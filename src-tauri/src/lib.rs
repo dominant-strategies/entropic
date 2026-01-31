@@ -18,6 +18,7 @@ pub fn run() {
             commands::check_runtime_status,
             commands::start_runtime,
             commands::stop_runtime,
+            commands::ensure_runtime,
             commands::start_gateway,
             commands::stop_gateway,
             commands::restart_gateway,

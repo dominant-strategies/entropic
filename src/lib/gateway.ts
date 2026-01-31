@@ -68,9 +68,6 @@ export class GatewayClient {
   private requestId = 0;
   private pendingRequests = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private listeners: Partial<{ [K in keyof GatewayEvents]: GatewayEvents[K][] }> = {};
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
-
   constructor(url: string, token: string) {
     this.url = url;
     this.token = token;
@@ -157,7 +154,6 @@ export class GatewayClient {
             auth: { token: this.token },
           });
           console.log("[Gateway] Connected successfully");
-          this.reconnectAttempts = 0;
           this.emit("connected");
           connectResolve?.();
         } catch (e) {
