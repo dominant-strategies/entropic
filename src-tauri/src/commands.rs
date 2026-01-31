@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 
@@ -59,6 +60,16 @@ pub struct CapabilityState {
     pub id: String,
     pub label: String,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AttachmentInfo {
+    pub id: String,
+    pub file_name: String,
+    pub mime_type: String,
+    pub temp_path: String,
+    pub size_bytes: u64,
+    pub is_image: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -157,6 +168,34 @@ fn read_openclaw_config() -> serde_json::Value {
 fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
     let payload = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     write_container_file("/home/node/.openclaw/openclaw.json", &payload)
+}
+
+fn sanitize_filename(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return "file".to_string();
+    }
+    let mut out = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else if ch.is_whitespace() {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "file".to_string()
+    } else {
+        out
+    }
+}
+
+fn unique_id() -> String {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("{}", ts)
 }
 
 fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String> {
@@ -787,6 +826,85 @@ pub async fn set_identity(
     settings.identity_name = name.trim().to_string();
     settings.identity_avatar = avatar_data_url;
     save_agent_settings(&app, settings)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn upload_attachment(
+    file_name: String,
+    mime_type: String,
+    base64: String,
+) -> Result<AttachmentInfo, String> {
+    let sanitized = sanitize_filename(&file_name);
+    let id = unique_id();
+    let temp_path = format!("/home/node/.openclaw/uploads/tmp/{}_{}", id, sanitized);
+    let size_bytes = (base64.len() as u64 * 3) / 4;
+    if size_bytes > 25 * 1024 * 1024 {
+        return Err("Attachment too large (max 25MB)".to_string());
+    }
+    let mk = "mkdir -p /home/node/.openclaw/uploads/tmp";
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", mk])?;
+    let mut child = Command::new("docker")
+        .args([
+            "exec",
+            "-i",
+            OPENCLAW_CONTAINER,
+            "sh",
+            "-c",
+            &format!("base64 -d > {}", temp_path),
+        ])
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to upload file: {}", e))?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        stdin
+            .write_all(base64.as_bytes())
+            .map_err(|e| format!("Failed to upload file: {}", e))?;
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("Failed to finalize upload: {}", e))?;
+    if !status.success() {
+        return Err("Failed to upload file in container".to_string());
+    }
+    let is_image = mime_type.starts_with("image/");
+    Ok(AttachmentInfo {
+        id,
+        file_name: sanitized,
+        mime_type,
+        temp_path,
+        size_bytes,
+        is_image,
+    })
+}
+
+#[tauri::command]
+pub async fn save_attachment(temp_path: String) -> Result<String, String> {
+    let file_name = temp_path
+        .split('/')
+        .last()
+        .unwrap_or("file")
+        .to_string();
+    let dest_dir = "/data/uploads";
+    let mut dest_path = format!("{}/{}", dest_dir, file_name);
+    let mk = format!("mkdir -p {}", dest_dir);
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &mk])?;
+    // Avoid overwrite: add suffix if exists
+    let check = format!("test -e {}", dest_path);
+    if docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &check]).is_ok() {
+        let ts = unique_id();
+        dest_path = format!("{}/{}_{}", dest_dir, ts, file_name);
+    }
+    let mv = format!("mv {} {}", temp_path, dest_path);
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &mv])?;
+    Ok(dest_path)
+}
+
+#[tauri::command]
+pub async fn delete_attachment(temp_path: String) -> Result<(), String> {
+    let rm = format!("rm -f {}", temp_path);
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &rm])?;
     Ok(())
 }
 

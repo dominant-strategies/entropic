@@ -34,6 +34,9 @@ pub fn run() {
             commands::set_memory,
             commands::set_capabilities,
             commands::set_identity,
+            commands::upload_attachment,
+            commands::save_attachment,
+            commands::delete_attachment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

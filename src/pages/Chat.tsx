@@ -7,6 +7,7 @@ import {
   GatewayClient,
   createGatewayClient,
 } from "../lib/gateway";
+import { Paperclip, X as XIcon } from "lucide-react";
 
 type Message = {
   id: string;
@@ -31,6 +32,17 @@ type Provider = {
   placeholder: string;
   keyUrl: string;
   color: string;
+};
+
+type PendingAttachment = {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  tempPath: string;
+  sizeBytes: number;
+  isImage: boolean;
+  base64?: string;
+  savedPath?: string;
 };
 
 type AuthState = {
@@ -95,6 +107,8 @@ export function Chat({ gatewayRunning }: Props) {
   const [connectedProvider, setConnectedProvider] = useState<string | null>(null);
   const [providerStatus, setProviderStatus] = useState<AuthState["providers"]>([]);
   const [gatewayUrl, setGatewayUrl] = useState<string>(DEFAULT_GATEWAY_URL);
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [dragActive, setDragActive] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const clientRef = useRef<GatewayClient | null>(null);
@@ -366,15 +380,24 @@ export function Chat({ gatewayRunning }: Props) {
   }
 
   async function handleSend() {
-    if (!message.trim() || !currentSession || !connected || isLoading) return;
+    if (!currentSession || !connected || isLoading) return;
+    if (!message.trim() && pendingAttachments.length === 0) return;
 
     const client = clientRef.current;
     if (!client) return;
 
+    const attachmentLines = pendingAttachments.map((att) => {
+      const location = att.savedPath || att.tempPath;
+      return `- ${att.fileName} (${location})`;
+    });
+    const attachmentBlock =
+      attachmentLines.length > 0 ? `\n\nAttached files:\n${attachmentLines.join("\n")}` : "";
+    const finalMessage = `${message.trim()}${attachmentBlock}`.trim();
+
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
-      content: message.trim(),
+      content: finalMessage,
       timestamp: new Date(),
     };
 
@@ -385,12 +408,85 @@ export function Chat({ gatewayRunning }: Props) {
 
     try {
       console.log("[Zara] Sending message...");
-      await client.sendMessage(currentSession, userMessage.content);
+      const imageAttachments = pendingAttachments
+        .filter((a) => a.isImage && a.base64)
+        .map((a) => ({
+          fileName: a.fileName,
+          mimeType: a.mimeType,
+          content: a.base64!,
+        }));
+      await client.sendMessage(currentSession, userMessage.content, imageAttachments);
+      setPendingAttachments([]);
       // Response will come via chat event
     } catch (e) {
       console.error("[Zara] Failed to send:", e);
       setError(e instanceof Error ? e.message : "Send failed");
       setIsLoading(false);
+    }
+  }
+
+  async function handleFiles(files: FileList | File[]) {
+    const list = Array.from(files);
+    for (const file of list) {
+      const reader = new FileReader();
+      await new Promise<void>((resolve, reject) => {
+        reader.onerror = () => reject(reader.error);
+        reader.onload = async () => {
+          try {
+            const result = typeof reader.result === "string" ? reader.result : "";
+            const base64 = result.includes(",") ? result.split(",")[1] : result;
+            const info = await invoke<{
+              id: string;
+              file_name: string;
+              mime_type: string;
+              temp_path: string;
+              size_bytes: number;
+              is_image: boolean;
+            }>("upload_attachment", {
+              fileName: file.name,
+              mimeType: file.type || "application/octet-stream",
+              base64,
+            });
+            setPendingAttachments((prev) => [
+              ...prev,
+              {
+                id: info.id,
+                fileName: info.file_name,
+                mimeType: info.mime_type,
+                tempPath: info.temp_path,
+                sizeBytes: info.size_bytes,
+                isImage: info.is_image,
+                base64: info.is_image ? base64 : undefined,
+              },
+            ]);
+            resolve();
+          } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
+            resolve();
+          }
+        };
+        reader.readAsDataURL(file);
+      });
+    }
+  }
+
+  async function removeAttachment(att: PendingAttachment) {
+    try {
+      await invoke("delete_attachment", { tempPath: att.tempPath });
+    } catch {}
+    setPendingAttachments((prev) => prev.filter((a) => a.id !== att.id));
+  }
+
+  async function saveAttachment(att: PendingAttachment) {
+    try {
+      const savedPath = await invoke<string>("save_attachment", {
+        tempPath: att.tempPath,
+      });
+      setPendingAttachments((prev) =>
+        prev.map((a) => (a.id === att.id ? { ...a, savedPath } : a))
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -525,7 +621,21 @@ export function Chat({ gatewayRunning }: Props) {
 
   // Show chat interface
   return (
-    <div className="h-full flex flex-col">
+    <div
+      className="h-full flex flex-col"
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragActive(true);
+      }}
+      onDragLeave={() => setDragActive(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragActive(false);
+        if (e.dataTransfer.files?.length) {
+          handleFiles(e.dataTransfer.files);
+        }
+      }}
+    >
       {/* Provider Switcher */}
       <div className="flex items-center justify-between px-6 py-2 border-b border-gray-100 bg-white">
         <div className="text-xs text-gray-500">Provider</div>
@@ -646,9 +756,56 @@ export function Chat({ gatewayRunning }: Props) {
       </div>
 
       {/* Input Area */}
-      <div className="border-t border-gray-200 p-4 bg-white">
+      <div className="border-t border-gray-200 p-4 bg-white relative">
         <div className="max-w-3xl mx-auto">
+          {pendingAttachments.length > 0 && (
+            <div className="mb-3 flex flex-wrap gap-2">
+              {pendingAttachments.map((att) => (
+                <div
+                  key={att.id}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs"
+                >
+                  <Paperclip className="w-3 h-3 text-gray-500" />
+                  <span className="text-gray-700">{att.fileName}</span>
+                  {att.savedPath ? (
+                    <span className="text-green-600">Saved</span>
+                  ) : (
+                    <button
+                      onClick={() => saveAttachment(att)}
+                      className="text-violet-600 hover:text-violet-700"
+                    >
+                      Save
+                    </button>
+                  )}
+                  <button
+                    onClick={() => removeAttachment(att)}
+                    className="text-gray-400 hover:text-gray-600"
+                    title="Remove"
+                  >
+                    <XIcon className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="flex gap-3">
+            <label
+              className="px-3 py-3 bg-gray-50 border border-gray-200 rounded-xl text-gray-500 cursor-pointer hover:bg-gray-100"
+              title="Attach files"
+            >
+              <Paperclip className="w-5 h-5" />
+              <input
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files?.length) {
+                    handleFiles(e.target.files);
+                    e.target.value = "";
+                  }
+                }}
+              />
+            </label>
             <input
               type="text"
               value={message}
@@ -681,6 +838,11 @@ export function Chat({ gatewayRunning }: Props) {
             </button>
           </div>
         </div>
+        {dragActive && (
+          <div className="absolute inset-0 bg-violet-50/80 border-2 border-dashed border-violet-300 flex items-center justify-center text-violet-700 font-medium">
+            Drop files to attach
+          </div>
+        )}
       </div>
     </div>
   );

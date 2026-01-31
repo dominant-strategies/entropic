@@ -225,10 +225,19 @@ export class GatewayClient {
     return result.messages || [];
   }
 
-  async sendMessage(sessionKey: string, message: string): Promise<string> {
+  async sendMessage(
+    sessionKey: string,
+    message: string,
+    attachments?: Array<{
+      fileName?: string;
+      mimeType?: string;
+      content?: string;
+    }>
+  ): Promise<string> {
     const result = await this.rpc<{ runId: string }>("chat.send", {
       sessionKey,
       message,
+      attachments,
       idempotencyKey: crypto.randomUUID(),
     });
     return result.runId;
