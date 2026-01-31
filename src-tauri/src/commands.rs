@@ -1,4 +1,4 @@
-use crate::runtime::{Runtime, RuntimeStatus};
+use crate::runtime::{Platform, Runtime, RuntimeStatus};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -6,6 +6,37 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
+
+/// Get the Docker socket path for the current platform.
+/// On macOS, uses Colima socket. On Linux/Windows, uses default.
+fn get_docker_host() -> Option<String> {
+    match Platform::detect() {
+        Platform::MacOS => {
+            // Use Colima socket on macOS
+            let home = dirs::home_dir()?;
+            Some(format!("unix://{}/.colima/default/docker.sock", home.display()))
+        }
+        Platform::Linux => {
+            // Check if we're in a container (dev environment)
+            if std::path::Path::new("/.dockerenv").exists() {
+                // In dev container, use host's Docker socket (mounted)
+                None // Use default DOCKER_HOST or /var/run/docker.sock
+            } else {
+                None // Native Linux, use default
+            }
+        }
+        Platform::Windows => None, // Use default named pipe
+    }
+}
+
+/// Create a Docker command with the correct DOCKER_HOST set
+fn docker_command() -> Command {
+    let mut cmd = Command::new("docker");
+    if let Some(host) = get_docker_host() {
+        cmd.env("DOCKER_HOST", host);
+    }
+    cmd
+}
 
 pub struct AppState {
     pub setup_progress: Mutex<SetupProgress>,
@@ -228,7 +259,7 @@ fn get_runtime(app: &AppHandle) -> Runtime {
 const OPENCLAW_CONTAINER: &str = "zara-openclaw";
 
 fn docker_exec_output(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("docker")
+    let output = docker_command()
         .args(args)
         .output()
         .map_err(|e| format!("Failed to run docker: {}", e))?;
@@ -250,7 +281,7 @@ fn read_container_file(path: &str) -> Option<String> {
 fn write_container_file(path: &str, content: &str) -> Result<(), String> {
     let dir_cmd = format!("mkdir -p $(dirname {})", path);
     docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &dir_cmd])?;
-    let mut child = Command::new("docker")
+    let mut child = docker_command()
         .args(["exec", "-i", OPENCLAW_CONTAINER, "sh", "-c", &format!("cat > {}", path)])
         .stdin(Stdio::piped())
         .spawn()
@@ -347,7 +378,7 @@ async fn run_whatsapp_login_script(script: &str) -> Result<serde_json::Value, St
 
     // Check if docker is accessible first
     eprintln!("[WA-DEBUG] [{:.1}s] Checking docker accessibility...", start.elapsed().as_secs_f64());
-    let docker_check = Command::new("docker")
+    let docker_check = docker_command()
         .args(["--version"])
         .output();
     match &docker_check {
@@ -357,9 +388,14 @@ async fn run_whatsapp_login_script(script: &str) -> Result<serde_json::Value, St
 
     eprintln!("[WA-DEBUG] [{:.1}s] About to spawn_blocking for docker exec...", start.elapsed().as_secs_f64());
     let script = script.to_string();
+    let docker_host = get_docker_host();
     let output = tokio::task::spawn_blocking(move || {
         eprintln!("[WA-DEBUG] [inside spawn_blocking] Running docker exec now...");
-        let result = Command::new("docker")
+        let mut cmd = Command::new("docker");
+        if let Some(host) = docker_host {
+            cmd.env("DOCKER_HOST", host);
+        }
+        let result = cmd
             .args([
                 "exec",
                 OPENCLAW_CONTAINER,
@@ -664,6 +700,37 @@ pub async fn stop_runtime(app: AppHandle) -> Result<(), String> {
     runtime.stop_colima().map_err(|e| e.to_string())
 }
 
+/// Ensure runtime is ready for Docker operations.
+/// On macOS: starts Colima if not running.
+/// On Linux/Windows: checks Docker is available.
+/// Returns the current status after any auto-start attempts.
+#[tauri::command]
+pub async fn ensure_runtime(app: AppHandle) -> Result<RuntimeStatus, String> {
+    let runtime = get_runtime(&app);
+    let mut status = runtime.check_status();
+
+    // On macOS, auto-start Colima if it's installed but not running
+    if matches!(Platform::detect(), Platform::MacOS) {
+        if status.colima_installed && !status.vm_running {
+            // Try to start Colima
+            if let Err(e) = runtime.start_colima() {
+                return Err(format!("Failed to start Colima: {}", e));
+            }
+            // Re-check status after starting
+            status = runtime.check_status();
+        }
+    }
+
+    if !status.docker_ready {
+        if !status.docker_installed {
+            return Err("Docker is not installed. Please install Docker to continue.".to_string());
+        }
+        return Err("Docker is not running. Please ensure Docker is started.".to_string());
+    }
+
+    Ok(status)
+}
+
 #[tauri::command]
 pub async fn set_api_key(
     app: AppHandle,
@@ -740,8 +807,22 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         .map_err(|e| e.to_string())?
         .clone();
 
+    // Ensure runtime (Colima) is running on macOS
+    let runtime = get_runtime(&app);
+    let status = runtime.check_status();
+    if !status.docker_ready {
+        if matches!(Platform::detect(), Platform::MacOS) && status.colima_installed && !status.vm_running {
+            // Auto-start Colima on macOS
+            runtime.start_colima().map_err(|e| format!("Failed to start Colima: {}", e))?;
+        } else if !status.docker_installed {
+            return Err("Docker is not installed. Please install Docker to continue.".to_string());
+        } else {
+            return Err("Docker is not running. Please start Docker and try again.".to_string());
+        }
+    }
+
     // Check if zara-openclaw container exists
-    let check = Command::new("docker")
+    let check = docker_command()
         .args(["ps", "-q", "-f", "name=zara-openclaw"])
         .output()
         .map_err(|e| format!("Failed to check container: {}", e))?;
@@ -752,14 +833,14 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
     }
 
     // Check if container exists but stopped
-    let check_all = Command::new("docker")
+    let check_all = docker_command()
         .args(["ps", "-aq", "-f", "name=zara-openclaw"])
         .output()
         .map_err(|e| format!("Failed to check container: {}", e))?;
 
     if !check_all.stdout.is_empty() {
         // Start existing container
-        let start = Command::new("docker")
+        let start = docker_command()
             .args(["start", "zara-openclaw"])
             .output()
             .map_err(|e| format!("Failed to start container: {}", e))?;
@@ -775,12 +856,12 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
 
     // Container doesn't exist - need to create it
     // Create network if it doesn't exist
-    let _ = Command::new("docker")
+    let _ = docker_command()
         .args(["network", "create", "zara-net"])
         .output(); // Ignore error if already exists
 
     // Check if image exists
-    let image_check = Command::new("docker")
+    let image_check = docker_command()
         .args(["image", "inspect", "openclaw-runtime:latest"])
         .output()
         .map_err(|e| format!("Failed to check image: {}", e))?;
@@ -850,7 +931,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
     }
 
     // Create and start container with hardened settings
-    let run = Command::new("docker")
+    let run = docker_command()
         .args(&docker_args)
         .output()
         .map_err(|e| format!("Failed to run container: {}", e))?;
@@ -868,7 +949,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
 
 #[tauri::command]
 pub async fn stop_gateway() -> Result<(), String> {
-    let stop = Command::new("docker")
+    let stop = docker_command()
         .args(["stop", "zara-openclaw"])
         .output()
         .map_err(|e| format!("Failed to stop container: {}", e))?;
@@ -887,10 +968,10 @@ pub async fn stop_gateway() -> Result<(), String> {
 #[tauri::command]
 pub async fn restart_gateway(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     // Stop and remove existing container (to pick up new env vars)
-    let _ = Command::new("docker")
+    let _ = docker_command()
         .args(["stop", "zara-openclaw"])
         .output();
-    let _ = Command::new("docker")
+    let _ = docker_command()
         .args(["rm", "-f", "zara-openclaw"])
         .output();
 
@@ -901,7 +982,7 @@ pub async fn restart_gateway(app: AppHandle, state: State<'_, AppState>) -> Resu
 #[tauri::command]
 pub async fn get_gateway_status() -> Result<bool, String> {
     // Check if container is running
-    let check = Command::new("docker")
+    let check = docker_command()
         .args(["ps", "-q", "-f", "name=zara-openclaw", "-f", "status=running"])
         .output()
         .map_err(|e| format!("Failed to check container: {}", e))?;
@@ -1388,7 +1469,7 @@ pub async fn upload_attachment(
     }
     let mk = "mkdir -p /home/node/.openclaw/uploads/tmp";
     docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", mk])?;
-    let mut child = Command::new("docker")
+    let mut child = docker_command()
         .args([
             "exec",
             "-i",
@@ -1530,29 +1611,113 @@ pub async fn run_first_time_setup(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    // Update progress: Starting
+    let runtime = get_runtime(&app);
+    let mut status = runtime.check_status();
+
+    // On macOS, we need to start Colima first
+    if matches!(Platform::detect(), Platform::MacOS) {
+        // Check if Colima is installed (bundled)
+        if !status.colima_installed {
+            let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
+            *progress = SetupProgress {
+                stage: "error".to_string(),
+                message: "Colima not found".to_string(),
+                percent: 0,
+                complete: false,
+                error: Some("Colima runtime not found in app bundle. Please reinstall the app.".to_string()),
+            };
+            return Err("Colima not found".to_string());
+        }
+
+        // Start Colima if not running
+        if !status.vm_running {
+            {
+                let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
+                *progress = SetupProgress {
+                    stage: "vm".to_string(),
+                    message: "Starting container runtime (first time may download ~100MB)...".to_string(),
+                    percent: 10,
+                    complete: false,
+                    error: None,
+                };
+            }
+
+            // Start Colima - this can take 30-60 seconds on first run
+            if let Err(e) = runtime.start_colima() {
+                let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
+                *progress = SetupProgress {
+                    stage: "error".to_string(),
+                    message: "Failed to start container runtime".to_string(),
+                    percent: 0,
+                    complete: false,
+                    error: Some(format!("Failed to start Colima: {}", e)),
+                };
+                return Err(format!("Failed to start Colima: {}", e));
+            }
+
+            // Update progress
+            {
+                let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
+                *progress = SetupProgress {
+                    stage: "vm".to_string(),
+                    message: "Container runtime started, waiting for Docker...".to_string(),
+                    percent: 40,
+                    complete: false,
+                    error: None,
+                };
+            }
+
+            // Wait for Docker to become ready (can take 10-30 seconds after VM starts)
+            let max_retries = 30;
+            for i in 0..max_retries {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                status = runtime.check_status();
+                if status.docker_ready {
+                    break;
+                }
+                // Update progress with retry count
+                {
+                    let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
+                    *progress = SetupProgress {
+                        stage: "docker".to_string(),
+                        message: format!("Waiting for Docker to start ({}/{}s)...", (i + 1) * 2, max_retries * 2),
+                        percent: 40 + ((i as u8) * 30 / max_retries as u8),
+                        complete: false,
+                        error: None,
+                    };
+                }
+            }
+        }
+    }
+
+    // Update progress: Checking Docker
     {
         let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
         *progress = SetupProgress {
-            stage: "init".to_string(),
-            message: "Checking Docker...".to_string(),
-            percent: 10,
+            stage: "docker".to_string(),
+            message: "Verifying Docker connection...".to_string(),
+            percent: 70,
             complete: false,
             error: None,
         };
     }
 
-    let runtime = get_runtime(&app);
-    let status = runtime.check_status();
+    // Final status check
+    status = runtime.check_status();
 
     if !status.docker_ready {
+        let error_msg = if matches!(Platform::detect(), Platform::MacOS) {
+            "Docker connection failed. The container runtime may still be starting - try again in a moment."
+        } else {
+            "Please install Docker and ensure the daemon is running."
+        };
         let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
         *progress = SetupProgress {
             stage: "error".to_string(),
             message: "Docker is not available".to_string(),
             percent: 0,
             complete: false,
-            error: Some("Please install Docker and ensure the daemon is running.".to_string()),
+            error: Some(error_msg.to_string()),
         };
         return Err("Docker not available".to_string());
     }
@@ -1563,27 +1728,30 @@ pub async fn run_first_time_setup(
         *progress = SetupProgress {
             stage: "image".to_string(),
             message: "Checking OpenClaw runtime...".to_string(),
-            percent: 50,
+            percent: 70,
             complete: false,
             error: None,
         };
     }
 
-    let image_check = Command::new("docker")
+    let image_check = docker_command()
         .args(["image", "inspect", "openclaw-runtime:latest"])
         .output()
         .map_err(|e| e.to_string())?;
 
     if !image_check.status.success() {
-        let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
-        *progress = SetupProgress {
-            stage: "error".to_string(),
-            message: "OpenClaw runtime not found".to_string(),
-            percent: 0,
-            complete: false,
-            error: Some("Run ./scripts/build-openclaw-runtime.sh to build the runtime image.".to_string()),
-        };
-        return Err("OpenClaw runtime image not found".to_string());
+        // Image not found - this is expected on first run
+        // For now, mark as complete and let the dashboard handle image loading
+        {
+            let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
+            *progress = SetupProgress {
+                stage: "image".to_string(),
+                message: "OpenClaw runtime will be set up on first use...".to_string(),
+                percent: 90,
+                complete: false,
+                error: None,
+            };
+        }
     }
 
     // Complete

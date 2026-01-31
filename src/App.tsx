@@ -17,7 +17,7 @@ type AppState = "loading" | "docker-install" | "setup" | "ready";
 function App() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [appState, setAppState] = useState<AppState>("loading");
-  const [os, setOs] = useState<string>("");
+  const [_os, setOs] = useState<string>("");
 
   useEffect(() => {
     init();
@@ -68,8 +68,19 @@ function App() {
 
   if (appState === "loading") {
     return (
-      <div className="h-screen w-screen flex items-center justify-center bg-gray-50">
-        <div className="animate-pulse text-gray-500">Loading...</div>
+      <div 
+        className="h-screen w-screen flex items-center justify-center bg-[var(--bg-primary)]"
+      >
+        <div 
+          className="text-center p-8 rounded-2xl animate-fade-in glass-card"
+        >
+          <div 
+            className="w-12 h-12 rounded-xl mx-auto mb-4 bg-[var(--purple-accent)] animate-pulse-subtle"
+          />
+          <div className="animate-pulse text-[var(--text-secondary)]">
+            loading...
+          </div>
+        </div>
       </div>
     );
   }

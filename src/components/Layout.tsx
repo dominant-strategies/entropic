@@ -6,6 +6,7 @@ import {
   Settings,
   Shield,
   ShoppingBag,
+  Search,
 } from "lucide-react";
 import clsx from "clsx";
 import { loadProfile, type AgentProfile } from "../lib/profile";
@@ -29,6 +30,7 @@ const navItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
 
 export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Props) {
   const [profile, setProfile] = useState<AgentProfile>({ name: "Zara" });
+  const [searchTerm, setSearchTerm] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -49,20 +51,42 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Pr
   }, []);
 
   return (
-    <div className="h-screen w-screen flex bg-gray-50">
+    <div className="h-screen w-screen flex bg-[var(--bg-primary)]">
       {/* Sidebar */}
-      <div className="w-56 bg-white border-r border-gray-200 flex flex-col">
+      <div 
+        data-tauri-drag-region
+        className="w-56 flex flex-col flex-shrink-0"
+        style={{ 
+          background: 'var(--bg-sidebar)',
+          borderRight: '1px solid var(--glass-border-subtle)'
+        }}
+      >
         {/* Logo */}
         <div
           data-tauri-drag-region
-          className="h-14 flex items-center gap-2 px-4 border-b border-gray-100"
+          className="h-14 flex items-center gap-3 px-4 flex-shrink-0"
+          style={{ borderBottom: '1px solid var(--glass-border-subtle)' }}
         >
-          <Shield className="w-6 h-6 text-violet-600" />
-          <span className="font-semibold text-gray-900">Zara</span>
+          <Shield className="w-6 h-6 text-[var(--purple-accent)]" />
+          <span className="font-semibold text-lg text-[var(--text-primary)]">Zara</span>
+        </div>
+
+        {/* Search */}
+        <div className="p-2 flex-shrink-0">
+          <div className="relative">
+            <Search className="w-4 h-4 text-[var(--text-tertiary)] absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              placeholder="Search"
+              className="form-input !pl-9 w-full text-sm"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+          </div>
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 p-3 space-y-1">
+        <nav className="flex-1 p-2 space-y-1 overflow-auto">
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = currentPage === item.id;
@@ -73,11 +97,11 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Pr
                 className={clsx(
                   "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
                   isActive
-                    ? "bg-violet-50 text-violet-700"
-                    : "text-gray-600 hover:bg-gray-100 hover:text-gray-900"
+                    ? "bg-[#f3e8ff] text-[var(--purple-accent)]" // Light purple background for active
+                    : "text-[var(--text-secondary)] hover:bg-black/5" // Subtle hover
                 )}
               >
-                <Icon className="w-5 h-5" />
+                <Icon className={clsx("w-5 h-5", isActive ? 'text-[var(--purple-accent)]' : 'text-[var(--text-tertiary)]')} />
                 {item.label}
               </button>
             );
@@ -85,12 +109,12 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Pr
         </nav>
 
         {/* Agent Profile */}
-        <div className="px-3 pb-2">
+        <div className="p-2 flex-shrink-0">
           <button
             onClick={() => onNavigate("settings")}
-            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-100 text-left"
+            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-black/5"
           >
-            <div className="w-9 h-9 rounded-full bg-gray-100 overflow-hidden flex items-center justify-center">
+            <div className="w-9 h-9 rounded-full bg-black/5 overflow-hidden flex items-center justify-center">
               {profile.avatarDataUrl ? (
                 <img
                   src={profile.avatarDataUrl}
@@ -98,29 +122,29 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Pr
                   className="w-full h-full object-cover"
                 />
               ) : (
-                <span className="text-xs font-semibold text-gray-500">
+                <span className="text-xs font-semibold text-[var(--text-accent)]">
                   {profile.name.slice(0, 2).toUpperCase()}
                 </span>
               )}
             </div>
-            <div className="flex-1">
-              <div className="text-sm font-medium text-gray-900">{profile.name}</div>
-              <div className="text-xs text-gray-500">Edit profile</div>
+            <div className="flex-1 text-left">
+              <div className="text-sm font-medium text-[var(--text-primary)]">
+                {profile.name}
+              </div>
+              <div className="text-xs text-[var(--text-tertiary)]">Your Assistant</div>
             </div>
           </button>
         </div>
 
         {/* Gateway Status */}
-        <div className="p-3 border-t border-gray-100">
+        <div className="p-2 flex-shrink-0" style={{ borderTop: '1px solid var(--glass-border-subtle)' }}>
           <div className="flex items-center gap-2 px-3 py-2">
             <div
-              className={clsx(
-                "w-2 h-2 rounded-full",
-                gatewayRunning ? "bg-green-500" : "bg-gray-300"
-              )}
+              className="w-2 h-2 rounded-full"
+              style={{ background: gatewayRunning ? '#22c55e' : '#e0e0e0' }}
             />
-            <span className="text-xs text-gray-500">
-              Gateway {gatewayRunning ? "Running" : "Stopped"}
+            <span className="text-xs text-[var(--text-tertiary)]">
+              {gatewayRunning ? 'Connected' : 'Offline'}
             </span>
           </div>
         </div>
@@ -129,12 +153,12 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Pr
       {/* Main Content */}
       <div className="flex-1 flex flex-col">
         {/* Drag region for window */}
-        <div data-tauri-drag-region className="h-8 bg-gray-50" />
+        <div data-tauri-drag-region className="h-8 flex-shrink-0" />
 
         {/* Page Content */}
-        <div className="flex-1 overflow-auto">
+        <main className="flex-1 overflow-auto px-6 pb-6">
           {children}
-        </div>
+        </main>
       </div>
     </div>
   );

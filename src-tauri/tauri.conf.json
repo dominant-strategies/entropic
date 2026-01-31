@@ -20,9 +20,9 @@
         "minHeight": 500,
         "resizable": true,
         "fullscreen": false,
-        "decorations": true,
-        "transparent": false,
-        "titleBarStyle": "Visible"
+        "decorations": false,
+        "transparent": true,
+        "titleBarStyle": "Overlay"
       }
     ],
     "security": {
@@ -31,14 +31,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app"],
+    "targets": ["app"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
-    "resources": [],
+    "resources": [
+      "resources/bin/*",
+      "resources/share/**/*"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "AI assistant with secure sandboxing",
     "longDescription": "Zara brings OpenClaw to your desktop with a beautiful interface and secure container-based sandboxing for AI-generated commands.",

@@ -19,7 +19,7 @@ type Props = {
   onRefresh: () => void;
 };
 
-export function Dashboard({ status, onRefresh }: Props) {
+export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [currentPage, setCurrentPage] = useState<Page>("chat");
   const [gatewayRunning, setGatewayRunning] = useState(false);
   const [isTogglingGateway, setIsTogglingGateway] = useState(false);
