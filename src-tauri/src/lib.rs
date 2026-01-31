@@ -1,22 +1,33 @@
 mod runtime;
 mod commands;
 
+use tauri::Manager;
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_os::init())
-        .manage(commands::AppState::default())
+        .setup(|app| {
+            let state = commands::init_state(&app.handle());
+            app.manage(state);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::check_runtime_status,
             commands::start_runtime,
             commands::stop_runtime,
             commands::start_gateway,
             commands::stop_gateway,
+            commands::restart_gateway,
             commands::get_gateway_status,
+            commands::get_gateway_ws_url,
             commands::get_setup_progress,
             commands::run_first_time_setup,
+            commands::set_api_key,
+            commands::set_active_provider,
+            commands::get_auth_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

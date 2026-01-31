@@ -24,14 +24,37 @@ trap "rm -rf $STAGING_DIR" EXIT
 
 echo "Staging OpenClaw files..."
 
-# Copy Dockerfile
+# Copy Dockerfile and entrypoint
 cp "$RUNTIME_DIR/Dockerfile" "$STAGING_DIR/"
+cp "$RUNTIME_DIR/entrypoint.sh" "$STAGING_DIR/"
 
 # Copy dist
 cp -r "$OPENCLAW_SOURCE/dist" "$STAGING_DIR/"
 
 # Copy package.json
 cp "$OPENCLAW_SOURCE/package.json" "$STAGING_DIR/"
+
+# Copy docs/reference/templates (required for agent workspace)
+echo "Copying templates..."
+mkdir -p "$STAGING_DIR/docs/reference"
+cp -r "$OPENCLAW_SOURCE/docs/reference/templates" "$STAGING_DIR/docs/reference/"
+
+# Copy bundled memory plugins
+mkdir -p "$STAGING_DIR/extensions"
+
+if [ -d "$OPENCLAW_SOURCE/extensions/memory-core" ]; then
+    echo "Copying memory-core plugin..."
+    cp -r "$OPENCLAW_SOURCE/extensions/memory-core" "$STAGING_DIR/extensions/"
+else
+    echo "WARNING: memory-core plugin not found in OpenClaw source."
+fi
+
+if [ -d "$OPENCLAW_SOURCE/extensions/memory-lancedb" ]; then
+    echo "Copying memory-lancedb plugin..."
+    cp -r "$OPENCLAW_SOURCE/extensions/memory-lancedb" "$STAGING_DIR/extensions/"
+else
+    echo "WARNING: memory-lancedb plugin not found in OpenClaw source."
+fi
 
 # Copy node_modules (production only)
 echo "Copying node_modules (this may take a moment)..."

@@ -1,10 +1,15 @@
 use crate::runtime::{Runtime, RuntimeStatus};
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 
 pub struct AppState {
     pub setup_progress: Mutex<SetupProgress>,
+    pub api_keys: Mutex<HashMap<String, String>>,
+    pub active_provider: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, Default)]
@@ -20,6 +25,38 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             setup_progress: Mutex::new(SetupProgress::default()),
+            api_keys: Mutex::new(HashMap::new()),
+            active_provider: Mutex::new(None),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuthState {
+    pub active_provider: Option<String>,
+    pub providers: Vec<AuthProviderStatus>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuthProviderStatus {
+    pub id: String,
+    pub has_key: bool,
+    pub last4: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredAuth {
+    version: u8,
+    keys: HashMap<String, String>,
+    active_provider: Option<String>,
+}
+
+impl Default for StoredAuth {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            keys: HashMap::new(),
+            active_provider: None,
         }
     }
 }
@@ -30,6 +67,43 @@ fn get_runtime(app: &AppHandle) -> Runtime {
         .resource_dir()
         .unwrap_or_default();
     Runtime::new(resource_dir)
+}
+
+fn auth_store_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Failed to resolve app data dir".to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create app data dir: {}", e))?;
+    Ok(dir.join("auth.json"))
+}
+
+fn load_auth(app: &AppHandle) -> StoredAuth {
+    let path = match auth_store_path(app) {
+        Ok(p) => p,
+        Err(_) => return StoredAuth::default(),
+    };
+    let raw = match fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(_) => return StoredAuth::default(),
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn save_auth(app: &AppHandle, data: &StoredAuth) -> Result<(), String> {
+    let path = auth_store_path(app)?;
+    let payload = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
+    fs::write(&path, payload).map_err(|e| format!("Failed to write auth store: {}", e))?;
+    Ok(())
+}
+
+pub fn init_state(app: &AppHandle) -> AppState {
+    let stored = load_auth(app);
+    AppState {
+        setup_progress: Mutex::new(SetupProgress::default()),
+        api_keys: Mutex::new(stored.keys.clone()),
+        active_provider: Mutex::new(stored.active_provider.clone()),
+    }
 }
 
 #[tauri::command]
@@ -51,7 +125,85 @@ pub async fn stop_runtime(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn start_gateway() -> Result<(), String> {
+pub async fn set_api_key(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    provider: String,
+    key: String,
+) -> Result<(), String> {
+    let mut keys = state.api_keys.lock().map_err(|e| e.to_string())?;
+    keys.insert(provider.clone(), key);
+    let mut active = state.active_provider.lock().map_err(|e| e.to_string())?;
+    *active = Some(provider.clone());
+    let stored = StoredAuth {
+        version: 1,
+        keys: keys.clone(),
+        active_provider: active.clone(),
+    };
+    save_auth(&app, &stored)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_active_provider(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    provider: String,
+) -> Result<(), String> {
+    let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
+    if !keys.contains_key(&provider) {
+        return Err("No API key stored for selected provider".to_string());
+    }
+    drop(keys);
+    let mut active = state.active_provider.lock().map_err(|e| e.to_string())?;
+    *active = Some(provider.clone());
+    let keys = state.api_keys.lock().map_err(|e| e.to_string())?.clone();
+    let stored = StoredAuth {
+        version: 1,
+        keys,
+        active_provider: active.clone(),
+    };
+    save_auth(&app, &stored)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_auth_state(state: State<'_, AppState>) -> Result<AuthState, String> {
+    let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
+    let active = state.active_provider.lock().map_err(|e| e.to_string())?;
+    let providers = ["anthropic", "openai", "google"]
+        .into_iter()
+        .map(|id| {
+            let last4 = keys.get(id).and_then(|k| {
+                if k.len() >= 4 {
+                    Some(k[k.len() - 4..].to_string())
+                } else {
+                    None
+                }
+            });
+            AuthProviderStatus {
+                id: id.to_string(),
+                has_key: keys.contains_key(id),
+                last4,
+            }
+        })
+        .collect();
+    Ok(AuthState {
+        active_provider: active.clone(),
+        providers,
+    })
+}
+
+#[tauri::command]
+pub async fn start_gateway(state: State<'_, AppState>) -> Result<(), String> {
+    // Get API keys from state
+    let api_keys = state.api_keys.lock().map_err(|e| e.to_string())?.clone();
+    let active_provider = state
+        .active_provider
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+
     // Check if zara-openclaw container exists
     let check = Command::new("docker")
         .args(["ps", "-q", "-f", "name=zara-openclaw"])
@@ -99,25 +251,69 @@ pub async fn start_gateway() -> Result<(), String> {
         return Err("OpenClaw runtime image not found. Run: ./scripts/build-openclaw-runtime.sh".to_string());
     }
 
+    // Determine which provider/model to use based on active provider, then fall back
+    let model = match active_provider.as_deref() {
+        Some("anthropic") if api_keys.contains_key("anthropic") => "anthropic/claude-sonnet-4-20250514",
+        Some("openai") if api_keys.contains_key("openai") => "openai/gpt-4o",
+        Some("google") if api_keys.contains_key("google") => "google/gemini-2.0-flash",
+        _ if api_keys.contains_key("anthropic") => "anthropic/claude-sonnet-4-20250514",
+        _ if api_keys.contains_key("openai") => "openai/gpt-4o",
+        _ if api_keys.contains_key("google") => "google/gemini-2.0-flash",
+        _ => "anthropic/claude-sonnet-4-20250514",
+    };
+
+    // Build docker run command - pass API keys as env vars
+    // The entrypoint.sh script creates auth-profiles.json from these
+    let mut docker_args = vec![
+        "run".to_string(), "-d".to_string(),
+        "--name".to_string(), "zara-openclaw".to_string(),
+        "--user".to_string(), "1000:1000".to_string(),
+        "--cap-drop=ALL".to_string(),
+        "--security-opt".to_string(), "no-new-privileges".to_string(),
+        "--read-only".to_string(),
+        "--tmpfs".to_string(), "/tmp:rw,noexec,nosuid,nodev,size=100m".to_string(),
+        "--tmpfs".to_string(), "/run:rw,noexec,nosuid,nodev,size=10m".to_string(),
+        "--tmpfs".to_string(), "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000".to_string(),
+        "-e".to_string(), "OPENCLAW_GATEWAY_TOKEN=zara-local-gateway".to_string(),
+        "-e".to_string(), format!("OPENCLAW_MODEL={}", model),
+    ];
+
+    // Add API keys as environment variables (entrypoint creates auth-profiles.json from these)
+    if let Some(key) = api_keys.get("anthropic") {
+        docker_args.push("-e".to_string());
+        docker_args.push(format!("ANTHROPIC_API_KEY={}", key));
+    }
+    if let Some(key) = api_keys.get("openai") {
+        docker_args.push("-e".to_string());
+        docker_args.push(format!("OPENAI_API_KEY={}", key));
+    }
+    if let Some(key) = api_keys.get("google") {
+        docker_args.push("-e".to_string());
+        docker_args.push(format!("GEMINI_API_KEY={}", key));
+    }
+
+    // Add remaining args
+    docker_args.extend([
+        "-v".to_string(), "zara-openclaw-data:/data".to_string(),
+        "--network".to_string(), "zara-net".to_string(),
+        "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
+        "--restart".to_string(), "unless-stopped".to_string(),
+        "openclaw-runtime:latest".to_string(),
+    ]);
+
+    // Dev-only: bind-mount local OpenClaw dist/extensions to avoid image rebuilds
+    if let Ok(source) = std::env::var("ZARA_DEV_OPENCLAW_SOURCE") {
+        if !source.trim().is_empty() {
+            docker_args.push("-v".to_string());
+            docker_args.push(format!("{}/dist:/app/dist:ro", source));
+            docker_args.push("-v".to_string());
+            docker_args.push(format!("{}/extensions:/app/extensions:ro", source));
+        }
+    }
+
     // Create and start container with hardened settings
     let run = Command::new("docker")
-        .args([
-            "run", "-d",
-            "--name", "zara-openclaw",
-            "--user", "1000:1000",
-            "--cap-drop=ALL",
-            "--security-opt", "no-new-privileges",
-            "--read-only",
-            "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=100m",
-            "--tmpfs", "/run:rw,noexec,nosuid,nodev,size=10m",
-            "--tmpfs", "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000",
-            "-e", "OPENCLAW_GATEWAY_TOKEN=zara-local-gateway",
-            "-v", "zara-openclaw-data:/data",
-            "--network", "zara-net",
-            "-p", "127.0.0.1:19789:18789",
-            "--restart", "unless-stopped",
-            "openclaw-runtime:latest",
-        ])
+        .args(&docker_args)
         .output()
         .map_err(|e| format!("Failed to run container: {}", e))?;
 
@@ -148,6 +344,20 @@ pub async fn stop_gateway() -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn restart_gateway(state: State<'_, AppState>) -> Result<(), String> {
+    // Stop and remove existing container (to pick up new env vars)
+    let _ = Command::new("docker")
+        .args(["stop", "zara-openclaw"])
+        .output();
+    let _ = Command::new("docker")
+        .args(["rm", "-f", "zara-openclaw"])
+        .output();
+
+    // Start with current API keys
+    start_gateway(state).await
+}
+
+#[tauri::command]
 pub async fn get_gateway_status() -> Result<bool, String> {
     // Check if container is running
     let check = Command::new("docker")
@@ -175,6 +385,16 @@ pub async fn get_gateway_status() -> Result<bool, String> {
         Ok(_) => Ok(true), // Any HTTP response means gateway is up
         Err(_) => Ok(false), // No response - not running
     }
+}
+
+#[tauri::command]
+pub async fn get_gateway_ws_url() -> Result<String, String> {
+    let url = if std::path::Path::new("/.dockerenv").exists() {
+        "ws://zara-openclaw:18789"
+    } else {
+        "ws://127.0.0.1:19789"
+    };
+    Ok(url.to_string())
 }
 
 #[tauri::command]

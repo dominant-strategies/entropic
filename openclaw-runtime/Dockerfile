@@ -15,6 +15,8 @@ WORKDIR /app
 COPY dist ./dist
 COPY package.json ./package.json
 COPY node_modules ./node_modules
+COPY docs ./docs
+COPY extensions ./extensions
 
 # Set ownership
 RUN chown -R node:node /app
@@ -28,5 +30,8 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=5s \
 
 EXPOSE 18789
 
-# Entrypoint: gateway in loopback mode
-CMD ["node", "/app/dist/index.js", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
+# Entrypoint script that creates auth from env vars, then starts gateway
+COPY --chown=node:node entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+ENTRYPOINT ["/app/entrypoint.sh"]
