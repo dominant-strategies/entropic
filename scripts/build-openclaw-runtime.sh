@@ -39,22 +39,31 @@ echo "Copying templates..."
 mkdir -p "$STAGING_DIR/docs/reference"
 cp -r "$OPENCLAW_SOURCE/docs/reference/templates" "$STAGING_DIR/docs/reference/"
 
-# Copy bundled memory plugins
+# Copy bundled plugins (curated set for the store)
 mkdir -p "$STAGING_DIR/extensions"
 
-if [ -d "$OPENCLAW_SOURCE/extensions/memory-core" ]; then
-    echo "Copying memory-core plugin..."
-    cp -r "$OPENCLAW_SOURCE/extensions/memory-core" "$STAGING_DIR/extensions/"
-else
-    echo "WARNING: memory-core plugin not found in OpenClaw source."
-fi
+PLUGINS_TO_BUNDLE=(
+    "memory-core"
+    "memory-lancedb"
+    "discord"
+    "telegram"
+    "slack"
+    "whatsapp"
+    "imessage"
+    "msteams"
+    "voice-call"
+    "matrix"
+    "googlechat"
+)
 
-if [ -d "$OPENCLAW_SOURCE/extensions/memory-lancedb" ]; then
-    echo "Copying memory-lancedb plugin..."
-    cp -r "$OPENCLAW_SOURCE/extensions/memory-lancedb" "$STAGING_DIR/extensions/"
-else
-    echo "WARNING: memory-lancedb plugin not found in OpenClaw source."
-fi
+for plugin in "${PLUGINS_TO_BUNDLE[@]}"; do
+    if [ -d "$OPENCLAW_SOURCE/extensions/$plugin" ]; then
+        echo "Copying ${plugin} plugin..."
+        cp -r "$OPENCLAW_SOURCE/extensions/$plugin" "$STAGING_DIR/extensions/"
+    else
+        echo "WARNING: ${plugin} plugin not found in OpenClaw source."
+    fi
+done
 
 # Copy node_modules (production only)
 echo "Copying node_modules (this may take a moment)..."

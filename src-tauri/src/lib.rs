@@ -34,9 +34,17 @@ pub fn run() {
             commands::set_memory,
             commands::set_capabilities,
             commands::set_identity,
+            commands::set_imessage_config,
+            commands::set_channels_config,
+            commands::start_whatsapp_login,
+            commands::wait_whatsapp_login,
+            commands::get_whatsapp_login,
+            commands::approve_pairing,
             commands::upload_attachment,
             commands::save_attachment,
             commands::delete_attachment,
+            commands::get_plugin_store,
+            commands::set_plugin_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

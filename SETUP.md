@@ -220,8 +220,10 @@ Set by Rust backend when starting container:
 
 ## Next Steps (TODO)
 
+- [ ] Ship with QMD (https://github.com/tobi/qmd) bundled and enabled
 - [ ] Keychain integration for persistent API key storage
-- [ ] Bundle Colima + Docker CLI for normie install
+- [ ] Colima first-run setup + bundled CLI for normie install
+- [ ] Colima security posture: locked-down defaults + limited VM networking
 - [ ] Code signing + notarization for macOS
 - [ ] Auto-updater
 - [ ] Windows/Linux builds

@@ -1,6 +1,15 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Power, Key, Shield, Info, Clock, Sparkles, Brain, Sliders } from "lucide-react";
+import {
+  Power,
+  Key,
+  Shield,
+  Info,
+  Clock,
+  Sparkles,
+  Brain,
+  Sliders,
+} from "lucide-react";
 import clsx from "clsx";
 import { loadProfile, saveProfile, type AgentProfile } from "../lib/profile";
 
