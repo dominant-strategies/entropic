@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Power, Key, Shield, Info } from "lucide-react";
+import { Power, Key, Shield, Info, Clock, Sparkles, Brain, Sliders } from "lucide-react";
 import clsx from "clsx";
+import { loadProfile, saveProfile, type AgentProfile } from "../lib/profile";
 
 type Props = {
   gatewayRunning: boolean;
@@ -15,6 +16,17 @@ export function Settings({ gatewayRunning, onGatewayToggle, isTogglingGateway }:
     openai: "",
     google: "",
   });
+  const [profile, setProfile] = useState<AgentProfile>({ name: "Zara" });
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [soul, setSoul] = useState("");
+  const [heartbeatEvery, setHeartbeatEvery] = useState("30m");
+  const [heartbeatTasks, setHeartbeatTasks] = useState<string[]>([]);
+  const [memoryEnabled, setMemoryEnabled] = useState(true);
+  const [memoryLongTerm, setMemoryLongTerm] = useState(true);
+  const [capabilities, setCapabilities] = useState<
+    { id: string; label: string; enabled: boolean }[]
+  >([]);
+  const [savingAgent, setSavingAgent] = useState(false);
 
   function saveApiKey(provider: keyof typeof apiKeys, value: string) {
     setApiKeys((prev) => ({ ...prev, [provider]: value }));
@@ -22,9 +34,165 @@ export function Settings({ gatewayRunning, onGatewayToggle, isTogglingGateway }:
     console.log("[Zara] Saving API key for:", provider);
   }
 
+  useEffect(() => {
+    loadProfile().then(setProfile).catch(() => {});
+    invoke<{
+      soul: string;
+      heartbeat_every: string;
+      heartbeat_tasks: string[];
+      memory_enabled: boolean;
+      memory_long_term: boolean;
+      capabilities: { id: string; label: string; enabled: boolean }[];
+    }>("get_agent_profile_state")
+      .then((state) => {
+        setSoul(state.soul || "");
+        setHeartbeatEvery(state.heartbeat_every || "30m");
+        setHeartbeatTasks(state.heartbeat_tasks || []);
+        setMemoryEnabled(state.memory_enabled);
+        setMemoryLongTerm(state.memory_long_term);
+        setCapabilities(state.capabilities || []);
+      })
+      .catch(() => {});
+  }, []);
+
+  async function handleAvatarChange(file?: File) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      if (!result) return;
+      setProfile((prev) => ({ ...prev, avatarDataUrl: result }));
+    };
+    reader.readAsDataURL(file);
+  }
+
+  async function saveAgentProfile() {
+    setProfileSaving(true);
+    try {
+      const cleanName = profile.name.trim() || "Zara";
+      await saveProfile({ ...profile, name: cleanName });
+      setProfile((prev) => ({ ...prev, name: cleanName }));
+      await invoke("set_identity", {
+        name: cleanName,
+        avatar_data_url: profile.avatarDataUrl ?? null,
+      });
+      window.dispatchEvent(new CustomEvent("zara-profile-updated"));
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
+  async function savePersonality() {
+    setSavingAgent(true);
+    try {
+      await invoke("set_personality", { soul });
+    } finally {
+      setSavingAgent(false);
+    }
+  }
+
+  async function saveHeartbeat() {
+    setSavingAgent(true);
+    try {
+      await invoke("set_heartbeat", { every: heartbeatEvery, tasks: heartbeatTasks });
+    } finally {
+      setSavingAgent(false);
+    }
+  }
+
+  async function saveMemory() {
+    setSavingAgent(true);
+    try {
+      await invoke("set_memory", { memory_enabled: memoryEnabled, long_term: memoryLongTerm });
+    } finally {
+      setSavingAgent(false);
+    }
+  }
+
+  async function saveCapabilities() {
+    setSavingAgent(true);
+    try {
+      await invoke("set_capabilities", { list: capabilities });
+    } finally {
+      setSavingAgent(false);
+    }
+  }
+
   return (
     <div className="p-6">
       <div className="max-w-2xl space-y-8">
+        {/* Agent Profile */}
+        <section>
+          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <Shield className="w-5 h-5 text-violet-600" />
+            Agent Profile
+          </h2>
+          <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-4">
+            <div className="flex items-center gap-4">
+              <div className="w-14 h-14 rounded-full bg-gray-100 overflow-hidden flex items-center justify-center">
+                {profile.avatarDataUrl ? (
+                  <img
+                    src={profile.avatarDataUrl}
+                    alt="Agent avatar"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <span className="text-sm font-semibold text-gray-500">
+                    {profile.name.slice(0, 2).toUpperCase()}
+                  </span>
+                )}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Photo
+                </label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => handleAvatarChange(e.target.files?.[0])}
+                  className="text-sm text-gray-600"
+                />
+              </div>
+              {profile.avatarDataUrl && (
+                <button
+                  onClick={() => setProfile((prev) => ({ ...prev, avatarDataUrl: undefined }))}
+                  className="text-sm text-gray-500 hover:text-gray-700"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Name
+              </label>
+              <input
+                type="text"
+                value={profile.name}
+                onChange={(e) => setProfile((prev) => ({ ...prev, name: e.target.value }))}
+                placeholder="Zara"
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500"
+              />
+            </div>
+
+            <div className="flex items-center justify-end">
+              <button
+                onClick={saveAgentProfile}
+                disabled={profileSaving}
+                className={clsx(
+                  "px-4 py-2 text-sm rounded-lg font-medium",
+                  profileSaving
+                    ? "bg-gray-200 text-gray-500"
+                    : "bg-violet-600 text-white hover:bg-violet-700"
+                )}
+              >
+                {profileSaving ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+        </section>
+
         {/* Gateway Section */}
         <section>
           <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
@@ -54,6 +222,175 @@ export function Settings({ gatewayRunning, onGatewayToggle, isTogglingGateway }:
               >
                 <Power className="w-4 h-4" />
                 {isTogglingGateway ? "..." : gatewayRunning ? "Stop" : "Start"}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {/* Personality */}
+        <section>
+          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <Sparkles className="w-5 h-5 text-violet-600" />
+            Personality
+          </h2>
+          <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+            <p className="text-sm text-gray-500">
+              Describe how your agent should sound and behave. Short and simple is
+              great.
+            </p>
+            <textarea
+              value={soul}
+              onChange={(e) => setSoul(e.target.value)}
+              rows={6}
+              placeholder="Be concise, helpful, and a little witty. Ask before doing anything public."
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500"
+            />
+            <div className="flex justify-end">
+              <button
+                onClick={savePersonality}
+                disabled={savingAgent}
+                className={clsx(
+                  "px-4 py-2 text-sm rounded-lg font-medium",
+                  savingAgent
+                    ? "bg-gray-200 text-gray-500"
+                    : "bg-violet-600 text-white hover:bg-violet-700"
+                )}
+              >
+                {savingAgent ? "Saving..." : "Save personality"}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {/* Check-ins */}
+        <section>
+          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <Clock className="w-5 h-5 text-violet-600" />
+            Check-ins
+          </h2>
+          <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+            <div className="flex items-center gap-3">
+              <label className="text-sm text-gray-700">Frequency</label>
+              <select
+                value={heartbeatEvery}
+                onChange={(e) => setHeartbeatEvery(e.target.value)}
+                className="text-sm border border-gray-200 rounded-lg px-3 py-1.5"
+              >
+                <option value="15m">Every 15 minutes</option>
+                <option value="30m">Every 30 minutes</option>
+                <option value="1h">Every hour</option>
+                <option value="4h">Every 4 hours</option>
+                <option value="12h">Every 12 hours</option>
+                <option value="24h">Daily</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm text-gray-700 mb-1">
+                Checklist
+              </label>
+              <textarea
+                value={heartbeatTasks.join("\n")}
+                onChange={(e) => setHeartbeatTasks(
+                  e.target.value.split("\n").map((t) => t.trim()).filter(Boolean)
+                )}
+                rows={4}
+                placeholder="Check for urgent messages\nReview upcoming deadlines"
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500"
+              />
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={saveHeartbeat}
+                disabled={savingAgent}
+                className={clsx(
+                  "px-4 py-2 text-sm rounded-lg font-medium",
+                  savingAgent
+                    ? "bg-gray-200 text-gray-500"
+                    : "bg-violet-600 text-white hover:bg-violet-700"
+                )}
+              >
+                {savingAgent ? "Saving..." : "Save check-ins"}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {/* Memory */}
+        <section>
+          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <Brain className="w-5 h-5 text-violet-600" />
+            Memory
+          </h2>
+          <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+            <label className="flex items-center gap-3 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={memoryEnabled}
+                onChange={(e) => setMemoryEnabled(e.target.checked)}
+              />
+              Remember things between chats
+            </label>
+            <label className="flex items-center gap-3 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={memoryLongTerm}
+                onChange={(e) => setMemoryLongTerm(e.target.checked)}
+                disabled={!memoryEnabled}
+              />
+              Long‑term memory (better recall)
+            </label>
+            <div className="flex justify-end">
+              <button
+                onClick={saveMemory}
+                disabled={savingAgent}
+                className={clsx(
+                  "px-4 py-2 text-sm rounded-lg font-medium",
+                  savingAgent
+                    ? "bg-gray-200 text-gray-500"
+                    : "bg-violet-600 text-white hover:bg-violet-700"
+                )}
+              >
+                {savingAgent ? "Saving..." : "Save memory"}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {/* Capabilities */}
+        <section>
+          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <Sliders className="w-5 h-5 text-violet-600" />
+            Capabilities
+          </h2>
+          <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+            {capabilities.map((cap) => (
+              <label key={cap.id} className="flex items-center gap-3 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={cap.enabled}
+                  onChange={(e) =>
+                    setCapabilities((prev) =>
+                      prev.map((c) =>
+                        c.id === cap.id ? { ...c, enabled: e.target.checked } : c
+                      )
+                    )
+                  }
+                />
+                {cap.label}
+              </label>
+            ))}
+            <div className="flex justify-end">
+              <button
+                onClick={saveCapabilities}
+                disabled={savingAgent}
+                className={clsx(
+                  "px-4 py-2 text-sm rounded-lg font-medium",
+                  savingAgent
+                    ? "bg-gray-200 text-gray-500"
+                    : "bg-violet-600 text-white hover:bg-violet-700"
+                )}
+              >
+                {savingAgent ? "Saving..." : "Save capabilities"}
               </button>
             </div>
           </div>

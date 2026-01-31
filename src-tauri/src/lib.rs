@@ -28,6 +28,12 @@ pub fn run() {
             commands::set_api_key,
             commands::set_active_provider,
             commands::get_auth_state,
+            commands::get_agent_profile_state,
+            commands::set_personality,
+            commands::set_heartbeat,
+            commands::set_memory,
+            commands::set_capabilities,
+            commands::set_identity,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

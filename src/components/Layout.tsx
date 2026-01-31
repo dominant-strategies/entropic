@@ -1,4 +1,4 @@
-import { ReactNode } from "react";
+import { ReactNode, useEffect, useState } from "react";
 import {
   MessageSquare,
   Radio,
@@ -8,6 +8,7 @@ import {
   ShoppingBag,
 } from "lucide-react";
 import clsx from "clsx";
+import { loadProfile, type AgentProfile } from "../lib/profile";
 
 export type Page = "chat" | "store" | "channels" | "logs" | "settings";
 
@@ -27,6 +28,26 @@ const navItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
 ];
 
 export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Props) {
+  const [profile, setProfile] = useState<AgentProfile>({ name: "Zara" });
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      loadProfile()
+        .then((data) => {
+          if (!cancelled) setProfile(data);
+        })
+        .catch(() => {});
+    };
+    refresh();
+    const handler = () => refresh();
+    window.addEventListener("zara-profile-updated", handler);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("zara-profile-updated", handler);
+    };
+  }, []);
+
   return (
     <div className="h-screen w-screen flex bg-gray-50">
       {/* Sidebar */}
@@ -62,6 +83,32 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Pr
             );
           })}
         </nav>
+
+        {/* Agent Profile */}
+        <div className="px-3 pb-2">
+          <button
+            onClick={() => onNavigate("settings")}
+            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-100 text-left"
+          >
+            <div className="w-9 h-9 rounded-full bg-gray-100 overflow-hidden flex items-center justify-center">
+              {profile.avatarDataUrl ? (
+                <img
+                  src={profile.avatarDataUrl}
+                  alt="Agent avatar"
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <span className="text-xs font-semibold text-gray-500">
+                  {profile.name.slice(0, 2).toUpperCase()}
+                </span>
+              )}
+            </div>
+            <div className="flex-1">
+              <div className="text-sm font-medium text-gray-900">{profile.name}</div>
+              <div className="text-xs text-gray-500">Edit profile</div>
+            </div>
+          </button>
+        </div>
 
         {/* Gateway Status */}
         <div className="p-3 border-t border-gray-100">
