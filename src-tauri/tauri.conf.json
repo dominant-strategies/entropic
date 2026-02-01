@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Zara",
+  "productName": "Nova",
   "version": "0.1.0",
-  "identifier": "ai.openclaw.zara",
+  "identifier": "ai.openclaw.nova",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:5174",
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
         "windows": [
       {
-        "title": "Zara",
+        "title": "Nova",
         "width": 900,
         "height": 700,
         "minWidth": 600,
@@ -44,7 +44,7 @@
     ],
     "category": "DeveloperTool",
     "shortDescription": "AI assistant with secure sandboxing",
-    "longDescription": "Zara brings OpenClaw to your desktop with a beautiful interface and secure container-based sandboxing for AI-generated commands.",
+    "longDescription": "Nova brings OpenClaw to your desktop with a beautiful interface and secure container-based sandboxing for AI-generated commands.",
     "macOS": {
       "entitlements": "entitlements.plist",
       "exceptionDomain": null,

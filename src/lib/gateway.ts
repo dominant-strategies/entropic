@@ -144,7 +144,7 @@ export class GatewayClient {
             maxProtocol: 3,
             client: {
               id: "webchat-ui",  // Must be a known client ID
-              displayName: "Zara Desktop",
+              displayName: "Nova Desktop",
               version: "0.1.0",
               platform: "desktop",
               mode: "ui",  // Must be: webchat, cli, ui, backend, node, probe, test

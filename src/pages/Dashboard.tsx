@@ -34,9 +34,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     try {
       const running = await invoke<boolean>("get_gateway_status");
       setGatewayRunning(running);
-      console.log("[Zara] Gateway health check:", running ? "healthy" : "not responding");
+      console.log("[Nova] Gateway health check:", running ? "healthy" : "not responding");
     } catch (error) {
-      console.error("[Zara] Gateway check failed:", error);
+      console.error("[Nova] Gateway check failed:", error);
       setGatewayRunning(false);
     }
   }
@@ -45,18 +45,18 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     setIsTogglingGateway(true);
     try {
       if (gatewayRunning) {
-        console.log("[Zara] Stopping gateway...");
+        console.log("[Nova] Stopping gateway...");
         await invoke("stop_gateway");
-        console.log("[Zara] Gateway stopped successfully");
+        console.log("[Nova] Gateway stopped successfully");
       } else {
-        console.log("[Zara] Starting gateway...");
+        console.log("[Nova] Starting gateway...");
         await invoke("start_gateway");
-        console.log("[Zara] Gateway started successfully");
+        console.log("[Nova] Gateway started successfully");
       }
       await new Promise((r) => setTimeout(r, 2000));
       await checkGateway();
     } catch (error) {
-      console.error("[Zara] Failed to toggle gateway:", error);
+      console.error("[Nova] Failed to toggle gateway:", error);
     } finally {
       setIsTogglingGateway(false);
     }

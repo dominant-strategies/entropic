@@ -29,7 +29,7 @@ const navItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
 ];
 
 export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Props) {
-  const [profile, setProfile] = useState<AgentProfile>({ name: "Zara" });
+  const [profile, setProfile] = useState<AgentProfile>({ name: "Nova" });
   const [searchTerm, setSearchTerm] = useState("");
 
   useEffect(() => {
@@ -43,10 +43,10 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Pr
     };
     refresh();
     const handler = () => refresh();
-    window.addEventListener("zara-profile-updated", handler);
+    window.addEventListener("nova-profile-updated", handler);
     return () => {
       cancelled = true;
-      window.removeEventListener("zara-profile-updated", handler);
+      window.removeEventListener("nova-profile-updated", handler);
     };
   }, []);
 
@@ -68,7 +68,7 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Pr
           style={{ borderBottom: '1px solid var(--glass-border-subtle)' }}
         >
           <Shield className="w-6 h-6 text-[var(--purple-accent)]" />
-          <span className="font-semibold text-lg text-[var(--text-primary)]">Zara</span>
+          <span className="font-semibold text-lg text-[var(--text-primary)]">Nova</span>
         </div>
 
         {/* Search */}

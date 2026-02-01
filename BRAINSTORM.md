@@ -1,4 +1,4 @@
-# Zara - OpenClaw Desktop App
+# Nova - OpenClaw Desktop App
 
 ## Vision
 A beautiful, Apple-like desktop app that lets anyone run OpenClaw with one click. No terminal, no Docker knowledge, no configuration files.
@@ -12,7 +12,7 @@ A beautiful, Apple-like desktop app that lets anyone run OpenClaw with one click
 - No raw API keys visible in UI
 - Sandboxed execution environment
 - Auto-updates with signed binaries
-- Clear permission prompts ("Zara wants to access your microphone")
+- Clear permission prompts ("Nova wants to access your microphone")
 
 ### 2. What's the runtime strategy?
 
@@ -43,10 +43,10 @@ A beautiful, Apple-like desktop app that lets anyone run OpenClaw with one click
 ### 3. Tauri + React Architecture
 
 ```
-Zara.app/
+Nova.app/
 ├── Contents/
 │   ├── MacOS/
-│   │   └── zara              # Tauri Rust binary
+│   │   └── nova              # Tauri Rust binary
 │   ├── Resources/
 │   │   ├── openclaw/         # Bundled openclaw dist
 │   │   ├── node/             # Bundled Node.js (if Option A)
@@ -73,7 +73,7 @@ Zara.app/
 ### 4. Onboarding Flow (Apple-like)
 
 ```
-[Welcome to Zara]
+[Welcome to Nova]
      ↓
 [Sign in with Claude] ← OAuth or session key
      ↓
@@ -104,7 +104,7 @@ Zara.app/
 ### 6. Distribution
 
 **DMG Contents:**
-- Zara.app (drag to Applications)
+- Nova.app (drag to Applications)
 - Optional: Uninstaller or "Move to Trash" instructions
 
 **Signing & Notarization:**
@@ -149,7 +149,7 @@ Zara.app/
 1. **Licensing** - Is OpenClaw MIT? Can we bundle and distribute?
 2. **Claude auth** - OAuth flow or manual session key paste?
 3. **Windows/Linux** - Tauri supports all, but focus Mac first?
-4. **Name** - Zara? Something else?
+4. **Name** - Nova? Something else?
 5. **Pricing** - Free? Freemium? Paid?
 
 ---
@@ -238,7 +238,7 @@ If we skip Docker, the AI can:
 
 ### Option 1: Require Docker Desktop (Current State)
 - User installs Docker Desktop separately
-- Zara checks for Docker, prompts to install if missing
+- Nova checks for Docker, prompts to install if missing
 - **Pros:** Battle-tested, familiar
 - **Cons:** Not 1-click, Docker Desktop licensing ($), 700MB+ install
 
@@ -290,10 +290,10 @@ Rationale:
 
 **Architecture:**
 ```
-Zara.app/
+Nova.app/
 ├── Contents/
 │   ├── MacOS/
-│   │   └── zara                    # Tauri binary
+│   │   └── nova                    # Tauri binary
 │   ├── Resources/
 │   │   ├── bin/
 │   │   │   ├── colima              # Colima binary

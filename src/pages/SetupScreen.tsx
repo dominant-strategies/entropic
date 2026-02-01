@@ -49,7 +49,7 @@ export function SetupScreen({ onComplete }: Props) {
           <Shield className="w-10 h-10 text-white" />
         </div>
         <h1 className="text-3xl font-semibold text-gray-900 mb-2">
-          Welcome to Zara
+          Welcome to Nova
         </h1>
         <p className="text-gray-500 max-w-md">
           Your AI assistant with secure sandboxing. Commands run in an isolated
@@ -65,7 +65,7 @@ export function SetupScreen({ onComplete }: Props) {
               First-Time Setup
             </h2>
             <p className="text-gray-500 text-sm mb-6">
-              Zara needs to set up a secure sandbox environment. This downloads
+              Nova needs to set up a secure sandbox environment. This downloads
               a small Linux VM (~300MB) and only needs to happen once.
             </p>
             <button
@@ -96,7 +96,7 @@ export function SetupScreen({ onComplete }: Props) {
             <CheckCircle2 className="w-12 h-12 text-green-500 mx-auto mb-4" />
             <p className="text-gray-900 font-medium">Setup Complete!</p>
             <p className="text-gray-500 text-sm mt-1">
-              Launching Zara...
+              Launching Nova...
             </p>
           </div>
         )}

@@ -411,7 +411,7 @@ export function Channels() {
             </label>
           </div>
           <p className="text-xs text-gray-500">
-            If Zara runs in Colima/Docker, set the CLI path to an SSH wrapper that
+            If Nova runs in Colima/Docker, set the CLI path to an SSH wrapper that
             runs <code>imsg rpc</code> on your Mac.
           </p>
         </div>

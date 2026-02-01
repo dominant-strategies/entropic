@@ -1,4 +1,4 @@
-# Zara Development Setup
+# Nova Development Setup
 
 ## Prerequisites
 
@@ -27,7 +27,7 @@ pnpm tauri dev
 ┌─────────────────────────────────────────────────────────────┐
 │  Host Machine                                               │
 │  ┌────────────────────┐    ┌─────────────────────────────┐  │
-│  │  zara-dev          │    │  zara-openclaw              │  │
+│  │  nova-dev          │    │  nova-openclaw              │  │
 │  │  (dev container)   │    │  (runtime container)        │  │
 │  │                    │    │                             │  │
 │  │  - Tauri app       │───▶│  - OpenClaw gateway         │  │
@@ -35,12 +35,12 @@ pnpm tauri dev
 │  │  - Rust backend    │    │  - Hardened (no caps, etc)  │  │
 │  └────────────────────┘    └─────────────────────────────┘  │
 │           │                            │                    │
-│           └────────── zara-net ────────┘                    │
+│           └────────── nova-net ────────┘                    │
 │                    (Docker network)                         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Dev Container (zara-dev)
+## Dev Container (nova-dev)
 
 The dev container provides a consistent build environment with:
 - Node.js 22
@@ -59,7 +59,7 @@ pnpm tauri dev      # Full Tauri app with Rust backend
 pnpm tauri build    # Build release binary
 ```
 
-## OpenClaw Runtime Container (zara-openclaw)
+## OpenClaw Runtime Container (nova-openclaw)
 
 The runtime container runs OpenClaw gateway in a hardened environment.
 
@@ -83,7 +83,7 @@ The container runs with:
 - `--security-opt no-new-privileges` - Can't escalate
 - `--user 1000:1000` - Non-root
 - `--tmpfs /home/node/.openclaw` - Writable area in memory only
-- Network isolated to `zara-net`
+- Network isolated to `nova-net`
 
 ### API Keys
 
@@ -105,7 +105,7 @@ API keys flow:
 ./scripts/build-openclaw-runtime.sh
 
 # Remove old container (picks up new image)
-sg docker -c "docker rm -f zara-openclaw"
+sg docker -c "docker rm -f nova-openclaw"
 
 # Restart Tauri app
 pnpm tauri dev
@@ -114,13 +114,13 @@ pnpm tauri dev
 ### Check Container Logs
 
 ```bash
-sg docker -c "docker logs zara-openclaw"
+sg docker -c "docker logs nova-openclaw"
 ```
 
 ### Check Container Status
 
 ```bash
-sg docker -c "docker ps -a | grep zara"
+sg docker -c "docker ps -a | grep nova"
 ```
 
 ### Verify Entrypoint
@@ -133,17 +133,17 @@ sg docker -c "docker inspect openclaw-runtime:latest --format '{{.Config.Entrypo
 ### Check Auth File in Container
 
 ```bash
-sg docker -c "docker exec zara-openclaw cat /home/node/.openclaw/agents/main/agent/auth-profiles.json"
+sg docker -c "docker exec nova-openclaw cat /home/node/.openclaw/agents/main/agent/auth-profiles.json"
 ```
 
 ### Reset Everything
 
 ```bash
 # Remove container
-sg docker -c "docker rm -f zara-openclaw"
+sg docker -c "docker rm -f nova-openclaw"
 
 # Remove volume (chat history)
-sg docker -c "docker volume rm zara-openclaw-data"
+sg docker -c "docker volume rm nova-openclaw-data"
 
 # Remove image (forces rebuild)
 sg docker -c "docker rmi openclaw-runtime:latest"
@@ -161,14 +161,14 @@ sg docker -c "docker rmi openclaw-runtime:latest"
    ```
 3. Remove old container and restart:
    ```bash
-   sg docker -c "docker rm -f zara-openclaw"
+   sg docker -c "docker rm -f nova-openclaw"
    ```
 
 ### "EACCES: permission denied, mkdir..."
 
 The entrypoint.sh should create all needed directories. If you see this:
 1. Rebuild the image: `./scripts/build-openclaw-runtime.sh`
-2. Remove old container: `sg docker -c "docker rm -f zara-openclaw"`
+2. Remove old container: `sg docker -c "docker rm -f nova-openclaw"`
 
 ### Model Using Wrong Provider
 
@@ -183,15 +183,15 @@ If wrong model is used, the container may have cached old env vars. Remove and r
 
 1. Check if container is running:
    ```bash
-   sg docker -c "docker ps | grep zara-openclaw"
+   sg docker -c "docker ps | grep nova-openclaw"
    ```
 2. Check logs:
    ```bash
-   sg docker -c "docker logs zara-openclaw"
+   sg docker -c "docker logs nova-openclaw"
    ```
 3. Verify network:
    ```bash
-   sg docker -c "docker network inspect zara-net"
+   sg docker -c "docker network inspect nova-net"
    ```
 
 ## File Locations

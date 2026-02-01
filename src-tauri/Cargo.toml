@@ -1,12 +1,12 @@
 [package]
-name = "zara"
+name = "nova"
 version = "0.1.0"
 description = "OpenClaw Desktop - AI assistant with secure sandboxing"
 authors = ["OpenClaw Team"]
 edition = "2021"
 
 [lib]
-name = "zara_lib"
+name = "nova_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]

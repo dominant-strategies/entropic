@@ -81,7 +81,7 @@ export function DockerInstall({ onDockerReady }: Props) {
           Install Docker
         </h1>
         <p className="text-gray-500 max-w-md">
-          Zara needs Docker to run AI commands in a secure sandbox.
+          Nova needs Docker to run AI commands in a secure sandbox.
           This is a one-time setup.
         </p>
       </div>

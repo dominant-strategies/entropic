@@ -1,28 +1,75 @@
-# Zara Development Guide
+# Nova Development Guide
 
 ## Prerequisites
 
+- Node.js 18+ and pnpm
+- Rust (for Tauri backend)
+- Docker (Linux) or Colima (macOS)
+- **OpenClaw** (clawdbot repo) - see below
+
 ### One-time host setup (Linux)
 
-1. **Create zara user for isolated X11 access:**
+1. **Create nova user for isolated X11 access:**
    ```bash
-   sudo useradd -u 1337 -M -s /bin/false zara
+   sudo useradd -u 1337 -M -s /bin/false novauser
    ```
 
 2. **Docker must be installed and running**
 
 ---
 
+## OpenClaw Setup (Required)
+
+Nova requires the OpenClaw runtime image. This is built from the separate `clawdbot` repository.
+
+### 1. Clone and build OpenClaw
+
+```bash
+# Clone clawdbot repo (sibling to Nova)
+cd ~/agent
+git clone https://github.com/dominant-strategies/openclaw clawdbot
+cd clawdbot
+
+# Install dependencies and build
+pnpm install
+pnpm build
+```
+
+### 2. Build the runtime image
+
+```bash
+cd ~/agent/Nova
+./scripts/build-openclaw-runtime.sh
+```
+
+This creates the `openclaw-runtime:latest` Docker image containing:
+- OpenClaw gateway server
+- Bundled extensions (memory, discord, telegram, etc.)
+- Node.js runtime
+
+**Custom OpenClaw location:**
+```bash
+OPENCLAW_SOURCE=/path/to/clawdbot ./scripts/build-openclaw-runtime.sh
+```
+
+### 3. Verify the image
+
+```bash
+docker images openclaw-runtime:latest
+```
+
+---
+
 ## Development Workflow
 
-### 1. Allow X11 access for Zara container
+### 1. Allow X11 access for Nova container
 ```bash
-xhost +si:localuser:zara
+xhost +si:localuser:novauser
 ```
 
 ### 2. Start the dev container
 ```bash
-cd /home/alan/agent/Zara
+cd /home/alan/agent/Nova
 ./dev.sh
 ```
 
@@ -54,7 +101,7 @@ Then open http://localhost:5174 in your browser.
 
 If you change the Dockerfile in dev.sh:
 ```bash
-docker rmi zara-dev:latest
+docker rmi nova-dev:latest
 ./dev.sh
 ```
 
@@ -62,15 +109,15 @@ docker rmi zara-dev:latest
 
 ## Security Notes
 
-- Container runs as UID 1337 (`zara`), not your user
-- Only the Zara container has X11 display access
-- Other Docker containers (agents) cannot access your display
+- **Dev container** (`dev.sh`) runs as your user for file access
+- **OpenClaw agent containers** run as UID 1337 (`novauser`) for isolation
+- Only the Nova dev container has X11 display access
+- Agent containers cannot access your display or home directory
 - Project files are mounted read-write at `/app`
-- Your home directory is NOT accessible from the container
 
 ### Revoke X11 access after dev session
 ```bash
-xhost -si:localuser:zara
+xhost -si:localuser:novauser
 ```
 
 ---
@@ -78,7 +125,7 @@ xhost -si:localuser:zara
 ## Project Structure
 
 ```
-Zara/
+Nova/
 ├── src/                    # React frontend
 │   ├── App.tsx            # Main app, routing
 │   ├── pages/
@@ -129,7 +176,7 @@ Output: `src-tauri/target/release/bundle/`
 ### "Failed to initialize GTK"
 X11 access not granted. Run on host:
 ```bash
-xhost +si:localuser:zara
+xhost +si:localuser:novauser
 ```
 
 ### "Port 5174 already in use"

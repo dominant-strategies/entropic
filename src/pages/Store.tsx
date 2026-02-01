@@ -16,9 +16,9 @@ type Plugin = {
 const META: Record<string, Partial<Plugin>> = {
   "memory-lancedb": { name: "Memory (Long‑Term)", description: "Keeps long‑term memories and recalls them automatically.", category: "memory" },
   "memory-core": { name: "Memory (Core)", description: "Lightweight memory search for recent conversations.", category: "memory" },
-  discord: { name: "Discord", description: "Connect Zara to Discord servers and DMs.", category: "integrations" },
+  discord: { name: "Discord", description: "Connect Nova to Discord servers and DMs.", category: "integrations" },
   telegram: { name: "Telegram", description: "Run your agent as a Telegram bot.", category: "integrations" },
-  slack: { name: "Slack", description: "Connect Zara to Slack workspaces.", category: "integrations" },
+  slack: { name: "Slack", description: "Connect Nova to Slack workspaces.", category: "integrations" },
 };
 
 const CATEGORIES = [

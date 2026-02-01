@@ -6,8 +6,8 @@ use thiserror::Error;
 fn debug_log(msg: &str) {
     use std::io::Write;
     let log_path = dirs::home_dir()
-        .map(|h| h.join("zara-runtime.log"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/zara-runtime.log"));
+        .map(|h| h.join("nova-runtime.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/nova-runtime.log"));
 
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)

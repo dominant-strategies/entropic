@@ -5,7 +5,7 @@ set -euo pipefail
 
 CONTAINER_NAME="openclaw-core"
 IMAGE="openclaw-runtime:latest"
-DATA_VOLUME="zara-openclaw-data"
+DATA_VOLUME="nova-openclaw-data"
 PORT="${OPENCLAW_PORT:-18789}"
 
 # Colors

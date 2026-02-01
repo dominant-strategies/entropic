@@ -25,7 +25,7 @@ export function Logs() {
   }
 
   function refreshLogs() {
-    console.log("[Zara] refreshing logs...");
+    console.log("[Nova] refreshing logs...");
     // TODO: Fetch from gateway
   }
 

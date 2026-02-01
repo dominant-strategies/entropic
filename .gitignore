@@ -42,5 +42,5 @@ coverage/
 *.temp
 .cache/
 
-# Zara local data (contains API keys)
-.zara-data/
+# Nova local data (contains API keys)
+.nova-data/
