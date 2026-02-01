@@ -41,8 +41,10 @@ codesign --force --options runtime --timestamp --sign "$CERT" \
 codesign --force --options runtime --timestamp --sign "$CERT" \
   Zara.app/Contents/Resources/resources/bin/limactl
 
-# Sign the main app
+# Sign the main app with entitlements (required for Virtualization.framework)
+# The entitlements.plist is in src-tauri/ directory
 codesign --force --options runtime --timestamp --sign "$CERT" \
+  --entitlements ../../src-tauri/entitlements.plist \
   --deep Zara.app
 
 # Verify signature
