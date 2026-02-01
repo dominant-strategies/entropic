@@ -31,6 +31,7 @@ pub fn run() {
             commands::get_auth_state,
             commands::get_agent_profile_state,
             commands::set_personality,
+            commands::sync_onboarding_to_settings,
             commands::set_heartbeat,
             commands::set_memory,
             commands::set_capabilities,

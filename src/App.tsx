@@ -4,6 +4,8 @@ import { platform } from "@tauri-apps/plugin-os";
 import { SetupScreen } from "./pages/SetupScreen";
 import { DockerInstall } from "./pages/DockerInstall";
 import { Dashboard } from "./pages/Dashboard";
+import { Onboarding } from "./pages/Onboarding";
+import { isOnboardingComplete } from "./lib/profile";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -12,7 +14,7 @@ type RuntimeStatus = {
   docker_ready: boolean;
 };
 
-type AppState = "loading" | "docker-install" | "setup" | "ready";
+type AppState = "loading" | "onboarding" | "docker-install" | "setup" | "ready";
 
 function App() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
@@ -24,6 +26,22 @@ function App() {
   }, []);
 
   async function init() {
+    // Check if onboarding is complete first (separate try/catch so it doesn't skip onboarding on other errors)
+    try {
+      const onboarded = await isOnboardingComplete();
+      console.log("Onboarding complete:", onboarded);
+      if (!onboarded) {
+        setAppState("onboarding");
+        return;
+      }
+    } catch (error) {
+      console.error("Failed to check onboarding:", error);
+      // If we can't check, show onboarding to be safe
+      setAppState("onboarding");
+      return;
+    }
+
+    // Onboarding is complete, check runtime status
     try {
       // Detect OS
       const currentPlatform = await platform();
@@ -48,7 +66,7 @@ function App() {
         setAppState("setup");
       }
     } catch (error) {
-      console.error("Failed to initialize:", error);
+      console.error("Failed to check runtime:", error);
       // If we can't check, assume we need setup
       setAppState("setup");
     }
@@ -82,6 +100,17 @@ function App() {
           </div>
         </div>
       </div>
+    );
+  }
+
+  if (appState === "onboarding") {
+    return (
+      <Onboarding
+        onComplete={() => {
+          // After onboarding, re-run init to check Docker status
+          init();
+        }}
+      />
     );
   }
 

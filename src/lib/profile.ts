@@ -38,3 +38,55 @@ export async function saveProfile(profile: AgentProfile): Promise<void> {
   await store.set("profile", profile);
   await store.save();
 }
+
+export async function isOnboardingComplete(): Promise<boolean> {
+  try {
+    const store = await getStore();
+    const complete = await store.get("onboardingComplete");
+    console.log("[profile] onboardingComplete value:", complete, "type:", typeof complete);
+    return complete === true;
+  } catch (error) {
+    console.error("[profile] Failed to check onboarding status:", error);
+    // If we can't check, assume not complete
+    return false;
+  }
+}
+
+export async function resetOnboarding(): Promise<void> {
+  const store = await getStore();
+  await store.delete("onboardingComplete");
+  await store.delete("profile");
+  await store.delete("onboardingData");
+  await store.save();
+}
+
+export type OnboardingData = {
+  userName: string;
+  interests: string;
+  goals: string;
+  agentName: string;
+  soul: string;
+};
+
+export async function saveOnboardingData(data: OnboardingData): Promise<void> {
+  const store = await getStore();
+  await store.set("onboardingData", data);
+  await store.save();
+}
+
+export async function loadOnboardingData(): Promise<OnboardingData | null> {
+  try {
+    const store = await getStore();
+    const data = await store.get("onboardingData");
+    if (!data || typeof data !== "object") return null;
+    return data as OnboardingData;
+  } catch {
+    return null;
+  }
+}
+
+export async function setOnboardingComplete(complete: boolean): Promise<void> {
+  const store = await getStore();
+  await store.set("onboardingComplete", complete);
+  await store.save();
+}

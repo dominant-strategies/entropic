@@ -1188,6 +1188,21 @@ pub async fn set_personality(app: AppHandle, soul: String) -> Result<(), String>
     Ok(())
 }
 
+/// Sync onboarding data from JS store to Rust store.
+/// Called after onboarding completes so settings are ready when Docker starts.
+#[tauri::command]
+pub async fn sync_onboarding_to_settings(
+    app: AppHandle,
+    soul: String,
+    agent_name: String,
+) -> Result<(), String> {
+    let mut settings = load_agent_settings(&app);
+    settings.soul = soul;
+    settings.identity_name = agent_name;
+    save_agent_settings(&app, settings)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn set_heartbeat(app: AppHandle, every: String, tasks: Vec<String>) -> Result<(), String> {
     let mut cfg = read_openclaw_config();
