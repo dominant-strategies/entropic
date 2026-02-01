@@ -419,8 +419,10 @@ impl Runtime {
 
         // Build a shell command that sets up environment before running colima
         // This ensures PATH is set BEFORE colima does its dependency check
+        // Note: We don't specify --vm-type or --mount-type to let Colima auto-detect
+        // the best options for the user's macOS version (VZ for 13+, QEMU for older)
         let shell_cmd = format!(
-            "export PATH=\"{}:$PATH\" && export LIMA_SHARE_DIR=\"{}\" && \"{}\" start --arch aarch64 --vm-type vz --mount-type virtiofs --cpu 2 --memory 4 --disk 20",
+            "export PATH=\"{}:$PATH\" && export LIMA_SHARE_DIR=\"{}\" && \"{}\" start --cpu 2 --memory 4 --disk 20",
             bin_dir.display(),
             share_dir.join("lima").display(),
             colima_path.display()
