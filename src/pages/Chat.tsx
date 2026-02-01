@@ -19,7 +19,7 @@ const PROVIDERS: Provider[] = [
 ];
 
 const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:19789";
-const GATEWAY_TOKEN = "zara-local-gateway";
+const GATEWAY_TOKEN = "nova-local-gateway";
 
 export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
   const [messages, setMessages] = useState<Message[]>([]);

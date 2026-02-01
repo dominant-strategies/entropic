@@ -27,7 +27,7 @@ function SettingsSection({ title, icon: Icon, children }: { title: string, icon:
 
 export function Settings({ gatewayRunning, onGatewayToggle, isTogglingGateway }: Props) {
   const [apiKeys, setApiKeys] = useState({ anthropic: "", openai: "", google: "" });
-  const [profile, setProfile] = useState<AgentProfile>({ name: "Zara" });
+  const [profile, setProfile] = useState<AgentProfile>({ name: "Nova" });
   const [saving, setSaving] = useState(false);
   const [soul, setSoul] = useState("");
   const [_heartbeatEvery, setHeartbeatEvery] = useState("30m");
@@ -79,7 +79,7 @@ export function Settings({ gatewayRunning, onGatewayToggle, isTogglingGateway }:
         <div>
           <label className="block text-sm font-medium mb-1 text-[var(--text-secondary)]">Name</label>
           <input type="text" value={profile.name} onChange={e => setProfile(p => ({ ...p, name: e.target.value }))}
-            placeholder="Zara" className="form-input" />
+            placeholder="Nova" className="form-input" />
         </div>
         <div className="flex justify-end">
           <button onClick={() => handleSave(() => saveProfile(profile))} disabled={saving} className="btn-primary">

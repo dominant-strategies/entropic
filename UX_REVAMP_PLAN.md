@@ -1,4 +1,4 @@
-# Zara UX Revamp Plan
+# Nova UX Revamp Plan
 ## "The First Conversation" - User Onboarding & Main App Redesign
 
 ---
@@ -29,12 +29,12 @@
 ### Animation Sequence (8-10 seconds)
 1. **0-2s**: Dark screen, single glowing point appears
 2. **2-4s**: Particles emerge and begin gentle orbit
-3. **4-6s**: Zara logo forms from gathering particles
+3. **4-6s**: Nova logo forms from gathering particles
 4. **6-8s**: Logo solidifies with glass refraction effect
 5. **8-10s**: Subtle tagline appears: "Your AI companion"
 
 ### Copy
-- "Waking Zara up..."
+- "Waking Nova up..."
 - "Preparing your space..."
 - "Almost there..."
 
@@ -56,7 +56,7 @@
 
 **Copy:**
 - "Hello."
-- "I'm Zara."
+- "I'm Nova."
 - "Let's get to know each other."
 
 **Interaction:**
@@ -284,7 +284,7 @@ If something fails:
 ┌─────────────────────────────────────────────────────────────┐
 │  [glass sidebar]                              [glass main]  │
 │  ┌─────────────┐                             ┌───────────┐  │
-│  │  zara       │                             │           │  │
+│  │  nova       │                             │           │  │
 │  │             │                             │  chat     │  │
 │  │  new chat   │                             │  area     │  │
 │  │  history    │                             │           │  │
@@ -312,7 +312,7 @@ If something fails:
 - Floats above main content with shadow
 
 **Elements:**
-- **Logo**: Simple "zara" text, warm amber glow on hover
+- **Logo**: Simple "nova" text, warm amber glow on hover
 - **New Chat**: Large glass button, "+" icon, magnetic hover
 - **Recent Chats**: List of glass chips
   - Each shows first few words + time
@@ -335,7 +335,7 @@ If something fails:
 
 **Message Bubbles:**
 - **User**: Right-aligned, amber-tinted glass
-- **Zara**: Left-aligned, white-tinted glass
+- **Nova**: Left-aligned, white-tinted glass
 - Both have generous padding (20px)
 - Rounded corners (20px)
 - Soft shadow
@@ -369,7 +369,7 @@ If something fails:
 
 **Copy:**
 - "Connect your AI services"
-- "Zara works with multiple AI providers"
+- "Nova works with multiple AI providers"
 - "Your keys are stored securely on your device"
 
 **Interaction:**
@@ -399,7 +399,7 @@ If something fails:
 1. **Message Send:**
    - Input field compresses slightly on send
    - Message whooshes up with trail
-   - Zara's response fades in word-by-word
+   - Nova's response fades in word-by-word
 
 2. **Typing Indicator:**
    - Three dots in a glass pill
@@ -467,7 +467,7 @@ If something fails:
 
 ### Three.js Components
 - `ParticleField` - Background particles
-- `GlassLogo` - Animated Zara logo
+- `GlassLogo` - Animated Nova logo
 - `FloatingCards` - 3D card arrangement
 - `SecureSpaceVisualization` - Setup animation
 - `TransitionEffect` - Page transition particles
@@ -528,7 +528,7 @@ If something fails:
 2. **Interest areas** - Missing any important categories? Too many?
 3. **Three.js intensity** - Should animations be subtle or more prominent?
 4. **Color scheme** - Warm amber good, or prefer different accent?
-5. **Name** - Keep "Zara" or open to alternatives?
+5. **Name** - Keep "Nova" or open to alternatives?
 6. **Setup** - Should we allow skipping technical setup and use a cloud fallback?
 7. **Voice** - Add voice input option in main interface?
 8. **Mobile** - Is mobile/tablet support important, or desktop-only?

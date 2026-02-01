@@ -220,7 +220,7 @@ impl Default for StoredAgentSettings {
                     enabled: true,
                 },
             ],
-            identity_name: "Zara".to_string(),
+            identity_name: "Nova".to_string(),
             identity_avatar: None,
             imessage_enabled: false,
             imessage_cli_path: "/usr/local/bin/imsg".to_string(),
@@ -256,7 +256,7 @@ fn get_runtime(app: &AppHandle) -> Runtime {
     Runtime::new(resource_dir)
 }
 
-const OPENCLAW_CONTAINER: &str = "zara-openclaw";
+const OPENCLAW_CONTAINER: &str = "nova-openclaw";
 
 fn docker_exec_output(args: &[&str]) -> Result<String, String> {
     let output = docker_command()
@@ -320,7 +320,7 @@ async fn call_whatsapp_qr_endpoint(
     force: bool,
 ) -> Result<WhatsAppLoginState, String> {
     let base = if std::path::Path::new("/.dockerenv").exists() {
-        "http://zara-openclaw:18789"
+        "http://nova-openclaw:18789"
     } else {
         "http://127.0.0.1:19789"
     };
@@ -336,7 +336,7 @@ async fn call_whatsapp_qr_endpoint(
         .map_err(|e| e.to_string())?;
     let res = client
         .get(&url)
-        .bearer_auth("zara-local-gateway")
+        .bearer_auth("nova-local-gateway")
         .send()
         .await
         .map_err(|e| format!("WhatsApp QR request failed: {}", e))?;
@@ -821,9 +821,9 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         }
     }
 
-    // Check if zara-openclaw container exists
+    // Check if nova-openclaw container exists
     let check = docker_command()
-        .args(["ps", "-q", "-f", "name=zara-openclaw"])
+        .args(["ps", "-q", "-f", "name=nova-openclaw"])
         .output()
         .map_err(|e| format!("Failed to check container: {}", e))?;
 
@@ -834,14 +834,14 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
 
     // Check if container exists but stopped
     let check_all = docker_command()
-        .args(["ps", "-aq", "-f", "name=zara-openclaw"])
+        .args(["ps", "-aq", "-f", "name=nova-openclaw"])
         .output()
         .map_err(|e| format!("Failed to check container: {}", e))?;
 
     if !check_all.stdout.is_empty() {
         // Start existing container
         let start = docker_command()
-            .args(["start", "zara-openclaw"])
+            .args(["start", "nova-openclaw"])
             .output()
             .map_err(|e| format!("Failed to start container: {}", e))?;
 
@@ -857,7 +857,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
     // Container doesn't exist - need to create it
     // Create network if it doesn't exist
     let _ = docker_command()
-        .args(["network", "create", "zara-net"])
+        .args(["network", "create", "nova-net"])
         .output(); // Ignore error if already exists
 
     // Check if image exists
@@ -885,7 +885,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
     // The entrypoint.sh script creates auth-profiles.json from these
     let mut docker_args = vec![
         "run".to_string(), "-d".to_string(),
-        "--name".to_string(), "zara-openclaw".to_string(),
+        "--name".to_string(), "nova-openclaw".to_string(),
         "--user".to_string(), "1000:1000".to_string(),
         "--cap-drop=ALL".to_string(),
         "--security-opt".to_string(), "no-new-privileges".to_string(),
@@ -893,7 +893,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         "--tmpfs".to_string(), "/tmp:rw,noexec,nosuid,nodev,size=100m".to_string(),
         "--tmpfs".to_string(), "/run:rw,noexec,nosuid,nodev,size=10m".to_string(),
         "--tmpfs".to_string(), "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000".to_string(),
-        "-e".to_string(), "OPENCLAW_GATEWAY_TOKEN=zara-local-gateway".to_string(),
+        "-e".to_string(), "OPENCLAW_GATEWAY_TOKEN=nova-local-gateway".to_string(),
         "-e".to_string(), format!("OPENCLAW_MODEL={}", model),
     ];
 
@@ -913,15 +913,15 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
 
     // Add remaining args
     docker_args.extend([
-        "-v".to_string(), "zara-openclaw-data:/data".to_string(),
-        "--network".to_string(), "zara-net".to_string(),
+        "-v".to_string(), "nova-openclaw-data:/data".to_string(),
+        "--network".to_string(), "nova-net".to_string(),
         "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
         "--restart".to_string(), "unless-stopped".to_string(),
         "openclaw-runtime:latest".to_string(),
     ]);
 
     // Dev-only: bind-mount local OpenClaw dist/extensions to avoid image rebuilds
-    if let Ok(source) = std::env::var("ZARA_DEV_OPENCLAW_SOURCE") {
+    if let Ok(source) = std::env::var("NOVA_DEV_OPENCLAW_SOURCE") {
         if !source.trim().is_empty() {
             docker_args.push("-v".to_string());
             docker_args.push(format!("{}/dist:/app/dist:ro", source));
@@ -950,7 +950,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
 #[tauri::command]
 pub async fn stop_gateway() -> Result<(), String> {
     let stop = docker_command()
-        .args(["stop", "zara-openclaw"])
+        .args(["stop", "nova-openclaw"])
         .output()
         .map_err(|e| format!("Failed to stop container: {}", e))?;
 
@@ -969,10 +969,10 @@ pub async fn stop_gateway() -> Result<(), String> {
 pub async fn restart_gateway(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     // Stop and remove existing container (to pick up new env vars)
     let _ = docker_command()
-        .args(["stop", "zara-openclaw"])
+        .args(["stop", "nova-openclaw"])
         .output();
     let _ = docker_command()
-        .args(["rm", "-f", "zara-openclaw"])
+        .args(["rm", "-f", "nova-openclaw"])
         .output();
 
     // Start with current API keys
@@ -983,7 +983,7 @@ pub async fn restart_gateway(app: AppHandle, state: State<'_, AppState>) -> Resu
 pub async fn get_gateway_status() -> Result<bool, String> {
     // Check if container is running
     let check = docker_command()
-        .args(["ps", "-q", "-f", "name=zara-openclaw", "-f", "status=running"])
+        .args(["ps", "-q", "-f", "name=nova-openclaw", "-f", "status=running"])
         .output()
         .map_err(|e| format!("Failed to check container: {}", e))?;
 
@@ -999,7 +999,7 @@ pub async fn get_gateway_status() -> Result<bool, String> {
 
     // Use container name when in dev container (shared network), localhost otherwise
     let health_url = if std::path::Path::new("/.dockerenv").exists() {
-        "http://zara-openclaw:18789/health"
+        "http://nova-openclaw:18789/health"
     } else {
         "http://127.0.0.1:19789/health"
     };
@@ -1012,7 +1012,7 @@ pub async fn get_gateway_status() -> Result<bool, String> {
 #[tauri::command]
 pub async fn get_gateway_ws_url() -> Result<String, String> {
     let url = if std::path::Path::new("/.dockerenv").exists() {
-        "ws://zara-openclaw:18789"
+        "ws://nova-openclaw:18789"
     } else {
         "ws://127.0.0.1:19789"
     };

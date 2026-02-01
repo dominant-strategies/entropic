@@ -1,1 +1,85 @@
-# joulie
+# Nova
+
+Nova is a Tauri desktop app that runs OpenClaw in a hardened local container to provide a secure, "normie-friendly" AI assistant.
+
+## Quick Start
+
+### Prerequisites
+
+- Node.js 18+ and pnpm
+- Rust (for Tauri)
+- Docker (Linux) or the app bundles Colima (macOS)
+- **OpenClaw** (clawdbot repo) - built separately
+
+### 1. Build OpenClaw
+
+Nova requires the OpenClaw runtime. Clone and build it first:
+
+```bash
+# Clone clawdbot as a sibling directory
+git clone https://github.com/dominant-strategies/openclaw ../clawdbot
+cd ../clawdbot
+pnpm install
+pnpm build
+cd ../Nova
+```
+
+### 2. Build the runtime image
+
+```bash
+./scripts/build-openclaw-runtime.sh
+```
+
+This creates the `openclaw-runtime:latest` Docker image.
+
+### 3. Run Nova
+
+```bash
+pnpm install
+pnpm tauri dev
+```
+
+## Platform-Specific Setup
+
+### macOS
+
+No additional setup needed. Nova bundles Colima for Docker support.
+
+### Linux
+
+Create an isolated user for container security:
+```bash
+sudo useradd -u 1337 -M -s /bin/false novauser
+```
+
+For X11 display access (dev container):
+```bash
+xhost +si:localuser:novauser
+./dev.sh
+```
+
+## Project Structure
+
+```
+Nova/
+├── src/                    # React frontend
+├── src-tauri/              # Rust backend (Tauri)
+├── openclaw-runtime/       # Docker image for OpenClaw
+├── scripts/                # Build scripts
+└── dev.sh                  # Dev container launcher (Linux)
+```
+
+## Documentation
+
+- [DEVELOPMENT.md](./DEVELOPMENT.md) - Full development workflow
+- [DISTRIBUTE.md](./DISTRIBUTE.md) - macOS signing & notarization
+- [SETUP.md](./SETUP.md) - Runtime architecture details
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| GTK init error | Run `xhost +si:localuser:novauser` on host |
+| Port 5174 in use | `pkill -f vite` |
+| Docker access denied | Check `/var/run/docker.sock` permissions |
+| OpenClaw image not found | Run `./scripts/build-openclaw-runtime.sh` |

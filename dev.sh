@@ -1,20 +1,20 @@
 #!/bin/bash
 set -e
 
-# Zara Development Environment
+# Nova Development Environment
 # Runs in Docker with Ubuntu 24.04 for latest dependencies
 # Uses xauth for X11 isolation (container can display, but isolated auth)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONTAINER_NAME="zara-dev"
-IMAGE_NAME="zara-dev:latest"
+CONTAINER_NAME="nova-dev"
+IMAGE_NAME="nova-dev:latest"
 
 # Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${GREEN}=== Zara Development Environment ===${NC}"
+echo -e "${GREEN}=== Nova Development Environment ===${NC}"
 echo ""
 
 # Check if Docker is available
@@ -24,7 +24,7 @@ if ! command -v docker &> /dev/null; then
 fi
 
 # Setup xauth for X11 isolation
-XAUTH=/tmp/.zara.xauth
+XAUTH=/tmp/.nova.xauth
 if [ -n "$DISPLAY" ]; then
     echo "Setting up X11 authentication..."
     touch "$XAUTH"
@@ -127,15 +127,15 @@ echo ""
 
 # Run the container as your UID
 # Create shared network if it doesn't exist
-docker network create zara-net 2>/dev/null || true
+docker network create nova-net 2>/dev/null || true
 
 docker run -it --rm \
     --name "$CONTAINER_NAME" \
     --user "$(id -u):$(id -g)" \
-    --network zara-net \
+    --network nova-net \
     -v "$SCRIPT_DIR":/app \
-    -v zara-cargo-cache:/home/user/.cargo \
-    -v zara-pnpm-cache:/home/user/.local/share/pnpm \
+    -v nova-cargo-cache:/home/user/.cargo \
+    -v nova-pnpm-cache:/home/user/.local/share/pnpm \
     -e CARGO_HOME=/home/user/.cargo \
     -e RUSTUP_HOME=/opt/rust \
     -e PATH="/opt/rust/bin:/home/user/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
@@ -150,7 +150,7 @@ docker run -it --rm \
     "$IMAGE_NAME" \
     bash -c '
         echo ""
-        echo "=== Zara Dev Container ==="
+        echo "=== Nova Dev Container ==="
         echo ""
         echo "Commands:"
         echo "  pnpm install      - Install dependencies"

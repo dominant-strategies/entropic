@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build Zara release with all bundled dependencies
+# Build Nova release with all bundled dependencies
 #
 # Usage:
 #   ./build-release.sh                           # Build for current platform
@@ -59,9 +59,9 @@ if [ -n "$TARGET" ]; then
             ;;
     esac
     export TARGET_OS TARGET_ARCH
-    echo "=== Zara Release Build (cross-compile for $TARGET) ==="
+    echo "=== Nova Release Build (cross-compile for $TARGET) ==="
 else
-    echo "=== Zara Release Build ==="
+    echo "=== Nova Release Build ==="
 fi
 echo ""
 
