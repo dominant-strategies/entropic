@@ -224,8 +224,26 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
   );
   
   async function connectWithKey() {
-    // Logic for setting key and restarting gateway
-    setShowKeyModal(false);
+    if (!selectedProvider || !keyInput.trim()) return;
+    try {
+      const provider = selectedProvider.id;
+      await invoke("set_api_key", {
+        provider,
+        key: keyInput.trim(),
+      });
+      await invoke("set_active_provider", { provider });
+      setConnectedProvider(provider);
+      setKeyInput("");
+      setShowKeyModal(false);
+      if (gatewayRunning) {
+        await invoke("restart_gateway");
+      } else {
+        await invoke("start_gateway");
+      }
+    } catch (e) {
+      console.error("Failed to set API key:", e);
+      setError("Failed to save API key");
+    }
   }
 
   if (isConnecting) return renderConnecting();

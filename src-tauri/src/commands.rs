@@ -965,6 +965,123 @@ pub async fn stop_gateway() -> Result<(), String> {
     Ok(())
 }
 
+/// Start gateway using the Nova proxy (for users without their own API keys)
+#[tauri::command]
+pub async fn start_gateway_with_proxy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    gateway_token: String,
+    proxy_url: String,
+    model: String,
+) -> Result<(), String> {
+    // Ensure runtime (Colima) is running on macOS
+    let runtime = get_runtime(&app);
+    let status = runtime.check_status();
+    if !status.docker_ready {
+        if matches!(Platform::detect(), Platform::MacOS) && status.colima_installed && !status.vm_running {
+            runtime.start_colima().map_err(|e| format!("Failed to start Colima: {}", e))?;
+        } else if !status.docker_installed {
+            return Err("Docker is not installed. Please install Docker to continue.".to_string());
+        } else {
+            return Err("Docker is not running. Please start Docker and try again.".to_string());
+        }
+    }
+
+    // Check if container is already running
+    let check = docker_command()
+        .args(["ps", "-q", "-f", "name=nova-openclaw"])
+        .output()
+        .map_err(|e| format!("Failed to check container: {}", e))?;
+
+    if !check.stdout.is_empty() {
+        return Ok(());
+    }
+
+    // Check if container exists but stopped - remove it to recreate with new config
+    let check_all = docker_command()
+        .args(["ps", "-aq", "-f", "name=nova-openclaw"])
+        .output()
+        .map_err(|e| format!("Failed to check container: {}", e))?;
+
+    if !check_all.stdout.is_empty() {
+        // Remove existing container to recreate with new proxy config
+        let _ = docker_command()
+            .args(["rm", "-f", "nova-openclaw"])
+            .output();
+    }
+
+    // Create network if it doesn't exist
+    let _ = docker_command()
+        .args(["network", "create", "nova-net"])
+        .output();
+
+    // Check if image exists
+    let image_check = docker_command()
+        .args(["image", "inspect", "openclaw-runtime:latest"])
+        .output()
+        .map_err(|e| format!("Failed to check image: {}", e))?;
+
+    if !image_check.status.success() {
+        return Err("OpenClaw runtime image not found. Run: ./scripts/build-openclaw-runtime.sh".to_string());
+    }
+
+    // Build docker run command with proxy configuration
+    let mut docker_args = vec![
+        "run".to_string(), "-d".to_string(),
+        "--name".to_string(), "nova-openclaw".to_string(),
+        "--user".to_string(), "1000:1000".to_string(),
+        "--cap-drop=ALL".to_string(),
+        "--security-opt".to_string(), "no-new-privileges".to_string(),
+        "--read-only".to_string(),
+        "--tmpfs".to_string(), "/tmp:rw,noexec,nosuid,nodev,size=100m".to_string(),
+        "--tmpfs".to_string(), "/run:rw,noexec,nosuid,nodev,size=10m".to_string(),
+        "--tmpfs".to_string(), "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000".to_string(),
+        "-e".to_string(), "OPENCLAW_GATEWAY_TOKEN=nova-local-gateway".to_string(),
+        "-e".to_string(), format!("OPENCLAW_MODEL={}", model),
+        // Nova proxy configuration - OpenClaw will use this as its AI backend
+        "-e".to_string(), format!("OPENAI_API_KEY={}", gateway_token),
+        "-e".to_string(), format!("OPENAI_BASE_URL={}/v1", proxy_url),
+        // Also set for other providers that might use different env vars
+        "-e".to_string(), format!("ANTHROPIC_API_KEY={}", gateway_token),
+        "-e".to_string(), format!("ANTHROPIC_BASE_URL={}/v1", proxy_url),
+    ];
+
+    // Add remaining args
+    docker_args.extend([
+        "-v".to_string(), "nova-openclaw-data:/data".to_string(),
+        "--network".to_string(), "nova-net".to_string(),
+        "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
+        "--restart".to_string(), "unless-stopped".to_string(),
+        "openclaw-runtime:latest".to_string(),
+    ]);
+
+    // Dev-only: bind-mount local OpenClaw dist/extensions
+    if let Ok(source) = std::env::var("NOVA_DEV_OPENCLAW_SOURCE") {
+        if !source.trim().is_empty() {
+            docker_args.insert(docker_args.len() - 1, "-v".to_string());
+            docker_args.insert(docker_args.len() - 1, format!("{}/dist:/app/dist:ro", source));
+            docker_args.insert(docker_args.len() - 1, "-v".to_string());
+            docker_args.insert(docker_args.len() - 1, format!("{}/extensions:/app/extensions:ro", source));
+        }
+    }
+
+    // Create and start container
+    let run = docker_command()
+        .args(&docker_args)
+        .output()
+        .map_err(|e| format!("Failed to run container: {}", e))?;
+
+    if !run.status.success() {
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        return Err(format!("Failed to start container: {}", stderr));
+    }
+
+    // Apply persisted settings
+    apply_agent_settings(&app, &state)?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn restart_gateway(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     // Stop and remove existing container (to pick up new env vars)

@@ -5,7 +5,9 @@ import { SetupScreen } from "./pages/SetupScreen";
 import { DockerInstall } from "./pages/DockerInstall";
 import { Dashboard } from "./pages/Dashboard";
 import { Onboarding } from "./pages/Onboarding";
+import { SignIn } from "./pages/SignIn";
 import { isOnboardingComplete } from "./lib/profile";
+import { AuthProvider, useAuth } from "./contexts/AuthContext";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -14,19 +16,29 @@ type RuntimeStatus = {
   docker_ready: boolean;
 };
 
-type AppState = "loading" | "onboarding" | "docker-install" | "setup" | "ready";
+type AppState = "loading" | "signin" | "onboarding" | "docker-install" | "setup" | "ready";
 
-function App() {
+function AppContent() {
+  const { isLoading: authLoading, isAuthenticated, isAuthConfigured } = useAuth();
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [appState, setAppState] = useState<AppState>("loading");
   const [_os, setOs] = useState<string>("");
 
   useEffect(() => {
-    init();
-  }, []);
+    // Wait for auth to finish loading before determining app state
+    if (!authLoading) {
+      init();
+    }
+  }, [authLoading, isAuthenticated, isAuthConfigured]);
 
   async function init() {
-    // Check if onboarding is complete first (separate try/catch so it doesn't skip onboarding on other errors)
+    // If auth is configured but not authenticated, show sign in
+    if (isAuthConfigured && !isAuthenticated) {
+      setAppState("signin");
+      return;
+    }
+
+    // Check if onboarding is complete first
     try {
       const onboarded = await isOnboardingComplete();
       console.log("Onboarding complete:", onboarded);
@@ -36,38 +48,29 @@ function App() {
       }
     } catch (error) {
       console.error("Failed to check onboarding:", error);
-      // If we can't check, show onboarding to be safe
       setAppState("onboarding");
       return;
     }
 
     // Onboarding is complete, check runtime status
     try {
-      // Detect OS
       const currentPlatform = await platform();
       setOs(currentPlatform);
 
-      // Check runtime status
       const result = await invoke<RuntimeStatus>("check_runtime_status");
       setStatus(result);
 
-      // Determine what screen to show
       if (result.docker_ready) {
-        // Docker is ready, go to dashboard
         setAppState("ready");
       } else if (currentPlatform === "linux" && !result.docker_ready) {
-        // Linux without Docker - show install instructions
         setAppState("docker-install");
       } else if (currentPlatform === "macos") {
-        // macOS - run our setup (Colima)
         setAppState("setup");
       } else {
-        // Windows or other - show setup
         setAppState("setup");
       }
     } catch (error) {
       console.error("Failed to check runtime:", error);
-      // If we can't check, assume we need setup
       setAppState("setup");
     }
   }
@@ -84,17 +87,12 @@ function App() {
     }
   }
 
-  if (appState === "loading") {
+  // Loading state
+  if (authLoading || appState === "loading") {
     return (
-      <div 
-        className="h-screen w-screen flex items-center justify-center bg-[var(--bg-primary)]"
-      >
-        <div 
-          className="text-center p-8 rounded-2xl animate-fade-in glass-card"
-        >
-          <div 
-            className="w-12 h-12 rounded-xl mx-auto mb-4 bg-[var(--purple-accent)] animate-pulse-subtle"
-          />
+      <div className="h-screen w-screen flex items-center justify-center bg-[var(--bg-primary)]">
+        <div className="text-center p-8 rounded-2xl animate-fade-in glass-card">
+          <div className="w-12 h-12 rounded-xl mx-auto mb-4 bg-[var(--purple-accent)] animate-pulse-subtle" />
           <div className="animate-pulse text-[var(--text-secondary)]">
             loading...
           </div>
@@ -103,17 +101,35 @@ function App() {
     );
   }
 
+  // Sign in state
+  if (appState === "signin") {
+    return (
+      <SignIn
+        onSignInStarted={() => {
+          // User clicked sign in, browser opened
+          // We'll wait for the deep link callback
+        }}
+        onSkipAuth={() => {
+          // User chose to skip auth and use their own API keys
+          // Go directly to onboarding/setup
+          setAppState("onboarding");
+        }}
+      />
+    );
+  }
+
+  // Onboarding state
   if (appState === "onboarding") {
     return (
       <Onboarding
         onComplete={() => {
-          // After onboarding, re-run init to check Docker status
           init();
         }}
       />
     );
   }
 
+  // Docker install state (Linux)
   if (appState === "docker-install") {
     return (
       <DockerInstall
@@ -124,6 +140,7 @@ function App() {
     );
   }
 
+  // Setup state (macOS Colima)
   if (appState === "setup") {
     return (
       <SetupScreen
@@ -134,7 +151,16 @@ function App() {
     );
   }
 
+  // Main dashboard
   return <Dashboard status={status} onRefresh={checkStatus} />;
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
+  );
 }
 
 export default App;

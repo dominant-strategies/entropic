@@ -1,13 +1,18 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Power, Key, Shield, Sparkles } from "lucide-react";
+import { Power, Key, Shield, Sparkles, Cpu, CreditCard } from "lucide-react";
 import clsx from "clsx";
 import { loadProfile, saveProfile, type AgentProfile } from "../lib/profile";
+import { useAuth } from "../contexts/AuthContext";
+import { ModelSelector } from "../components/ModelSelector";
+import { Billing } from "../components/Billing";
 
 type Props = {
   gatewayRunning: boolean;
   onGatewayToggle: () => void;
   isTogglingGateway: boolean;
+  selectedModel: string;
+  onModelChange: (model: string) => void;
 };
 
 // A section wrapper for consistent styling
@@ -25,7 +30,9 @@ function SettingsSection({ title, icon: Icon, children }: { title: string, icon:
   );
 }
 
-export function Settings({ gatewayRunning, onGatewayToggle, isTogglingGateway }: Props) {
+export function Settings({ gatewayRunning, onGatewayToggle, isTogglingGateway, selectedModel, onModelChange }: Props) {
+  const { isAuthenticated, isAuthConfigured } = useAuth();
+  const showProxyFeatures = isAuthConfigured && isAuthenticated;
   const [apiKeys, setApiKeys] = useState({ anthropic: "", openai: "", google: "" });
   const [profile, setProfile] = useState<AgentProfile>({ name: "Nova" });
   const [saving, setSaving] = useState(false);
@@ -113,13 +120,39 @@ export function Settings({ gatewayRunning, onGatewayToggle, isTogglingGateway }:
         </div>
       </SettingsSection>
 
-      <SettingsSection title="API Keys" icon={Key}>
-        <div className="divide-y divide-[var(--glass-border-subtle)] -m-4">
-          <ApiKeyInput provider="Anthropic" description="Claude models" value={apiKeys.anthropic} onChange={v => setApiKeys(k => ({...k, anthropic: v}))} />
-          <ApiKeyInput provider="OpenAI" description="GPT-4, DALL-E" value={apiKeys.openai} onChange={v => setApiKeys(k => ({...k, openai: v}))} />
-          <ApiKeyInput provider="Google AI" description="Gemini models" value={apiKeys.google} onChange={v => setApiKeys(k => ({...k, google: v}))} />
-        </div>
-      </SettingsSection>
+      {/* Model Selection - only show when authenticated (using proxy) */}
+      {showProxyFeatures && (
+        <SettingsSection title="AI Model" icon={Cpu}>
+          <ModelSelector
+            selectedModel={selectedModel}
+            onModelChange={onModelChange}
+          />
+          <p className="text-sm text-[var(--text-tertiary)] mt-2">
+            Choose the AI model to use. Different models have different capabilities and costs.
+          </p>
+        </SettingsSection>
+      )}
+
+      {/* Billing - only show when authenticated */}
+      {showProxyFeatures && (
+        <SettingsSection title="Billing & Credits" icon={CreditCard}>
+          <Billing />
+        </SettingsSection>
+      )}
+
+      {/* API Keys - only show when NOT using proxy (for users with their own keys) */}
+      {!showProxyFeatures && (
+        <SettingsSection title="API Keys" icon={Key}>
+          <p className="text-sm text-[var(--text-tertiary)] mb-4">
+            Add your own API keys to use AI models directly. Or sign in to use Nova's pay-as-you-go service.
+          </p>
+          <div className="divide-y divide-[var(--glass-border-subtle)] -m-4">
+            <ApiKeyInput provider="Anthropic" description="Claude models" value={apiKeys.anthropic} onChange={v => setApiKeys(k => ({...k, anthropic: v}))} />
+            <ApiKeyInput provider="OpenAI" description="GPT-4, DALL-E" value={apiKeys.openai} onChange={v => setApiKeys(k => ({...k, openai: v}))} />
+            <ApiKeyInput provider="Google AI" description="Gemini models" value={apiKeys.google} onChange={v => setApiKeys(k => ({...k, google: v}))} />
+          </div>
+        </SettingsSection>
+      )}
     </div>
   );
 }

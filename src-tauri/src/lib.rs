@@ -9,6 +9,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             let state = commands::init_state(&app.handle());
             app.manage(state);
@@ -20,6 +21,7 @@ pub fn run() {
             commands::stop_runtime,
             commands::ensure_runtime,
             commands::start_gateway,
+            commands::start_gateway_with_proxy,
             commands::stop_gateway,
             commands::restart_gateway,
             commands::get_gateway_status,

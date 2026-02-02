@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://localhost:* https://api.anthropic.com https://api.openai.com; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src 'self' http://localhost:* https://*.supabase.co https://*.workers.dev https://openrouter.ai https://api.anthropic.com https://api.openai.com; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {
@@ -56,6 +56,12 @@
   "plugins": {
     "shell": {
       "open": true
+    },
+    "deep-link": {
+      "mobile": [],
+      "desktop": {
+        "schemes": ["nova"]
+      }
     }
   }
 }
