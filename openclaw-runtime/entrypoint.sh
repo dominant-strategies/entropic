@@ -7,7 +7,6 @@ set -e
 AUTH_DIR="/home/node/.openclaw/agents/main/agent"
 mkdir -p "$AUTH_DIR"
 
-# Build JSON with available API keys (OpenClaw auth-profiles schema)
 {
     echo "{"
     echo "  \"version\": 1,"
@@ -17,6 +16,12 @@ mkdir -p "$AUTH_DIR"
 
     if [ -n "$ANTHROPIC_API_KEY" ]; then
         echo "    \"anthropic:default\": { \"type\": \"api_key\", \"provider\": \"anthropic\", \"key\": \"${ANTHROPIC_API_KEY}\" }"
+        FIRST=false
+    fi
+
+    if [ -n "$OPENROUTER_API_KEY" ]; then
+        if [ "$FIRST" = false ]; then echo ","; fi
+        echo "    \"openrouter:default\": { \"type\": \"api_key\", \"provider\": \"openrouter\", \"key\": \"${OPENROUTER_API_KEY}\" }"
         FIRST=false
     fi
 
@@ -42,23 +47,64 @@ mkdir -p /home/node/.openclaw/cron
 mkdir -p /home/node/.openclaw/logs
 
 # Write a minimal config to select the primary model when provided
-MEMORY_SLOT="none"
+MEMORY_SLOT="${OPENCLAW_MEMORY_SLOT:-}"
 MEMORY_CONFIG=""
-if [ -d "/app/extensions/memory-lancedb" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
-    MEMORY_SLOT="memory-lancedb"
-    MEMORY_CONFIG="\"entries\": { \"memory-lancedb\": { \"enabled\": true, \"config\": { \"embedding\": { \"apiKey\": \"${OPENAI_API_KEY}\", \"model\": \"text-embedding-3-small\" } } } }"
-elif [ -d "/app/extensions/memory-core" ]; then
-    MEMORY_SLOT="memory-core"
+
+if [ -z "$MEMORY_SLOT" ]; then
+    if [ -d "/app/extensions/memory-lancedb" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
+        MEMORY_SLOT="memory-lancedb"
+    elif [ -d "/app/extensions/memory-core" ]; then
+        MEMORY_SLOT="memory-core"
+    else
+        MEMORY_SLOT="none"
+    fi
+fi
+
+if [ "$MEMORY_SLOT" = "memory-lancedb" ]; then
+    if [ -n "${OPENAI_API_KEY:-}" ]; then
+        MEMORY_CONFIG="\"entries\": { \"memory-lancedb\": { \"enabled\": true, \"config\": { \"embedding\": { \"apiKey\": \"${OPENAI_API_KEY}\", \"model\": \"text-embedding-3-small\" } } } }"
+    else
+        MEMORY_SLOT="memory-core"
+    fi
 fi
 
 if [ -n "${OPENCLAW_MODEL:-}" ]; then
+    MODELS_BLOCK=""
+    if [ -n "${NOVA_PROXY_BASE_URL:-}" ]; then
+        MODEL_ID="${OPENCLAW_MODEL#openrouter/}"
+        if [ "$MODEL_ID" = "free" ] || [ "$MODEL_ID" = "auto" ]; then
+            MODEL_ID="${OPENCLAW_MODEL}"
+        fi
+        IMAGE_MODEL_ID=""
+        if [ -n "${OPENCLAW_IMAGE_MODEL:-}" ]; then
+            IMAGE_MODEL_ID="${OPENCLAW_IMAGE_MODEL#openrouter/}"
+            if [ "$IMAGE_MODEL_ID" = "free" ] || [ "$IMAGE_MODEL_ID" = "auto" ]; then
+                IMAGE_MODEL_ID="${OPENCLAW_IMAGE_MODEL}"
+            fi
+        fi
+        MODELS_BLOCK=",
+  \"models\": {
+    \"providers\": {
+      \"openrouter\": {
+        \"baseUrl\": \"${NOVA_PROXY_BASE_URL}\",
+        \"api\": \"openai-completions\",
+        \"models\": [
+          { \"id\": \"${MODEL_ID}\", \"name\": \"${MODEL_ID}\" }${IMAGE_MODEL_ID:+,
+          { \"id\": \"${IMAGE_MODEL_ID}\", \"name\": \"${IMAGE_MODEL_ID}\" }}
+        ]
+      }
+    }
+  }"
+    fi
+
     cat > /home/node/.openclaw/openclaw.json << EOF
 {
   "agents": {
     "defaults": {
       "model": {
         "primary": "${OPENCLAW_MODEL}"
-      }
+      }${OPENCLAW_IMAGE_MODEL:+,
+      "imageModel": { "primary": "${OPENCLAW_IMAGE_MODEL}" }}
     }
   },
   "plugins": {
@@ -66,10 +112,11 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
       "memory": "${MEMORY_SLOT}"
     }${MEMORY_CONFIG:+,
     ${MEMORY_CONFIG}}
-  }
+  }${MODELS_BLOCK}
 }
 EOF
 fi
 
 # Start the gateway
-exec node /app/dist/index.js gateway --bind lan --port 18789 --allow-unconfigured
+PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
+exec node /app/dist/index.js gateway --bind lan --port "${PORT}" --allow-unconfigured

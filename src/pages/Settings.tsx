@@ -13,6 +13,12 @@ type Props = {
   isTogglingGateway: boolean;
   selectedModel: string;
   onModelChange: (model: string) => void;
+  useLocalKeys: boolean;
+  onUseLocalKeysChange: (value: boolean) => void;
+  codeModel: string;
+  imageModel: string;
+  onCodeModelChange: (model: string) => void;
+  onImageModelChange: (model: string) => void;
 };
 
 // A section wrapper for consistent styling
@@ -30,9 +36,21 @@ function SettingsSection({ title, icon: Icon, children }: { title: string, icon:
   );
 }
 
-export function Settings({ gatewayRunning, onGatewayToggle, isTogglingGateway, selectedModel, onModelChange }: Props) {
+export function Settings({
+  gatewayRunning,
+  onGatewayToggle,
+  isTogglingGateway,
+  selectedModel,
+  onModelChange,
+  useLocalKeys,
+  onUseLocalKeysChange,
+  codeModel,
+  imageModel,
+  onCodeModelChange,
+  onImageModelChange,
+}: Props) {
   const { isAuthenticated, isAuthConfigured } = useAuth();
-  const showProxyFeatures = isAuthConfigured && isAuthenticated;
+  const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
   const [apiKeys, setApiKeys] = useState({ anthropic: "", openai: "", google: "" });
   const [profile, setProfile] = useState<AgentProfile>({ name: "Nova" });
   const [saving, setSaving] = useState(false);
@@ -120,8 +138,31 @@ export function Settings({ gatewayRunning, onGatewayToggle, isTogglingGateway, s
         </div>
       </SettingsSection>
 
-      {/* Model Selection - only show when authenticated (using proxy) */}
-      {showProxyFeatures && (
+      {/* Proxy Mode */}
+      {isAuthConfigured && isAuthenticated && (
+        <SettingsSection title="AI Service Mode" icon={Sparkles}>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="font-medium text-[var(--text-primary)]">Use Nova Managed Service</p>
+              <p className="text-sm text-[var(--text-tertiary)]">
+                Default option. Uses Nova credits and supports model switching automatically.
+              </p>
+            </div>
+            <button
+              onClick={() => onUseLocalKeysChange(!useLocalKeys)}
+              className={clsx("btn", useLocalKeys ? "btn-secondary" : "btn-primary")}
+            >
+              {useLocalKeys ? "Switch to Nova" : "Using Nova"}
+            </button>
+          </div>
+          <div className="mt-3 text-xs text-[var(--text-tertiary)]">
+            Power users can switch to local API keys below.
+          </div>
+        </SettingsSection>
+      )}
+
+      {/* Model Selection - only show when proxy is enabled */}
+      {proxyEnabled && (
         <SettingsSection title="AI Model" icon={Cpu}>
           <ModelSelector
             selectedModel={selectedModel}
@@ -133,15 +174,41 @@ export function Settings({ gatewayRunning, onGatewayToggle, isTogglingGateway, s
         </SettingsSection>
       )}
 
-      {/* Billing - only show when authenticated */}
-      {showProxyFeatures && (
+      {/* Code Model Selection */}
+      {proxyEnabled && (
+        <SettingsSection title="Code Model" icon={Cpu}>
+          <ModelSelector
+            selectedModel={codeModel}
+            onModelChange={onCodeModelChange}
+          />
+          <p className="text-sm text-[var(--text-tertiary)] mt-2">
+            Used when you switch a chat to Code mode.
+          </p>
+        </SettingsSection>
+      )}
+
+      {/* Image Model Selection */}
+      {proxyEnabled && (
+        <SettingsSection title="Image Model" icon={Cpu}>
+          <ModelSelector
+            selectedModel={imageModel}
+            onModelChange={onImageModelChange}
+          />
+          <p className="text-sm text-[var(--text-tertiary)] mt-2">
+            Used for image understanding and image tool calls.
+          </p>
+        </SettingsSection>
+      )}
+
+      {/* Billing - only show when proxy is enabled */}
+      {proxyEnabled && (
         <SettingsSection title="Billing & Credits" icon={CreditCard}>
           <Billing />
         </SettingsSection>
       )}
 
-      {/* API Keys - only show when NOT using proxy (for users with their own keys) */}
-      {!showProxyFeatures && (
+      {/* API Keys - show for power users or when not authenticated */}
+      {(!proxyEnabled || useLocalKeys) && (
         <SettingsSection title="API Keys" icon={Key}>
           <p className="text-sm text-[var(--text-tertiary)] mb-4">
             Add your own API keys to use AI models directly. Or sign in to use Nova's pay-as-you-go service.

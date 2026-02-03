@@ -23,14 +23,19 @@ type Props = {
 };
 
 // Default model for proxy mode
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514";
+const DEFAULT_MODEL = "openai/gpt-5.2";
 
 export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const { isAuthenticated, isAuthConfigured } = useAuth();
+  const [useLocalKeys, setUseLocalKeys] = useState(false);
   const [currentPage, setCurrentPage] = useState<Page>("chat");
   const [gatewayRunning, setGatewayRunning] = useState(false);
   const [isTogglingGateway, setIsTogglingGateway] = useState(false);
+  const [showGatewayStartup, setShowGatewayStartup] = useState(false);
+  const [startupError, setStartupError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
+  const [codeModel, setCodeModel] = useState("openai/gpt-5.2-codex");
+  const [imageModel, setImageModel] = useState("google/gemini-3-pro-image-preview");
   const gatewayTokenRef = useRef<string | null>(null);
   const autoStartAttemptedRef = useRef(false);
 
@@ -41,6 +46,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         const store = await TauriStore.load("nova-settings.json");
         const saved = await store.get("selectedModel") as string | null;
         if (saved) setSelectedModel(saved);
+        const storedUseLocal = await store.get("useLocalKeys") as boolean | null;
+        if (typeof storedUseLocal === "boolean") setUseLocalKeys(storedUseLocal);
+        const savedCode = await store.get("codeModel") as string | null;
+        if (savedCode) setCodeModel(savedCode);
+        const savedImage = await store.get("imageModel") as string | null;
+        if (savedImage) setImageModel(savedImage);
       } catch (error) {
         console.error("[Nova] Failed to load model preference:", error);
       }
@@ -57,17 +68,19 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   // Auto-start gateway for authenticated users
   useEffect(() => {
     async function autoStartGateway() {
+      const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
       // Only attempt auto-start once, when authenticated via OAuth
       if (
         !autoStartAttemptedRef.current &&
-        isAuthConfigured &&
-        isAuthenticated &&
+        proxyEnabled &&
         !gatewayRunning &&
         !isTogglingGateway
       ) {
         autoStartAttemptedRef.current = true;
         console.log("[Nova] Auto-starting gateway for authenticated user...");
 
+        setStartupError(null);
+        setShowGatewayStartup(true);
         setIsTogglingGateway(true);
         try {
           // Get a gateway token for OpenClaw to use
@@ -75,12 +88,19 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           gatewayTokenRef.current = token;
 
           const proxyUrl = getProxyUrl();
+          const proxyModel = selectedModel.startsWith("openrouter/")
+            ? selectedModel
+            : `openrouter/${selectedModel}`;
+          const proxyImageModel = imageModel.startsWith("openrouter/")
+            ? imageModel
+            : `openrouter/${imageModel}`;
           console.log("[Nova] Auto-start: Using proxy mode with URL:", proxyUrl);
 
           await invoke("start_gateway_with_proxy", {
             gatewayToken: token,
             proxyUrl,
-            model: selectedModel,
+            model: proxyModel,
+            imageModel: proxyImageModel,
           });
 
           console.log("[Nova] Auto-start: Gateway started successfully");
@@ -90,6 +110,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           console.error("[Nova] Auto-start: Failed to start gateway:", error);
           // Reset the flag so user can try manually
           autoStartAttemptedRef.current = false;
+          setStartupError(error instanceof Error ? error.message : "Failed to start gateway");
         } finally {
           setIsTogglingGateway(false);
         }
@@ -104,6 +125,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       const running = await invoke<boolean>("get_gateway_status");
       setGatewayRunning(running);
       console.log("[Nova] Gateway health check:", running ? "healthy" : "not responding");
+      if (running) {
+        setShowGatewayStartup(false);
+      }
     } catch (error) {
       console.error("[Nova] Gateway check failed:", error);
       setGatewayRunning(false);
@@ -119,21 +143,30 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         console.log("[Nova] Gateway stopped successfully");
       } else {
         console.log("[Nova] Starting gateway...");
+        setStartupError(null);
+        setShowGatewayStartup(true);
 
         // If authenticated via OAuth, use proxy mode
-        if (isAuthConfigured && isAuthenticated) {
+        if (isAuthConfigured && isAuthenticated && !useLocalKeys) {
           try {
             // Get a gateway token for OpenClaw to use
             const { token } = await createGatewayToken();
             gatewayTokenRef.current = token;
 
             const proxyUrl = getProxyUrl();
+            const proxyModel = selectedModel.startsWith("openrouter/")
+              ? selectedModel
+              : `openrouter/${selectedModel}`;
+            const proxyImageModel = imageModel.startsWith("openrouter/")
+              ? imageModel
+              : `openrouter/${imageModel}`;
             console.log("[Nova] Using proxy mode with URL:", proxyUrl);
 
             await invoke("start_gateway_with_proxy", {
               gatewayToken: token,
               proxyUrl,
-              model: selectedModel,
+              model: proxyModel,
+              imageModel: proxyImageModel,
             });
           } catch (proxyError) {
             console.error("[Nova] Proxy mode failed, falling back to direct:", proxyError);
@@ -151,6 +184,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       await checkGateway();
     } catch (error) {
       console.error("[Nova] Failed to toggle gateway:", error);
+      setStartupError(error instanceof Error ? error.message : "Failed to toggle gateway");
     } finally {
       setIsTogglingGateway(false);
     }
@@ -170,16 +204,23 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
 
     // If gateway is running and we're in proxy mode, restart with new model
-    if (gatewayRunning && isAuthConfigured && isAuthenticated && gatewayTokenRef.current) {
+    if (gatewayRunning && isAuthConfigured && isAuthenticated && !useLocalKeys && gatewayTokenRef.current) {
       setIsTogglingGateway(true);
       try {
         await invoke("stop_gateway");
         const { token } = await createGatewayToken();
         gatewayTokenRef.current = token;
+        const proxyModel = newModel.startsWith("openrouter/")
+          ? newModel
+          : `openrouter/${newModel}`;
+        const proxyImageModel = imageModel.startsWith("openrouter/")
+          ? imageModel
+          : `openrouter/${imageModel}`;
         await invoke("start_gateway_with_proxy", {
           gatewayToken: token,
           proxyUrl: getProxyUrl(),
-          model: newModel,
+          model: proxyModel,
+          imageModel: proxyImageModel,
         });
         await new Promise((r) => setTimeout(r, 2000));
         await checkGateway();
@@ -194,7 +235,14 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   function renderPage() {
     switch (currentPage) {
       case "chat":
-        return <Chat gatewayRunning={gatewayRunning} />;
+        return (
+          <Chat
+            gatewayRunning={gatewayRunning}
+            useLocalKeys={useLocalKeys}
+            codeModel={codeModel}
+            imageModel={imageModel}
+          />
+        );
       case "store":
         return <Store />;
       case "channels":
@@ -209,6 +257,72 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             isTogglingGateway={isTogglingGateway}
             selectedModel={selectedModel}
             onModelChange={handleModelChange}
+            useLocalKeys={useLocalKeys}
+            onUseLocalKeysChange={async (value) => {
+              setUseLocalKeys(value);
+              try {
+                const store = await TauriStore.load("nova-settings.json");
+                await store.set("useLocalKeys", value);
+                await store.save();
+              } catch (error) {
+                console.error("[Nova] Failed to save useLocalKeys:", error);
+              }
+
+              if (gatewayRunning) {
+                try {
+                  await invoke("stop_gateway");
+                } catch (error) {
+                  console.error("[Nova] Failed to stop gateway:", error);
+                }
+                await checkGateway();
+              }
+            }}
+            codeModel={codeModel}
+            imageModel={imageModel}
+            onCodeModelChange={async (value) => {
+              setCodeModel(value);
+              try {
+                const store = await TauriStore.load("nova-settings.json");
+                await store.set("codeModel", value);
+                await store.save();
+              } catch (error) {
+                console.error("[Nova] Failed to save codeModel:", error);
+              }
+            }}
+            onImageModelChange={async (value) => {
+              setImageModel(value);
+              try {
+                const store = await TauriStore.load("nova-settings.json");
+                await store.set("imageModel", value);
+                await store.save();
+              } catch (error) {
+                console.error("[Nova] Failed to save imageModel:", error);
+              }
+
+              if (gatewayRunning && isAuthConfigured && isAuthenticated && !useLocalKeys && gatewayTokenRef.current) {
+                try {
+                  await invoke("stop_gateway");
+                  const { token } = await createGatewayToken();
+                  gatewayTokenRef.current = token;
+                  const proxyImageModel = value.startsWith("openrouter/")
+                    ? value
+                    : `openrouter/${value}`;
+                  const proxyModel = selectedModel.startsWith("openrouter/")
+                    ? selectedModel
+                    : `openrouter/${selectedModel}`;
+                  await invoke("start_gateway_with_proxy", {
+                    gatewayToken: token,
+                    proxyUrl: getProxyUrl(),
+                    model: proxyModel,
+                    imageModel: proxyImageModel,
+                  });
+                  await new Promise((r) => setTimeout(r, 2000));
+                  await checkGateway();
+                } catch (error) {
+                  console.error("[Nova] Failed to restart gateway with new image model:", error);
+                }
+              }
+            }}
           />
         );
     }
@@ -220,6 +334,34 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       onNavigate={setCurrentPage}
       gatewayRunning={gatewayRunning}
     >
+      {showGatewayStartup && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+          <div className="glass-card p-8 w-full max-w-md mx-4 text-center">
+            <div className="w-12 h-12 rounded-xl mx-auto mb-4 bg-[var(--purple-accent)] animate-pulse-subtle" />
+            <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-2">
+              Starting secure sandbox
+            </h2>
+            <p className="text-sm text-[var(--text-secondary)] mb-4">
+              We’re spinning up the Docker container for your assistant.
+            </p>
+            <div className="text-left text-sm space-y-2">
+              <div className="flex items-center gap-2">
+                <span className={`h-2 w-2 rounded-full ${isTogglingGateway ? "bg-amber-400" : "bg-green-500"}`} />
+                <span className="text-[var(--text-secondary)]">Starting gateway container</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`h-2 w-2 rounded-full ${gatewayRunning ? "bg-green-500" : "bg-amber-400"}`} />
+                <span className="text-[var(--text-secondary)]">Waiting for health check</span>
+              </div>
+            </div>
+            {startupError && (
+              <div className="mt-4 text-sm text-red-500">
+                {startupError}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {renderPage()}
     </Layout>
   );

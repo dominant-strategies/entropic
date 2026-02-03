@@ -253,6 +253,10 @@ export class GatewayClient {
     await this.rpc("sessions.reset", { key: sessionKey });
   }
 
+  async patchSession(sessionKey: string, patch: { model?: string | null }): Promise<void> {
+    await this.rpc("sessions.patch", { key: sessionKey, ...patch });
+  }
+
   async getConfig(): Promise<unknown> {
     return this.rpc("config.get");
   }

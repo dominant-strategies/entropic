@@ -124,6 +124,12 @@ pnpm tauri dev
 - Compiles Rust (~2-3 min first time, fast after)
 - Opens native window on your desktop
 
+**Linux host networking (required for local nova-web API)**
+```bash
+export NOVA_HOST_NETWORK=1
+```
+Use this when running `pnpm tauri dev` on the host so OpenClaw can reach the local `nova-web` server.
+
 **Linux dev deep links (nova://)**
 ```bash
 ./scripts/register-dev-protocol.sh

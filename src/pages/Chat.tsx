@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Sparkles, X, Loader2, Plus, ExternalLink, Paperclip, MessageSquare, Calendar, Globe, Mail } from "lucide-react";
+import { Send, Sparkles, X, Loader2, Plus, ExternalLink, Paperclip, MessageSquare, Calendar, Globe, Mail, Activity } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
@@ -7,6 +7,7 @@ import { GatewayClient, createGatewayClient } from "../lib/gateway";
 import { loadOnboardingData, type OnboardingData } from "../lib/profile";
 import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
 import { ChannelSetupModal } from "../components/ChannelSetupModal";
+import { useAuth } from "../contexts/AuthContext";
 
 // NOTE: Most type definitions are omitted for brevity in this example
 type Message = { id: string; role: "user" | "assistant"; content: string };
@@ -33,7 +34,19 @@ const SUGGESTIONS = [
   { icon: Globe, label: "Browse the web for me", action: { type: "agent", message: "I'd like you to browse the web and research something for me." } as SuggestionAction },
 ];
 
-export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
+export function Chat({
+  gatewayRunning,
+  useLocalKeys,
+  codeModel,
+  imageModel: _imageModel,
+}: {
+  gatewayRunning: boolean;
+  useLocalKeys: boolean;
+  codeModel: string;
+  imageModel: string;
+}) {
+  const { isAuthenticated, isAuthConfigured } = useAuth();
+  const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
   const [messages, setMessages] = useState<Message[]>([]);
   const [message, setMessage] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -52,6 +65,13 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
   const [dragActive, setDragActive] = useState(false);
   const [onboardingData, setOnboardingData] = useState<OnboardingData | null>(null);
   const [showWelcome, setShowWelcome] = useState(true);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [diagLogs, setDiagLogs] = useState<string[]>([]);
+  const [lastGatewayError, setLastGatewayError] = useState<string | null>(null);
+  const [lastChatEvent, setLastChatEvent] = useState<ChatEvent | null>(null);
+  const [lastSendId, setLastSendId] = useState<string | null>(null);
+  const [lastSendAt, setLastSendAt] = useState<number | null>(null);
+  const [chatMode, setChatMode] = useState<"general" | "code">("general");
   const [channelModal, setChannelModal] = useState<{ isOpen: boolean; channel: "imessage" | "whatsapp" }>({
     isOpen: false,
     channel: "imessage",
@@ -59,6 +79,15 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const clientRef = useRef<GatewayClient | null>(null);
+  const lastEventByRunIdRef = useRef<Record<string, number>>({});
+
+  function addDiag(message: string) {
+    const stamp = new Date().toLocaleTimeString();
+    setDiagLogs(prev => {
+      const next = [...prev, `${stamp} ${message}`];
+      return next.slice(-200);
+    });
+  }
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -78,42 +107,83 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
     invoke<string>("get_gateway_ws_url").then(url => url && setGatewayUrl(url)).catch(console.error);
   }, []);
 
+  // If authenticated via proxy, treat as connected even without local API keys
+  useEffect(() => {
+    if (proxyEnabled && !connectedProvider) {
+      setConnectedProvider("proxy");
+      return;
+    }
+    if (!proxyEnabled && connectedProvider === "proxy") {
+      setConnectedProvider(null);
+    }
+  }, [proxyEnabled, connectedProvider]);
+
+  useEffect(() => {
+    if (!currentSession || !clientRef.current) return;
+    const modelOverride =
+      chatMode === "code"
+        ? codeModel.startsWith("openrouter/")
+          ? codeModel
+          : `openrouter/${codeModel}`
+        : null;
+    clientRef.current
+      .patchSession(currentSession, { model: modelOverride })
+      .then(() => addDiag(`session model override: ${modelOverride || "default"}`))
+      .catch((err) => addDiag(`session override failed: ${String(err)}`));
+  }, [chatMode, currentSession, codeModel]);
+
+  useEffect(() => {
+    addDiag(`status proxy=${proxyEnabled} gatewayRunning=${gatewayRunning}`);
+  }, [proxyEnabled, gatewayRunning]);
+
   // Simplified connection effect
   useEffect(() => {
-    if (gatewayRunning && connectedProvider && !clientRef.current) {
+    if (gatewayRunning && (connectedProvider || proxyEnabled) && !clientRef.current) {
       connectToGateway();
     }
     return () => {
       clientRef.current?.disconnect();
       clientRef.current = null;
     };
-  }, [gatewayRunning, connectedProvider]);
+  }, [gatewayRunning, connectedProvider, proxyEnabled]);
 
   async function connectToGateway() {
     setIsConnecting(true);
     setError(null);
     try {
+      addDiag(`connect -> ${gatewayUrl}`);
       const client = createGatewayClient(gatewayUrl, GATEWAY_TOKEN);
       clientRef.current = client;
       client.on("connected", () => {
         setConnected(true);
         setIsConnecting(false);
         loadSessions();
+        addDiag("gateway connected");
       });
-      client.on("disconnected", () => setConnected(false));
+      client.on("disconnected", () => {
+        setConnected(false);
+        addDiag("gateway disconnected");
+      });
       client.on("chat", handleChatEvent);
       client.on("error", (err) => {
         setError(err);
         setIsConnecting(false);
+        setLastGatewayError(err);
+        addDiag(`gateway error: ${err}`);
       });
       await client.connect();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Connection failed");
       setIsConnecting(false);
+      addDiag(`connect failed: ${e instanceof Error ? e.message : "unknown"}`);
     }
   }
 
   function handleChatEvent(event: any) {
+    setLastChatEvent(event);
+    if (event?.runId) {
+      lastEventByRunIdRef.current[event.runId] = Date.now();
+    }
     if (event.state === "delta" || event.state === "final") {
       const text = event.message?.content?.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('') || '';
       if (!text) return;
@@ -130,8 +200,10 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
     } else if (event.state === "error") {
       setError(event.errorMessage || "Chat error");
       setIsLoading(false);
+      addDiag(`chat error: ${event.errorMessage || "unknown"}`);
     } else if (event.state === "aborted") {
       setIsLoading(false);
+      addDiag("chat aborted");
     }
   }
 
@@ -178,11 +250,24 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
     setIsLoading(true);
     setError(null);
     try {
-      await clientRef.current?.sendMessage(currentSession, messageContent, []);
+      addDiag(`send -> session=${currentSession} len=${messageContent.length}`);
+      const runId = await clientRef.current?.sendMessage(currentSession, messageContent, []);
+      setLastSendId(runId || null);
+      setLastSendAt(Date.now());
+      if (runId) {
+        addDiag(`send ok runId=${runId}`);
+        const capturedRunId = runId;
+        setTimeout(() => {
+          if (!lastEventByRunIdRef.current[capturedRunId]) {
+            addDiag(`no chat event within 15s runId=${capturedRunId}`);
+          }
+        }, 15000);
+      }
       setPendingAttachments([]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Send failed");
       setIsLoading(false);
+      addDiag(`send failed: ${e instanceof Error ? e.message : "unknown"}`);
     }
   }
 
@@ -323,7 +408,7 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
   }
 
   if (isConnecting) return renderConnecting();
-  if (!connectedProvider) return renderNoProvider();
+  if (!connectedProvider && !proxyEnabled) return renderNoProvider();
 
   // Main Chat UI
   return (
@@ -343,15 +428,28 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
               className="form-input text-sm !py-1 !px-3 !w-auto">
               {sessions.map(s => <option key={s.key} value={s.key}>{s.label || s.displayName || s.derivedTitle || `Chat ${s.key.slice(0, 8)}`}</option>)}
             </select>
+            <select value={chatMode} onChange={e => setChatMode(e.target.value as "general" | "code")}
+              className="form-input text-sm !py-1 !px-3 !w-auto">
+              <option value="general">General</option>
+              <option value="code">Code</option>
+            </select>
             <button onClick={createNewSession} title="New Chat"
               className="p-1.5 rounded-md text-[var(--text-secondary)] hover:bg-black/5 hover:text-[var(--text-primary)]"><Plus className="w-4 h-4" /></button>
           </div>
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-gray-300'}`} />
-            <span className="text-xs text-[var(--text-tertiary)]">{connected ? 'Connected' : 'Disconnected'}</span>
-          </div>
+        <div className="flex items-center gap-2">
+          <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-gray-300'}`} />
+          <span className="text-xs text-[var(--text-tertiary)]">{connected ? 'Connected' : 'Disconnected'}</span>
         </div>
+        <button
+          onClick={() => setShowDiagnostics(true)}
+          className="btn-secondary !py-1 !px-3 text-xs"
+          title="Gateway diagnostics"
+        >
+          <Activity className="w-3.5 h-3.5 mr-1" />
+          Diagnostics
+        </button>
       </div>
+    </div>
 
       {/* Error Banner */}
       {error && <div className="p-2 text-center text-sm bg-red-500/10 text-red-500">{error}</div>}
@@ -418,6 +516,54 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
         onClose={() => setChannelModal({ ...channelModal, isOpen: false })}
         onSetupComplete={handleChannelSetupComplete}
       />
+
+      {showDiagnostics && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 backdrop-blur-sm"
+          onClick={() => setShowDiagnostics(false)}>
+          <div className="glass-card p-6 w-full max-w-2xl m-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-[var(--text-primary)]">Gateway Diagnostics</h3>
+              <button onClick={() => setShowDiagnostics(false)} className="p-1 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-sm mb-4">
+              <div className="glass-card p-3">
+                <p className="text-[var(--text-tertiary)]">Gateway URL</p>
+                <p className="text-[var(--text-primary)] break-all">{gatewayUrl}</p>
+              </div>
+              <div className="glass-card p-3">
+                <p className="text-[var(--text-tertiary)]">Proxy Enabled</p>
+                <p className="text-[var(--text-primary)]">{proxyEnabled ? "true" : "false"}</p>
+              </div>
+              <div className="glass-card p-3">
+                <p className="text-[var(--text-tertiary)]">Connected Provider</p>
+                <p className="text-[var(--text-primary)]">{connectedProvider || "—"}</p>
+              </div>
+              <div className="glass-card p-3">
+                <p className="text-[var(--text-tertiary)]">Connected</p>
+                <p className="text-[var(--text-primary)]">{connected ? "true" : "false"}</p>
+              </div>
+              <div className="glass-card p-3">
+                <p className="text-[var(--text-tertiary)]">Last Send</p>
+                <p className="text-[var(--text-primary)] break-all">{lastSendId || "—"}</p>
+                <p className="text-xs text-[var(--text-tertiary)]">
+                  {lastSendAt ? new Date(lastSendAt).toLocaleTimeString() : "—"}
+                </p>
+              </div>
+              <div className="glass-card p-3">
+                <p className="text-[var(--text-tertiary)]">Last Gateway Error</p>
+                <p className="text-[var(--text-primary)] break-all">{lastGatewayError || "—"}</p>
+              </div>
+              <div className="glass-card p-3">
+                <p className="text-[var(--text-tertiary)]">Last Chat Event</p>
+                <p className="text-[var(--text-primary)] break-all">{lastChatEvent?.state || "—"}</p>
+              </div>
+            </div>
+            <div className="glass-card p-3 max-h-64 overflow-auto text-xs font-mono whitespace-pre-wrap">
+              {diagLogs.length ? diagLogs.join("\n") : "No diagnostics yet."}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

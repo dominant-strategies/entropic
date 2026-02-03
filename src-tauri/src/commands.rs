@@ -310,6 +310,16 @@ fn read_openclaw_config() -> serde_json::Value {
     serde_json::json!({})
 }
 
+fn read_container_env(key: &str) -> Option<String> {
+    let cmd = format!("printf \"%s\" \"${}\"", key);
+    let value = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &cmd]).ok()?;
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
     let payload = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     write_container_file("/home/node/.openclaw/openclaw.json", &payload)
@@ -552,6 +562,46 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
     write_container_file("/home/node/.openclaw/workspace/IDENTITY.md", &id_body)?;
 
     let mut cfg = read_openclaw_config();
+
+    // Ensure model config persists even if apply_agent_settings runs before entrypoint writes.
+    if cfg.pointer("/agents/defaults/model").is_none() {
+        if let Some(model) = read_container_env("OPENCLAW_MODEL") {
+            cfg["agents"]["defaults"]["model"] = serde_json::json!({ "primary": model });
+        }
+    }
+    if cfg.pointer("/agents/defaults/imageModel").is_none() {
+        if let Some(image_model) = read_container_env("OPENCLAW_IMAGE_MODEL") {
+            cfg["agents"]["defaults"]["imageModel"] = serde_json::json!({ "primary": image_model });
+        }
+    }
+    if cfg.pointer("/models/providers/openrouter").is_none() {
+        if let Some(base_url) = read_container_env("NOVA_PROXY_BASE_URL") {
+            let model = read_container_env("OPENCLAW_MODEL")
+                .map(|m| {
+                    let stripped = m.trim_start_matches("openrouter/").to_string();
+                    if stripped == "free" || stripped == "auto" { m } else { stripped }
+                })
+                .unwrap_or_default();
+            let image_model = read_container_env("OPENCLAW_IMAGE_MODEL")
+                .map(|m| {
+                    let stripped = m.trim_start_matches("openrouter/").to_string();
+                    if stripped == "free" || stripped == "auto" { m } else { stripped }
+                })
+                .unwrap_or_default();
+            let mut models = Vec::new();
+            if !model.is_empty() {
+                models.push(serde_json::json!({ "id": model, "name": model }));
+            }
+            if !image_model.is_empty() && image_model != model {
+                models.push(serde_json::json!({ "id": image_model, "name": image_model }));
+            }
+            cfg["models"]["providers"]["openrouter"] = serde_json::json!({
+                "baseUrl": base_url,
+                "api": "openai-completions",
+                "models": models
+            });
+        }
+    }
     cfg["agents"]["defaults"]["heartbeat"] = serde_json::json!({
         "every": settings.heartbeat_every
     });
@@ -576,6 +626,8 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
         } else {
             cfg["plugins"]["slots"]["memory"] = serde_json::json!("memory-core");
         }
+    } else if let Some(entries) = cfg["plugins"]["entries"].as_object_mut() {
+        entries.remove("memory-lancedb");
     }
 
     cfg["channels"]["discord"]["enabled"] = serde_json::json!(settings.discord_enabled);
@@ -806,6 +858,17 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         .lock()
         .map_err(|e| e.to_string())?
         .clone();
+    let settings = load_agent_settings(&app);
+    let mut memory_slot = if !settings.memory_enabled {
+        "none"
+    } else if settings.memory_long_term {
+        "memory-lancedb"
+    } else {
+        "memory-core"
+    };
+    if memory_slot == "memory-lancedb" && !api_keys.contains_key("openai") {
+        memory_slot = "memory-core";
+    }
 
     // Ensure runtime (Colima) is running on macOS
     let runtime = get_runtime(&app);
@@ -883,10 +946,15 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
 
     // Build docker run command - pass API keys as env vars
     // The entrypoint.sh script creates auth-profiles.json from these
+    let use_host_network = std::env::var("NOVA_HOST_NETWORK")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
     let mut docker_args = vec![
         "run".to_string(), "-d".to_string(),
         "--name".to_string(), "nova-openclaw".to_string(),
         "--user".to_string(), "1000:1000".to_string(),
+        "--add-host".to_string(), "host.docker.internal:host-gateway".to_string(),
         "--cap-drop=ALL".to_string(),
         "--security-opt".to_string(), "no-new-privileges".to_string(),
         "--read-only".to_string(),
@@ -895,6 +963,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         "--tmpfs".to_string(), "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000".to_string(),
         "-e".to_string(), "OPENCLAW_GATEWAY_TOKEN=nova-local-gateway".to_string(),
         "-e".to_string(), format!("OPENCLAW_MODEL={}", model),
+        "-e".to_string(), format!("OPENCLAW_MEMORY_SLOT={}", memory_slot),
     ];
 
     // Add API keys as environment variables (entrypoint creates auth-profiles.json from these)
@@ -911,14 +980,26 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         docker_args.push(format!("GEMINI_API_KEY={}", key));
     }
 
-    // Add remaining args
-    docker_args.extend([
-        "-v".to_string(), "nova-openclaw-data:/data".to_string(),
-        "--network".to_string(), "nova-net".to_string(),
-        "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
-        "--restart".to_string(), "unless-stopped".to_string(),
-        "openclaw-runtime:latest".to_string(),
-    ]);
+    if use_host_network {
+        docker_args.push("--network".to_string());
+        docker_args.push("host".to_string());
+        docker_args.push("-e".to_string());
+        docker_args.push("OPENCLAW_GATEWAY_PORT=19789".to_string());
+        docker_args.extend([
+            "-v".to_string(), "nova-openclaw-data:/data".to_string(),
+            "--restart".to_string(), "unless-stopped".to_string(),
+            "openclaw-runtime:latest".to_string(),
+        ]);
+    } else {
+        // Add remaining args
+        docker_args.extend([
+            "-v".to_string(), "nova-openclaw-data:/data".to_string(),
+            "--network".to_string(), "nova-net".to_string(),
+            "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
+            "--restart".to_string(), "unless-stopped".to_string(),
+            "openclaw-runtime:latest".to_string(),
+        ]);
+    }
 
     // Dev-only: bind-mount local OpenClaw dist/extensions to avoid image rebuilds
     if let Ok(source) = std::env::var("NOVA_DEV_OPENCLAW_SOURCE") {
@@ -973,6 +1054,7 @@ pub async fn start_gateway_with_proxy(
     gateway_token: String,
     proxy_url: String,
     model: String,
+    image_model: Option<String>,
 ) -> Result<(), String> {
     // Ensure runtime (Colima) is running on macOS
     let runtime = get_runtime(&app);
@@ -994,7 +1076,10 @@ pub async fn start_gateway_with_proxy(
         .map_err(|e| format!("Failed to check container: {}", e))?;
 
     if !check.stdout.is_empty() {
-        return Ok(());
+        // Remove running container to ensure proxy config/model updates take effect
+        let _ = docker_command()
+            .args(["rm", "-f", "nova-openclaw"])
+            .output();
     }
 
     // Check if container exists but stopped - remove it to recreate with new config
@@ -1026,10 +1111,15 @@ pub async fn start_gateway_with_proxy(
     }
 
     // Build docker run command with proxy configuration
+    let use_host_network = std::env::var("NOVA_HOST_NETWORK")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
     let mut docker_args = vec![
         "run".to_string(), "-d".to_string(),
         "--name".to_string(), "nova-openclaw".to_string(),
         "--user".to_string(), "1000:1000".to_string(),
+        "--add-host".to_string(), "host.docker.internal:host-gateway".to_string(),
         "--cap-drop=ALL".to_string(),
         "--security-opt".to_string(), "no-new-privileges".to_string(),
         "--read-only".to_string(),
@@ -1038,22 +1128,40 @@ pub async fn start_gateway_with_proxy(
         "--tmpfs".to_string(), "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000".to_string(),
         "-e".to_string(), "OPENCLAW_GATEWAY_TOKEN=nova-local-gateway".to_string(),
         "-e".to_string(), format!("OPENCLAW_MODEL={}", model),
-        // Nova proxy configuration - OpenClaw will use this as its AI backend
-        "-e".to_string(), format!("OPENAI_API_KEY={}", gateway_token),
-        "-e".to_string(), format!("OPENAI_BASE_URL={}/v1", proxy_url),
-        // Also set for other providers that might use different env vars
-        "-e".to_string(), format!("ANTHROPIC_API_KEY={}", gateway_token),
-        "-e".to_string(), format!("ANTHROPIC_BASE_URL={}/v1", proxy_url),
+        "-e".to_string(), "OPENCLAW_MEMORY_SLOT=memory-core".to_string(),
+        "-e".to_string(), "NOVA_PROXY_MODE=1".to_string(),
+        // Nova proxy configuration - OpenClaw will use this as its AI backend (OpenRouter provider)
+        "-e".to_string(), format!("OPENROUTER_API_KEY={}", gateway_token),
+        "-e".to_string(), format!("NOVA_PROXY_BASE_URL={}/v1", proxy_url),
     ];
 
-    // Add remaining args
-    docker_args.extend([
-        "-v".to_string(), "nova-openclaw-data:/data".to_string(),
-        "--network".to_string(), "nova-net".to_string(),
-        "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
-        "--restart".to_string(), "unless-stopped".to_string(),
-        "openclaw-runtime:latest".to_string(),
-    ]);
+    if let Some(image_model) = image_model {
+        if !image_model.trim().is_empty() {
+            docker_args.push("-e".to_string());
+            docker_args.push(format!("OPENCLAW_IMAGE_MODEL={}", image_model));
+        }
+    }
+
+    if use_host_network {
+        docker_args.push("--network".to_string());
+        docker_args.push("host".to_string());
+        docker_args.push("-e".to_string());
+        docker_args.push("OPENCLAW_GATEWAY_PORT=19789".to_string());
+        docker_args.extend([
+            "-v".to_string(), "nova-openclaw-data:/data".to_string(),
+            "--restart".to_string(), "unless-stopped".to_string(),
+            "openclaw-runtime:latest".to_string(),
+        ]);
+    } else {
+        // Add remaining args
+        docker_args.extend([
+            "-v".to_string(), "nova-openclaw-data:/data".to_string(),
+            "--network".to_string(), "nova-net".to_string(),
+            "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
+            "--restart".to_string(), "unless-stopped".to_string(),
+            "openclaw-runtime:latest".to_string(),
+        ]);
+    }
 
     // Dev-only: bind-mount local OpenClaw dist/extensions
     if let Ok(source) = std::env::var("NOVA_DEV_OPENCLAW_SOURCE") {
@@ -1373,6 +1481,8 @@ pub async fn set_memory(
             "apiKey": openai_key,
             "model": "text-embedding-3-small"
         });
+    } else if let Some(entries) = cfg["plugins"]["entries"].as_object_mut() {
+        entries.remove("memory-lancedb");
     }
 
     write_openclaw_config(&cfg)?;

@@ -379,5 +379,15 @@ export async function revokeGatewayToken(token: string): Promise<void> {
  * Get the API URL for OpenClaw to use
  */
 export function getProxyUrl(): string {
+  if (!API_URL) return API_URL;
+  try {
+    const url = new URL(API_URL);
+    if (url.hostname === "localhost" || url.hostname === "127.0.0.1") {
+      url.hostname = "host.docker.internal";
+      return url.toString().replace(/\/$/, "");
+    }
+  } catch {
+    // Ignore URL parse errors, fall back to raw API_URL
+  }
   return API_URL;
 }

@@ -1,18 +1,15 @@
 import { useState, useEffect } from "react";
 import { ChevronDown, Zap, Star, Brain, Sparkles } from "lucide-react";
-import { getModels, Model } from "../lib/auth";
+import { Model } from "../lib/auth";
 import { Store } from "@tauri-apps/plugin-store";
 
 // Fallback models if API fails
 const FALLBACK_MODELS: Model[] = [
-  { id: "anthropic/claude-sonnet-4-20250514", name: "Claude Sonnet 4", provider: "Anthropic", tier: "recommended" },
-  { id: "anthropic/claude-opus-4-20250514", name: "Claude Opus 4", provider: "Anthropic", tier: "premium" },
-  { id: "anthropic/claude-3-haiku", name: "Claude 3 Haiku", provider: "Anthropic", tier: "fast" },
-  { id: "openai/gpt-4o", name: "GPT-4o", provider: "OpenAI", tier: "recommended" },
-  { id: "openai/gpt-4o-mini", name: "GPT-4o Mini", provider: "OpenAI", tier: "fast" },
-  { id: "google/gemini-2.0-flash", name: "Gemini 2.0 Flash", provider: "Google", tier: "fast" },
-  { id: "meta-llama/llama-3.1-405b-instruct", name: "Llama 3.1 405B", provider: "Meta", tier: "premium" },
-  { id: "deepseek/deepseek-chat", name: "DeepSeek Chat", provider: "DeepSeek", tier: "fast" },
+  { id: "openrouter/free", name: "OpenRouter Free (Router)", provider: "OpenRouter", tier: "fast" },
+  { id: "anthropic/claude-opus-4.5", name: "Claude Opus 4.5", provider: "Anthropic", tier: "premium" },
+  { id: "openai/gpt-5.2", name: "GPT‑5.2", provider: "OpenAI", tier: "recommended" },
+  { id: "openai/gpt-5.2-codex", name: "GPT‑5.2 Codex", provider: "OpenAI", tier: "reasoning" },
+  { id: "google/gemini-3-pro-image-preview", name: "Gemini 3 Pro Image (Nano Banana 3)", provider: "Google", tier: "premium" },
 ];
 
 const TIER_ICONS: Record<string, typeof Zap> = {
@@ -46,25 +43,12 @@ interface ModelSelectorProps {
 }
 
 export function ModelSelector({ selectedModel, onModelChange, compact = false }: ModelSelectorProps) {
-  const [models, setModels] = useState<Model[]>(FALLBACK_MODELS);
+  const [models, _setModels] = useState<Model[]>(FALLBACK_MODELS);
   const [isOpen, setIsOpen] = useState(false);
   const [_isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    async function loadModels() {
-      try {
-        const apiModels = await getModels();
-        if (apiModels.length > 0) {
-          setModels(apiModels);
-        }
-      } catch (error) {
-        console.error("Failed to load models:", error);
-      } finally {
-        setIsLoading(false);
-      }
-    }
-
-    loadModels();
+    setIsLoading(false);
   }, []);
 
   // Load saved model preference
