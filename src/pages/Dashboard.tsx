@@ -32,6 +32,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [isTogglingGateway, setIsTogglingGateway] = useState(false);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const gatewayTokenRef = useRef<string | null>(null);
+  const autoStartAttemptedRef = useRef(false);
 
   // Load saved model preference
   useEffect(() => {
@@ -52,6 +53,51 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     const interval = setInterval(checkGateway, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  // Auto-start gateway for authenticated users
+  useEffect(() => {
+    async function autoStartGateway() {
+      // Only attempt auto-start once, when authenticated via OAuth
+      if (
+        !autoStartAttemptedRef.current &&
+        isAuthConfigured &&
+        isAuthenticated &&
+        !gatewayRunning &&
+        !isTogglingGateway
+      ) {
+        autoStartAttemptedRef.current = true;
+        console.log("[Nova] Auto-starting gateway for authenticated user...");
+
+        setIsTogglingGateway(true);
+        try {
+          // Get a gateway token for OpenClaw to use
+          const { token } = await createGatewayToken();
+          gatewayTokenRef.current = token;
+
+          const proxyUrl = getProxyUrl();
+          console.log("[Nova] Auto-start: Using proxy mode with URL:", proxyUrl);
+
+          await invoke("start_gateway_with_proxy", {
+            gatewayToken: token,
+            proxyUrl,
+            model: selectedModel,
+          });
+
+          console.log("[Nova] Auto-start: Gateway started successfully");
+          await new Promise((r) => setTimeout(r, 2000));
+          await checkGateway();
+        } catch (error) {
+          console.error("[Nova] Auto-start: Failed to start gateway:", error);
+          // Reset the flag so user can try manually
+          autoStartAttemptedRef.current = false;
+        } finally {
+          setIsTogglingGateway(false);
+        }
+      }
+    }
+
+    autoStartGateway();
+  }, [isAuthenticated, isAuthConfigured, gatewayRunning, isTogglingGateway, selectedModel]);
 
   async function checkGateway() {
     try {

@@ -1,20 +1,55 @@
 # Nova Development Guide
 
-## Prerequisites
+## System Requirements
 
+### macOS
+- **macOS 12.0+** (Monterey or later)
+- Xcode Command Line Tools: `xcode-select --install`
+- Docker Desktop or Colima (bundled in release builds)
+
+### Linux
+- **Ubuntu 24.04+** (or equivalent distro with glibc 2.39+)
+- X11 or Wayland with XWayland
+- WebKitGTK 4.1+ and GTK 3 dependencies:
+  ```bash
+  sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+  ```
+- Docker Engine (not Docker Desktop)
+
+### All Platforms
 - Node.js 18+ and pnpm
-- Rust (for Tauri backend)
-- Docker (Linux) or Colima (macOS)
+- Rust 1.70+ (install via [rustup](https://rustup.rs))
 - **OpenClaw** (clawdbot repo) - see below
 
-### One-time host setup (Linux)
+---
 
-1. **Create nova user for isolated X11 access:**
+## One-time Host Setup
+
+### Linux
+
+1. **Install Tauri dependencies:**
+   ```bash
+   sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+   ```
+
+2. **Create nova user for isolated X11 access:**
    ```bash
    sudo useradd -u 1337 -M -s /bin/false novauser
    ```
 
-2. **Docker must be installed and running**
+3. **Docker must be installed and running**
+
+### macOS
+
+1. **Install Xcode Command Line Tools:**
+   ```bash
+   xcode-select --install
+   ```
+
+2. **Install Rust:**
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
 
 ---
 
@@ -88,6 +123,12 @@ pnpm tauri dev
 ```
 - Compiles Rust (~2-3 min first time, fast after)
 - Opens native window on your desktop
+
+**Linux dev deep links (nova://)**
+```bash
+./scripts/register-dev-protocol.sh
+```
+Run this on the host (outside the dev container) after the first successful `pnpm tauri dev` so the debug binary exists. This registers `nova://` so OAuth callbacks open the dev app.
 
 **Or run React UI only (faster, no Rust):**
 ```bash
@@ -197,4 +238,16 @@ Clean and rebuild:
 cd /app/src-tauri
 cargo clean
 pnpm tauri dev
+```
+
+### DRM/KMS permission denied (Linux)
+WebKitGTK GPU acceleration fails. Disable compositing:
+```bash
+WEBKIT_DISABLE_COMPOSITING_MODE=1 pnpm tauri dev
+```
+
+### OAuth callback doesn't open app (Linux)
+The `nova://` protocol handler isn't registered. Run on host (not in dev container):
+```bash
+./scripts/register-dev-protocol.sh
 ```

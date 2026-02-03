@@ -5,7 +5,7 @@ import {
   ScrollText,
   Settings,
   Shield,
-  ShoppingBag,
+  Sparkles,
   Search,
 } from "lucide-react";
 import clsx from "clsx";
@@ -22,7 +22,7 @@ type Props = {
 
 const navItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
   { id: "chat", label: "Chat", icon: MessageSquare },
-  { id: "store", label: "Store", icon: ShoppingBag },
+  { id: "store", label: "Skills", icon: Sparkles },
   { id: "channels", label: "Channels", icon: Radio },
   { id: "logs", label: "Logs", icon: ScrollText },
   { id: "settings", label: "Settings", icon: Settings },

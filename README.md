@@ -75,6 +75,26 @@ Nova/
 - [DISTRIBUTE.md](./DISTRIBUTE.md) - macOS signing & notarization
 - [SETUP.md](./SETUP.md) - Runtime architecture details
 
+## Data Storage
+
+Nova stores data in `~/.local/share/ai.openclaw.nova/`:
+
+| File | Purpose |
+|------|---------|
+| `nova-auth.json` | OAuth session and tokens |
+| `nova-profile.json` | User profile settings |
+| `localstorage/` | Web storage data |
+
+To reset OAuth:
+```bash
+rm ~/.local/share/ai.openclaw.nova/nova-auth.json
+```
+
+To fully reset all data:
+```bash
+rm -rf ~/.local/share/ai.openclaw.nova/
+```
+
 ## Troubleshooting
 
 | Issue | Solution |
@@ -83,3 +103,4 @@ Nova/
 | Port 5174 in use | `pkill -f vite` |
 | Docker access denied | Check `/var/run/docker.sock` permissions |
 | OpenClaw image not found | Run `./scripts/build-openclaw-runtime.sh` |
+| DRM/KMS permission denied | Run with `WEBKIT_DISABLE_COMPOSITING_MODE=1 pnpm tauri dev` |

@@ -19,11 +19,17 @@ import {
 
 // Dynamic import for deep-link to handle when it's not available
 let onOpenUrl: ((callback: (urls: string[]) => void) => Promise<() => void>) | null = null;
+let listenTauriEvent:
+  | ((event: string, handler: (event: { payload: unknown }) => void) => Promise<() => void>)
+  | null = null;
 if (isAuthConfigured) {
   try {
     // @ts-ignore - module may not exist
     import("@tauri-apps/plugin-deep-link").then((mod) => {
       onOpenUrl = mod.onOpenUrl;
+    }).catch(() => {});
+    import("@tauri-apps/api/event").then((mod) => {
+      listenTauriEvent = mod.listen;
     }).catch(() => {});
   } catch {
     // Deep link not available
@@ -123,6 +129,39 @@ export function AuthProvider({ children }: AuthProviderProps) {
   // Handle deep link for OAuth callback
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let unlistenEvent: (() => void) | undefined;
+
+    async function handleUrls(urls: string[]) {
+      for (const url of urls) {
+        console.log("Deep link received:", url);
+
+        if (url.includes("auth/callback")) {
+          const success = await handleAuthCallback(url);
+          if (success) {
+            console.log("Auth callback handled successfully");
+            // Session will be updated via onAuthStateChange
+          }
+        } else if (url.includes("billing/success")) {
+          // Refresh balance after successful payment
+          try {
+            const bal = await getBalance();
+            setBalance(bal);
+          } catch (err) {
+            console.error("Failed to refresh balance:", err);
+          }
+        } else if (url.includes("integrations/success")) {
+          // Integration OAuth completed successfully
+          console.log("Integration connected successfully");
+          window.dispatchEvent(new CustomEvent('nova-integration-updated'));
+        } else if (url.includes("integrations/error")) {
+          // Integration OAuth failed
+          const urlObj = new URL(url);
+          const error = urlObj.searchParams.get('error') || 'Unknown error';
+          console.error("Integration OAuth error:", error);
+          window.dispatchEvent(new CustomEvent('nova-integration-error', { detail: { error } }));
+        }
+      }
+    }
 
     async function setupDeepLink() {
       if (!onOpenUrl) {
@@ -132,25 +171,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
       try {
         unlisten = await onOpenUrl(async (urls: string[]) => {
-          for (const url of urls) {
-            console.log("Deep link received:", url);
-
-            if (url.includes("auth/callback")) {
-              const success = await handleAuthCallback(url);
-              if (success) {
-                console.log("Auth callback handled successfully");
-                // Session will be updated via onAuthStateChange
-              }
-            } else if (url.includes("billing/success")) {
-              // Refresh balance after successful payment
-              try {
-                const bal = await getBalance();
-                setBalance(bal);
-              } catch (err) {
-                console.error("Failed to refresh balance:", err);
-              }
-            }
-          }
+          await handleUrls(urls);
         });
       } catch (error) {
         console.error("Failed to setup deep link listener:", error);
@@ -159,8 +180,30 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
     setupDeepLink();
 
+    async function setupSingleInstanceBridge() {
+      if (!listenTauriEvent) {
+        return;
+      }
+
+      try {
+        unlistenEvent = await listenTauriEvent("deep-link-open", async (event) => {
+          const payload = event.payload;
+          if (Array.isArray(payload)) {
+            await handleUrls(payload as string[]);
+          } else if (typeof payload === "string") {
+            await handleUrls([payload]);
+          }
+        });
+      } catch (error) {
+        console.error("Failed to setup deep link event listener:", error);
+      }
+    }
+
+    setupSingleInstanceBridge();
+
     return () => {
       unlisten?.();
+      unlistenEvent?.();
     };
   }, []);
 

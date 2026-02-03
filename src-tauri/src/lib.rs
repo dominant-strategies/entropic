@@ -1,7 +1,7 @@
 mod runtime;
 mod commands;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 pub fn run() {
     tauri::Builder::default()
@@ -10,6 +10,23 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            let urls: Vec<String> = args
+                .into_iter()
+                .filter(|arg| arg.starts_with("nova://"))
+                .collect();
+
+            if urls.is_empty() {
+                return;
+            }
+
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+
+            let _ = app.emit("deep-link-open", urls);
+        }))
         .setup(|app| {
             let state = commands::init_state(&app.handle());
             app.manage(state);

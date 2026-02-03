@@ -1,9 +1,12 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Sparkles, X, Loader2, Plus, ExternalLink, Paperclip } from "lucide-react";
+import { Send, Sparkles, X, Loader2, Plus, ExternalLink, Paperclip, MessageSquare, Calendar, Globe, Mail } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import { GatewayClient, createGatewayClient } from "../lib/gateway";
+import { loadOnboardingData, type OnboardingData } from "../lib/profile";
+import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
+import { ChannelSetupModal } from "../components/ChannelSetupModal";
 
 // NOTE: Most type definitions are omitted for brevity in this example
 type Message = { id: string; role: "user" | "assistant"; content: string };
@@ -20,6 +23,15 @@ const PROVIDERS: Provider[] = [
 
 const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:19789";
 const GATEWAY_TOKEN = "nova-local-gateway";
+
+// Suggestion items for the welcome screen
+const SUGGESTIONS = [
+  { icon: MessageSquare, label: "Message me on iMessage", action: { type: "channel", channel: "imessage" } as SuggestionAction },
+  { icon: MessageSquare, label: "Message me on WhatsApp", action: { type: "channel", channel: "whatsapp" } as SuggestionAction },
+  { icon: Mail, label: "Clean up my inbox", action: { type: "agent", message: "Help me clean up and organize my email inbox" } as SuggestionAction },
+  { icon: Calendar, label: "Check my calendar", action: { type: "agent", message: "What's on my calendar for today and tomorrow?" } as SuggestionAction },
+  { icon: Globe, label: "Browse the web for me", action: { type: "agent", message: "I'd like you to browse the web and research something for me." } as SuggestionAction },
+];
 
 export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -38,6 +50,12 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
   const [gatewayUrl, setGatewayUrl] = useState(DEFAULT_GATEWAY_URL);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [dragActive, setDragActive] = useState(false);
+  const [onboardingData, setOnboardingData] = useState<OnboardingData | null>(null);
+  const [showWelcome, setShowWelcome] = useState(true);
+  const [channelModal, setChannelModal] = useState<{ isOpen: boolean; channel: "imessage" | "whatsapp" }>({
+    isOpen: false,
+    channel: "imessage",
+  });
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const clientRef = useRef<GatewayClient | null>(null);
@@ -45,6 +63,11 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
+
+  // Load onboarding data for personalized welcome
+  useEffect(() => {
+    loadOnboardingData().then(setOnboardingData).catch(console.error);
+  }, []);
 
   // Simplified effect for loading initial state
   useEffect(() => {
@@ -131,29 +154,50 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
       content: m.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('')
     }));
     setMessages(msgs);
+    // Hide welcome if there are messages
+    if (msgs.length > 0) {
+      setShowWelcome(false);
+    }
   }
 
   function createNewSession() {
     const sessionKey = clientRef.current!.createSessionKey();
     setCurrentSession(sessionKey);
     setMessages([]);
+    setShowWelcome(true);
   }
 
-  async function handleSend() {
-    if (!currentSession || !connected || isLoading || (!message.trim() && pendingAttachments.length === 0)) return;
-    const content = message.trim();
-    const userMessage: Message = { id: crypto.randomUUID(), role: "user", content };
+  async function handleSend(content?: string) {
+    const messageContent = content || message.trim();
+    if (!currentSession || !connected || isLoading || (!messageContent && pendingAttachments.length === 0)) return;
+
+    const userMessage: Message = { id: crypto.randomUUID(), role: "user", content: messageContent };
     setMessages(prev => [...prev, userMessage]);
     setMessage("");
+    setShowWelcome(false);
     setIsLoading(true);
     setError(null);
     try {
-      await clientRef.current?.sendMessage(currentSession, content, []);
+      await clientRef.current?.sendMessage(currentSession, messageContent, []);
       setPendingAttachments([]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Send failed");
       setIsLoading(false);
     }
+  }
+
+  function handleSuggestionClick(action: SuggestionAction) {
+    if (action.type === "channel") {
+      setChannelModal({ isOpen: true, channel: action.channel });
+    } else if (action.type === "agent") {
+      handleSend(action.message);
+    }
+  }
+
+  function handleChannelSetupComplete(channel: "imessage" | "whatsapp") {
+    setChannelModal({ isOpen: false, channel });
+    const channelName = channel === "imessage" ? "iMessage" : "WhatsApp";
+    handleSend(`I've connected ${channelName}. Please send me a test message!`);
   }
 
   // Simplified render helpers for different states
@@ -195,6 +239,38 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
     </>
   );
 
+  const renderWelcome = () => {
+    const userName = onboardingData?.userName || "there";
+    const agentName = onboardingData?.agentName || "Nova";
+
+    return (
+      <div className="h-full flex flex-col items-center justify-center p-6 text-center">
+        <div className="max-w-2xl">
+          <div className="w-16 h-16 rounded-2xl bg-[var(--purple-accent)] mx-auto flex items-center justify-center mb-6">
+            <Sparkles className="w-8 h-8 text-white" />
+          </div>
+          <h2 className="text-2xl font-semibold mb-2 text-[var(--text-primary)]">
+            Hello {userName}, I am {agentName}
+          </h2>
+          <p className="text-[var(--text-secondary)] mb-8">
+            What would you like me to help you with?
+          </p>
+          <div className="flex flex-wrap justify-center gap-3">
+            {SUGGESTIONS.map((suggestion, index) => (
+              <SuggestionChip
+                key={index}
+                icon={suggestion.icon}
+                label={suggestion.label}
+                action={suggestion.action}
+                onClick={handleSuggestionClick}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const ApiKeyModal = () => (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 backdrop-blur-sm"
       onClick={() => setShowKeyModal(false)}>
@@ -222,7 +298,7 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
       </div>
     </div>
   );
-  
+
   async function connectWithKey() {
     if (!selectedProvider || !keyInput.trim()) return;
     try {
@@ -253,7 +329,7 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
   return (
     <div className="h-full flex flex-col bg-transparent" onDragOver={e => { e.preventDefault(); setDragActive(true); }}
       onDragLeave={() => setDragActive(false)} onDrop={e => { e.preventDefault(); setDragActive(false); }}>
-      
+
       {/* Header */}
       <div className="flex-shrink-0" style={{
           background: 'var(--glass-bg)',
@@ -280,17 +356,19 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
       {/* Error Banner */}
       {error && <div className="p-2 text-center text-sm bg-red-500/10 text-red-500">{error}</div>}
 
-      {/* Messages */}
+      {/* Messages or Welcome */}
       <div className="flex-1 p-4 overflow-auto">
         <div className="max-w-3xl mx-auto space-y-4">
-          {messages.length === 0 && (
+          {messages.length === 0 && showWelcome ? (
+            renderWelcome()
+          ) : messages.length === 0 ? (
             <div className="h-full flex items-center justify-center text-center text-[var(--text-tertiary)]">
               <div>
                 <Sparkles className="w-8 h-8 mx-auto mb-2 opacity-50" />
                 <p>Start a conversation</p>
               </div>
             </div>
-          )}
+          ) : null}
           {messages.map(msg => (
             <div key={msg.id} className={clsx("flex", msg.role === "user" ? "justify-end" : "justify-start")}>
               <div className={clsx("max-w-[85%] px-4 py-2.5 rounded-2xl",
@@ -324,7 +402,7 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
             placeholder="Message your assistant..." rows={1}
             className="form-input flex-1 resize-none leading-tight"
           />
-          <button onClick={handleSend} disabled={!message.trim() || isLoading} className="btn-primary !p-2.5"><Send className="w-5 h-5" /></button>
+          <button onClick={() => handleSend()} disabled={!message.trim() || isLoading} className="btn-primary !p-2.5"><Send className="w-5 h-5" /></button>
         </div>
         {dragActive && (
           <div className="absolute inset-0 bg-black/10 border-2 border-dashed border-white/50 flex items-center justify-center font-medium text-white">
@@ -332,6 +410,14 @@ export function Chat({ gatewayRunning }: { gatewayRunning: boolean }) {
           </div>
         )}
       </div>
+
+      {/* Channel Setup Modal */}
+      <ChannelSetupModal
+        channel={channelModal.channel}
+        isOpen={channelModal.isOpen}
+        onClose={() => setChannelModal({ ...channelModal, isOpen: false })}
+        onSetupComplete={handleChannelSetupComplete}
+      />
     </div>
   );
 }

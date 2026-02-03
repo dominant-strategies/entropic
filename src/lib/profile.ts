@@ -62,8 +62,6 @@ export async function resetOnboarding(): Promise<void> {
 
 export type OnboardingData = {
   userName: string;
-  interests: string;
-  goals: string;
   agentName: string;
   soul: string;
 };
