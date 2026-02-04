@@ -2,6 +2,7 @@ import { open } from "@tauri-apps/plugin-shell";
 import { getAccessToken } from "./auth";
 
 const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || "";
 
 // Supabase Edge Functions base URL
 const FUNCTIONS_URL = `${SUPABASE_URL}/functions/v1`;
@@ -35,6 +36,7 @@ async function functionRequest<T>(
     ...options,
     headers: {
       Authorization: `Bearer ${token}`,
+      ...(SUPABASE_ANON_KEY ? { apikey: SUPABASE_ANON_KEY } : {}),
       "Content-Type": "application/json",
       ...options.headers,
     },
