@@ -164,6 +164,29 @@ pub struct PluginInfo {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScanFinding {
+    pub analyzer: Option<String>,
+    pub category: Option<String>,
+    pub severity: String,
+    pub title: String,
+    pub description: String,
+    pub file_path: Option<String>,
+    pub line_number: Option<u32>,
+    pub snippet: Option<String>,
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PluginScanResult {
+    pub scan_id: Option<String>,
+    pub is_safe: bool,
+    pub max_severity: String,
+    pub findings_count: u32,
+    pub findings: Vec<ScanFinding>,
+    pub scanner_available: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredAuth {
     version: u8,
     keys: HashMap<String, String>,
@@ -257,6 +280,83 @@ fn get_runtime(app: &AppHandle) -> Runtime {
 }
 
 const OPENCLAW_CONTAINER: &str = "nova-openclaw";
+const SCANNER_CONTAINER: &str = "nova-skill-scanner";
+
+fn start_scanner_sidecar() {
+    // Check if scanner container is already running
+    let check = docker_command()
+        .args(["ps", "-q", "-f", &format!("name={}", SCANNER_CONTAINER)])
+        .output();
+    if let Ok(out) = &check {
+        if !out.stdout.is_empty() {
+            return; // Already running
+        }
+    }
+
+    // Check if container exists but stopped
+    let check_all = docker_command()
+        .args(["ps", "-aq", "-f", &format!("name={}", SCANNER_CONTAINER)])
+        .output();
+    if let Ok(out) = &check_all {
+        if !out.stdout.is_empty() {
+            let start = docker_command()
+                .args(["start", SCANNER_CONTAINER])
+                .output();
+            if let Ok(s) = &start {
+                if s.status.success() {
+                    return;
+                }
+            }
+            // Start failed, remove and recreate
+            let _ = docker_command().args(["rm", "-f", SCANNER_CONTAINER]).output();
+        }
+    }
+
+    // Check if scanner image exists
+    let image_check = docker_command()
+        .args(["image", "inspect", "nova-skill-scanner:latest"])
+        .output();
+    match &image_check {
+        Ok(out) if out.status.success() => {}
+        _ => {
+            eprintln!("[scanner] Image nova-skill-scanner:latest not found, skipping scanner sidecar");
+            return;
+        }
+    }
+
+    // Create and start scanner container
+    let run = docker_command()
+        .args([
+            "run", "-d",
+            "--name", SCANNER_CONTAINER,
+            "--user", "1000:1000",
+            "--cap-drop=ALL",
+            "--security-opt", "no-new-privileges",
+            "--read-only",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=200m",
+            "--volumes-from", &format!("{}:ro", OPENCLAW_CONTAINER),
+            "--network", "nova-net",
+            "-p", "127.0.0.1:19790:8000",
+            "--restart", "unless-stopped",
+            "nova-skill-scanner:latest",
+        ])
+        .output();
+
+    match &run {
+        Ok(out) if !out.status.success() => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            eprintln!("[scanner] Failed to start scanner sidecar: {}", stderr);
+        }
+        Err(e) => eprintln!("[scanner] Failed to start scanner sidecar: {}", e),
+        _ => {}
+    }
+}
+
+fn stop_scanner_sidecar() {
+    let _ = docker_command()
+        .args(["stop", SCANNER_CONTAINER])
+        .output();
+}
 
 fn docker_exec_output(args: &[&str]) -> Result<String, String> {
     let output = docker_command()
@@ -919,6 +1019,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         }
         // Re-apply persisted settings after a restart
         apply_agent_settings(&app, &state)?;
+        start_scanner_sidecar();
         return Ok(());
     }
 
@@ -1030,11 +1131,16 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
     // Apply persisted settings to the fresh container
     apply_agent_settings(&app, &state)?;
 
+    // Start skill scanner sidecar
+    start_scanner_sidecar();
+
     Ok(())
 }
 
 #[tauri::command]
 pub async fn stop_gateway() -> Result<(), String> {
+    stop_scanner_sidecar();
+
     let stop = docker_command()
         .args(["stop", "nova-openclaw"])
         .output()
@@ -1191,6 +1297,9 @@ pub async fn start_gateway_with_proxy(
 
     // Apply persisted settings
     apply_agent_settings(&app, &state)?;
+
+    // Start skill scanner sidecar
+    start_scanner_sidecar();
 
     Ok(())
 }
@@ -1845,6 +1954,95 @@ pub async fn set_plugin_enabled(id: String, enabled: bool) -> Result<(), String>
     let mut cfg = read_openclaw_config();
     cfg["plugins"]["entries"][&id]["enabled"] = serde_json::json!(enabled);
     write_openclaw_config(&cfg)
+}
+
+#[tauri::command]
+pub async fn scan_plugin(id: String) -> Result<PluginScanResult, String> {
+    // Check if scanner is running
+    let check = docker_command()
+        .args(["ps", "-q", "-f", &format!("name={}", SCANNER_CONTAINER), "-f", "status=running"])
+        .output()
+        .map_err(|e| format!("Failed to check scanner: {}", e))?;
+
+    if check.stdout.is_empty() {
+        return Ok(PluginScanResult {
+            scan_id: None,
+            is_safe: true,
+            max_severity: "UNKNOWN".to_string(),
+            findings_count: 0,
+            findings: vec![],
+            scanner_available: false,
+        });
+    }
+
+    let skill_dir = format!("/app/extensions/{}", id);
+    let body = serde_json::json!({
+        "skill_directory": skill_dir,
+        "use_behavioral": true,
+        "use_llm": false,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let scan_url = if std::path::Path::new("/.dockerenv").exists() {
+        format!("http://{}:8000/scan", SCANNER_CONTAINER)
+    } else {
+        "http://127.0.0.1:19790/scan".to_string()
+    };
+
+    let res = client
+        .post(&scan_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Scan request failed: {}", e))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("Scanner returned {}: {}", status, text));
+    }
+
+    let scan_response: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse scan response: {}", e))?;
+
+    let findings: Vec<ScanFinding> = scan_response
+        .get("findings")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|f| ScanFinding {
+                    analyzer: f.get("analyzer").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    category: f.get("category").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    severity: f.get("severity").and_then(|v| v.as_str()).unwrap_or("UNKNOWN").to_string(),
+                    title: f.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    description: f.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    file_path: f.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    line_number: f.get("line_number").and_then(|v| v.as_u64()).map(|n| n as u32),
+                    snippet: f.get("snippet").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    remediation: f.get("remediation").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(PluginScanResult {
+        scan_id: scan_response.get("scan_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        is_safe: scan_response.get("is_safe").and_then(|v| v.as_bool()).unwrap_or(false),
+        max_severity: scan_response
+            .get("max_severity")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UNKNOWN")
+            .to_string(),
+        findings_count: findings.len() as u32,
+        findings,
+        scanner_available: true,
+    })
 }
 
 #[tauri::command]

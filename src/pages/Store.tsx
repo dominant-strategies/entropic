@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
-import { Calendar, Mail, CheckCircle2, ExternalLink } from "lucide-react";
+import { Calendar, Mail, CheckCircle2, ExternalLink, ShieldCheck } from "lucide-react";
 import {
   getIntegrations,
   connectIntegration,
@@ -9,6 +9,7 @@ import {
   Integration,
   IntegrationProvider,
 } from "../lib/integrations";
+import { ScanResultModal, type PluginScanResult } from "../components/ScanResultModal";
 
 type Plugin = {
   id: string;
@@ -66,6 +67,11 @@ export function Store() {
   const [installing, setInstalling] = useState<string | null>(null);
   const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [connecting, setConnecting] = useState<string | null>(null);
+  const [scanModalOpen, setScanModalOpen] = useState(false);
+  const [scanPluginId, setScanPluginId] = useState<string | null>(null);
+  const [scanResult, setScanResult] = useState<PluginScanResult | null>(null);
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
 
   useEffect(() => {
     refresh();
@@ -128,10 +134,40 @@ export function Store() {
     });
   }, [integrations]);
 
-  async function togglePlugin(id: string, enabled: boolean) {
+  async function handleEnablePlugin(id: string) {
+    setScanPluginId(id);
+    setScanResult(null);
+    setScanError(null);
+    setIsScanning(true);
+    setScanModalOpen(true);
+
+    try {
+      const result = await invoke<PluginScanResult>("scan_plugin", { id });
+      setScanResult(result);
+    } catch (err) {
+      setScanError(String(err));
+    } finally {
+      setIsScanning(false);
+    }
+  }
+
+  async function confirmEnablePlugin() {
+    if (!scanPluginId) return;
+    setScanModalOpen(false);
+    setInstalling(scanPluginId);
+    try {
+      await invoke("set_plugin_enabled", { id: scanPluginId, enabled: true });
+    } finally {
+      setInstalling(null);
+      setScanPluginId(null);
+      await refresh();
+    }
+  }
+
+  async function handleDisablePlugin(id: string) {
     setInstalling(id);
     try {
-      await invoke("set_plugin_enabled", { id, enabled });
+      await invoke("set_plugin_enabled", { id, enabled: false });
     } finally {
       setInstalling(null);
       await refresh();
@@ -255,7 +291,10 @@ export function Store() {
                   {plugin.managed ? (
                     <span className="text-xs text-[var(--text-tertiary)]">Managed in Settings</span>
                   ) : (
-                    <button onClick={() => togglePlugin(plugin.id, !plugin.enabled)} disabled={installing === plugin.id}
+                    <button onClick={() => plugin.enabled
+                        ? handleDisablePlugin(plugin.id)
+                        : handleEnablePlugin(plugin.id)
+                      } disabled={installing === plugin.id}
                       className={clsx("btn !text-xs", plugin.enabled ? "btn-secondary" : "btn-primary")}>
                       {installing === plugin.id ? "..." : plugin.enabled ? "Disable" : "Install"}
                     </button>
@@ -274,6 +313,29 @@ export function Store() {
           No skills found in this category
         </div>
       )}
+
+      {/* Scanner attribution */}
+      <div className="mt-8 pt-4 border-t border-[var(--glass-border)] flex items-center gap-2 text-xs text-[var(--text-tertiary)]">
+        <ShieldCheck className="w-3.5 h-3.5" />
+        <span>Skills are validated using{" "}
+          <a href="https://github.com/cisco-ai-defense/skill-scanner"
+            target="_blank" rel="noopener noreferrer"
+            className="underline hover:text-[var(--text-secondary)]">
+            Cisco AI Defense Skill Scanner
+          </a>
+        </span>
+      </div>
+
+      <ScanResultModal
+        isOpen={scanModalOpen}
+        pluginName={META[scanPluginId || ""]?.name || scanPluginId || ""}
+        scanResult={scanResult}
+        isScanning={isScanning}
+        error={scanError}
+        onClose={() => { setScanModalOpen(false); setScanPluginId(null); }}
+        onEnablePlugin={confirmEnablePlugin}
+        onEnableAnyway={confirmEnablePlugin}
+      />
     </div>
   );
 }
