@@ -311,7 +311,6 @@ export function Chat({
                 </div>
                 <div className="flex-1">
                   <p className="font-medium text-[var(--text-primary)]">{p.name}</p>
-                  <p className="text-sm text-[var(--text-tertiary)]">Claude, GPT, Gemini & more</p>
                 </div>
                 <ExternalLink className="w-4 h-4 text-[var(--text-tertiary)]" />
               </button>

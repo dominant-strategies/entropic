@@ -878,7 +878,12 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
             // Auto-start Colima on macOS if installed
             runtime.start_colima().map_err(|e| format!("Failed to start Colima: {}", e))?;
         } else if !status.docker_installed {
-            return Err("Docker is not installed. Please install Docker Desktop to continue.".to_string());
+            let install_msg = match Platform::detect() {
+                Platform::Linux => "Docker is not installed. Please install Docker Engine: sudo apt install docker.io",
+                Platform::MacOS => "Docker is not installed. Please install Docker Desktop for development.",
+                Platform::Windows => "Docker is not installed. Please install Docker Desktop for Windows.",
+            };
+            return Err(install_msg.to_string());
         } else {
             return Err("Docker is not running. Please start Docker and try again.".to_string());
         }

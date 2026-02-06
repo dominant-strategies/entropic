@@ -4,7 +4,7 @@ set -euo pipefail
 # Bundle Colima binary for macOS
 # Downloads the appropriate binary for the target architecture
 
-COLIMA_VERSION="0.6.8"
+COLIMA_VERSION="0.8.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 RESOURCES_DIR="$PROJECT_ROOT/src-tauri/resources/bin"
@@ -18,7 +18,7 @@ case "$ARCH" in
         COLIMA_ARCH="x86_64"
         ;;
     arm64|aarch64)
-        COLIMA_ARCH="aarch64"
+        COLIMA_ARCH="arm64"
         ;;
     *)
         echo "Unsupported architecture: $ARCH"
@@ -35,7 +35,7 @@ chmod +x "$RESOURCES_DIR/colima"
 echo "Colima bundled successfully: $RESOURCES_DIR/colima"
 
 # Also download Lima (dependency)
-LIMA_VERSION="0.20.1"
+LIMA_VERSION="0.23.2"
 LIMA_URL="https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Darwin-${COLIMA_ARCH}.tar.gz"
 
 echo "Downloading Lima v${LIMA_VERSION}..."
@@ -45,8 +45,17 @@ tar -xzf "$LIMA_TMP/lima.tar.gz" -C "$LIMA_TMP"
 
 # Copy Lima binaries
 cp "$LIMA_TMP/bin/limactl" "$RESOURCES_DIR/"
-cp "$LIMA_TMP/bin/qemu-system-"* "$RESOURCES_DIR/" 2>/dev/null || true
+cp "$LIMA_TMP/bin/lima" "$RESOURCES_DIR/" 2>/dev/null || true
 chmod +x "$RESOURCES_DIR/limactl"
+[ -f "$RESOURCES_DIR/lima" ] && chmod +x "$RESOURCES_DIR/lima"
+
+# Copy Lima share directory (templates)
+SHARE_DIR="$PROJECT_ROOT/src-tauri/resources/share"
+mkdir -p "$SHARE_DIR"
+if [ -d "$LIMA_TMP/share/lima" ]; then
+    cp -r "$LIMA_TMP/share/lima" "$SHARE_DIR/"
+    echo "Lima templates copied to $SHARE_DIR/lima"
+fi
 
 rm -rf "$LIMA_TMP"
 
