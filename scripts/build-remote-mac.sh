@@ -83,6 +83,9 @@ rsync -avz --progress \
     --exclude 'node_modules' \
     --exclude 'target' \
     --exclude 'dist' \
+    --exclude '.env' \
+    --exclude '.env.signing' \
+    --exclude '.env.*' \
     --exclude '.git' \
     --exclude '*.dmg' \
     --exclude '*.app' \

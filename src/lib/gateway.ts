@@ -24,7 +24,7 @@ type EventFrame = {
   seq?: number;
 };
 
-type ChatEvent = {
+export type ChatEvent = {
   runId: string;
   sessionKey: string;
   seq: number;

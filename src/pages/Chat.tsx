@@ -3,7 +3,7 @@ import { Send, Sparkles, X, Loader2, Plus, ExternalLink, Paperclip, MessageSquar
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
-import { GatewayClient, createGatewayClient } from "../lib/gateway";
+import { GatewayClient, createGatewayClient, type ChatEvent } from "../lib/gateway";
 import { loadOnboardingData, type OnboardingData } from "../lib/profile";
 import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
 import { ChannelSetupModal } from "../components/ChannelSetupModal";
