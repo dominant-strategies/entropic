@@ -18,7 +18,31 @@ pnpm tauri build
 
 The app will be at: `src-tauri/target/release/bundle/macos/Nova.app`
 
-## 2. Sign All Binaries
+## 2. Sign + Notarize (Scripted)
+
+This repo includes a helper script that reads signing settings from a root `.env`.
+
+1. Create your local signing env file:
+```bash
+cp .env.signing.example .env.signing
+```
+
+2. Edit `.env.signing` with your signing details:
+```
+CERT="Developer ID Application: YOUR NAME (TEAMID)"
+APPLE_ID="you@appleid.com"
+TEAM_ID="TEAMID"
+APP_PASSWORD="app-specific-password"
+```
+
+3. Run the signing + notarization script:
+```bash
+./scripts/sign-notarize-macos.sh
+```
+
+The DMG will be created at `~/Nova.dmg` unless overridden via env vars.
+
+## 3. Sign All Binaries (Manual)
 
 Replace `YOUR NAME` and `TEAMID` with your certificate details. Find yours with:
 ```bash
@@ -51,14 +75,14 @@ codesign --force --options runtime --timestamp --sign "$CERT" \
 codesign --verify --verbose Nova.app
 ```
 
-## 3. Create DMG
+## 4. Create DMG
 
 ```bash
 hdiutil create -volname Nova -srcfolder Nova.app -ov -format UDZO ~/Nova.dmg
 codesign --force --timestamp --sign "$CERT" ~/Nova.dmg
 ```
 
-## 4. Notarize
+## 5. Notarize
 
 Submit to Apple for notarization:
 ```bash
@@ -74,7 +98,7 @@ This usually takes 2-10 minutes. On success, staple the ticket:
 xcrun stapler staple ~/Nova.dmg
 ```
 
-## 5. Verify
+## 6. Verify
 
 ```bash
 spctl --assess --type open --context context:primary-signature --verbose ~/Nova.dmg
