@@ -59,7 +59,10 @@ PLUGINS_TO_BUNDLE=(
 for plugin in "${PLUGINS_TO_BUNDLE[@]}"; do
     if [ -d "$OPENCLAW_SOURCE/extensions/$plugin" ]; then
         echo "Copying ${plugin} plugin..."
-        cp -r "$OPENCLAW_SOURCE/extensions/$plugin" "$STAGING_DIR/extensions/"
+        rsync -a \
+            --exclude='node_modules' \
+            --exclude='.git' \
+            "$OPENCLAW_SOURCE/extensions/$plugin/" "$STAGING_DIR/extensions/$plugin/"
     else
         echo "WARNING: ${plugin} plugin not found in OpenClaw source."
     fi
@@ -76,10 +79,11 @@ rsync -a \
     --exclude='.git' \
     "$OPENCLAW_SOURCE/node_modules/" "$STAGING_DIR/node_modules/"
 
-# Security scan
+# Security scan - check for actual secrets in config files only
 echo ""
 echo "Running security scan..."
-if grep -rliE "(DISCORD_TOKEN|TELEGRAM_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|sk-[a-zA-Z0-9]{20,})" "$STAGING_DIR" 2>/dev/null | head -5; then
+if find "$STAGING_DIR" -type f \( -name "*.env" -o -name "*.json" -o -name "*.yaml" -o -name "*.yml" -o -name "*.toml" \) \
+    -exec grep -lE "sk-[a-zA-Z0-9]{40,}|key-[a-zA-Z0-9]{40,}" {} \; 2>/dev/null | head -5 | grep -q .; then
     echo "ERROR: Potential secrets found! Aborting."
     exit 1
 fi

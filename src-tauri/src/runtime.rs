@@ -147,19 +147,31 @@ impl Runtime {
         let colima_installed = colima_path.exists();
         debug_log(&format!("colima_installed: {}", colima_installed));
 
+        // In development mode, also check for system Docker (Docker Desktop)
+        let system_docker = which::which("docker").is_ok();
+        debug_log(&format!("system_docker available: {}", system_docker));
+
         let docker_path = self.docker_path();
         debug_log(&format!("docker_path: {:?}", docker_path));
-        let docker_installed = docker_path.is_some();
+        let docker_installed = docker_path.is_some() || system_docker;
         debug_log(&format!("docker_installed: {}", docker_installed));
 
         // Check if Docker socket exists - this is the real test of whether Colima/Docker is running
         // We skip `colima status` because it can fail with version mismatches
-        let socket_path = dirs::home_dir()
+        let colima_socket_path = dirs::home_dir()
             .map(|h| h.join(".colima").join("default").join("docker.sock"))
             .unwrap_or_default();
-        debug_log(&format!("Checking socket at: {:?}", socket_path));
-        let socket_exists = socket_path.exists();
-        debug_log(&format!("Socket exists: {}", socket_exists));
+        debug_log(&format!("Checking Colima socket at: {:?}", colima_socket_path));
+        let colima_socket_exists = colima_socket_path.exists();
+        debug_log(&format!("Colima socket exists: {}", colima_socket_exists));
+
+        // Also check Docker Desktop socket location
+        let docker_desktop_socket = std::path::Path::new("/var/run/docker.sock");
+        let docker_desktop_socket_exists = docker_desktop_socket.exists();
+        debug_log(&format!("Docker Desktop socket exists: {}", docker_desktop_socket_exists));
+
+        let socket_exists = colima_socket_exists || docker_desktop_socket_exists;
+        debug_log(&format!("Any socket exists: {}", socket_exists));
 
         // If socket exists, try Docker directly - that's the real test
         let (vm_running, docker_ready) = if docker_installed && socket_exists {
@@ -260,29 +272,38 @@ impl Runtime {
         }
     }
 
-    /// Check Docker on macOS (via Colima socket)
+    /// Check Docker on macOS (via Colima or Docker Desktop socket)
     fn is_docker_ready_colima(&self) -> bool {
         debug_log("=== is_docker_ready_colima() called ===");
 
-        // First check if the socket exists
-        let home = match dirs::home_dir() {
-            Some(h) => {
-                debug_log(&format!("Home dir: {:?}", h));
-                h
-            }
-            None => {
-                debug_log("ERROR: No home dir");
+        // Check Colima socket first
+        let colima_socket = dirs::home_dir()
+            .map(|h| h.join(".colima").join("default").join("docker.sock"));
+
+        // Check Docker Desktop socket as fallback
+        let docker_desktop_socket = std::path::Path::new("/var/run/docker.sock");
+
+        let socket_path = if let Some(ref colima) = colima_socket {
+            if colima.exists() {
+                debug_log(&format!("Using Colima socket: {:?}", colima));
+                colima.clone()
+            } else if docker_desktop_socket.exists() {
+                debug_log(&format!("Using Docker Desktop socket: {:?}", docker_desktop_socket));
+                docker_desktop_socket.to_path_buf()
+            } else {
+                debug_log("ERROR: No Docker socket found");
                 return false;
             }
+        } else if docker_desktop_socket.exists() {
+            debug_log(&format!("Using Docker Desktop socket: {:?}", docker_desktop_socket));
+            docker_desktop_socket.to_path_buf()
+        } else {
+            debug_log("ERROR: No Docker socket found");
+            return false;
         };
-        let socket_path = home.join(".colima").join("default").join("docker.sock");
+
         debug_log(&format!("Socket path: {:?}", socket_path));
         debug_log(&format!("Socket exists: {}", socket_path.exists()));
-
-        if !socket_path.exists() {
-            debug_log("ERROR: Socket does not exist");
-            return false;
-        }
 
         // Try bundled docker first, fall back to system docker
         let docker = self.docker_path().unwrap_or_else(|| std::path::PathBuf::from("docker"));

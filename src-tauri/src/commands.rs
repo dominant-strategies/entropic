@@ -761,9 +761,9 @@ pub async fn ensure_runtime(app: AppHandle) -> Result<RuntimeStatus, String> {
     let runtime = get_runtime(&app);
     let mut status = runtime.check_status();
 
-    // On macOS, auto-start Colima if it's installed but not running
+    // On macOS, auto-start Colima if it's installed but not running (skip if Docker Desktop is ready)
     if matches!(Platform::detect(), Platform::MacOS) {
-        if status.colima_installed && !status.vm_running {
+        if status.colima_installed && !status.vm_running && !status.docker_ready {
             // Try to start Colima
             if let Err(e) = runtime.start_colima() {
                 return Err(format!("Failed to start Colima: {}", e));
@@ -870,15 +870,15 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         memory_slot = "memory-core";
     }
 
-    // Ensure runtime (Colima) is running on macOS
+    // Ensure runtime is running on macOS (Colima or Docker Desktop)
     let runtime = get_runtime(&app);
     let status = runtime.check_status();
     if !status.docker_ready {
         if matches!(Platform::detect(), Platform::MacOS) && status.colima_installed && !status.vm_running {
-            // Auto-start Colima on macOS
+            // Auto-start Colima on macOS if installed
             runtime.start_colima().map_err(|e| format!("Failed to start Colima: {}", e))?;
         } else if !status.docker_installed {
-            return Err("Docker is not installed. Please install Docker to continue.".to_string());
+            return Err("Docker is not installed. Please install Docker Desktop to continue.".to_string());
         } else {
             return Err("Docker is not running. Please start Docker and try again.".to_string());
         }
@@ -1858,21 +1858,21 @@ pub async fn run_first_time_setup(
 
     // On macOS, we need to start Colima first
     if matches!(Platform::detect(), Platform::MacOS) {
-        // Check if Colima is installed (bundled)
-        if !status.colima_installed {
+        // Check if Colima is installed (bundled) OR Docker Desktop is available
+        if !status.colima_installed && !status.docker_installed {
             let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
             *progress = SetupProgress {
                 stage: "error".to_string(),
-                message: "Colima not found".to_string(),
+                message: "Docker not found".to_string(),
                 percent: 0,
                 complete: false,
-                error: Some("Colima runtime not found in app bundle. Please reinstall the app.".to_string()),
+                error: Some("Neither Colima runtime nor Docker Desktop found. Please install Docker Desktop for development.".to_string()),
             };
-            return Err("Colima not found".to_string());
+            return Err("Docker not found".to_string());
         }
 
-        // Start Colima if not running
-        if !status.vm_running {
+        // Start Colima if installed and not running (skip if using Docker Desktop)
+        if status.colima_installed && !status.vm_running && !status.docker_ready {
             {
                 let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
                 *progress = SetupProgress {
