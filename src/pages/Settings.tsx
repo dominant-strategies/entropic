@@ -1,11 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Power, Key, Shield, Sparkles, Cpu, CreditCard } from "lucide-react";
+import { Store } from "@tauri-apps/plugin-store";
+import { Power, Key, Shield, Sparkles, Cpu, CreditCard, Image } from "lucide-react";
 import clsx from "clsx";
 import { loadProfile, saveProfile, type AgentProfile } from "../lib/profile";
 import { useAuth } from "../contexts/AuthContext";
 import { ModelSelector } from "../components/ModelSelector";
 import { Billing } from "../components/Billing";
+import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
 
 type Props = {
   gatewayRunning: boolean;
@@ -61,6 +63,11 @@ export function Settings({
   const [_memoryLongTerm, setMemoryLongTerm] = useState(true);
   const [_capabilities, setCapabilities] = useState<{ id: string; label: string; enabled: boolean }[]>([]);
 
+  // Wallpaper state
+  const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
+  const [customWallpaper, setCustomWallpaper] = useState<string | null>(null);
+  const wallpaperInputRef = useRef<HTMLInputElement>(null);
+
   // Load initial state
   useEffect(() => {
     loadProfile().then(setProfile).catch(() => {});
@@ -72,7 +79,36 @@ export function Settings({
       setMemoryLongTerm(state.memory_long_term);
       setCapabilities(state.capabilities || []);
     }).catch(() => {});
+    Store.load("nova-settings.json").then(async (store) => {
+      const wp = (await store.get("desktopWallpaper")) as string | null;
+      if (wp) setWallpaperId(wp);
+      const cwp = (await store.get("desktopCustomWallpaper")) as string | null;
+      if (cwp) setCustomWallpaper(cwp);
+    }).catch(() => {});
   }, []);
+
+  async function saveWallpaper(id: string, custom?: string | null) {
+    setWallpaperId(id);
+    if (custom !== undefined) setCustomWallpaper(custom);
+    try {
+      const store = await Store.load("nova-settings.json");
+      await store.set("desktopWallpaper", id);
+      if (custom !== undefined) {
+        if (custom) await store.set("desktopCustomWallpaper", custom);
+        else await store.delete("desktopCustomWallpaper");
+      }
+      await store.save();
+    } catch {}
+  }
+
+  function handleCustomWallpaperUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    const reader = new FileReader();
+    reader.onload = () => saveWallpaper("custom", reader.result as string);
+    reader.readAsDataURL(file);
+  }
 
   async function handleSave(saveAction: () => Promise<any>) {
     setSaving(true);
@@ -111,6 +147,90 @@ export function Settings({
             {saving ? "Saving..." : "Save Profile"}
           </button>
         </div>
+      </SettingsSection>
+
+      <SettingsSection title="Desktop Wallpaper" icon={Image}>
+        <p className="text-sm text-[var(--text-tertiary)] mb-3">Choose a background for the Files desktop view.</p>
+
+        {/* Preview */}
+        {(() => {
+          const wp = getWallpaperById(wallpaperId);
+          const isPhoto = (wallpaperId === "custom" && customWallpaper) || wp?.type === "photo";
+          const css = wallpaperId === "custom" && customWallpaper
+            ? `url(${customWallpaper})`
+            : wp?.css || WALLPAPERS[0].css;
+          return (
+            <div
+              className="w-full h-32 rounded-lg mb-4 flex items-end justify-end p-2"
+              style={
+                isPhoto
+                  ? { backgroundImage: css, backgroundSize: "cover", backgroundPosition: "center" }
+                  : { background: css }
+              }
+            >
+              <span className="text-[10px] px-2 py-0.5 rounded-full" style={{ background: "rgba(0,0,0,0.4)", color: "white" }}>
+                {wallpaperId === "custom" ? "Custom" : wp?.label || "Unknown"}
+              </span>
+            </div>
+          );
+        })()}
+
+        {/* Scenic photos */}
+        <p className="text-xs font-medium mb-2 text-[var(--text-tertiary)]">Scenic</p>
+        <div className="grid grid-cols-4 gap-2 mb-4">
+          {WALLPAPERS.filter((wp) => wp.type === "photo").map((wp) => (
+            <button
+              key={wp.id}
+              onClick={() => saveWallpaper(wp.id, undefined)}
+              className="h-14 rounded-lg transition-all hover:scale-105 overflow-hidden"
+              style={{
+                backgroundImage: wp.thumbnail ? `url(${wp.thumbnail})` : wp.css,
+                backgroundSize: "cover", backgroundPosition: "center",
+                border: wallpaperId === wp.id ? "2px solid var(--purple-accent)" : "2px solid var(--glass-border-subtle)",
+                boxShadow: wallpaperId === wp.id ? "0 0 0 2px var(--purple-accent)" : "none",
+              }}
+              title={wp.label}
+            />
+          ))}
+        </div>
+
+        {/* Gradients */}
+        <p className="text-xs font-medium mb-2 text-[var(--text-tertiary)]">Gradients</p>
+        <div className="grid grid-cols-4 gap-2 mb-4">
+          {WALLPAPERS.filter((wp) => wp.type === "gradient").map((wp) => (
+            <button
+              key={wp.id}
+              onClick={() => saveWallpaper(wp.id, undefined)}
+              className="h-14 rounded-lg transition-all hover:scale-105"
+              style={{
+                background: wp.css,
+                border: wallpaperId === wp.id ? "2px solid var(--purple-accent)" : "2px solid var(--glass-border-subtle)",
+                boxShadow: wallpaperId === wp.id ? "0 0 0 2px var(--purple-accent)" : "none",
+              }}
+              title={wp.label}
+            />
+          ))}
+          {/* Custom upload */}
+          <button
+            onClick={() => wallpaperInputRef.current?.click()}
+            className="h-14 rounded-lg flex items-center justify-center transition-all hover:scale-105"
+            style={{
+              background: customWallpaper ? `url(${customWallpaper})` : "var(--bg-tertiary)",
+              backgroundSize: "cover", backgroundPosition: "center",
+              border: wallpaperId === "custom" ? "2px solid var(--purple-accent)" : "2px solid var(--glass-border-subtle)",
+              boxShadow: wallpaperId === "custom" ? "0 0 0 2px var(--purple-accent)" : "none",
+            }}
+            title="Custom image"
+          >
+            {!customWallpaper && (
+              <div className="text-center">
+                <Image className="w-4 h-4 mx-auto" style={{ color: "var(--text-tertiary)" }} />
+                <span className="text-[10px]" style={{ color: "var(--text-tertiary)" }}>Custom</span>
+              </div>
+            )}
+          </button>
+        </div>
+        <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleCustomWallpaperUpload} />
       </SettingsSection>
 
       <SettingsSection title="Gateway" icon={Shield}>

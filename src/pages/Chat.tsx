@@ -36,11 +36,17 @@ const SUGGESTIONS = [
 
 export function Chat({
   gatewayRunning,
+  gatewayStarting,
+  gatewayRetryIn,
+  onStartGateway,
   useLocalKeys,
   codeModel,
   imageModel: _imageModel,
 }: {
   gatewayRunning: boolean;
+  gatewayStarting: boolean;
+  gatewayRetryIn: number | null;
+  onStartGateway?: () => void;
   useLocalKeys: boolean;
   codeModel: string;
   imageModel: string;
@@ -147,6 +153,13 @@ export function Chat({
     };
   }, [gatewayRunning, connectedProvider, proxyEnabled]);
 
+  useEffect(() => {
+    if (gatewayStarting) {
+      setError(null);
+      setIsConnecting(true);
+    }
+  }, [gatewayStarting]);
+
   async function connectToGateway() {
     setIsConnecting(true);
     setError(null);
@@ -157,6 +170,7 @@ export function Chat({
       client.on("connected", () => {
         setConnected(true);
         setIsConnecting(false);
+        setError(null);
         loadSessions();
         addDiag("gateway connected");
       });
@@ -166,14 +180,18 @@ export function Chat({
       });
       client.on("chat", handleChatEvent);
       client.on("error", (err) => {
-        setError(err);
+        if (!gatewayStarting) {
+          setError(err);
+        }
         setIsConnecting(false);
         setLastGatewayError(err);
         addDiag(`gateway error: ${err}`);
       });
       await client.connect();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Connection failed");
+      if (!gatewayStarting) {
+        setError(e instanceof Error ? e.message : "Connection failed");
+      }
       setIsConnecting(false);
       addDiag(`connect failed: ${e instanceof Error ? e.message : "unknown"}`);
     }
@@ -436,8 +454,18 @@ export function Chat({
               className="p-1.5 rounded-md text-[var(--text-secondary)] hover:bg-black/5 hover:text-[var(--text-primary)]"><Plus className="w-4 h-4" /></button>
           </div>
         <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-gray-300'}`} />
-          <span className="text-xs text-[var(--text-tertiary)]">{connected ? 'Connected' : 'Disconnected'}</span>
+          <div className={`w-2 h-2 rounded-full ${
+            connected ? 'bg-green-500' : (gatewayStarting || isConnecting) ? 'bg-amber-400' : 'bg-gray-300'
+          }`} />
+          <span className="text-xs text-[var(--text-tertiary)]">
+            {connected
+              ? "Connected"
+              : gatewayStarting
+                ? (gatewayRetryIn ? `Retrying in ${gatewayRetryIn}s` : "Starting")
+                : isConnecting
+                  ? "Connecting"
+                  : "Disconnected"}
+          </span>
         </div>
         <button
           onClick={() => setShowDiagnostics(true)}
@@ -450,8 +478,30 @@ export function Chat({
       </div>
     </div>
 
+      {gatewayStarting && (
+        <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-600">
+          {gatewayRetryIn ? `Gateway reconnecting — retrying in ${gatewayRetryIn}s.` : "Gateway starting…"}
+        </div>
+      )}
+
+      {!gatewayRunning && !gatewayStarting && (
+        <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-600 flex items-center justify-center gap-3">
+          <span>Gateway offline — start the sandbox to chat.</span>
+          {onStartGateway && (
+            <button
+              onClick={onStartGateway}
+              className="btn-primary !py-1 !px-3 text-xs"
+            >
+              Start Gateway
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Error Banner */}
-      {error && <div className="p-2 text-center text-sm bg-red-500/10 text-red-500">{error}</div>}
+      {!gatewayStarting && error && (
+        <div className="p-2 text-center text-sm bg-red-500/10 text-red-500">{error}</div>
+      )}
 
       {/* Messages or Welcome */}
       <div className="flex-1 p-4 overflow-auto">

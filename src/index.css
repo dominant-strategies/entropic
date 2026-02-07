@@ -12,11 +12,12 @@
   --bg-tertiary: #f0f0f0;
   --bg-sidebar: #f8f8f8; /* New opaque sidebar background */
   
-  /* Glass/Transparent Surfaces */
-  --glass-bg: rgba(240, 240, 240, 0.6); /* More opaque and less 'white' */
-  --glass-bg-sidebar: rgba(230, 230, 230, 0.7); /* Slightly darker for sidebar */
+  /* Surfaces */
+  --glass-bg: #f5f5f5; /* Opaque surface */
+  --glass-bg-sidebar: #f1f1f1; /* Slightly darker for sidebar */
   --glass-border: rgba(0, 0, 0, 0.1);
-  --glass-border-subtle: rgba(0, 0, 0, 0.05);
+  --glass-border-subtle: rgba(0, 0, 0, 0.06);
+  --border-primary: rgba(0, 0, 0, 0.12);
   
   /* Text Colors */
   --text-primary: #1a1a1a;
@@ -105,8 +106,8 @@ body {
   
   .glass-card {
     background: var(--glass-bg);
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
     border: 1px solid var(--glass-border-subtle);
     border-radius: 12px;
     box-shadow: var(--shadow-md);
@@ -116,8 +117,8 @@ body {
     width: 100%;
     padding: 8px 12px;
     border-radius: 8px;
-    border: 1px solid var(--glass-border);
-    background-color: rgba(255, 255, 255, 0.8);
+    border: 1px solid var(--border-primary);
+    background-color: var(--bg-secondary);
     color: var(--text-primary);
     transition: border-color 0.2s, box-shadow 0.2s;
   }

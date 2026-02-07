@@ -67,6 +67,10 @@ pub fn run() {
             commands::get_plugin_store,
             commands::set_plugin_enabled,
             commands::scan_plugin,
+            commands::list_workspace_files,
+            commands::read_workspace_file,
+            commands::delete_workspace_file,
+            commands::upload_workspace_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

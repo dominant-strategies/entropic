@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import { ChevronDown, Zap, Star, Brain, Sparkles } from "lucide-react";
 import { Model } from "../lib/auth";
-import { Store } from "@tauri-apps/plugin-store";
 
 // Fallback models if API fails
 const FALLBACK_MODELS: Model[] = [
@@ -51,35 +50,10 @@ export function ModelSelector({ selectedModel, onModelChange, compact = false }:
     setIsLoading(false);
   }, []);
 
-  // Load saved model preference
-  useEffect(() => {
-    async function loadSavedModel() {
-      try {
-        const store = await Store.load("nova-settings.json");
-        const saved = await store.get("selectedModel") as string | null;
-        if (saved && models.some(m => m.id === saved)) {
-          onModelChange(saved);
-        }
-      } catch (error) {
-        console.error("Failed to load saved model:", error);
-      }
-    }
-
-    loadSavedModel();
-  }, [models]);
-
   // Save model preference
   const handleModelChange = async (modelId: string) => {
     onModelChange(modelId);
     setIsOpen(false);
-
-    try {
-      const store = await Store.load("nova-settings.json");
-      await store.set("selectedModel", modelId);
-      await store.save();
-    } catch (error) {
-      console.error("Failed to save model preference:", error);
-    }
   };
 
   const currentModel = models.find(m => m.id === selectedModel) || models[0];

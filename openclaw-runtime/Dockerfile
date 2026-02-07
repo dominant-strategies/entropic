@@ -26,7 +26,7 @@ USER node
 
 # Health check
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s \
-    CMD curl -f http://localhost:18789/health || exit 1
+    CMD sh -c 'curl -f http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/health || exit 1'
 
 EXPOSE 18789
 

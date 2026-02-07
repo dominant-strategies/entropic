@@ -7,11 +7,21 @@ import {
   Shield,
   Sparkles,
   Search,
+  FolderOpen,
+  CalendarClock,
 } from "lucide-react";
 import clsx from "clsx";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { loadProfile, type AgentProfile } from "../lib/profile";
 
-export type Page = "chat" | "store" | "channels" | "logs" | "settings";
+function startDrag(e: React.MouseEvent) {
+  if (e.button === 0 && e.target === e.currentTarget) {
+    e.preventDefault();
+    getCurrentWindow().startDragging();
+  }
+}
+
+export type Page = "chat" | "store" | "channels" | "files" | "tasks" | "logs" | "settings";
 
 type Props = {
   currentPage: Page;
@@ -24,6 +34,8 @@ const navItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
   { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "store", label: "Skills", icon: Sparkles },
   { id: "channels", label: "Channels", icon: Radio },
+  { id: "files", label: "Files", icon: FolderOpen },
+  { id: "tasks", label: "Tasks", icon: CalendarClock },
   { id: "logs", label: "Logs", icon: ScrollText },
   { id: "settings", label: "Settings", icon: Settings },
 ];
@@ -53,10 +65,11 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Pr
   return (
     <div className="h-screen w-screen flex bg-[var(--bg-primary)]">
       {/* Sidebar */}
-      <div 
+      <div
         data-tauri-drag-region
+        onMouseDown={startDrag}
         className="w-56 flex flex-col flex-shrink-0"
-        style={{ 
+        style={{
           background: 'var(--bg-sidebar)',
           borderRight: '1px solid var(--glass-border-subtle)'
         }}
@@ -64,6 +77,7 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Pr
         {/* Logo */}
         <div
           data-tauri-drag-region
+          onMouseDown={startDrag}
           className="h-14 flex items-center gap-3 px-4 flex-shrink-0"
           style={{ borderBottom: '1px solid var(--glass-border-subtle)' }}
         >
@@ -153,7 +167,7 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Pr
       {/* Main Content */}
       <div className="flex-1 flex flex-col">
         {/* Drag region for window */}
-        <div data-tauri-drag-region className="h-8 flex-shrink-0" />
+        <div data-tauri-drag-region onMouseDown={startDrag} className="h-8 flex-shrink-0" />
 
         {/* Page Content */}
         <main className="flex-1 overflow-auto px-6 pb-6">

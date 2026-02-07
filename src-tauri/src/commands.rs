@@ -1052,10 +1052,6 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
 
     // Build docker run command - pass API keys as env vars
     // The entrypoint.sh script creates auth-profiles.json from these
-    let use_host_network = std::env::var("NOVA_HOST_NETWORK")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-
     let mut docker_args = vec![
         "run".to_string(), "-d".to_string(),
         "--name".to_string(), "nova-openclaw".to_string(),
@@ -1086,26 +1082,14 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         docker_args.push(format!("GEMINI_API_KEY={}", key));
     }
 
-    if use_host_network {
-        docker_args.push("--network".to_string());
-        docker_args.push("host".to_string());
-        docker_args.push("-e".to_string());
-        docker_args.push("OPENCLAW_GATEWAY_PORT=19789".to_string());
-        docker_args.extend([
-            "-v".to_string(), "nova-openclaw-data:/data".to_string(),
-            "--restart".to_string(), "unless-stopped".to_string(),
-            "openclaw-runtime:latest".to_string(),
-        ]);
-    } else {
-        // Add remaining args
-        docker_args.extend([
-            "-v".to_string(), "nova-openclaw-data:/data".to_string(),
-            "--network".to_string(), "nova-net".to_string(),
-            "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
-            "--restart".to_string(), "unless-stopped".to_string(),
-            "openclaw-runtime:latest".to_string(),
-        ]);
-    }
+    // Add remaining args (always use bridge networking)
+    docker_args.extend([
+        "-v".to_string(), "nova-openclaw-data:/data".to_string(),
+        "--network".to_string(), "nova-net".to_string(),
+        "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
+        "--restart".to_string(), "unless-stopped".to_string(),
+        "openclaw-runtime:latest".to_string(),
+    ]);
 
     // Dev-only: bind-mount local OpenClaw dist/extensions to avoid image rebuilds
     if let Ok(source) = std::env::var("NOVA_DEV_OPENCLAW_SOURCE") {
@@ -1222,10 +1206,6 @@ pub async fn start_gateway_with_proxy(
     }
 
     // Build docker run command with proxy configuration
-    let use_host_network = std::env::var("NOVA_HOST_NETWORK")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-
     let mut docker_args = vec![
         "run".to_string(), "-d".to_string(),
         "--name".to_string(), "nova-openclaw".to_string(),
@@ -1253,26 +1233,14 @@ pub async fn start_gateway_with_proxy(
         }
     }
 
-    if use_host_network {
-        docker_args.push("--network".to_string());
-        docker_args.push("host".to_string());
-        docker_args.push("-e".to_string());
-        docker_args.push("OPENCLAW_GATEWAY_PORT=19789".to_string());
-        docker_args.extend([
-            "-v".to_string(), "nova-openclaw-data:/data".to_string(),
-            "--restart".to_string(), "unless-stopped".to_string(),
-            "openclaw-runtime:latest".to_string(),
-        ]);
-    } else {
-        // Add remaining args
-        docker_args.extend([
-            "-v".to_string(), "nova-openclaw-data:/data".to_string(),
-            "--network".to_string(), "nova-net".to_string(),
-            "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
-            "--restart".to_string(), "unless-stopped".to_string(),
-            "openclaw-runtime:latest".to_string(),
-        ]);
-    }
+    // Add remaining args (always use bridge networking)
+    docker_args.extend([
+        "-v".to_string(), "nova-openclaw-data:/data".to_string(),
+        "--network".to_string(), "nova-net".to_string(),
+        "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
+        "--restart".to_string(), "unless-stopped".to_string(),
+        "openclaw-runtime:latest".to_string(),
+    ]);
 
     // Dev-only: bind-mount local OpenClaw dist/extensions
     if let Ok(source) = std::env::var("NOVA_DEV_OPENCLAW_SOURCE") {
@@ -2211,5 +2179,128 @@ pub async fn run_first_time_setup(
         };
     }
 
+    Ok(())
+}
+
+// ── Workspace File Commands ──────────────────────────────────────────
+
+const WORKSPACE_ROOT: &str = "/home/node/.openclaw/workspace";
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkspaceFileEntry {
+    pub name: String,
+    pub path: String,
+    pub is_directory: bool,
+    pub size: u64,
+    pub modified_at: u64,
+}
+
+#[tauri::command]
+pub async fn list_workspace_files(path: String) -> Result<Vec<WorkspaceFileEntry>, String> {
+    let sanitized = path.replace("..", "").trim_matches('/').to_string();
+    let full_path = if sanitized.is_empty() {
+        WORKSPACE_ROOT.to_string()
+    } else {
+        format!("{}/{}", WORKSPACE_ROOT, sanitized)
+    };
+
+    // Ensure the directory exists
+    let mkdir_cmd = format!("mkdir -p {}", full_path);
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &mkdir_cmd])?;
+
+    let ls_cmd = format!("ls -la --time-style=+%s {} 2>/dev/null || true", full_path);
+    let output = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &ls_cmd])?;
+
+    let mut entries = Vec::new();
+    for line in output.lines().skip(1) {
+        // skip the "total N" line
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 7 {
+            continue;
+        }
+        let name = parts[6..].join(" ");
+        if name == "." || name == ".." {
+            continue;
+        }
+        let is_directory = parts[0].starts_with('d');
+        let size: u64 = parts[4].parse().unwrap_or(0);
+        let modified_at: u64 = parts[5].parse().unwrap_or(0);
+        let entry_path = if sanitized.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", sanitized, name)
+        };
+        entries.push(WorkspaceFileEntry {
+            name,
+            path: entry_path,
+            is_directory,
+            size,
+            modified_at,
+        });
+    }
+    Ok(entries)
+}
+
+#[tauri::command]
+pub async fn read_workspace_file(path: String) -> Result<String, String> {
+    let sanitized = path.replace("..", "").trim_matches('/').to_string();
+    let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
+    read_container_file(&full_path).ok_or_else(|| "File not found or unreadable".to_string())
+}
+
+#[tauri::command]
+pub async fn delete_workspace_file(path: String) -> Result<(), String> {
+    let sanitized = path.replace("..", "").trim_matches('/').to_string();
+    if sanitized.is_empty() {
+        return Err("Cannot delete workspace root".to_string());
+    }
+    let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
+    let rm = format!("rm -rf {}", full_path);
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &rm])?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn upload_workspace_file(
+    file_name: String,
+    base64: String,
+    dest_path: String,
+) -> Result<(), String> {
+    let sanitized_name = sanitize_filename(&file_name);
+    let sanitized_dest = dest_path.replace("..", "").trim_matches('/').to_string();
+    let dir = if sanitized_dest.is_empty() {
+        WORKSPACE_ROOT.to_string()
+    } else {
+        format!("{}/{}", WORKSPACE_ROOT, sanitized_dest)
+    };
+    let full_path = format!("{}/{}", dir, sanitized_name);
+
+    let mk = format!("mkdir -p {}", dir);
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &mk])?;
+
+    let mut child = docker_command()
+        .args([
+            "exec",
+            "-i",
+            OPENCLAW_CONTAINER,
+            "sh",
+            "-c",
+            &format!("base64 -d > {}", full_path),
+        ])
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to upload file: {}", e))?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        stdin
+            .write_all(base64.as_bytes())
+            .map_err(|e| format!("Failed to write file data: {}", e))?;
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("Failed to finalize upload: {}", e))?;
+    if !status.success() {
+        return Err("Failed to upload file to container".to_string());
+    }
     Ok(())
 }

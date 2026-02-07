@@ -176,7 +176,7 @@ export class GatewayClient {
     }
   }
 
-  private rpc<T = unknown>(method: string, params?: unknown): Promise<T> {
+  rpc<T = unknown>(method: string, params?: unknown): Promise<T> {
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         reject(new Error("Not connected"));
@@ -264,7 +264,88 @@ export class GatewayClient {
   async setConfig(path: string, value: unknown): Promise<void> {
     await this.rpc("config.set", { path, value });
   }
+
+  // ── Cron API ─────────────────────────────────────────────────────
+
+  async listCronJobs(includeDisabled = true): Promise<CronJob[]> {
+    const result = await this.rpc<{ jobs: CronJob[] }>("cron.list", { includeDisabled });
+    return result.jobs || [];
+  }
+
+  async addCronJob(job: {
+    name: string;
+    description?: string;
+    schedule: CronSchedule;
+    payload: CronPayload;
+    enabled?: boolean;
+  }): Promise<CronJob> {
+    return this.rpc<CronJob>("cron.add", job);
+  }
+
+  async updateCronJob(
+    id: string,
+    patch: Partial<{
+      name: string;
+      description: string;
+      schedule: CronSchedule;
+      payload: CronPayload;
+      enabled: boolean;
+    }>
+  ): Promise<CronJob> {
+    return this.rpc<CronJob>("cron.update", { id, ...patch });
+  }
+
+  async removeCronJob(id: string): Promise<void> {
+    await this.rpc("cron.remove", { id });
+  }
+
+  async runCronJob(id: string, mode?: "force" | "normal"): Promise<unknown> {
+    return this.rpc("cron.run", { id, mode: mode ?? "force" });
+  }
+
+  async getCronRuns(id: string, limit = 20): Promise<CronRunLogEntry[]> {
+    const result = await this.rpc<{ runs: CronRunLogEntry[] }>("cron.runs", { id, limit });
+    return result.runs || [];
+  }
 }
+
+// ── Cron Types ───────────────────────────────────────────────────────
+
+export type CronSchedule =
+  | { type: "at"; date: string }
+  | { type: "every"; intervalMs: number }
+  | { type: "cron"; expression: string };
+
+export type CronPayload =
+  | { type: "system_event"; event: string; data?: unknown }
+  | { type: "agent_turn"; message: string; sessionTarget?: "main" | "isolated" };
+
+export type CronJobState = "idle" | "running" | "error";
+
+export type CronJob = {
+  id: string;
+  name: string;
+  description?: string;
+  schedule: CronSchedule;
+  payload: CronPayload;
+  enabled: boolean;
+  state: CronJobState;
+  lastRunAt?: number;
+  nextRunAt?: number;
+  lastError?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type CronRunLogEntry = {
+  id: string;
+  jobId: string;
+  startedAt: number;
+  finishedAt?: number;
+  status: "ok" | "error";
+  error?: string;
+  result?: unknown;
+};
 
 // Singleton instance
 let client: GatewayClient | null = null;

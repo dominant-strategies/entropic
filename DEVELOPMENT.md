@@ -126,7 +126,6 @@ pnpm tauri dev
 
 **Linux host networking (required for local nova-web API)**
 ```bash
-export NOVA_HOST_NETWORK=1
 ```
 Use this when running `pnpm tauri dev` on the host so OpenClaw can reach the local `nova-web` server.
 
