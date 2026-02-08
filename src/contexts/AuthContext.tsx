@@ -17,6 +17,7 @@ import {
   getBalance,
   isAuthConfigured,
   BalanceResponse,
+  supabase,
 } from "../lib/auth";
 
 // Dynamic import for deep-link to handle when it's not available
@@ -213,6 +214,59 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
 
     setupSingleInstanceBridge();
+
+    // Development mode workaround: Check for OAuth callback when window regains focus
+    // This helps when deep links don't work properly in dev mode
+    if ((import.meta as any).env?.DEV) {
+      const handleFocus = async () => {
+        // Check if there's a pending OAuth callback in sessionStorage
+        const pendingCallback = sessionStorage.getItem('nova_oauth_pending');
+        if (pendingCallback) {
+          sessionStorage.removeItem('nova_oauth_pending');
+
+          // Try to get the session again - OAuth flow might have completed
+          if (supabase) {
+            try {
+              const { data: { session: newSession } } = await supabase.auth.getSession();
+              if (newSession) {
+                setSession(newSession);
+                setUser(newSession.user);
+                console.log('OAuth completed successfully in dev mode');
+              }
+            } catch (error) {
+              console.error('Failed to check session after OAuth:', error);
+            }
+          }
+        }
+      };
+
+      window.addEventListener('focus', handleFocus);
+
+      // Also check periodically while OAuth is pending
+      const checkInterval = setInterval(async () => {
+        if (sessionStorage.getItem('nova_oauth_pending') && supabase) {
+          try {
+            const { data: { session: newSession } } = await supabase.auth.getSession();
+            if (newSession) {
+              sessionStorage.removeItem('nova_oauth_pending');
+              setSession(newSession);
+              setUser(newSession.user);
+              console.log('OAuth completed successfully in dev mode (via polling)');
+              clearInterval(checkInterval);
+            }
+          } catch (error) {
+            // Ignore errors during polling
+          }
+        }
+      }, 1000);
+
+      return () => {
+        unlisten?.();
+        unlistenEvent?.();
+        window.removeEventListener('focus', handleFocus);
+        clearInterval(checkInterval);
+      };
+    }
 
     return () => {
       unlisten?.();

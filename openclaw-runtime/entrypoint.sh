@@ -149,4 +149,8 @@ fi
 
 # Start the gateway
 PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
-exec node /app/dist/index.js gateway --bind lan --port "${PORT}" --allow-unconfigured
+TOKEN_PARAM=""
+if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+    TOKEN_PARAM="--token ${OPENCLAW_GATEWAY_TOKEN}"
+fi
+exec node /app/dist/index.js gateway --bind lan --port "${PORT}" --allow-unconfigured ${TOKEN_PARAM}

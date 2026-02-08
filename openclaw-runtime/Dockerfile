@@ -21,6 +21,9 @@ COPY extensions ./extensions
 # Set ownership
 RUN chown -R node:node /app
 
+# Fix clipboard module for ARM64 Linux (create stub)
+RUN echo "module.exports = { read: () => '', write: () => {}, readSync: () => '', writeSync: () => {}, clear: () => {}, clearSync: () => {} };" > /app/node_modules/.pnpm/@mariozechner+clipboard@0.3.0/node_modules/@mariozechner/clipboard/index.js || true
+
 # Switch to non-root user
 USER node
 
