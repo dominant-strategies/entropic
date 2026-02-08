@@ -13,9 +13,22 @@ use tauri::{AppHandle, Manager, State};
 fn get_docker_host() -> Option<String> {
     match Platform::detect() {
         Platform::MacOS => {
-            // Use Colima socket on macOS
             let home = dirs::home_dir()?;
-            Some(format!("unix://{}/.colima/default/docker.sock", home.display()))
+
+            // Try Colima first
+            let colima_socket = format!("{}/.colima/default/docker.sock", home.display());
+            if std::path::Path::new(&colima_socket).exists() {
+                return Some(format!("unix://{}", colima_socket));
+            }
+
+            // Fall back to Docker Desktop
+            let docker_desktop_socket = format!("{}/.docker/run/docker.sock", home.display());
+            if std::path::Path::new(&docker_desktop_socket).exists() {
+                return Some(format!("unix://{}", docker_desktop_socket));
+            }
+
+            // Default fallback (use environment or system default)
+            None
         }
         Platform::Linux => {
             // Check if we're in a container (dev environment)
@@ -1196,6 +1209,14 @@ pub async fn start_gateway_with_proxy(
     model: String,
     image_model: Option<String>,
 ) -> Result<(), String> {
+    // Convert localhost URLs to host.docker.internal for Docker container access
+    let docker_proxy_url = if proxy_url.contains("localhost") || proxy_url.contains("127.0.0.1") {
+        proxy_url
+            .replace("localhost", "host.docker.internal")
+            .replace("127.0.0.1", "host.docker.internal")
+    } else {
+        proxy_url.clone()
+    };
     // Ensure runtime (Colima) is running on macOS
     let runtime = get_runtime(&app);
     let status = runtime.check_status();
@@ -1268,7 +1289,7 @@ pub async fn start_gateway_with_proxy(
         "-e".to_string(), "NOVA_PROXY_MODE=1".to_string(),
         // Nova proxy configuration - OpenClaw will use this as its AI backend (OpenRouter provider)
         "-e".to_string(), format!("OPENROUTER_API_KEY={}", gateway_token),
-        "-e".to_string(), format!("NOVA_PROXY_BASE_URL={}/v1", proxy_url),
+        "-e".to_string(), format!("NOVA_PROXY_BASE_URL={}/v1", docker_proxy_url),
     ];
 
     if let Some(image_model) = image_model {

@@ -1,0 +1,67 @@
+# Deploy faasd (which installs a bundled containerd).
+#
+# It can be accessed from the host by authenticating with faas-cli;
+# the ports are already forwarded automatically by lima.
+#
+# This template requires Lima v0.7.0 or later.
+
+message: |
+  # Get the faas-cli from one of following sources:
+  # package manager:
+  brew install faas-cli
+  #
+  # script:
+  curl -sLS https://cli.openfaas.com | sh
+  #
+  # You can now log into your gateway:
+  ------
+  export OPENFAAS_URL=http://localhost:8080
+  limactl shell faasd sudo cat /var/lib/faasd/secrets/basic-auth-password | faas-cli login -u admin --password-stdin
+  ------
+  #
+  # Once logged in, you can deploy your first function
+  ------
+  faas-cli store deploy NodeInfo
+  ------
+
+images:
+# Try to use release-yyyyMMdd image if available. Note that release-yyyyMMdd will be removed after several months.
+- location: "https://cloud-images.ubuntu.com/releases/24.04/release-20240821/ubuntu-24.04-server-cloudimg-amd64.img"
+  arch: "x86_64"
+  digest: "sha256:0e25ca6ee9f08ec5d4f9910054b66ae7163c6152e81a3e67689d89bd6e4dfa69"
+- location: "https://cloud-images.ubuntu.com/releases/24.04/release-20240821/ubuntu-24.04-server-cloudimg-arm64.img"
+  arch: "aarch64"
+  digest: "sha256:5ecac6447be66a164626744a87a27fd4e6c6606dc683e0a233870af63df4276a"
+# Fallback to the latest release image.
+# Hint: run `limactl prune` to invalidate the cache
+- location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+  arch: "x86_64"
+- location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+  arch: "aarch64"
+
+# Mounts are disabled in this template, but can be enabled optionally.
+mounts: []
+
+# containerd is installed by the faasd installer script, not by Lima, so the values are set to false here.
+containerd:
+  system: false
+  user: false
+
+provision:
+- mode: user
+  script: |
+    #!/bin/sh
+    curl -sfL https://raw.githubusercontent.com/openfaas/faasd/master/hack/install.sh | bash -s -
+
+probes:
+- script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    if ! timeout 30s bash -c 'while [[ "$(curl -s -o /dev/null -w ''%{http_code}'' http://localhost:8080/healthz)" != "200" ]]; do sleep 5; done'; then
+            echo >&2 "faasd is not running yet"
+            exit 1
+    fi
+  hint: |
+    The faasd service is not yet running.
+    Run "limactl shell faasd sudo journalctl -u faasd" to check the log.
+    If that is still empty, check the bottom of the log at "/var/log/cloud-init-output.log".

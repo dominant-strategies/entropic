@@ -82,6 +82,11 @@ export async function signInWithOAuth(provider: OAuthProvider): Promise<void> {
   }
 
   if (data?.url) {
+    // Set a flag that OAuth is pending (for dev mode workaround)
+    if ((import.meta as any).env?.DEV) {
+      sessionStorage.setItem('nova_oauth_pending', 'true');
+    }
+
     // Open system browser for OAuth
     await open(data.url);
   }
@@ -234,9 +239,26 @@ export async function signOut(): Promise<void> {
 
 /**
  * Get access token for API calls
+ * Ensures the token is fresh and valid
  */
 export async function getAccessToken(): Promise<string | null> {
-  const session = await getSession();
+  if (!supabase) {
+    return null;
+  }
+
+  // First try to get the session
+  let { data: { session }, error } = await supabase.auth.getSession();
+
+  // If we have a session but it might be expired, refresh it
+  if (session && !error) {
+    const { data: { session: refreshedSession }, error: refreshError } =
+      await supabase.auth.refreshSession({ refresh_token: session.refresh_token });
+
+    if (!refreshError && refreshedSession) {
+      session = refreshedSession;
+    }
+  }
+
   return session?.access_token || null;
 }
 
@@ -358,11 +380,27 @@ export interface GatewayTokenResponse {
 
 /**
  * Create a gateway token for OpenClaw to use
+ * Includes retry logic for auth timing issues
  */
 export async function createGatewayToken(): Promise<GatewayTokenResponse> {
-  return apiRequest<GatewayTokenResponse>("/create-gateway-token", {
-    method: "POST",
-  });
+  // Try up to 3 times with increasing delays
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await apiRequest<GatewayTokenResponse>("/create-gateway-token", {
+        method: "POST",
+      });
+    } catch (error: any) {
+      if (error?.message?.includes("Unauthorized") && attempt < 3) {
+        // Wait a bit for auth to propagate, then retry
+        await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  // Should never reach here, but TypeScript needs this
+  throw new Error("Failed to create gateway token after retries");
 }
 
 /**
