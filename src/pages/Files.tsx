@@ -47,8 +47,15 @@ type ChatDock = "bottom" | "right";
 type ChatMessage = { id: string; role: "user" | "assistant"; content: string };
 
 const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md"]);
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
+const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
 const GATEWAY_URL = "ws://127.0.0.1:19789";
 const GATEWAY_TOKEN = "nova-local-gateway";
+
+type PreviewState =
+  | { kind: "text"; name: string; content: string }
+  | { kind: "image"; name: string; dataUrl: string }
+  | { kind: "binary"; name: string; size: number };
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -109,7 +116,7 @@ function FolderIcon({ size = 64, selected = false }: { size?: number; selected?:
 
 // ═════════════════════════════════════════════════════════════════════
 export function Files({ gatewayRunning }: Props) {
-  const [userName, setUserName] = useState("User");
+  const [agentName, setAgentName] = useState("Nova");
 
   // Wallpaper
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
@@ -119,7 +126,7 @@ export function Files({ gatewayRunning }: Props) {
 
   // Windows
   const [finderOpen, setFinderOpen] = useState(false);
-  const [chatOpen, setChatOpen] = useState(true);
+  const [chatOpen, setChatOpen] = useState(false);
   const [chatDock, setChatDock] = useState<ChatDock>("right");
 
   // Finder drag
@@ -134,8 +141,7 @@ export function Files({ gatewayRunning }: Props) {
   const [historyIndex, setHistoryIndex] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [previewContent, setPreviewContent] = useState<string | null>(null);
-  const [previewName, setPreviewName] = useState("");
+  const [preview, setPreview] = useState<PreviewState | null>(null);
   const [uploading, setUploading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [selected, setSelected] = useState<string | null>(null);
@@ -157,7 +163,9 @@ export function Files({ gatewayRunning }: Props) {
   // ── Init ────────────────────────────────────────────────────────────
 
   useEffect(() => {
-    loadOnboardingData().then((d) => { if (d?.userName) setUserName(d.userName); });
+    loadOnboardingData().then((d) => {
+      if (d?.agentName) setAgentName(d.agentName);
+    });
     Store.load("nova-settings.json").then(async (s) => {
       const wp = (await s.get("desktopWallpaper")) as string | null;
       if (wp) setWallpaperId(wp);
@@ -251,8 +259,28 @@ export function Files({ gatewayRunning }: Props) {
   function handleContextMenuEntry(entry: WorkspaceFileEntry, e: React.MouseEvent) { e.preventDefault(); e.stopPropagation(); setSelected(entry.path); setContextMenu({ x: e.clientX, y: e.clientY, entry }); }
 
   async function handleView(entry: WorkspaceFileEntry) {
-    try { const c = await invoke<string>("read_workspace_file", { path: entry.path }); setPreviewName(entry.name); setPreviewContent(c); }
-    catch (e) { setError(`Failed to read: ${e instanceof Error ? e.message : String(e)}`); }
+    const ext = entry.name.split(".").pop()?.toLowerCase() || "";
+    try {
+      if (IMAGE_EXTS.has(ext)) {
+        const base64 = await invoke<string>("read_workspace_file_base64", { path: entry.path });
+        const mime =
+          ext === "svg"
+            ? "image/svg+xml"
+            : ext === "jpg" || ext === "jpeg"
+              ? "image/jpeg"
+              : `image/${ext}`;
+        setPreview({ kind: "image", name: entry.name, dataUrl: `data:${mime};base64,${base64}` });
+        return;
+      }
+      if (BINARY_EXTS.has(ext)) {
+        setPreview({ kind: "binary", name: entry.name, size: entry.size });
+        return;
+      }
+      const c = await invoke<string>("read_workspace_file", { path: entry.path });
+      setPreview({ kind: "text", name: entry.name, content: c });
+    } catch (e) {
+      setError(`Failed to read: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   async function handleDelete(entry: WorkspaceFileEntry) {
@@ -341,7 +369,6 @@ export function Files({ gatewayRunning }: Props) {
   const wallpaperCss = getWallpaperCss();
   const currentWp = getWallpaperById(wallpaperId);
   const isWpImage = (wallpaperId === "custom" && customWallpaper) || currentWp?.type === "photo";
-  const chatRight = chatOpen && chatDock === "right";
   const chatBottom = chatOpen && chatDock === "bottom";
 
   // ═══════════════════════════════════════════════════════════════════
@@ -376,18 +403,20 @@ export function Files({ gatewayRunning }: Props) {
             >
               <FolderIcon size={56} selected={selected === "__user_folder"} />
               <span className="text-[11px] text-center leading-tight mt-1 w-full truncate" style={{ color: "white", textShadow: "0 1px 3px rgba(0,0,0,0.6)", fontWeight: selected === "__user_folder" ? 600 : 400 }}>
-                {userName}&apos;s Files
+                {agentName}&apos;s Files
               </span>
             </div>
           </div>
 
           {/* Drag overlay */}
           {dragOver && (
-            <div className="absolute inset-4 z-20 rounded-2xl flex items-center justify-center pointer-events-none" style={{ border: "3px dashed rgba(255,255,255,0.6)", background: "rgba(255,255,255,0.1)", backdropFilter: "blur(4px)" }}>
-              <div className="text-center">
-                <ArrowUp className="w-12 h-12 mx-auto mb-2" style={{ color: "rgba(255,255,255,0.8)" }} />
-                <p className="text-base font-semibold" style={{ color: "white", textShadow: "0 1px 4px rgba(0,0,0,0.5)" }}>Drop files to upload</p>
-                <p className="text-xs mt-1" style={{ color: "rgba(255,255,255,0.7)" }}>Files will be added to your workspace</p>
+            <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none animate-fade-in" style={{ background: "rgba(0,0,0,0.3)", backdropFilter: "blur(8px)" }}>
+              <div className="rounded-3xl px-16 py-12 text-center" style={{ border: "3px dashed rgba(255,255,255,0.7)", background: "rgba(255,255,255,0.08)", boxShadow: "0 0 80px rgba(147,51,234,0.12)" }}>
+                <div className="w-20 h-20 mx-auto mb-4 rounded-2xl flex items-center justify-center" style={{ background: "rgba(255,255,255,0.12)" }}>
+                  <ArrowUp className="w-10 h-10 animate-bounce" style={{ color: "white" }} />
+                </div>
+                <p className="text-xl font-semibold" style={{ color: "white", textShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>Drop files to upload</p>
+                <p className="text-sm mt-2" style={{ color: "rgba(255,255,255,0.7)" }}>Files will be added to your workspace</p>
               </div>
             </div>
           )}
@@ -405,11 +434,12 @@ export function Files({ gatewayRunning }: Props) {
           {/* ── FLOATING FINDER WINDOW (draggable) ────────────────────── */}
           {finderOpen && (
             <div
-              className="absolute z-30 flex flex-col rounded-xl overflow-hidden animate-fade-in"
+              className="absolute z-30 flex flex-col rounded-xl overflow-hidden animate-scale-in"
               style={{
                 top: finderPos.y, left: finderPos.x,
                 width: finderSize.w, height: finderSize.h,
-                boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56), 0 0 0 1px rgba(255,255,255,0.05)",
+                boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56), 0 0 0 0.5px rgba(255,255,255,0.1)",
+                border: "0.5px solid rgba(255,255,255,0.08)",
               }}
               onClick={(e) => e.stopPropagation()}
             >
@@ -551,33 +581,64 @@ export function Files({ gatewayRunning }: Props) {
           )}
 
           {/* File viewer */}
-          {previewContent !== null && (() => {
-            const ext = previewName.split(".").pop()?.toLowerCase() || "";
+          {preview !== null && (() => {
+            const ext = preview.name.split(".").pop()?.toLowerCase() || "";
             const isCode = ["js","ts","jsx","tsx","py","rs","go","c","cpp","h","rb","sh","bash","zsh","css","html","xml","json","yaml","yml","toml","sql","java","kt","swift","php","lua","r","pl","ex","exs","hs","ml","scala","clj","dart","vue","svelte"].includes(ext);
             const isMd = ext === "md";
-            const Icon = getFileIcon(previewName, false);
-            const iconColor = getFileColor(previewName, false);
-            const lines = previewContent.split("\n");
-            const lnw = String(lines.length).length;
+            const Icon = getFileIcon(preview.name, false);
+            const iconColor = getFileColor(preview.name, false);
+            const lines = preview.kind === "text" ? preview.content.split("\n") : [];
+            const lnw = String(lines.length || 1).length;
             return (
-              <div className="absolute inset-0 z-[50] flex items-center justify-center" style={{ background: "rgba(0,0,0,0.45)" }} onClick={() => setPreviewContent(null)}>
+              <div className="absolute inset-0 z-[50] flex items-center justify-center" style={{ background: "rgba(0,0,0,0.45)" }} onClick={() => setPreview(null)}>
                 <div className="w-full max-w-3xl mx-6 max-h-[85vh] flex flex-col rounded-xl overflow-hidden animate-fade-in" style={{ boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56)" }} onClick={(e) => e.stopPropagation()}>
                   <div className="flex items-center px-3 py-2.5 flex-shrink-0 relative" style={{ background: "#2d2d2d", borderBottom: "1px solid #1a1a1a" }}>
                     <div className="flex items-center gap-2 z-10">
-                      <button onClick={() => setPreviewContent(null)} className="w-3 h-3 rounded-full hover:opacity-80 group relative" style={{ background: "#ff5f57" }}><X className="w-2 h-2 absolute inset-0.5 opacity-0 group-hover:opacity-100 text-black/60" /></button>
+                      <button onClick={() => setPreview(null)} className="w-3 h-3 rounded-full hover:opacity-80 group relative" style={{ background: "#ff5f57" }}><X className="w-2 h-2 absolute inset-0.5 opacity-0 group-hover:opacity-100 text-black/60" /></button>
                       <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} /><div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
                     </div>
-                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none"><div className="flex items-center gap-2"><Icon className="w-3.5 h-3.5" style={{ color: iconColor }} /><span className="text-xs font-medium" style={{ color: "#ccc" }}>{previewName}</span></div></div>
+                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none"><div className="flex items-center gap-2"><Icon className="w-3.5 h-3.5" style={{ color: iconColor }} /><span className="text-xs font-medium" style={{ color: "#ccc" }}>{preview.name}</span></div></div>
                   </div>
-                  <div className="flex-1 overflow-auto" style={{ background: isCode || isMd ? "#1e1e1e" : "#252526" }}>
-                    {(isCode || isMd) ? (
-                      <div className="flex text-[13px] font-mono leading-[1.6]">
-                        <div className="flex-shrink-0 text-right select-none py-3 pr-3 sticky left-0" style={{ color: "#858585", background: "#1e1e1e", paddingLeft: "12px", minWidth: `${lnw * 0.65 + 1.8}em`, borderRight: "1px solid #2d2d2d" }}>{lines.map((_, i) => <div key={i}>{i + 1}</div>)}</div>
-                        <pre className="flex-1 py-3 px-4 whitespace-pre-wrap break-words" style={{ color: "#d4d4d4", tabSize: 4 }}>{previewContent}</pre>
+                  <div className="flex-1 overflow-auto" style={{ background: preview.kind === "text" && (isCode || isMd) ? "#1e1e1e" : "#252526" }}>
+                    {preview.kind === "image" && (
+                      <div className="p-4 flex items-center justify-center">
+                        <img
+                          src={preview.dataUrl}
+                          alt={preview.name}
+                          className="max-w-full max-h-[70vh] rounded-lg shadow-lg"
+                        />
                       </div>
-                    ) : <pre className="p-5 text-[13px] font-mono whitespace-pre-wrap break-words leading-relaxed" style={{ color: "#d4d4d4" }}>{previewContent}</pre>}
+                    )}
+                    {preview.kind === "binary" && (
+                      <div className="p-6 text-sm" style={{ color: "#d4d4d4" }}>
+                        <p className="font-medium mb-2">Preview not available</p>
+                        <p>This file type isn’t viewable yet.</p>
+                        <p className="text-xs mt-2" style={{ color: "#888" }}>
+                          {preview.name} · {formatSize(preview.size)}
+                        </p>
+                      </div>
+                    )}
+                    {preview.kind === "text" && (
+                      (isCode || isMd) ? (
+                        <div className="flex text-[13px] font-mono leading-[1.6]">
+                          <div className="flex-shrink-0 text-right select-none py-3 pr-3 sticky left-0" style={{ color: "#858585", background: "#1e1e1e", paddingLeft: "12px", minWidth: `${lnw * 0.65 + 1.8}em`, borderRight: "1px solid #2d2d2d" }}>{lines.map((_, i) => <div key={i}>{i + 1}</div>)}</div>
+                          <pre className="flex-1 py-3 px-4 whitespace-pre-wrap break-words" style={{ color: "#d4d4d4", tabSize: 4 }}>{preview.content}</pre>
+                        </div>
+                      ) : (
+                        <pre className="p-5 text-[13px] font-mono whitespace-pre-wrap break-words leading-relaxed" style={{ color: "#d4d4d4" }}>{preview.content}</pre>
+                      )
+                    )}
                   </div>
-                  <div className="flex items-center justify-between px-3 py-1 flex-shrink-0 text-[11px]" style={{ background: "#007acc", color: "rgba(255,255,255,0.9)" }}><span>{ext.toUpperCase() || "TXT"}</span><span>{lines.length} lines · {formatSize(new Blob([previewContent]).size)}</span></div>
+                  <div className="flex items-center justify-between px-3 py-1 flex-shrink-0 text-[11px]" style={{ background: "#007acc", color: "rgba(255,255,255,0.9)" }}>
+                    <span>{ext.toUpperCase() || "TXT"}</span>
+                    {preview.kind === "text" ? (
+                      <span>{lines.length} lines · {formatSize(new Blob([preview.content]).size)}</span>
+                    ) : preview.kind === "image" ? (
+                      <span>Image preview</span>
+                    ) : (
+                      <span>{formatSize(preview.size)}</span>
+                    )}
+                  </div>
                 </div>
               </div>
             );
@@ -590,6 +651,83 @@ export function Files({ gatewayRunning }: Props) {
               <button onClick={() => setError(null)} className="font-medium underline">Dismiss</button>
             </div>
           )}
+
+          {/* ── FLOATING DOCK ─────────────────────────────────────────── */}
+          <div
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex items-end justify-center gap-2 px-2.5 py-1.5 rounded-[22px]"
+            style={{
+              background: "rgba(255,255,255,0.18)",
+              backdropFilter: "blur(40px)",
+              WebkitBackdropFilter: "blur(40px)",
+              border: "1px solid rgba(255,255,255,0.25)",
+              boxShadow: "0 8px 32px rgba(0,0,0,0.35), inset 0 0.5px 0 rgba(255,255,255,0.2)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Finder */}
+            <button
+              onClick={() => { if (!finderOpen) { setFinderOpen(true); fetchFiles(currentPath || ""); } else { setFinderOpen(false); } }}
+              className="group flex flex-col items-center"
+              title="Finder"
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #4dc7f0 0%, #1a9ad7 100%)", boxShadow: "0 3px 10px rgba(26,154,215,0.4)" }}
+              >
+                <Folder className="w-6 h-6 text-white" />
+              </div>
+              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${finderOpen ? "bg-white/80" : "opacity-0"}`} />
+            </button>
+
+            {/* Chat */}
+            <button
+              onClick={() => setChatOpen(!chatOpen)}
+              className="group flex flex-col items-center"
+              title="Chat"
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #5be579 0%, #32b350 100%)", boxShadow: "0 3px 10px rgba(50,179,80,0.4)" }}
+              >
+                <MessageSquare className="w-6 h-6 text-white" />
+              </div>
+              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${chatOpen ? "bg-white/80" : "opacity-0"}`} />
+            </button>
+
+            <div className="w-px self-stretch my-1.5 mx-0.5" style={{ background: "rgba(255,255,255,0.25)" }} />
+
+            {/* Wallpaper */}
+            <button
+              onClick={() => setShowWallpaperPicker(!showWallpaperPicker)}
+              className="group flex flex-col items-center"
+              title="Change Wallpaper"
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #c084fc 0%, #9333ea 100%)", boxShadow: "0 3px 10px rgba(147,51,234,0.4)" }}
+              >
+                <Image className="w-6 h-6 text-white" />
+              </div>
+              <div className="w-1 h-1 rounded-full mt-1 opacity-0" />
+            </button>
+
+            {/* Add Files */}
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="group flex flex-col items-center"
+              title="Add Files"
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #fbbf24 0%, #f59e0b 100%)", boxShadow: "0 3px 10px rgba(245,158,11,0.4)" }}
+              >
+                <Plus className="w-6 h-6 text-white" />
+              </div>
+              <div className="w-1 h-1 rounded-full mt-1 opacity-0" />
+            </button>
+
+            <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileInputChange} multiple />
+          </div>
         </div>
 
         {/* ── ANCHORED CHAT PANEL (right or bottom, light theme) ──────── */}
@@ -597,10 +735,10 @@ export function Files({ gatewayRunning }: Props) {
           <div
             className="flex flex-col flex-shrink-0"
             style={{
-              background: "var(--bg-secondary, #f8f8f8)",
+              background: "var(--bg-secondary, #ffffff)",
               ...(chatDock === "right"
-                ? { width: 340, borderLeft: "1px solid var(--glass-border-subtle, #e5e5e5)" }
-                : { height: 280, borderTop: "1px solid var(--glass-border-subtle, #e5e5e5)" }),
+                ? { width: 360, borderLeft: "1px solid var(--glass-border-subtle, #e5e5e5)", boxShadow: "-4px 0 20px rgba(0,0,0,0.06)" }
+                : { height: 300, borderTop: "1px solid var(--glass-border-subtle, #e5e5e5)", boxShadow: "0 -4px 20px rgba(0,0,0,0.06)" }),
             }}
           >
             {/* Chat header */}
@@ -649,24 +787,6 @@ export function Files({ gatewayRunning }: Props) {
         )}
       </div>
 
-      {/* ── DOCK BAR ─────────────────────────────────────────────────── */}
-      <div
-        className="flex items-center justify-center gap-1 px-4 py-2 flex-shrink-0"
-        style={{ background: "rgba(0,0,0,0.3)", backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)", borderTop: "1px solid rgba(255,255,255,0.06)" }}
-      >
-        <button onClick={() => setChatOpen(!chatOpen)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-colors hover:bg-white/10" style={{ color: chatOpen ? "white" : "rgba(255,255,255,0.7)", background: chatOpen ? "rgba(255,255,255,0.12)" : "transparent" }}>
-          <MessageSquare className="w-3.5 h-3.5" />Chat
-        </button>
-        <div className="w-px h-4" style={{ background: "rgba(255,255,255,0.15)" }} />
-        <button onClick={() => setShowWallpaperPicker(!showWallpaperPicker)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-colors hover:bg-white/10" style={{ color: "rgba(255,255,255,0.7)" }}>
-          <Image className="w-3.5 h-3.5" />Change Wallpaper
-        </button>
-        <div className="w-px h-4" style={{ background: "rgba(255,255,255,0.15)" }} />
-        <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-colors hover:bg-white/10" style={{ color: "rgba(255,255,255,0.7)" }}>
-          <Plus className="w-3.5 h-3.5" />Add Files
-        </button>
-        <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileInputChange} multiple />
-      </div>
     </div>
   );
 }

@@ -30,7 +30,7 @@ const DEFAULT_MODEL = "openai/gpt-5.2";
 export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const { isAuthenticated, isAuthConfigured } = useAuth();
   const [useLocalKeys, setUseLocalKeys] = useState(false);
-  const [currentPage, setCurrentPage] = useState<Page>("chat");
+  const [currentPage, setCurrentPage] = useState<Page>("files");
   const [gatewayRunning, setGatewayRunning] = useState(false);
   const [isTogglingGateway, setIsTogglingGateway] = useState(false);
   const [showGatewayStartup, setShowGatewayStartup] = useState(false);

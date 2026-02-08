@@ -66,6 +66,7 @@ export function Settings({
   // Wallpaper state
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
   const [customWallpaper, setCustomWallpaper] = useState<string | null>(null);
+  const [wallpaperPickerOpen, setWallpaperPickerOpen] = useState(false);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
 
   // Load initial state
@@ -101,6 +102,11 @@ export function Settings({
     } catch {}
   }
 
+  async function handleWallpaperPick(id: string) {
+    await saveWallpaper(id, undefined);
+    setWallpaperPickerOpen(false);
+  }
+
   function handleCustomWallpaperUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -120,8 +126,10 @@ export function Settings({
   }
 
   return (
-    <div className="max-w-2xl space-y-8">
-      <SettingsSection title="Agent Profile" icon={Shield}>
+    <div className="w-full max-w-6xl mx-auto px-4 pb-10">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
+        <div className="space-y-8">
+          <SettingsSection title="Agent Profile" icon={Shield}>
         <div className="flex items-center gap-4">
           <div className="w-14 h-14 rounded-full bg-black/5 flex-shrink-0 overflow-hidden flex items-center justify-center">
             {profile.avatarDataUrl ? (
@@ -147,9 +155,20 @@ export function Settings({
             {saving ? "Saving..." : "Save Profile"}
           </button>
         </div>
-      </SettingsSection>
+          </SettingsSection>
 
-      <SettingsSection title="Desktop Wallpaper" icon={Image}>
+          <SettingsSection title="Personality" icon={Sparkles}>
+            <p className="text-sm text-[var(--text-tertiary)]">Describe how your assistant should sound and behave.</p>
+            <textarea value={soul} onChange={e => setSoul(e.target.value)} rows={6}
+              placeholder="Be concise, helpful, and a little witty." className="form-input" />
+            <div className="flex justify-end">
+              <button onClick={() => handleSave(() => invoke("set_personality", { soul }))} disabled={saving} className="btn-primary">
+                {saving ? "Saving..." : "Save Personality"}
+              </button>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection title="Desktop Wallpaper" icon={Image}>
         <p className="text-sm text-[var(--text-tertiary)] mb-3">Choose a background for the Files desktop view.</p>
 
         {/* Preview */}
@@ -174,66 +193,20 @@ export function Settings({
             </div>
           );
         })()}
-
-        {/* Scenic photos */}
-        <p className="text-xs font-medium mb-2 text-[var(--text-tertiary)]">Scenic</p>
-        <div className="grid grid-cols-4 gap-2 mb-4">
-          {WALLPAPERS.filter((wp) => wp.type === "photo").map((wp) => (
-            <button
-              key={wp.id}
-              onClick={() => saveWallpaper(wp.id, undefined)}
-              className="h-14 rounded-lg transition-all hover:scale-105 overflow-hidden"
-              style={{
-                backgroundImage: wp.thumbnail ? `url(${wp.thumbnail})` : wp.css,
-                backgroundSize: "cover", backgroundPosition: "center",
-                border: wallpaperId === wp.id ? "2px solid var(--purple-accent)" : "2px solid var(--glass-border-subtle)",
-                boxShadow: wallpaperId === wp.id ? "0 0 0 2px var(--purple-accent)" : "none",
-              }}
-              title={wp.label}
-            />
-          ))}
-        </div>
-
-        {/* Gradients */}
-        <p className="text-xs font-medium mb-2 text-[var(--text-tertiary)]">Gradients</p>
-        <div className="grid grid-cols-4 gap-2 mb-4">
-          {WALLPAPERS.filter((wp) => wp.type === "gradient").map((wp) => (
-            <button
-              key={wp.id}
-              onClick={() => saveWallpaper(wp.id, undefined)}
-              className="h-14 rounded-lg transition-all hover:scale-105"
-              style={{
-                background: wp.css,
-                border: wallpaperId === wp.id ? "2px solid var(--purple-accent)" : "2px solid var(--glass-border-subtle)",
-                boxShadow: wallpaperId === wp.id ? "0 0 0 2px var(--purple-accent)" : "none",
-              }}
-              title={wp.label}
-            />
-          ))}
-          {/* Custom upload */}
-          <button
-            onClick={() => wallpaperInputRef.current?.click()}
-            className="h-14 rounded-lg flex items-center justify-center transition-all hover:scale-105"
-            style={{
-              background: customWallpaper ? `url(${customWallpaper})` : "var(--bg-tertiary)",
-              backgroundSize: "cover", backgroundPosition: "center",
-              border: wallpaperId === "custom" ? "2px solid var(--purple-accent)" : "2px solid var(--glass-border-subtle)",
-              boxShadow: wallpaperId === "custom" ? "0 0 0 2px var(--purple-accent)" : "none",
-            }}
-            title="Custom image"
-          >
-            {!customWallpaper && (
-              <div className="text-center">
-                <Image className="w-4 h-4 mx-auto" style={{ color: "var(--text-tertiary)" }} />
-                <span className="text-[10px]" style={{ color: "var(--text-tertiary)" }}>Custom</span>
-              </div>
-            )}
+        <div className="flex items-center justify-between">
+          <button onClick={() => setWallpaperPickerOpen(true)} className="btn-secondary text-sm">
+            Change wallpaper
+          </button>
+          <button onClick={() => wallpaperInputRef.current?.click()} className="btn-secondary text-sm">
+            Upload custom
           </button>
         </div>
         <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleCustomWallpaperUpload} />
-      </SettingsSection>
+          </SettingsSection>
+        </div>
 
-      <SettingsSection title="Gateway" icon={Shield}>
+        <div className="space-y-8">
+          <SettingsSection title="Gateway" icon={Shield}>
         <div className="flex items-center justify-between">
           <div>
             <p className="font-medium text-[var(--text-primary)]">OpenClaw Gateway</p>
@@ -245,18 +218,7 @@ export function Settings({
             {isTogglingGateway ? "..." : gatewayRunning ? "Stop" : "Start"}
           </button>
         </div>
-      </SettingsSection>
-
-      <SettingsSection title="Personality" icon={Sparkles}>
-        <p className="text-sm text-[var(--text-tertiary)]">Describe how your assistant should sound and behave.</p>
-        <textarea value={soul} onChange={e => setSoul(e.target.value)} rows={6}
-          placeholder="Be concise, helpful, and a little witty." className="form-input" />
-        <div className="flex justify-end">
-          <button onClick={() => handleSave(() => invoke("set_personality", { soul }))} disabled={saving} className="btn-primary">
-            {saving ? "Saving..." : "Save Personality"}
-          </button>
-        </div>
-      </SettingsSection>
+          </SettingsSection>
 
       {/* Proxy Mode */}
       {isAuthConfigured && isAuthenticated && (
@@ -339,6 +301,112 @@ export function Settings({
             <ApiKeyInput provider="Google AI" description="Gemini models" value={apiKeys.google} onChange={v => setApiKeys(k => ({...k, google: v}))} />
           </div>
         </SettingsSection>
+      )}
+        </div>
+      </div>
+
+      {wallpaperPickerOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+          onClick={() => setWallpaperPickerOpen(false)}
+        >
+          <div
+            className="glass-card p-6 w-full max-w-4xl mx-4 max-h-[85vh] overflow-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold text-[var(--text-primary)]">Choose wallpaper</h2>
+              <button
+                onClick={() => setWallpaperPickerOpen(false)}
+                className="btn-secondary text-sm"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mb-5">
+              <p className="text-xs font-medium mb-2 text-[var(--text-tertiary)]">Scenic</p>
+              <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2">
+                {WALLPAPERS.filter((wp) => wp.type === "photo").map((wp) => (
+                  <button
+                    key={wp.id}
+                    onClick={() => handleWallpaperPick(wp.id)}
+                    className="h-16 rounded-lg transition-all hover:scale-105 overflow-hidden"
+                    style={{
+                      backgroundImage: wp.thumbnail ? `url(${wp.thumbnail})` : wp.css,
+                      backgroundSize: "cover",
+                      backgroundPosition: "center",
+                      border:
+                        wallpaperId === wp.id
+                          ? "2px solid var(--purple-accent)"
+                          : "2px solid var(--glass-border-subtle)",
+                      boxShadow: wallpaperId === wp.id ? "0 0 0 2px var(--purple-accent)" : "none",
+                    }}
+                    title={wp.label}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div className="mb-5">
+              <p className="text-xs font-medium mb-2 text-[var(--text-tertiary)]">Gradients</p>
+              <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2">
+                {WALLPAPERS.filter((wp) => wp.type === "gradient").map((wp) => (
+                  <button
+                    key={wp.id}
+                    onClick={() => handleWallpaperPick(wp.id)}
+                    className="h-16 rounded-lg transition-all hover:scale-105"
+                    style={{
+                      background: wp.css,
+                      border:
+                        wallpaperId === wp.id
+                          ? "2px solid var(--purple-accent)"
+                          : "2px solid var(--glass-border-subtle)",
+                      boxShadow: wallpaperId === wp.id ? "0 0 0 2px var(--purple-accent)" : "none",
+                    }}
+                    title={wp.label}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs font-medium mb-2 text-[var(--text-tertiary)]">Custom</p>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => wallpaperInputRef.current?.click()}
+                  className="h-16 w-24 rounded-lg flex items-center justify-center transition-all hover:scale-105"
+                  style={{
+                    background: customWallpaper ? `url(${customWallpaper})` : "var(--bg-tertiary)",
+                    backgroundSize: "cover",
+                    backgroundPosition: "center",
+                    border:
+                      wallpaperId === "custom"
+                        ? "2px solid var(--purple-accent)"
+                        : "2px solid var(--glass-border-subtle)",
+                    boxShadow: wallpaperId === "custom" ? "0 0 0 2px var(--purple-accent)" : "none",
+                  }}
+                  title="Custom image"
+                >
+                  {!customWallpaper && (
+                    <div className="text-center">
+                      <Image className="w-4 h-4 mx-auto" style={{ color: "var(--text-tertiary)" }} />
+                      <span className="text-[10px]" style={{ color: "var(--text-tertiary)" }}>Upload</span>
+                    </div>
+                  )}
+                </button>
+                {customWallpaper && (
+                  <button
+                    onClick={() => saveWallpaper(DEFAULT_WALLPAPER_ID, null)}
+                    className="btn-secondary text-xs"
+                  >
+                    Remove custom
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -69,6 +69,7 @@ pub fn run() {
             commands::scan_plugin,
             commands::list_workspace_files,
             commands::read_workspace_file,
+            commands::read_workspace_file_base64,
             commands::delete_workspace_file,
             commands::upload_workspace_file,
         ])

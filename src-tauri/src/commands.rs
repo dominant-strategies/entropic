@@ -2249,6 +2249,15 @@ pub async fn read_workspace_file(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn read_workspace_file_base64(path: String) -> Result<String, String> {
+    let sanitized = path.replace("..", "").trim_matches('/').to_string();
+    let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
+    let cmd = format!("base64 {} | tr -d '\\n'", full_path);
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &cmd])
+        .map_err(|_| "File not found or unreadable".to_string())
+}
+
+#[tauri::command]
 pub async fn delete_workspace_file(path: String) -> Result<(), String> {
     let sanitized = path.replace("..", "").trim_matches('/').to_string();
     if sanitized.is_empty() {
