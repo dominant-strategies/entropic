@@ -144,7 +144,18 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     stopFirst?: boolean;
     allowRetry?: boolean;
   }): Promise<boolean> {
+    console.log("[Nova] startGatewayProxyFlow called with:", {
+      model,
+      image,
+      stopFirst,
+      allowRetry,
+      isAuthConfigured,
+      isAuthenticated,
+      useLocalKeys
+    });
+
     if (!isAuthConfigured || !isAuthenticated || useLocalKeys) {
+      console.log("[Nova] Skipping proxy flow - auth not ready or using local keys");
       return false;
     }
 
@@ -159,20 +170,28 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         }
       }
 
+      console.log("[Nova] Creating gateway token...");
       const { token } = await createGatewayToken();
       gatewayTokenRef.current = token;
+      console.log("[Nova] Gateway token created successfully");
 
       const proxyUrl = getProxyUrl();
       const proxyModel = normalizeProxyModel(model);
       const proxyImageModel = normalizeProxyModel(image);
-      console.log("[Nova] Proxy start: Using URL:", proxyUrl);
+      console.log("[Nova] Proxy configuration:", {
+        proxyUrl,
+        proxyModel,
+        proxyImageModel
+      });
 
+      console.log("[Nova] Invoking start_gateway_with_proxy...");
       await invoke("start_gateway_with_proxy", {
         gatewayToken: token,
         proxyUrl,
         model: proxyModel,
         imageModel: proxyImageModel,
       });
+      console.log("[Nova] start_gateway_with_proxy completed");
 
       await new Promise((r) => setTimeout(r, 2000));
       await checkGateway();
@@ -196,6 +215,17 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   useEffect(() => {
     async function autoStartGateway() {
       const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
+      console.log("[Nova] Auto-start check:", {
+        isAuthConfigured,
+        isAuthenticated,
+        useLocalKeys,
+        proxyEnabled,
+        gatewayRunning,
+        isTogglingGateway,
+        gatewayRetryIn,
+        autoStartAttempted: autoStartAttemptedRef.current
+      });
+
       // Only attempt auto-start once, when authenticated via OAuth
       if (
         !autoStartAttemptedRef.current &&
@@ -209,12 +239,15 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
         setIsTogglingGateway(true);
         try {
-          await startGatewayProxyFlow({
+          const result = await startGatewayProxyFlow({
             model: selectedModel,
             image: imageModel,
             stopFirst: false,
             allowRetry: true,
           });
+          console.log("[Nova] Auto-start result:", result);
+        } catch (error) {
+          console.error("[Nova] Auto-start error:", error);
         } finally {
           setIsTogglingGateway(false);
         }
