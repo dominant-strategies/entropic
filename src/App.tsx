@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { platform } from "@tauri-apps/plugin-os";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { SetupScreen } from "./pages/SetupScreen";
 import { DockerInstall } from "./pages/DockerInstall";
 import { Dashboard } from "./pages/Dashboard";
@@ -23,6 +25,29 @@ function AppContent() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [appState, setAppState] = useState<AppState>("loading");
   const [_os, setOs] = useState<string>("");
+
+  useEffect(() => {
+    if (import.meta.env.DEV) {
+      return;
+    }
+    let cancelled = false;
+    const runUpdate = async () => {
+      try {
+        const update = await check();
+        if (!update || cancelled) return;
+        await update.downloadAndInstall();
+        if (!cancelled) {
+          await relaunch();
+        }
+      } catch (error) {
+        console.warn("Updater check failed:", error);
+      }
+    };
+    runUpdate();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     // Wait for auth to finish loading before determining app state
