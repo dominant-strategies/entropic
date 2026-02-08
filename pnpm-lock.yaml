@@ -20,12 +20,18 @@ importers:
       '@tauri-apps/plugin-os':
         specifier: ^2.0.0
         version: 2.3.2
+      '@tauri-apps/plugin-process':
+        specifier: ^2.0.0
+        version: 2.3.1
       '@tauri-apps/plugin-shell':
         specifier: ^2.0.0
         version: 2.3.4
       '@tauri-apps/plugin-store':
         specifier: ^2.0.0
         version: 2.4.2
+      '@tauri-apps/plugin-updater':
+        specifier: ^2.0.0
+        version: 2.10.0
       clsx:
         specifier: ^2.1.0
         version: 2.1.1
@@ -494,6 +500,9 @@ packages:
     resolution: {integrity: sha512-paUqEqdBI9ztr/4bbMoCgeJ6M8ZTm2fpfjSOlzarPuzYveKFM20ZfDZqUpi9CFfYagYj5Iv3m3ztUjaI9/tM1w==}
     engines: {node: '>=20.0.0'}
 
+  '@tauri-apps/api@2.10.1':
+    resolution: {integrity: sha512-hKL/jWf293UDSUN09rR69hrToyIXBb8CjGaWC7gfinvnQrBVvnLr08FeFi38gxtugAVyVcTa5/FD/Xnkb1siBw==}
+
   '@tauri-apps/api@2.9.1':
     resolution: {integrity: sha512-IGlhP6EivjXHepbBic618GOmiWe4URJiIeZFlB7x3czM0yDHHYviH1Xvoiv4FefdkQtn6v7TuwWCRfOGdnVUGw==}
 
@@ -579,11 +588,17 @@ packages:
   '@tauri-apps/plugin-os@2.3.2':
     resolution: {integrity: sha512-n+nXWeuSeF9wcEsSPmRnBEGrRgOy6jjkSU+UVCOV8YUGKb2erhDOxis7IqRXiRVHhY8XMKks00BJ0OAdkpf6+A==}
 
+  '@tauri-apps/plugin-process@2.3.1':
+    resolution: {integrity: sha512-nCa4fGVaDL/B9ai03VyPOjfAHRHSBz5v6F/ObsB73r/dA3MHHhZtldaDMIc0V/pnUw9ehzr2iEG+XkSEyC0JJA==}
+
   '@tauri-apps/plugin-shell@2.3.4':
     resolution: {integrity: sha512-ktsRWf8wHLD17aZEyqE8c5x98eNAuTizR1FSX475zQ4TxaiJnhwksLygQz+AGwckJL5bfEP13nWrlTNQJUpKpA==}
 
   '@tauri-apps/plugin-store@2.4.2':
     resolution: {integrity: sha512-0ClHS50Oq9HEvLPhNzTNFxbWVOqoAp3dRvtewQBeqfIQ0z5m3JRnOISIn2ZVPCrQC0MyGyhTS9DWhHjpigQE7A==}
+
+  '@tauri-apps/plugin-updater@2.10.0':
+    resolution: {integrity: sha512-ljN8jPlnT0aSn8ecYhuBib84alxfMx6Hc8vJSKMJyzGbTPFZAC44T2I1QNFZssgWKrAlofvJqCC6Rr472JWfkQ==}
 
   '@types/babel__core@7.20.5':
     resolution: {integrity: sha512-qoQprZvz5wQFJwMDqeseRXWv3rqMvhgpbXFfVyWhbx9X47POIA6i/+dXefEmZKoAgOaTdaIgNSMqMIU61yRyzA==}
@@ -1422,6 +1437,8 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
+  '@tauri-apps/api@2.10.1': {}
+
   '@tauri-apps/api@2.9.1': {}
 
   '@tauri-apps/cli-darwin-arm64@2.9.6':
@@ -1479,6 +1496,10 @@ snapshots:
     dependencies:
       '@tauri-apps/api': 2.9.1
 
+  '@tauri-apps/plugin-process@2.3.1':
+    dependencies:
+      '@tauri-apps/api': 2.9.1
+
   '@tauri-apps/plugin-shell@2.3.4':
     dependencies:
       '@tauri-apps/api': 2.9.1
@@ -1486,6 +1507,10 @@ snapshots:
   '@tauri-apps/plugin-store@2.4.2':
     dependencies:
       '@tauri-apps/api': 2.9.1
+
+  '@tauri-apps/plugin-updater@2.10.0':
+    dependencies:
+      '@tauri-apps/api': 2.10.1
 
   '@types/babel__core@7.20.5':
     dependencies:
