@@ -72,6 +72,9 @@ type EditorState = {
   sessionTarget: "main" | "isolated";
   enabled: boolean;
   skillIds: string[];
+  notifyEnabled: boolean;
+  notifyChannel: string;
+  notifyTo: string;
 };
 
 const defaultEditor: EditorState = {
@@ -87,6 +90,9 @@ const defaultEditor: EditorState = {
   sessionTarget: "isolated",
   enabled: true,
   skillIds: [],
+  notifyEnabled: false,
+  notifyChannel: "",
+  notifyTo: "",
 };
 
 type SkillOption = {
@@ -117,6 +123,13 @@ const PLUGIN_LABELS: Record<string, string> = {
   telegram: "Telegram",
   slack: "Slack",
 };
+
+const CHANNEL_OPTIONS: Array<{ id: string; label: string; helper: string }> = [
+  { id: "telegram", label: "Telegram", helper: "Chat ID or @username" },
+  { id: "whatsapp", label: "WhatsApp", helper: "Phone number with country code" },
+  { id: "imessage", label: "iMessage", helper: "Phone number or email" },
+  { id: "discord", label: "Discord", helper: "User ID or channel ID" },
+];
 
 const SCHEDULE_PRESETS: Array<{ id: SchedulePreset; label: string; needsTime?: boolean }> = [
   { id: "every_hour", label: "Every hour" },
@@ -211,6 +224,9 @@ function editorFromJob(job: CronJob): EditorState {
     case "agent_turn":
       state.message = job.payload.message;
       state.sessionTarget = job.payload.sessionTarget || "isolated";
+      state.notifyEnabled = job.payload.deliver === true;
+      state.notifyChannel = job.payload.channel || "";
+      state.notifyTo = job.payload.to || "";
       break;
   }
 
@@ -328,11 +344,22 @@ function editorToSchedule(editor: EditorState): CronSchedule {
 }
 
 function editorToPayload(editor: EditorState): CronPayload {
-  return {
+  const payload: CronPayload = {
     type: "agent_turn",
     message: editor.message || "Hello",
     sessionTarget: editor.sessionTarget,
   };
+
+  if (editor.notifyEnabled) {
+    payload.deliver = true;
+    payload.channel = editor.notifyChannel || "last";
+    if (editor.notifyTo.trim()) {
+      payload.to = editor.notifyTo.trim();
+    }
+    payload.bestEffortDeliver = false;
+  }
+
+  return payload;
 }
 
 export function Tasks({ gatewayRunning }: Props) {
@@ -342,6 +369,9 @@ export function Tasks({ gatewayRunning }: Props) {
   const [skills, setSkills] = useState<SkillOption[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
+  const [channelOptions, setChannelOptions] = useState<Array<{ id: string; label: string; helper: string }>>([]);
+  const [channelsLoading, setChannelsLoading] = useState(false);
+  const [channelsError, setChannelsError] = useState<string | null>(null);
 
   // Editor modal
   const [editingJob, setEditingJob] = useState<CronJob | null>(null);
@@ -413,6 +443,38 @@ export function Tasks({ gatewayRunning }: Props) {
     }
 
     loadSkills();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadChannels() {
+      setChannelsLoading(true);
+      setChannelsError(null);
+      try {
+        const state = await invoke<{
+          telegram_enabled?: boolean;
+          whatsapp_enabled?: boolean;
+          discord_enabled?: boolean;
+          imessage_enabled?: boolean;
+        }>("get_agent_profile_state");
+        if (cancelled) return;
+        const enabledIds = new Set<string>();
+        if (state.telegram_enabled) enabledIds.add("telegram");
+        if (state.whatsapp_enabled) enabledIds.add("whatsapp");
+        if (state.discord_enabled) enabledIds.add("discord");
+        if (state.imessage_enabled) enabledIds.add("imessage");
+        const filtered = CHANNEL_OPTIONS.filter((c) => enabledIds.has(c.id));
+        setChannelOptions(filtered);
+      } catch (e) {
+        if (!cancelled) setChannelsError("Failed to load channels");
+      } finally {
+        if (!cancelled) setChannelsLoading(false);
+      }
+    }
+    loadChannels();
     return () => {
       cancelled = true;
     };
@@ -634,6 +696,12 @@ export function Tasks({ gatewayRunning }: Props) {
   const selectedSkillLabels = useMemo(
     () => selectedSkills.map((skill) => skill.label).join(", "),
     [selectedSkills]
+  );
+  const notifyInvalid =
+    editor.notifyEnabled && (!editor.notifyChannel || !editor.notifyTo.trim());
+  const selectedChannelMeta = useMemo(
+    () => CHANNEL_OPTIONS.find((c) => c.id === editor.notifyChannel) || null,
+    [editor.notifyChannel]
   );
 
   async function handleGenerateSteps() {
@@ -1227,6 +1295,92 @@ export function Tasks({ gatewayRunning }: Props) {
                     </p>
                   )}
                 </div>
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-sm font-medium" style={{ color: "var(--text-secondary)" }}>
+                      Notifications
+                    </label>
+                    <label className="flex items-center gap-2 text-xs" style={{ color: "var(--text-tertiary)" }}>
+                      <input
+                        type="checkbox"
+                        checked={editor.notifyEnabled}
+                        onChange={(e) => {
+                          const enabled = e.target.checked;
+                          if (enabled) {
+                            const fallback = editor.notifyChannel || channelOptions[0]?.id || "";
+                            updateEditor({
+                              notifyEnabled: true,
+                              notifyChannel: fallback,
+                            });
+                          } else {
+                            updateEditor({ notifyEnabled: false });
+                          }
+                        }}
+                        style={{ accentColor: "var(--purple-600)" }}
+                      />
+                      Send a notification
+                    </label>
+                  </div>
+
+                  {editor.notifyEnabled && (
+                    <div className="space-y-2">
+                      {channelsLoading && (
+                        <p className="text-xs" style={{ color: "var(--text-tertiary)" }}>
+                          Loading channels…
+                        </p>
+                      )}
+                      {!channelsLoading && channelsError && (
+                        <p className="text-xs" style={{ color: "#ef4444" }}>
+                          {channelsError}
+                        </p>
+                      )}
+                      {!channelsLoading && channelOptions.length === 0 && (
+                        <p className="text-xs" style={{ color: "var(--text-tertiary)" }}>
+                          No channels connected yet. Connect one in the Channels tab.
+                        </p>
+                      )}
+                      {channelOptions.length > 0 && (
+                        <div className="flex flex-wrap gap-2">
+                          {channelOptions.map((channel) => {
+                            const selected = editor.notifyChannel === channel.id;
+                            return (
+                              <button
+                                key={channel.id}
+                                type="button"
+                                onClick={() => updateEditor({ notifyChannel: channel.id })}
+                                className={clsx(
+                                  "px-3 py-1.5 rounded-full text-xs transition-colors border",
+                                  selected
+                                    ? "bg-[var(--purple-accent)] text-white border-transparent"
+                                    : "bg-[var(--bg-secondary)] text-[var(--text-secondary)] border-[var(--glass-border-subtle)]"
+                                )}
+                              >
+                                {channel.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      <input
+                        type="text"
+                        className="form-input w-full text-sm"
+                        placeholder={
+                          selectedChannelMeta
+                            ? selectedChannelMeta.helper
+                            : "Recipient (phone, chat ID, etc.)"
+                        }
+                        value={editor.notifyTo}
+                        onChange={(e) => updateEditor({ notifyTo: e.target.value })}
+                        disabled={!editor.notifyChannel}
+                      />
+                      {notifyInvalid && (
+                        <p className="text-xs" style={{ color: "#ef4444" }}>
+                          Select a channel and add a recipient to send notifications.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
               </>
             </div>
 
@@ -1237,7 +1391,7 @@ export function Tasks({ gatewayRunning }: Props) {
               </button>
               <button
                 onClick={handleSave}
-                disabled={saving || !editor.name.trim()}
+                disabled={saving || !editor.name.trim() || notifyInvalid}
                 className="btn-primary text-sm"
               >
                 {saving ? "Saving…" : editingJob ? "Update" : "Create"}

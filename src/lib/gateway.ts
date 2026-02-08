@@ -318,7 +318,15 @@ export type CronSchedule =
 
 export type CronPayload =
   | { type: "system_event"; event: string; data?: unknown }
-  | { type: "agent_turn"; message: string; sessionTarget?: "main" | "isolated" };
+  | {
+      type: "agent_turn";
+      message: string;
+      sessionTarget?: "main" | "isolated";
+      deliver?: boolean;
+      channel?: "last" | string;
+      to?: string;
+      bestEffortDeliver?: boolean;
+    };
 
 export type CronJobState = "idle" | "running" | "error";
 

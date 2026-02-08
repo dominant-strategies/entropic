@@ -69,6 +69,21 @@ if [ "$MEMORY_SLOT" = "memory-lancedb" ]; then
 fi
 
 if [ -n "${OPENCLAW_MODEL:-}" ]; then
+    TOOLS_BLOCK=""
+    if [ -n "${NOVA_PROXY_MODE:-}" ] && [ -n "${NOVA_PROXY_BASE_URL:-}" ]; then
+        TOOLS_BLOCK=",
+  \"tools\": {
+    \"web\": {
+      \"search\": {
+        \"provider\": \"perplexity\",
+        \"perplexity\": {
+          \"baseUrl\": \"${NOVA_PROXY_BASE_URL}\"
+        }
+      }
+    }
+  }"
+    fi
+
     MODELS_BLOCK=""
     if [ -n "${NOVA_PROXY_BASE_URL:-}" ]; then
         MODEL_ID="${OPENCLAW_MODEL#openrouter/}"
@@ -112,7 +127,7 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
       "memory": "${MEMORY_SLOT}"
     }${MEMORY_CONFIG:+,
     ${MEMORY_CONFIG}}
-  }${MODELS_BLOCK}
+  }${MODELS_BLOCK}${TOOLS_BLOCK}
 }
 EOF
 fi

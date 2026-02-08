@@ -777,6 +777,17 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
     }
     cfg["plugins"]["entries"]["imessage"]["enabled"] = serde_json::json!(settings.imessage_enabled);
 
+    // Enable web search via Perplexity when in proxy mode (only if not already configured)
+    if cfg.pointer("/tools/web/search/provider").is_none() {
+        if let Some(proxy_base) = read_container_env("NOVA_PROXY_BASE_URL") {
+            if read_container_env("NOVA_PROXY_MODE").is_some() {
+                cfg["tools"]["web"]["search"]["provider"] = serde_json::json!("perplexity");
+                cfg["tools"]["web"]["search"]["perplexity"]["baseUrl"] =
+                    serde_json::json!(proxy_base);
+            }
+        }
+    }
+
     write_openclaw_config(&cfg)?;
     Ok(())
 }
