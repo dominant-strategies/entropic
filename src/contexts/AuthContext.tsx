@@ -1,7 +1,9 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
   ReactNode,
 } from "react";
@@ -66,6 +68,32 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [balance, setBalance] = useState<BalanceResponse | null>(null);
+  const balanceFetchRef = useRef({ inFlight: false, lastAt: 0 });
+  const BALANCE_FETCH_THROTTLE_MS = 3000;
+
+  const loadBalance = useCallback(
+    async (opts?: { force?: boolean }) => {
+      if (!session) return;
+
+      const now = Date.now();
+      if (!opts?.force) {
+        if (balanceFetchRef.current.inFlight) return;
+        if (now - balanceFetchRef.current.lastAt < BALANCE_FETCH_THROTTLE_MS) return;
+      }
+
+      balanceFetchRef.current.inFlight = true;
+      balanceFetchRef.current.lastAt = now;
+      try {
+        const bal = await getBalance();
+        setBalance(bal);
+      } catch (err) {
+        console.error("Failed to load balance:", err);
+      } finally {
+        balanceFetchRef.current.inFlight = false;
+      }
+    },
+    [session]
+  );
 
   // Load initial session (only if auth is configured)
   useEffect(() => {
@@ -84,12 +112,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
         if (currentSession) {
           // Load balance
-          try {
-            const bal = await getBalance();
-            setBalance(bal);
-          } catch (err) {
-            console.error("Failed to load balance:", err);
-          }
+          await loadBalance({ force: true });
         }
       } catch (error) {
         console.error("Failed to load session:", error);
@@ -111,12 +134,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
         setUser(currentUser);
 
         // Load balance when user signs in
-        try {
-          const bal = await getBalance();
-          setBalance(bal);
-        } catch (err) {
-          console.error("Failed to load balance:", err);
-        }
+        await loadBalance({ force: true });
       } else {
         setUser(null);
         setBalance(null);
@@ -143,12 +161,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
           }
         } else if (url.includes("billing/success")) {
           // Refresh balance after successful payment
-          try {
-            const bal = await getBalance();
-            setBalance(bal);
-          } catch (err) {
-            console.error("Failed to refresh balance:", err);
-          }
+          await loadBalance({ force: true });
         } else if (url.includes("integrations/success")) {
           // Integration OAuth completed successfully
           console.log("Integration connected successfully");
@@ -214,16 +227,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
     setBalance(null);
   };
 
-  const refreshBalance = async () => {
-    if (!session) return;
-
-    try {
-      const bal = await getBalance();
-      setBalance(bal);
-    } catch (err) {
-      console.error("Failed to refresh balance:", err);
-    }
-  };
+  const refreshBalance = useCallback(async () => {
+    await loadBalance();
+  }, [loadBalance]);
 
   return (
     <AuthContext.Provider
