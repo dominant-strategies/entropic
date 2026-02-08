@@ -68,16 +68,27 @@ if [ "$MEMORY_SLOT" = "memory-lancedb" ]; then
     fi
 fi
 
+json_escape() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\r/\\r/g' -e 's/\n/\\n/g'
+}
+
 if [ -n "${OPENCLAW_MODEL:-}" ]; then
+    OPENCLAW_MODEL_ESC="$(json_escape "${OPENCLAW_MODEL}")"
+    if [ -n "${OPENCLAW_IMAGE_MODEL:-}" ]; then
+        OPENCLAW_IMAGE_MODEL_ESC="$(json_escape "${OPENCLAW_IMAGE_MODEL}")"
+    else
+        OPENCLAW_IMAGE_MODEL_ESC=""
+    fi
     TOOLS_BLOCK=""
     if [ -n "${NOVA_PROXY_MODE:-}" ] && [ -n "${NOVA_PROXY_BASE_URL:-}" ]; then
+        NOVA_PROXY_BASE_URL_ESC="$(json_escape "${NOVA_PROXY_BASE_URL}")"
         TOOLS_BLOCK=",
   \"tools\": {
     \"web\": {
       \"search\": {
         \"provider\": \"perplexity\",
         \"perplexity\": {
-          \"baseUrl\": \"${NOVA_PROXY_BASE_URL}\"
+          \"baseUrl\": \"${NOVA_PROXY_BASE_URL_ESC}\"
         }
       }
     }
@@ -86,26 +97,30 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
 
     MODELS_BLOCK=""
     if [ -n "${NOVA_PROXY_BASE_URL:-}" ]; then
-        MODEL_ID="${OPENCLAW_MODEL#openrouter/}"
-        if [ "$MODEL_ID" = "free" ] || [ "$MODEL_ID" = "auto" ]; then
-            MODEL_ID="${OPENCLAW_MODEL}"
+        NOVA_PROXY_BASE_URL_ESC="$(json_escape "${NOVA_PROXY_BASE_URL}")"
+        MODEL_ID_RAW="${OPENCLAW_MODEL#openrouter/}"
+        if [ "$MODEL_ID_RAW" = "free" ] || [ "$MODEL_ID_RAW" = "auto" ]; then
+            MODEL_ID_RAW="${OPENCLAW_MODEL}"
         fi
-        IMAGE_MODEL_ID=""
+        MODEL_ID_ESC="$(json_escape "${MODEL_ID_RAW}")"
+        IMAGE_MODEL_ID_RAW=""
+        IMAGE_MODEL_ID_ESC=""
         if [ -n "${OPENCLAW_IMAGE_MODEL:-}" ]; then
-            IMAGE_MODEL_ID="${OPENCLAW_IMAGE_MODEL#openrouter/}"
-            if [ "$IMAGE_MODEL_ID" = "free" ] || [ "$IMAGE_MODEL_ID" = "auto" ]; then
-                IMAGE_MODEL_ID="${OPENCLAW_IMAGE_MODEL}"
+            IMAGE_MODEL_ID_RAW="${OPENCLAW_IMAGE_MODEL#openrouter/}"
+            if [ "$IMAGE_MODEL_ID_RAW" = "free" ] || [ "$IMAGE_MODEL_ID_RAW" = "auto" ]; then
+                IMAGE_MODEL_ID_RAW="${OPENCLAW_IMAGE_MODEL}"
             fi
+            IMAGE_MODEL_ID_ESC="$(json_escape "${IMAGE_MODEL_ID_RAW}")"
         fi
         MODELS_BLOCK=",
   \"models\": {
     \"providers\": {
       \"openrouter\": {
-        \"baseUrl\": \"${NOVA_PROXY_BASE_URL}\",
+        \"baseUrl\": \"${NOVA_PROXY_BASE_URL_ESC}\",
         \"api\": \"openai-completions\",
         \"models\": [
-          { \"id\": \"${MODEL_ID}\", \"name\": \"${MODEL_ID}\" }${IMAGE_MODEL_ID:+,
-          { \"id\": \"${IMAGE_MODEL_ID}\", \"name\": \"${IMAGE_MODEL_ID}\" }}
+          { \"id\": \"${MODEL_ID_ESC}\", \"name\": \"${MODEL_ID_ESC}\" }${IMAGE_MODEL_ID_ESC:+,
+          { \"id\": \"${IMAGE_MODEL_ID_ESC}\", \"name\": \"${IMAGE_MODEL_ID_ESC}\" }}
         ]
       }
     }
@@ -117,9 +132,9 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
   "agents": {
     "defaults": {
       "model": {
-        "primary": "${OPENCLAW_MODEL}"
+        "primary": "${OPENCLAW_MODEL_ESC}"
       }${OPENCLAW_IMAGE_MODEL:+,
-      "imageModel": { "primary": "${OPENCLAW_IMAGE_MODEL}" }}
+      "imageModel": { "primary": "${OPENCLAW_IMAGE_MODEL_ESC}" }}
     }
   },
   "plugins": {

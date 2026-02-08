@@ -1,7 +1,8 @@
 use crate::runtime::{Platform, Runtime, RuntimeStatus};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Mutex;
@@ -370,8 +371,14 @@ fn docker_exec_output(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn decode_base64_payload(payload: &str) -> Result<Vec<u8>, String> {
+    STANDARD
+        .decode(payload.as_bytes())
+        .map_err(|_| "Invalid base64 payload".to_string())
+}
+
 fn read_container_file(path: &str) -> Option<String> {
-    let args = ["exec", OPENCLAW_CONTAINER, "sh", "-c", &format!("cat {}", path)];
+    let args = ["exec", OPENCLAW_CONTAINER, "cat", "--", path];
     match docker_exec_output(&args) {
         Ok(s) => Some(s),
         Err(_) => None,
@@ -379,11 +386,15 @@ fn read_container_file(path: &str) -> Option<String> {
 }
 
 fn write_container_file(path: &str, content: &str) -> Result<(), String> {
-    let dir_cmd = format!("mkdir -p $(dirname {})", path);
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &dir_cmd])?;
+    let dir = Path::new(path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", &dir])?;
     let mut child = docker_command()
-        .args(["exec", "-i", OPENCLAW_CONTAINER, "sh", "-c", &format!("cat > {}", path)])
+        .args(["exec", "-i", OPENCLAW_CONTAINER, "tee", "--", path])
         .stdin(Stdio::piped())
+        .stdout(Stdio::null())
         .spawn()
         .map_err(|e| format!("Failed to write file: {}", e))?;
     if let Some(stdin) = child.stdin.as_mut() {
@@ -608,6 +619,29 @@ fn sanitize_filename(name: &str) -> String {
     } else {
         out
     }
+}
+
+fn sanitize_workspace_path(path: &str) -> Result<String, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    let mut parts = Vec::new();
+    for component in Path::new(trimmed).components() {
+        match component {
+            Component::Normal(os) => {
+                let part = os.to_string_lossy();
+                if !part.is_empty() {
+                    parts.push(part.to_string());
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err("Invalid path".to_string());
+            }
+        }
+    }
+    Ok(parts.join("/"))
 }
 
 fn unique_id() -> String {
@@ -1727,8 +1761,17 @@ pub async fn approve_pairing(channel: String, code: String) -> Result<String, St
     if channel.is_empty() || code.is_empty() {
         return Err("Channel and code are required".to_string());
     }
-    let cmd = format!("node /app/dist/index.js pairing approve {} {}", channel, code);
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &cmd])
+    let args = [
+        "exec",
+        OPENCLAW_CONTAINER,
+        "node",
+        "/app/dist/index.js",
+        "pairing",
+        "approve",
+        channel,
+        code,
+    ];
+    docker_exec_output(&args)
 }
 
 #[tauri::command]
@@ -1798,28 +1841,27 @@ pub async fn upload_attachment(
     let sanitized = sanitize_filename(&file_name);
     let id = unique_id();
     let temp_path = format!("/home/node/.openclaw/uploads/tmp/{}_{}", id, sanitized);
-    let size_bytes = (base64.len() as u64 * 3) / 4;
+    let size_estimate = (base64.len() as u64 * 3) / 4;
+    if size_estimate > 25 * 1024 * 1024 {
+        return Err("Attachment too large (max 25MB)".to_string());
+    }
+    let mk = "/home/node/.openclaw/uploads/tmp";
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", mk])?;
+    let decoded = decode_base64_payload(&base64)?;
+    let size_bytes = decoded.len() as u64;
     if size_bytes > 25 * 1024 * 1024 {
         return Err("Attachment too large (max 25MB)".to_string());
     }
-    let mk = "mkdir -p /home/node/.openclaw/uploads/tmp";
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", mk])?;
     let mut child = docker_command()
-        .args([
-            "exec",
-            "-i",
-            OPENCLAW_CONTAINER,
-            "sh",
-            "-c",
-            &format!("base64 -d > {}", temp_path),
-        ])
+        .args(["exec", "-i", OPENCLAW_CONTAINER, "tee", "--", &temp_path])
         .stdin(Stdio::piped())
+        .stdout(Stdio::null())
         .spawn()
         .map_err(|e| format!("Failed to upload file: {}", e))?;
     if let Some(stdin) = child.stdin.as_mut() {
         use std::io::Write;
         stdin
-            .write_all(base64.as_bytes())
+            .write_all(&decoded)
             .map_err(|e| format!("Failed to upload file: {}", e))?;
     }
     let status = child
@@ -1848,23 +1890,26 @@ pub async fn save_attachment(temp_path: String) -> Result<String, String> {
         .to_string();
     let dest_dir = "/data/uploads";
     let mut dest_path = format!("{}/{}", dest_dir, file_name);
-    let mk = format!("mkdir -p {}", dest_dir);
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &mk])?;
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", dest_dir])?;
     // Avoid overwrite: add suffix if exists
-    let check = format!("test -e {}", dest_path);
-    if docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &check]).is_ok() {
+    if docker_exec_output(&["exec", OPENCLAW_CONTAINER, "test", "-e", &dest_path]).is_ok() {
         let ts = unique_id();
         dest_path = format!("{}/{}_{}", dest_dir, ts, file_name);
     }
-    let mv = format!("mv {} {}", temp_path, dest_path);
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &mv])?;
+    docker_exec_output(&[
+        "exec",
+        OPENCLAW_CONTAINER,
+        "mv",
+        "--",
+        &temp_path,
+        &dest_path,
+    ])?;
     Ok(dest_path)
 }
 
 #[tauri::command]
 pub async fn delete_attachment(temp_path: String) -> Result<(), String> {
-    let rm = format!("rm -f {}", temp_path);
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &rm])?;
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-f", "--", &temp_path])?;
     Ok(())
 }
 
@@ -2208,7 +2253,7 @@ pub struct WorkspaceFileEntry {
 
 #[tauri::command]
 pub async fn list_workspace_files(path: String) -> Result<Vec<WorkspaceFileEntry>, String> {
-    let sanitized = path.replace("..", "").trim_matches('/').to_string();
+    let sanitized = sanitize_workspace_path(&path)?;
     let full_path = if sanitized.is_empty() {
         WORKSPACE_ROOT.to_string()
     } else {
@@ -2216,11 +2261,18 @@ pub async fn list_workspace_files(path: String) -> Result<Vec<WorkspaceFileEntry
     };
 
     // Ensure the directory exists
-    let mkdir_cmd = format!("mkdir -p {}", full_path);
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &mkdir_cmd])?;
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", &full_path])?;
 
-    let ls_cmd = format!("ls -la --time-style=+%s {} 2>/dev/null || true", full_path);
-    let output = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &ls_cmd])?;
+    let output = docker_exec_output(&[
+        "exec",
+        OPENCLAW_CONTAINER,
+        "ls",
+        "-la",
+        "--time-style=+%s",
+        "--",
+        &full_path,
+    ])
+    .unwrap_or_default();
 
     let mut entries = Vec::new();
     for line in output.lines().skip(1) {
@@ -2254,29 +2306,34 @@ pub async fn list_workspace_files(path: String) -> Result<Vec<WorkspaceFileEntry
 
 #[tauri::command]
 pub async fn read_workspace_file(path: String) -> Result<String, String> {
-    let sanitized = path.replace("..", "").trim_matches('/').to_string();
+    let sanitized = sanitize_workspace_path(&path)?;
+    if sanitized.is_empty() {
+        return Err("Invalid path".to_string());
+    }
     let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
     read_container_file(&full_path).ok_or_else(|| "File not found or unreadable".to_string())
 }
 
 #[tauri::command]
 pub async fn read_workspace_file_base64(path: String) -> Result<String, String> {
-    let sanitized = path.replace("..", "").trim_matches('/').to_string();
+    let sanitized = sanitize_workspace_path(&path)?;
+    if sanitized.is_empty() {
+        return Err("Invalid path".to_string());
+    }
     let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
-    let cmd = format!("base64 {} | tr -d '\\n'", full_path);
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &cmd])
-        .map_err(|_| "File not found or unreadable".to_string())
+    let raw = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "base64", "--", &full_path])
+        .map_err(|_| "File not found or unreadable".to_string())?;
+    Ok(raw.chars().filter(|c| *c != '\n' && *c != '\r').collect())
 }
 
 #[tauri::command]
 pub async fn delete_workspace_file(path: String) -> Result<(), String> {
-    let sanitized = path.replace("..", "").trim_matches('/').to_string();
+    let sanitized = sanitize_workspace_path(&path)?;
     if sanitized.is_empty() {
         return Err("Cannot delete workspace root".to_string());
     }
     let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
-    let rm = format!("rm -rf {}", full_path);
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &rm])?;
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-rf", "--", &full_path])?;
     Ok(())
 }
 
@@ -2287,7 +2344,7 @@ pub async fn upload_workspace_file(
     dest_path: String,
 ) -> Result<(), String> {
     let sanitized_name = sanitize_filename(&file_name);
-    let sanitized_dest = dest_path.replace("..", "").trim_matches('/').to_string();
+    let sanitized_dest = sanitize_workspace_path(&dest_path)?;
     let dir = if sanitized_dest.is_empty() {
         WORKSPACE_ROOT.to_string()
     } else {
@@ -2295,25 +2352,19 @@ pub async fn upload_workspace_file(
     };
     let full_path = format!("{}/{}", dir, sanitized_name);
 
-    let mk = format!("mkdir -p {}", dir);
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &mk])?;
+    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", &dir])?;
+    let decoded = decode_base64_payload(&base64)?;
 
     let mut child = docker_command()
-        .args([
-            "exec",
-            "-i",
-            OPENCLAW_CONTAINER,
-            "sh",
-            "-c",
-            &format!("base64 -d > {}", full_path),
-        ])
+        .args(["exec", "-i", OPENCLAW_CONTAINER, "tee", "--", &full_path])
         .stdin(Stdio::piped())
+        .stdout(Stdio::null())
         .spawn()
         .map_err(|e| format!("Failed to upload file: {}", e))?;
     if let Some(stdin) = child.stdin.as_mut() {
         use std::io::Write;
         stdin
-            .write_all(base64.as_bytes())
+            .write_all(&decoded)
             .map_err(|e| format!("Failed to write file data: {}", e))?;
     }
     let status = child
