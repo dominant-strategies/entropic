@@ -61,6 +61,14 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
       else if (provider === "apple") await signInWithApple();
       else if (provider === "discord") await signInWithDiscord();
       onSignInStarted?.();
+
+      // Set a timeout to show error message if OAuth takes too long
+      setTimeout(() => {
+        if (sessionStorage.getItem('nova_oauth_pending')) {
+          setError("Sign in is taking longer than expected. If the browser window didn't open, please try again.");
+          setIsLoading(false);
+        }
+      }, 10000); // 10 seconds timeout for user feedback
     } catch (err) {
       console.error("Sign in failed:", err);
       setError("Failed to start sign in. Please try again.");

@@ -52,8 +52,6 @@ export function ScanResultModal({
 
   const isBlocked = scanResult && !scanResult.is_safe &&
     ["CRITICAL", "HIGH"].includes(scanResult.max_severity);
-  const isWarning = scanResult && !scanResult.is_safe &&
-    scanResult.max_severity === "MEDIUM";
 
   function toggleFinding(idx: number) {
     const next = new Set(expandedFindings);

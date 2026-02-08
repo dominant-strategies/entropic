@@ -1,7 +1,7 @@
 mod runtime;
 mod commands;
 
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
 pub fn run() {
     tauri::Builder::default()
@@ -74,6 +74,30 @@ pub fn run() {
             commands::delete_workspace_file,
             commands::upload_workspace_file,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| match event {
+            RunEvent::WindowEvent {
+                event: WindowEvent::CloseRequested { .. },
+                ..
+            } => {
+                println!("[Nova] App closing, cleaning up Docker containers...");
+                // Stop the Docker container before exiting
+                std::process::Command::new("docker")
+                    .args(["stop", "nova-openclaw"])
+                    .output()
+                    .ok();
+                println!("[Nova] Container stopped");
+            }
+            RunEvent::Exit => {
+                println!("[Nova] App exiting, cleaning up Docker containers...");
+                // Stop the Docker container on exit as well
+                std::process::Command::new("docker")
+                    .args(["stop", "nova-openclaw"])
+                    .output()
+                    .ok();
+                println!("[Nova] Cleanup complete");
+            }
+            _ => {}
+        });
 }

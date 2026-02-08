@@ -82,10 +82,8 @@ export async function signInWithOAuth(provider: OAuthProvider): Promise<void> {
   }
 
   if (data?.url) {
-    // Set a flag that OAuth is pending (for dev mode workaround)
-    if ((import.meta as any).env?.DEV) {
-      sessionStorage.setItem('nova_oauth_pending', 'true');
-    }
+    // Set a timestamp for OAuth pending (for both dev and production)
+    sessionStorage.setItem('nova_oauth_pending', Date.now().toString());
 
     // Open system browser for OAuth
     await open(data.url);

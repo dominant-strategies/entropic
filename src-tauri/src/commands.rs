@@ -1160,6 +1160,9 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
     }
 
     // Create and start container with hardened settings
+    println!("[Nova] Starting gateway container with model: {}", model);
+    println!("[Nova] Docker command: docker {}", docker_args.join(" "));
+
     let run = docker_command()
         .args(&docker_args)
         .output()
@@ -1167,8 +1170,11 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
 
     if !run.status.success() {
         let stderr = String::from_utf8_lossy(&run.stderr);
+        println!("[Nova] Failed to start container: {}", stderr);
         return Err(format!("Failed to start container: {}", stderr));
     }
+
+    println!("[Nova] Container started successfully");
 
     // Apply persisted settings to the fresh container
     apply_agent_settings(&app, &state)?;
@@ -1319,6 +1325,10 @@ pub async fn start_gateway_with_proxy(
     }
 
     // Create and start container
+    println!("[Nova] Starting proxy gateway with model: {}", model);
+    println!("[Nova] Proxy URL: {}", docker_proxy_url);
+    println!("[Nova] Docker command: docker {}", docker_args.join(" "));
+
     let run = docker_command()
         .args(&docker_args)
         .output()
@@ -1326,8 +1336,11 @@ pub async fn start_gateway_with_proxy(
 
     if !run.status.success() {
         let stderr = String::from_utf8_lossy(&run.stderr);
+        println!("[Nova] Failed to start proxy container: {}", stderr);
         return Err(format!("Failed to start container: {}", stderr));
     }
+
+    println!("[Nova] Proxy container started successfully");
 
     // Apply persisted settings
     apply_agent_settings(&app, &state)?;
@@ -1361,6 +1374,7 @@ pub async fn get_gateway_status() -> Result<bool, String> {
         .map_err(|e| format!("Failed to check container: {}", e))?;
 
     if check.stdout.is_empty() {
+        println!("[Nova] Container not running");
         return Ok(false);
     }
 
@@ -1376,9 +1390,31 @@ pub async fn get_gateway_status() -> Result<bool, String> {
     } else {
         "http://127.0.0.1:19789/health"
     };
+
+    println!("[Nova] Checking health at: {}", health_url);
     match client.get(health_url).send().await {
-        Ok(_) => Ok(true), // Any HTTP response means gateway is up
-        Err(_) => Ok(false), // No response - not running
+        Ok(response) => {
+            if response.status().is_success() {
+                println!("[Nova] Health check passed");
+                Ok(true)
+            } else {
+                println!("[Nova] Health check failed with status: {}", response.status());
+                Ok(false)
+            }
+        }
+        Err(e) => {
+            println!("[Nova] Health check failed: {}", e);
+            // Check if container is actually healthy
+            let inspect = docker_command()
+                .args(["inspect", "--format", "{{.State.Health.Status}}", "nova-openclaw"])
+                .output();
+
+            if let Ok(output) = inspect {
+                let health_status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                println!("[Nova] Container health status: {}", health_status);
+            }
+            Ok(false)
+        }
     }
 }
 

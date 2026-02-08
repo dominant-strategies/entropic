@@ -15,7 +15,7 @@ import clsx from "clsx";
 import { invoke } from "@tauri-apps/api/core";
 import {
   getGatewayClient,
-  type GatewayClient,
+  GatewayClient,
   type ChatEvent,
   type CronJob,
   type CronSchedule,

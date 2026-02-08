@@ -215,58 +215,95 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
     setupSingleInstanceBridge();
 
-    // Development mode workaround: Check for OAuth callback when window regains focus
-    // This helps when deep links don't work properly in dev mode
-    if ((import.meta as any).env?.DEV) {
-      const handleFocus = async () => {
-        // Check if there's a pending OAuth callback in sessionStorage
-        const pendingCallback = sessionStorage.getItem('nova_oauth_pending');
-        if (pendingCallback) {
+    // Handle OAuth callback with improved polling for production and dev
+    const handleFocus = async () => {
+      // Check if there's a pending OAuth callback in sessionStorage
+      const pendingCallback = sessionStorage.getItem('nova_oauth_pending');
+      if (pendingCallback) {
+        const pendingTime = parseInt(pendingCallback);
+        const now = Date.now();
+
+        // If OAuth has been pending for more than 30 seconds, clear it
+        if (now - pendingTime > 30000) {
           sessionStorage.removeItem('nova_oauth_pending');
-
-          // Try to get the session again - OAuth flow might have completed
-          if (supabase) {
-            try {
-              const { data: { session: newSession } } = await supabase.auth.getSession();
-              if (newSession) {
-                setSession(newSession);
-                setUser(newSession.user);
-                console.log('OAuth completed successfully in dev mode');
-              }
-            } catch (error) {
-              console.error('Failed to check session after OAuth:', error);
-            }
-          }
+          console.log('OAuth timeout - clearing pending state');
+          return;
         }
-      };
 
-      window.addEventListener('focus', handleFocus);
-
-      // Also check periodically while OAuth is pending
-      const checkInterval = setInterval(async () => {
-        if (sessionStorage.getItem('nova_oauth_pending') && supabase) {
+        // Try to get the session again - OAuth flow might have completed
+        if (supabase) {
           try {
-            const { data: { session: newSession } } = await supabase.auth.getSession();
+            // First try to get the current session
+            const { data: { session: currentSession } } = await supabase.auth.getSession();
+            if (currentSession) {
+              sessionStorage.removeItem('nova_oauth_pending');
+              setSession(currentSession);
+              setUser(currentSession.user);
+              console.log('OAuth completed successfully');
+              return;
+            }
+
+            // If no session, try to refresh (in case tokens exist but session is not loaded)
+            const { data: { session: newSession } } = await supabase.auth.refreshSession();
             if (newSession) {
               sessionStorage.removeItem('nova_oauth_pending');
               setSession(newSession);
               setUser(newSession.user);
-              console.log('OAuth completed successfully in dev mode (via polling)');
-              clearInterval(checkInterval);
+              console.log('OAuth completed successfully (via refresh)');
             }
           } catch (error) {
-            // Ignore errors during polling
+            console.error('Failed to check session after OAuth:', error);
           }
         }
-      }, 1000);
+      }
+    };
 
-      return () => {
-        unlisten?.();
-        unlistenEvent?.();
-        window.removeEventListener('focus', handleFocus);
+    window.addEventListener('focus', handleFocus);
+
+    // Check periodically while OAuth is pending (for both dev and production)
+    const checkInterval = setInterval(async () => {
+      const pendingCallback = sessionStorage.getItem('nova_oauth_pending');
+      if (pendingCallback && supabase) {
+        const pendingTime = parseInt(pendingCallback);
+        const now = Date.now();
+
+        // Clear if timeout exceeded
+        if (now - pendingTime > 30000) {
+          sessionStorage.removeItem('nova_oauth_pending');
+          clearInterval(checkInterval);
+          console.log('OAuth timeout - clearing pending state');
+          return;
+        }
+
+        try {
+          // First try to get the current session
+          const { data: { session: currentSession } } = await supabase.auth.getSession();
+          if (currentSession) {
+            sessionStorage.removeItem('nova_oauth_pending');
+            setSession(currentSession);
+            setUser(currentSession.user);
+            console.log('OAuth completed successfully (via polling)');
+            clearInterval(checkInterval);
+            return;
+          }
+
+          // If no session, try to refresh
+          const { data: { session: newSession } } = await supabase.auth.refreshSession();
+          if (newSession) {
+            sessionStorage.removeItem('nova_oauth_pending');
+            setSession(newSession);
+            setUser(newSession.user);
+            console.log('OAuth completed successfully (via polling refresh)');
+            clearInterval(checkInterval);
+          }
+        } catch (error) {
+          // Ignore errors during polling
+        }
+      } else if (!pendingCallback) {
+        // No pending OAuth, stop checking
         clearInterval(checkInterval);
-      };
-    }
+      }
+    }, 1000);
 
     return () => {
       unlisten?.();
