@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { CreditCard, TrendingUp, AlertCircle, ExternalLink, RefreshCw } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { useAuth } from "../contexts/AuthContext";
@@ -10,6 +10,10 @@ const CREDIT_AMOUNTS = [
   { cents: 2500, label: "$25" },
   { cents: 5000, label: "$50" },
 ];
+const BALANCE_POLL_INTERVAL_MS = 10000;
+const BALANCE_POLL_DURATION_MS = 5 * 60 * 1000;
+const USAGE_CACHE_KEY = "nova_usage_cache_v1";
+const USAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 
 export function Billing() {
   const { balance, refreshBalance } = useAuth();
@@ -17,16 +21,76 @@ export function Billing() {
   const [isLoadingUsage, setIsLoadingUsage] = useState(true);
   const [isAddingCredits, setIsAddingCredits] = useState(false);
   const [selectedAmount, setSelectedAmount] = useState(1000);
+  const pollIntervalRef = useRef<number | null>(null);
+  const pollTimeoutRef = useRef<number | null>(null);
+
+  function stopBalancePolling() {
+    if (pollIntervalRef.current !== null) {
+      window.clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (pollTimeoutRef.current !== null) {
+      window.clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
+  }
+
+  function startBalancePolling() {
+    stopBalancePolling();
+    refreshBalance();
+    pollIntervalRef.current = window.setInterval(() => {
+      refreshBalance();
+    }, BALANCE_POLL_INTERVAL_MS);
+    pollTimeoutRef.current = window.setTimeout(() => {
+      stopBalancePolling();
+    }, BALANCE_POLL_DURATION_MS);
+  }
 
   useEffect(() => {
-    loadUsage();
-  }, []);
+    const cached = readUsageCache();
+    if (cached) {
+      setUsage(cached);
+      setIsLoadingUsage(false);
+    }
+    loadUsage({ background: Boolean(cached) });
+    refreshBalance();
+    return () => {
+      stopBalancePolling();
+    };
+  }, [refreshBalance]);
 
-  async function loadUsage() {
-    setIsLoadingUsage(true);
+  function readUsageCache(): UsageResponse | null {
+    try {
+      const raw = sessionStorage.getItem(USAGE_CACHE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as { ts: number; data: UsageResponse };
+      if (!parsed?.data || typeof parsed.ts !== "number") return null;
+      if (Date.now() - parsed.ts > USAGE_CACHE_TTL_MS) return null;
+      return parsed.data;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeUsageCache(data: UsageResponse) {
+    try {
+      sessionStorage.setItem(
+        USAGE_CACHE_KEY,
+        JSON.stringify({ ts: Date.now(), data })
+      );
+    } catch {
+      // Ignore cache failures
+    }
+  }
+
+  async function loadUsage(opts?: { background?: boolean }) {
+    if (!opts?.background) {
+      setIsLoadingUsage(true);
+    }
     try {
       const data = await getUsage(30);
       setUsage(data);
+      writeUsageCache(data);
     } catch (error) {
       console.error("Failed to load usage:", error);
     } finally {
@@ -39,6 +103,7 @@ export function Billing() {
     try {
       const { checkout_url } = await createCheckout(selectedAmount);
       if (checkout_url) {
+        startBalancePolling();
         await open(checkout_url);
       }
     } catch (error) {
@@ -126,10 +191,12 @@ export function Billing() {
 
       {/* Usage Summary */}
       <div className="glass-card p-6">
-        <h3 className="text-lg font-semibold text-[var(--text-primary)] mb-4 flex items-center gap-2">
-          <TrendingUp className="w-5 h-5" />
-          Usage (Last 30 Days)
-        </h3>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-[var(--text-primary)] flex items-center gap-2">
+            <TrendingUp className="w-5 h-5" />
+            Usage (Last 30 Days)
+          </h3>
+        </div>
 
         {isLoadingUsage ? (
           <div className="flex items-center justify-center py-8">
