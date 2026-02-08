@@ -104,6 +104,90 @@ xcrun stapler staple ~/Nova.dmg
 spctl --assess --type open --context context:primary-signature --verbose ~/Nova.dmg
 ```
 
+## Auto Updates (GitHub Releases + Silent Install)
+
+Nova uses the Tauri updater to deliver silent updates for DMG installs. The DMG is only the installer — updates are applied from signed updater artifacts (`.app.tar.gz` + `.sig`) hosted in a public releases repo.
+
+### 1. Create a Public Releases Repo
+
+Keep the code repo private and publish only release artifacts in a public repo (example: `nova-releases`).
+
+### 2. Generate Updater Signing Keys
+
+On a secure machine:
+```bash
+pnpm tauri signer generate -- -w ~/.tauri/nova-updater.key
+```
+
+This writes:
+- `~/.tauri/nova-updater.key` (private key — keep secret)
+- `~/.tauri/nova-updater.key.pub` (public key — commit to config)
+
+### 3. Configure Tauri Updater
+
+Edit `src-tauri/tauri.conf.json`:
+```json
+{
+  "bundle": { "createUpdaterArtifacts": true },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_UPDATER_PUBLIC_KEY",
+      "endpoints": [
+        "https://github.com/ORG/nova-releases/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}
+```
+
+### 4. Build With Signing Key
+
+The updater artifacts are signed at build time. Provide the private key in env:
+```bash
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/nova-updater.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" # set if you used one
+pnpm tauri build
+```
+
+Artifacts will be in:
+```
+src-tauri/target/release/bundle/macos/
+  Nova.app.tar.gz
+  Nova.app.tar.gz.sig
+```
+
+### 5. Publish Release + latest.json
+
+Create a GitHub release in the public repo and upload:
+- `Nova.app.tar.gz`
+- `Nova.app.tar.gz.sig`
+- `latest.json`
+
+`latest.json` must point to the tarball URL. Example:
+```json
+{
+  "version": "0.1.1",
+  "notes": "Bug fixes and improvements.",
+  "pub_date": "2026-02-08T00:00:00Z",
+  "platforms": {
+    "darwin-x86_64": {
+      "url": "https://github.com/ORG/nova-releases/releases/download/v0.1.1/Nova.app.tar.gz",
+      "signature": "BASE64_SIGNATURE"
+    },
+    "darwin-aarch64": {
+      "url": "https://github.com/ORG/nova-releases/releases/download/v0.1.1/Nova.app.tar.gz",
+      "signature": "BASE64_SIGNATURE"
+    }
+  }
+}
+```
+
+### 6. Silent Auto-Update Behavior
+
+Nova checks for updates on app start in production, silently downloads + installs, then immediately relaunches. Dev builds skip the updater.
+
+If you want to delay relaunch or add UI prompts, change the update flow in `src/App.tsx`.
+
 ## Troubleshooting
 
 ### Check notarization status

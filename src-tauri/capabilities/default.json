@@ -10,6 +10,7 @@
     "store:default",
     "process:default",
     "os:default",
-    "deep-link:default"
+    "deep-link:default",
+    "updater:default"
   ]
 }
