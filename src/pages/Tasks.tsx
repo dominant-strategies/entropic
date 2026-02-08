@@ -32,18 +32,18 @@ const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:19789";
 const GATEWAY_TOKEN = "nova-local-gateway";
 
 function describeSchedule(schedule: CronSchedule): string {
-  switch (schedule.type) {
+  switch (schedule.kind) {
     case "at":
-      return `Once at ${new Date(schedule.date).toLocaleString()}`;
+      return `Once at ${new Date(schedule.atMs).toLocaleString()}`;
     case "every": {
-      const ms = schedule.intervalMs;
+      const ms = schedule.everyMs;
       if (ms < 60_000) return `Every ${Math.round(ms / 1000)}s`;
       if (ms < 3_600_000) return `Every ${Math.round(ms / 60_000)} minutes`;
       if (ms < 86_400_000) return `Every ${Math.round(ms / 3_600_000)} hours`;
       return `Every ${Math.round(ms / 86_400_000)} days`;
     }
     case "cron":
-      return `Cron: ${schedule.expression}`;
+      return `Cron: ${schedule.expr}`;
     default:
       return "Unknown schedule";
   }
@@ -163,17 +163,26 @@ function parseCron(expr: string): { minute: number; hour: number; days: string }
   return { minute, hour, days: dow };
 }
 
+function toLocalInputValue(ms: number): string {
+  const date = new Date(ms);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
 function inferPreset(schedule: CronSchedule): { preset: SchedulePreset; time?: string } {
-  if (schedule.type === "at") {
-    return { preset: "once" };
+  if (schedule.kind === "at") {
+    const date = new Date(schedule.atMs);
+    const hours = date.getHours().toString().padStart(2, "0");
+    const minutes = date.getMinutes().toString().padStart(2, "0");
+    return { preset: "once", time: `${hours}:${minutes}` };
   }
-  if (schedule.type === "every") {
-    if (Math.round(schedule.intervalMs / 60_000) === 60) {
+  if (schedule.kind === "every") {
+    if (Math.round(schedule.everyMs / 60_000) === 60) {
       return { preset: "every_hour" };
     }
     return { preset: "custom" };
   }
-  const parsed = parseCron(schedule.expression);
+  const parsed = parseCron(schedule.expr);
   if (!parsed) return { preset: "custom" };
   const time = `${pad2(parsed.hour)}:${pad2(parsed.minute)}`;
   switch (parsed.days) {
@@ -201,29 +210,29 @@ function editorFromJob(job: CronJob): EditorState {
     scheduleTime: inferred.time || defaultEditor.scheduleTime,
   };
 
-  switch (job.schedule.type) {
+  switch (job.schedule.kind) {
     case "every":
       state.scheduleType = "every";
-      state.intervalMinutes = String(Math.round(job.schedule.intervalMs / 60_000));
+      state.intervalMinutes = String(Math.round(job.schedule.everyMs / 60_000));
       break;
     case "at":
       state.scheduleType = "at";
-      state.atDate = job.schedule.date;
+      state.atDate = toLocalInputValue(job.schedule.atMs);
       break;
     case "cron":
       state.scheduleType = "cron";
-      state.cronExpr = job.schedule.expression;
+      state.cronExpr = job.schedule.expr;
       break;
   }
 
-  switch (job.payload.type) {
-    case "system_event":
-      state.message = job.payload.event;
-      state.sessionTarget = "main";
+  switch (job.payload.kind) {
+    case "systemEvent":
+      state.message = job.payload.text;
+      state.sessionTarget = job.sessionTarget || "main";
       break;
-    case "agent_turn":
+    case "agentTurn":
       state.message = job.payload.message;
-      state.sessionTarget = job.payload.sessionTarget || "isolated";
+      state.sessionTarget = job.sessionTarget || "isolated";
       state.notifyEnabled = job.payload.deliver === true;
       state.notifyChannel = job.payload.channel || "";
       state.notifyTo = job.payload.to || "";
@@ -335,19 +344,23 @@ async function resolveGatewayUrl(): Promise<string> {
 function editorToSchedule(editor: EditorState): CronSchedule {
   switch (editor.scheduleType) {
     case "every":
-      return { type: "every", intervalMs: (parseFloat(editor.intervalMinutes) || 5) * 60_000 };
+      return { kind: "every", everyMs: (parseFloat(editor.intervalMinutes) || 5) * 60_000 };
     case "at":
-      return { type: "at", date: editor.atDate || new Date().toISOString() };
+      return {
+        kind: "at",
+        atMs: Number.isFinite(Date.parse(editor.atDate))
+          ? Date.parse(editor.atDate)
+          : Date.now(),
+      };
     case "cron":
-      return { type: "cron", expression: editor.cronExpr || "0 * * * *" };
+      return { kind: "cron", expr: editor.cronExpr || "0 * * * *" };
   }
 }
 
 function editorToPayload(editor: EditorState): CronPayload {
   const payload: CronPayload = {
-    type: "agent_turn",
+    kind: "agentTurn",
     message: editor.message || "Hello",
-    sessionTarget: editor.sessionTarget,
   };
 
   if (editor.notifyEnabled) {
@@ -388,6 +401,8 @@ export function Tasks({ gatewayRunning }: Props) {
   const [historyLoading, setHistoryLoading] = useState(false);
 
   const pollRef = useRef<number | null>(null);
+  const tasksClientRef = useRef<GatewayClient | null>(null);
+  const tasksConnectingRef = useRef<Promise<GatewayClient> | null>(null);
   const lastAutoMessageRef = useRef<string | null>(null);
   const lastAutoKindRef = useRef<"hint" | "generated" | null>(null);
 
@@ -481,31 +496,57 @@ export function Tasks({ gatewayRunning }: Props) {
   }, []);
 
   const fetchJobs = useCallback(async () => {
-    const client = getGatewayClient();
-    if (!client?.isConnected()) return;
     setLoading(true);
     setError(null);
     try {
-      const result = await client.listCronJobs(true);
+      const result = await withGatewayClient((client) => client.listCronJobs(true));
       setJobs(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(
+        e instanceof Error ? e.message : "Gateway is offline. Start it to manage tasks."
+      );
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (gatewayRunning) {
-      fetchJobs();
-      pollRef.current = window.setInterval(fetchJobs, 15_000);
-    } else {
+    let cancelled = false;
+    if (!gatewayRunning) {
+      tasksClientRef.current?.disconnect();
+      tasksClientRef.current = null;
       setJobs([]);
+      return;
     }
+
+    (async () => {
+      try {
+        await ensureTasksClient();
+        if (!cancelled) {
+          fetchJobs();
+          pollRef.current = window.setInterval(fetchJobs, 15_000);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(
+            e instanceof Error ? e.message : "Gateway is offline. Start it to manage tasks."
+          );
+        }
+      }
+    })();
+
     return () => {
+      cancelled = true;
       if (pollRef.current) window.clearInterval(pollRef.current);
     };
   }, [gatewayRunning, fetchJobs]);
+
+  useEffect(() => {
+    return () => {
+      tasksClientRef.current?.disconnect();
+      tasksClientRef.current = null;
+    };
+  }, []);
 
   function openCreate() {
     setEditingJob(null);
@@ -526,34 +567,42 @@ export function Tasks({ gatewayRunning }: Props) {
   }
 
   async function handleSave() {
-    const client = getGatewayClient();
-    if (!client?.isConnected()) return;
     setSaving(true);
     setError(null);
     try {
       const schedule = editorToSchedule(editor);
       const payload = editorToPayload(editor);
+      const sessionTarget = editor.sessionTarget || "isolated";
       if (editingJob) {
-        await client.updateCronJob(editingJob.id, {
-          name: editor.name,
-          description: editor.description || undefined,
-          schedule,
-          payload,
-          enabled: editor.enabled,
-        });
+        await withGatewayClient((client) =>
+          client.updateCronJob(editingJob.id, {
+            name: editor.name,
+            description: editor.description || undefined,
+            schedule,
+            payload,
+            sessionTarget,
+            enabled: editor.enabled,
+          })
+        );
       } else {
-        await client.addCronJob({
-          name: editor.name,
-          description: editor.description || undefined,
-          schedule,
-          payload,
-          enabled: editor.enabled,
-        });
+        await withGatewayClient((client) =>
+          client.addCronJob({
+            name: editor.name,
+            description: editor.description || undefined,
+            schedule,
+            payload,
+            sessionTarget,
+            wakeMode: "next-heartbeat",
+            enabled: editor.enabled,
+          })
+        );
       }
       setEditorOpen(false);
       fetchJobs();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(
+        e instanceof Error ? e.message : "Gateway is offline. Start it to save tasks."
+      );
     } finally {
       setSaving(false);
     }
@@ -561,50 +610,52 @@ export function Tasks({ gatewayRunning }: Props) {
 
   async function handleDelete(job: CronJob) {
     if (!confirm(`Delete task "${job.name}"? This cannot be undone.`)) return;
-    const client = getGatewayClient();
-    if (!client?.isConnected()) return;
     try {
-      await client.removeCronJob(job.id);
+      await withGatewayClient((client) => client.removeCronJob(job.id));
       fetchJobs();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(
+        e instanceof Error ? e.message : "Gateway is offline. Start it to delete tasks."
+      );
     }
   }
 
   async function handleRun(job: CronJob) {
-    const client = getGatewayClient();
-    if (!client?.isConnected()) return;
     try {
-      await client.runCronJob(job.id, "force");
+      await withGatewayClient((client) => client.runCronJob(job.id, "force"));
       // Refresh after a brief delay to pick up state change
       setTimeout(fetchJobs, 1000);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(
+        e instanceof Error ? e.message : "Gateway is offline. Start it to run tasks."
+      );
     }
   }
 
   async function handleToggle(job: CronJob) {
-    const client = getGatewayClient();
-    if (!client?.isConnected()) return;
     try {
-      await client.updateCronJob(job.id, { enabled: !job.enabled });
+      await withGatewayClient((client) =>
+        client.updateCronJob(job.id, { enabled: !job.enabled })
+      );
       fetchJobs();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(
+        e instanceof Error ? e.message : "Gateway is offline. Start it to update tasks."
+      );
     }
   }
 
   async function openHistory(job: CronJob) {
-    const client = getGatewayClient();
-    if (!client?.isConnected()) return;
     setHistoryJobId(job.id);
     setHistoryJobName(job.name);
     setHistoryLoading(true);
     try {
-      const result = await client.getCronRuns(job.id, 20);
+      const result = await withGatewayClient((client) => client.getCronRuns(job.id, 20));
       setRuns(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(
+        e instanceof Error ? e.message : "Gateway is offline. Start it to view history."
+      );
     } finally {
       setHistoryLoading(false);
     }
@@ -704,22 +755,56 @@ export function Tasks({ gatewayRunning }: Props) {
     [editor.notifyChannel]
   );
 
+  async function ensureTasksClient(): Promise<GatewayClient> {
+    if (tasksClientRef.current?.isConnected()) return tasksClientRef.current;
+    if (tasksConnectingRef.current) return tasksConnectingRef.current;
+    if (!gatewayRunning) {
+      throw new Error("Gateway is offline. Start it to manage tasks.");
+    }
+    tasksConnectingRef.current = (async () => {
+      const url = await resolveGatewayUrl();
+      const client = tasksClientRef.current ?? new GatewayClient(url, GATEWAY_TOKEN);
+      if (!client.isConnected()) {
+        const timeoutMs = 8_000;
+        let timeoutId: number | null = null;
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutId = window.setTimeout(() => {
+            reject(new Error("Gateway connection timed out"));
+          }, timeoutMs);
+        });
+        try {
+          await Promise.race([client.connect(), timeout]);
+        } finally {
+          if (timeoutId) window.clearTimeout(timeoutId);
+        }
+      }
+      tasksClientRef.current = client;
+      return client;
+    })();
+    try {
+      return await tasksConnectingRef.current;
+    } finally {
+      tasksConnectingRef.current = null;
+    }
+  }
+
+  async function withGatewayClient<T>(
+    action: (client: GatewayClient) => Promise<T>
+  ): Promise<T> {
+    const client = await ensureTasksClient();
+    return action(client);
+  }
+
   async function handleGenerateSteps() {
     setGenerateStepsError(null);
-    let client = getGatewayClient();
-    let tempClient: GatewayClient | null = null;
-    if (!client?.isConnected()) {
-      try {
-        const url = await resolveGatewayUrl();
-        tempClient = new GatewayClient(url, GATEWAY_TOKEN);
-        await tempClient.connect();
-        client = tempClient;
-      } catch (err) {
-        setGenerateStepsError(
-          err instanceof Error ? err.message : "Gateway is offline. Start it and try again."
-        );
-        return;
-      }
+    let client: GatewayClient;
+    try {
+      client = await withGatewayClient(async (connected) => connected);
+    } catch (err) {
+      setGenerateStepsError(
+        err instanceof Error ? err.message : "Gateway is offline. Start it and try again."
+      );
+      return;
     }
 
     setGeneratingSteps(true);
@@ -755,9 +840,6 @@ export function Tasks({ gatewayRunning }: Props) {
       setGenerateStepsError(e instanceof Error ? e.message : "Failed to generate steps");
     } finally {
       setGeneratingSteps(false);
-      if (tempClient) {
-        tempClient.disconnect();
-      }
       client
         .rpc("sessions.delete", { key: sessionKey })
         .catch(() => {});

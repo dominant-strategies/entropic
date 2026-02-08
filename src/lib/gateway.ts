@@ -277,7 +277,12 @@ export class GatewayClient {
     description?: string;
     schedule: CronSchedule;
     payload: CronPayload;
+    sessionTarget: "main" | "isolated";
+    wakeMode?: "next-heartbeat" | "now";
     enabled?: boolean;
+    agentId?: string | null;
+    deleteAfterRun?: boolean;
+    isolation?: unknown;
   }): Promise<CronJob> {
     return this.rpc<CronJob>("cron.add", job);
   }
@@ -289,10 +294,12 @@ export class GatewayClient {
       description: string;
       schedule: CronSchedule;
       payload: CronPayload;
+      sessionTarget: "main" | "isolated";
+      wakeMode: "next-heartbeat" | "now";
       enabled: boolean;
     }>
   ): Promise<CronJob> {
-    return this.rpc<CronJob>("cron.update", { id, ...patch });
+    return this.rpc<CronJob>("cron.update", { id, patch });
   }
 
   async removeCronJob(id: string): Promise<void> {
@@ -312,16 +319,15 @@ export class GatewayClient {
 // ── Cron Types ───────────────────────────────────────────────────────
 
 export type CronSchedule =
-  | { type: "at"; date: string }
-  | { type: "every"; intervalMs: number }
-  | { type: "cron"; expression: string };
+  | { kind: "at"; atMs: number }
+  | { kind: "every"; everyMs: number; anchorMs?: number }
+  | { kind: "cron"; expr: string; tz?: string };
 
 export type CronPayload =
-  | { type: "system_event"; event: string; data?: unknown }
+  | { kind: "systemEvent"; text: string }
   | {
-      type: "agent_turn";
+      kind: "agentTurn";
       message: string;
-      sessionTarget?: "main" | "isolated";
       deliver?: boolean;
       channel?: "last" | string;
       to?: string;
@@ -335,6 +341,8 @@ export type CronJob = {
   name: string;
   description?: string;
   schedule: CronSchedule;
+  sessionTarget: "main" | "isolated";
+  wakeMode?: "next-heartbeat" | "now";
   payload: CronPayload;
   enabled: boolean;
   state: CronJobState;
