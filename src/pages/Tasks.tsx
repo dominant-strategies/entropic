@@ -73,6 +73,25 @@ function formatRunDuration(run: CronRunLogEntry): string | null {
   return null;
 }
 
+const CRON_GUARD_LINES = [
+  "This is a scheduled run. Do NOT create, edit, or run cron jobs.",
+  "Do NOT use gateway or exec tools. Just perform the task now and report results.",
+];
+const CRON_GUARD_BLOCK = `${CRON_GUARD_LINES.join("\n")}\n\n`;
+
+function stripCronGuards(message: string): string {
+  const trimmed = message ?? "";
+  if (trimmed.startsWith(CRON_GUARD_BLOCK)) {
+    return trimmed.slice(CRON_GUARD_BLOCK.length);
+  }
+  const guardLineBlock = CRON_GUARD_LINES.join("\n");
+  if (trimmed.startsWith(guardLineBlock)) {
+    const remainder = trimmed.slice(guardLineBlock.length);
+    return remainder.replace(/^\n\n?/, "");
+  }
+  return trimmed;
+}
+
 type ScheduleType = "every" | "at" | "cron";
 type SchedulePreset = "every_hour" | "daily" | "weekdays" | "weekends" | "mwf" | "once" | "custom";
 
@@ -248,7 +267,7 @@ function editorFromJob(job: CronJob): EditorState {
       state.sessionTarget = job.sessionTarget || "main";
       break;
     case "agentTurn":
-      state.message = job.payload.message;
+      state.message = stripCronGuards(job.payload.message || "");
       state.sessionTarget = job.sessionTarget || "isolated";
       state.notifyEnabled = job.payload.deliver === true;
       state.notifyChannel = job.payload.channel || "";
@@ -377,13 +396,8 @@ function editorToSchedule(editor: EditorState): CronSchedule {
 }
 
 function editorToPayload(editor: EditorState): CronPayload {
-  const baseMessage = editor.message || "Hello";
-  const message = [
-    "This is a scheduled run. Do NOT create, edit, or run cron jobs.",
-    "Do NOT use gateway or exec tools. Just perform the task now and report results.",
-    "",
-    baseMessage,
-  ].join("\n");
+  const baseMessage = stripCronGuards(editor.message || "Hello");
+  const message = `${CRON_GUARD_BLOCK}${baseMessage}`;
   const payload: CronPayload = {
     kind: "agentTurn",
     message,

@@ -21,8 +21,6 @@ import {
   Send,
   Loader2,
   Image,
-  PanelRight,
-  PanelBottom,
 } from "lucide-react";
 import {
   getGatewayClient,
@@ -43,7 +41,6 @@ type WorkspaceFileEntry = {
 
 type Props = { gatewayRunning: boolean };
 type ViewMode = "grid" | "list";
-type ChatDock = "bottom" | "right";
 type ChatMessage = { id: string; role: "user" | "assistant"; content: string };
 
 const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md"]);
@@ -127,12 +124,15 @@ export function Files({ gatewayRunning }: Props) {
   // Windows
   const [finderOpen, setFinderOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
-  const [chatDock, setChatDock] = useState<ChatDock>("right");
 
   // Finder drag
   const [finderPos, setFinderPos] = useState({ x: 30, y: 20 });
   const [finderSize, setFinderSize] = useState({ w: 680, h: 460 });
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+
+  // Chat window drag
+  const [chatPos, setChatPos] = useState({ x: 120, y: 40 });
+  const chatDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
 
   // File browser
   const [entries, setEntries] = useState<WorkspaceFileEntry[]>([]);
@@ -226,6 +226,26 @@ export function Files({ gatewayRunning }: Props) {
     }
     function onUp() {
       dragRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  function handleChatDragStart(e: React.MouseEvent) {
+    if ((e.target as HTMLElement).closest("button")) return;
+    e.preventDefault();
+    chatDragRef.current = { sx: e.clientX, sy: e.clientY, ox: chatPos.x, oy: chatPos.y };
+    function onMove(ev: MouseEvent) {
+      if (!chatDragRef.current) return;
+      setChatPos({
+        x: Math.max(0, chatDragRef.current.ox + ev.clientX - chatDragRef.current.sx),
+        y: Math.max(0, chatDragRef.current.oy + ev.clientY - chatDragRef.current.sy),
+      });
+    }
+    function onUp() {
+      chatDragRef.current = null;
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     }
@@ -369,7 +389,6 @@ export function Files({ gatewayRunning }: Props) {
   const wallpaperCss = getWallpaperCss();
   const currentWp = getWallpaperById(wallpaperId);
   const isWpImage = (wallpaperId === "custom" && customWallpaper) || currentWp?.type === "photo";
-  const chatBottom = chatOpen && chatDock === "bottom";
 
   // ═══════════════════════════════════════════════════════════════════
   // RENDER
@@ -377,8 +396,8 @@ export function Files({ gatewayRunning }: Props) {
 
   return (
     <div className="h-full flex flex-col select-none relative overflow-hidden">
-      {/* Main area: wallpaper + optional anchored chat */}
-      <div className={`flex-1 flex overflow-hidden ${chatBottom ? "flex-col" : "flex-row"}`}>
+      {/* Main area */}
+      <div className="flex-1 flex overflow-hidden">
 
         {/* Desktop area */}
         <div
@@ -652,6 +671,79 @@ export function Files({ gatewayRunning }: Props) {
             </div>
           )}
 
+          {/* ── FLOATING CHAT WINDOW (draggable) ────────────────────── */}
+          {chatOpen && (
+            <div
+              className="absolute z-30 flex flex-col rounded-xl overflow-hidden animate-scale-in"
+              style={{
+                top: chatPos.y, left: chatPos.x,
+                width: 360, height: 420,
+                boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56), 0 0 0 0.5px rgba(255,255,255,0.1)",
+                border: "0.5px solid rgba(255,255,255,0.08)",
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Title bar — drag handle */}
+              <div
+                className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing"
+                style={{ background: "#2d2d2d", borderBottom: "1px solid #1a1a1a" }}
+                onMouseDown={handleChatDragStart}
+              >
+                <div className="flex items-center gap-2 z-10">
+                  <button onClick={() => setChatOpen(false)} className="w-3 h-3 rounded-full hover:opacity-80 group relative" style={{ background: "#ff5f57" }} title="Close">
+                    <X className="w-2 h-2 absolute inset-0.5 opacity-0 group-hover:opacity-100 text-black/60" />
+                  </button>
+                  <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} />
+                  <div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
+                </div>
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                  <div className="flex items-center gap-2">
+                    <MessageSquare className="w-3.5 h-3.5" style={{ color: "#5be579" }} />
+                    <span className="text-xs font-medium" style={{ color: "#ccc" }}>Chat</span>
+                    {!chatConnected && !chatConnecting && <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: "rgba(255,255,255,0.1)", color: "#888" }}>offline</span>}
+                  </div>
+                </div>
+              </div>
+
+              {/* Messages */}
+              <div className="flex-1 overflow-auto p-3 space-y-2" style={{ background: "#1e1e1e" }}>
+                {chatMessages.length === 0 && !chatLoading && (
+                  <div className="flex items-center justify-center h-full">
+                    <div className="text-center px-4">
+                      <MessageSquare className="w-8 h-8 mx-auto mb-2" style={{ color: "#555", opacity: 0.3 }} />
+                      <p className="text-xs" style={{ color: "#888" }}>Ask questions about your files</p>
+                      <p className="text-[10px] mt-1" style={{ color: "#666" }}>e.g. "What's in config.json?"</p>
+                    </div>
+                  </div>
+                )}
+                {chatMessages.map((msg) => (
+                  <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                    <div className="max-w-[85%] px-3 py-2 rounded-xl text-xs" style={msg.role === "user" ? { background: "#7c3aed", color: "white" } : { background: "#2d2d2d", color: "#d4d4d4" }}>
+                      <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                    </div>
+                  </div>
+                ))}
+                {chatLoading && <div className="flex justify-start"><div className="px-3 py-2 rounded-xl" style={{ background: "#2d2d2d" }}><Loader2 className="w-4 h-4 animate-spin" style={{ color: "#888" }} /></div></div>}
+                <div ref={chatEndRef} />
+              </div>
+
+              {/* Input */}
+              <div className="flex items-center gap-2 px-3 py-2 flex-shrink-0" style={{ background: "#252526", borderTop: "1px solid #1a1a1a" }}>
+                <input
+                  type="text"
+                  className="flex-1 text-xs px-3 py-1.5 rounded-md outline-none"
+                  style={{ background: "#1e1e1e", color: "#d4d4d4", border: "1px solid #3a3a3a" }}
+                  placeholder={chatConnected ? "Ask about these files..." : "Connecting..."}
+                  value={chatInput}
+                  disabled={!chatConnected || chatLoading}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleChatSend(); } }}
+                />
+                <button onClick={handleChatSend} disabled={!chatInput.trim() || !chatConnected || chatLoading} className="p-1.5 rounded-md disabled:opacity-40" style={{ background: "#7c3aed" }}><Send className="w-3.5 h-3.5 text-white" /></button>
+              </div>
+            </div>
+          )}
+
           {/* ── FLOATING DOCK ─────────────────────────────────────────── */}
           <div
             className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex items-end justify-center gap-2 px-2.5 py-1.5 rounded-[22px]"
@@ -729,62 +821,6 @@ export function Files({ gatewayRunning }: Props) {
             <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileInputChange} multiple />
           </div>
         </div>
-
-        {/* ── ANCHORED CHAT PANEL (right or bottom, light theme) ──────── */}
-        {chatOpen && (
-          <div
-            className="flex flex-col flex-shrink-0"
-            style={{
-              background: "var(--bg-secondary, #ffffff)",
-              ...(chatDock === "right"
-                ? { width: 360, borderLeft: "1px solid var(--glass-border-subtle, #e5e5e5)", boxShadow: "-4px 0 20px rgba(0,0,0,0.06)" }
-                : { height: 300, borderTop: "1px solid var(--glass-border-subtle, #e5e5e5)", boxShadow: "0 -4px 20px rgba(0,0,0,0.06)" }),
-            }}
-          >
-            {/* Chat header */}
-            <div className="flex items-center justify-between px-3 py-2 flex-shrink-0" style={{ borderBottom: "1px solid var(--glass-border-subtle, #e5e5e5)" }}>
-              <div className="flex items-center gap-2">
-                <MessageSquare className="w-3.5 h-3.5" style={{ color: "var(--purple-accent, #7c3aed)" }} />
-                <span className="text-xs font-medium" style={{ color: "var(--text-primary, #1a1a1a)" }}>Chat</span>
-                {!chatConnected && !chatConnecting && <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: "var(--bg-tertiary, #eee)", color: "var(--text-tertiary, #999)" }}>offline</span>}
-              </div>
-              <div className="flex items-center gap-0.5">
-                <button onClick={() => setChatDock(chatDock === "right" ? "bottom" : "right")} className="p-1 rounded hover:bg-black/5" title={chatDock === "right" ? "Dock to bottom" : "Dock to right"}>
-                  {chatDock === "right" ? <PanelBottom className="w-3.5 h-3.5" style={{ color: "var(--text-tertiary, #999)" }} /> : <PanelRight className="w-3.5 h-3.5" style={{ color: "var(--text-tertiary, #999)" }} />}
-                </button>
-                <button onClick={() => setChatOpen(false)} className="p-1 rounded hover:bg-black/5"><X className="w-3.5 h-3.5" style={{ color: "var(--text-tertiary, #999)" }} /></button>
-              </div>
-            </div>
-
-            {/* Messages */}
-            <div className="flex-1 overflow-auto p-3 space-y-2">
-              {chatMessages.length === 0 && !chatLoading && (
-                <div className="flex items-center justify-center h-full">
-                  <div className="text-center px-4">
-                    <MessageSquare className="w-8 h-8 mx-auto mb-2" style={{ color: "var(--text-tertiary, #999)", opacity: 0.3 }} />
-                    <p className="text-xs" style={{ color: "var(--text-tertiary, #999)" }}>Ask questions about your files</p>
-                    <p className="text-[10px] mt-1" style={{ color: "var(--text-tertiary, #999)", opacity: 0.7 }}>e.g. "What's in config.json?"</p>
-                  </div>
-                </div>
-              )}
-              {chatMessages.map((msg) => (
-                <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                  <div className="max-w-[85%] px-3 py-2 rounded-xl text-xs" style={msg.role === "user" ? { background: "var(--purple-accent, #7c3aed)", color: "white" } : { background: "var(--bg-tertiary, #eee)", color: "var(--text-primary, #1a1a1a)" }}>
-                    <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
-                  </div>
-                </div>
-              ))}
-              {chatLoading && <div className="flex justify-start"><div className="px-3 py-2 rounded-xl" style={{ background: "var(--bg-tertiary, #eee)" }}><Loader2 className="w-4 h-4 animate-spin" style={{ color: "var(--text-tertiary, #999)" }} /></div></div>}
-              <div ref={chatEndRef} />
-            </div>
-
-            {/* Input */}
-            <div className="flex items-center gap-2 px-3 py-2 flex-shrink-0" style={{ borderTop: "1px solid var(--glass-border-subtle, #e5e5e5)" }}>
-              <input type="text" className="form-input flex-1 !py-1.5 !text-xs" placeholder={chatConnected ? "Ask about these files..." : "Connecting..."} value={chatInput} disabled={!chatConnected || chatLoading} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleChatSend(); } }} />
-              <button onClick={handleChatSend} disabled={!chatInput.trim() || !chatConnected || chatLoading} className="btn-primary !p-1.5 disabled:opacity-40"><Send className="w-3.5 h-3.5" /></button>
-            </div>
-          </div>
-        )}
       </div>
 
     </div>
