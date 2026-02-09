@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "NOVA_DEV_RELAY=1 tauri dev --config src-tauri/tauri.conf.dev.json",
+    "tauri:dev": "tauri dev --config src-tauri/tauri.conf.dev.json",
     "tauri:build": "tauri build",
     "tauri:build:dev": "tauri build --debug --config src-tauri/tauri.conf.dev.json",
     "dev:protocol": "bash ./scripts/register-dev-protocol.sh",

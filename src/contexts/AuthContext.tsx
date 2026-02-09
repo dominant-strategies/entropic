@@ -152,6 +152,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let unlistenEvent: (() => void) | undefined;
+    let unlistenLocalhost: (() => void) | undefined;
 
     async function handleUrls(urls: string[]) {
       for (const url of urls) {
@@ -211,6 +212,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
             await handleUrls(payload as string[]);
           } else if (typeof payload === "string") {
             await handleUrls([payload]);
+          }
+        });
+        unlistenLocalhost = await listenTauriEvent("auth-localhost-callback", async (event) => {
+          const payload = event.payload;
+          if (typeof payload === "string") {
+            await handleUrls([payload]);
+          } else if (payload && typeof (payload as { url?: string }).url === "string") {
+            await handleUrls([(payload as { url?: string }).url as string]);
           }
         });
       } catch (error) {
@@ -298,6 +307,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     return () => {
       unlisten?.();
       unlistenEvent?.();
+      unlistenLocalhost?.();
     };
   }, []);
 

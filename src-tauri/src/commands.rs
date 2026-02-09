@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::ShellExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -2666,9 +2666,17 @@ pub async fn upload_workspace_file(
 // Local OAuth (Google integrations)
 // =============================================================================
 
+const AUTH_LOCALHOST_PORT_ENV: &str = "NOVA_AUTH_LOCALHOST_PORT";
+const AUTH_LOCALHOST_DEFAULT_PORT: u16 = 27100;
+
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalhostAuthStart {
+    pub redirect_url: String,
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OAuthTokenBundle {
@@ -2807,6 +2815,80 @@ async fn wait_for_oauth_callback(
     let _ = socket.write_all(response.as_bytes()).await;
 
     Ok(code)
+}
+
+async fn wait_for_localhost_auth_callback(
+    listener: TcpListener,
+    app: AppHandle,
+    port: u16,
+) -> Result<(), String> {
+    let (mut socket, _) = timeout(Duration::from_secs(300), listener.accept())
+        .await
+        .map_err(|_| "Timed out waiting for localhost OAuth callback".to_string())?
+        .map_err(|e| format!("Failed to accept localhost OAuth callback: {}", e))?;
+
+    let mut buffer = vec![0u8; 8192];
+    let size = socket
+        .read(&mut buffer)
+        .await
+        .map_err(|e| format!("Failed to read localhost OAuth callback: {}", e))?;
+    let request = String::from_utf8_lossy(&buffer[..size]);
+    let first_line = request.lines().next().unwrap_or("");
+    let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+    let url = Url::parse(&format!("http://127.0.0.1:{}{}", port, path))
+        .map_err(|_| "Invalid localhost OAuth callback URL".to_string())?;
+
+    let has_code = url
+        .query_pairs()
+        .any(|(k, _)| k == "code");
+
+    let response = [
+        "HTTP/1.1 200 OK",
+        "Content-Type: text/html; charset=utf-8",
+        "Connection: close",
+        "",
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"/>",
+        "<title>Nova Sign-in</title></head><body>",
+        "<h1>Authentication complete</h1>",
+        "<p>You can return to the app.</p>",
+        "</body></html>",
+    ]
+    .join("\r\n");
+    let _ = socket.write_all(response.as_bytes()).await;
+
+    if has_code {
+        let _ = app.emit("auth-localhost-callback", url.to_string());
+    } else {
+        return Err("Localhost OAuth callback missing code".to_string());
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn start_auth_localhost(app: AppHandle) -> Result<LocalhostAuthStart, String> {
+    if !cfg!(debug_assertions) {
+        return Err("Localhost OAuth is only available in dev builds".to_string());
+    }
+
+    let port = std::env::var(AUTH_LOCALHOST_PORT_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(AUTH_LOCALHOST_DEFAULT_PORT);
+    let addr = format!("127.0.0.1:{}", port);
+    let listener = TcpListener::bind(&addr)
+        .await
+        .map_err(|e| format!("Failed to bind localhost OAuth server on {}: {}", addr, e))?;
+
+    let redirect_url = format!("http://{}/auth/callback", addr);
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = wait_for_localhost_auth_callback(listener, app_handle, port).await {
+            eprintln!("[Nova] Localhost OAuth error: {}", err);
+        }
+    });
+
+    Ok(LocalhostAuthStart { redirect_url })
 }
 
 async fn exchange_code_for_tokens(

@@ -1,6 +1,8 @@
 import { createClient, Session, User, SupabaseClient } from "@supabase/supabase-js";
 import { open } from "@tauri-apps/plugin-shell";
 import { Store } from "@tauri-apps/plugin-store";
+import { invoke } from "@tauri-apps/api/core";
+import { platform } from "@tauri-apps/plugin-os";
 
 // These should be set via environment variables
 const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL || "";
@@ -10,6 +12,10 @@ const AUTH_REDIRECT_URL =
   (import.meta as any).env?.VITE_AUTH_REDIRECT_URL || "nova://auth/callback";
 const AUTH_STORE_NAME =
   (import.meta as any).env?.VITE_AUTH_STORE_NAME || "nova-auth.json";
+const AUTH_USE_LOCALHOST =
+  (import.meta as any).env?.VITE_AUTH_USE_LOCALHOST === "1";
+const AUTH_FORCE_DEEPLINK =
+  (import.meta as any).env?.VITE_AUTH_FORCE_DEEPLINK === "1";
 const AUTH_DEBUG =
   (import.meta as any).env?.VITE_AUTH_DEBUG === "1" ||
   (import.meta as any).env?.DEV;
@@ -81,6 +87,37 @@ export type AuthState = {
 };
 
 type OAuthProvider = "google" | "apple" | "discord";
+type LocalhostAuthStart = { redirect_url: string };
+
+async function shouldUseLocalhostOAuth(): Promise<boolean> {
+  if (AUTH_FORCE_DEEPLINK) return false;
+  if (AUTH_USE_LOCALHOST) return true;
+  if (!(import.meta as any).env?.DEV) return false;
+  try {
+    const os = await platform();
+    return os === "macos";
+  } catch {
+    return false;
+  }
+}
+
+async function resolveOAuthRedirectUrl(): Promise<string> {
+  const useLocalhost = await shouldUseLocalhostOAuth();
+  if (!useLocalhost) {
+    return AUTH_REDIRECT_URL;
+  }
+
+  try {
+    const result = await invoke<LocalhostAuthStart>("start_auth_localhost");
+    authDebug("localhost OAuth server started", { redirectTo: result.redirect_url });
+    return result.redirect_url;
+  } catch (error) {
+    console.error("Failed to start localhost OAuth server", error);
+    throw new Error(
+      "Failed to start localhost OAuth server. Is port 27100 in use? You can change it with NOVA_AUTH_LOCALHOST_PORT."
+    );
+  }
+}
 
 /**
  * Sign in with OAuth provider
@@ -91,12 +128,13 @@ export async function signInWithOAuth(provider: OAuthProvider): Promise<void> {
     throw new Error("Auth not configured");
   }
 
-  authDebug("signInWithOAuth start", { provider, redirectTo: AUTH_REDIRECT_URL });
+  const redirectTo = await resolveOAuthRedirectUrl();
+  authDebug("signInWithOAuth start", { provider, redirectTo });
 
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider,
     options: {
-      redirectTo: AUTH_REDIRECT_URL,
+      redirectTo,
       skipBrowserRedirect: true,
     },
   });
