@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import { Calendar, Mail, CheckCircle2, ExternalLink, ShieldCheck } from "lucide-react";
@@ -6,6 +6,8 @@ import {
   getIntegrations,
   connectIntegration,
   disconnectIntegration,
+  syncIntegrationToGateway,
+  removeIntegrationFromGateway,
   Integration,
   IntegrationProvider,
 } from "../lib/integrations";
@@ -72,17 +74,11 @@ export function Store() {
   const [scanResult, setScanResult] = useState<PluginScanResult | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const syncedIntegrationsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     refresh();
     refreshIntegrations();
-
-    // Listen for integration success/error deep links
-    const handleIntegrationResult = () => {
-      refreshIntegrations();
-    };
-    window.addEventListener('nova-integration-updated', handleIntegrationResult);
-    return () => window.removeEventListener('nova-integration-updated', handleIntegrationResult);
   }, []);
 
   async function refresh() {
@@ -112,9 +108,29 @@ export function Store() {
     try {
       const list = await getIntegrations();
       setIntegrations(list);
+      const connectedIds = new Set(list.filter(i => i.connected).map(i => i.provider));
+      for (const id of Array.from(syncedIntegrationsRef.current)) {
+        if (!connectedIds.has(id)) {
+          syncedIntegrationsRef.current.delete(id);
+        }
+      }
+      await syncConnectedIntegrations(list);
     } catch (err) {
       // User might not be authenticated or backend might not support integrations yet
       console.error("Failed to load integrations:", err);
+    }
+  }
+
+  async function syncConnectedIntegrations(list: Integration[]) {
+    for (const integration of list) {
+      if (!integration.connected) continue;
+      if (syncedIntegrationsRef.current.has(integration.provider)) continue;
+      try {
+        await syncIntegrationToGateway(integration.provider as IntegrationProvider);
+        syncedIntegrationsRef.current.add(integration.provider);
+      } catch (err) {
+        console.warn(`Failed to sync ${integration.provider} to OpenClaw:`, err);
+      }
     }
   }
 
@@ -178,7 +194,7 @@ export function Store() {
     setConnecting(provider);
     try {
       await connectIntegration(provider);
-      // OAuth will open in browser, result comes via deep link
+      await refreshIntegrations();
     } catch (err) {
       console.error("Failed to start OAuth:", err);
     } finally {
@@ -190,6 +206,7 @@ export function Store() {
     setConnecting(provider);
     try {
       await disconnectIntegration(provider);
+      await removeIntegrationFromGateway(provider);
       await refreshIntegrations();
     } catch (err) {
       console.error("Failed to disconnect:", err);
@@ -203,8 +220,8 @@ export function Store() {
   return (
     <div className="max-w-4xl">
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-[var(--text-primary)]">Skills</h1>
-        <p className="text-sm text-[var(--text-secondary)]">Extend your AI with skills from ClawdHub</p>
+        <h1 className="text-xl font-semibold text-[var(--text-primary)]">Plugins</h1>
+        <p className="text-sm text-[var(--text-secondary)]">Extend your AI with plugins and integrations</p>
       </div>
 
       <div className="flex gap-2 mb-6">
@@ -310,14 +327,14 @@ export function Store() {
       {/* Empty state */}
       {filteredPlugins.length === 0 && (!showIntegrations || googleIntegrations.length === 0) && (
         <div className="text-center py-12 text-[var(--text-tertiary)]">
-          No skills found in this category
+          No plugins found in this category
         </div>
       )}
 
       {/* Scanner attribution */}
       <div className="mt-8 pt-4 border-t border-[var(--glass-border)] flex items-center gap-2 text-xs text-[var(--text-tertiary)]">
         <ShieldCheck className="w-3.5 h-3.5" />
-        <span>Skills are validated using{" "}
+        <span>Plugins are validated using{" "}
           <a href="https://github.com/cisco-ai-defense/skill-scanner"
             target="_blank" rel="noopener noreferrer"
             className="underline hover:text-[var(--text-secondary)]">

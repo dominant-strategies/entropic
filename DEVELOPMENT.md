@@ -19,7 +19,7 @@
 ### All Platforms
 - Node.js 18+ and pnpm
 - Rust 1.70+ (install via [rustup](https://rustup.rs))
-- **OpenClaw** (clawdbot repo) - see below
+- **OpenClaw** (openclaw repo) - see below
 
 ---
 
@@ -55,15 +55,15 @@
 
 ## OpenClaw Setup (Required)
 
-Nova requires the OpenClaw runtime image. This is built from the separate `clawdbot` repository.
+Nova requires the OpenClaw runtime image. This is built from the separate `openclaw` repository.
 
 ### 1. Clone and build OpenClaw
 
 ```bash
-# Clone clawdbot repo (sibling to Nova)
+# Clone openclaw repo (sibling to Nova)
 cd ~/agent
-git clone https://github.com/dominant-strategies/openclaw clawdbot
-cd clawdbot
+git clone https://github.com/dominant-strategies/openclaw openclaw
+cd openclaw
 
 # Install dependencies and build
 pnpm install
@@ -84,7 +84,7 @@ This creates the `openclaw-runtime:latest` Docker image containing:
 
 **Custom OpenClaw location:**
 ```bash
-OPENCLAW_SOURCE=/path/to/clawdbot ./scripts/build-openclaw-runtime.sh
+OPENCLAW_SOURCE=/path/to/openclaw ./scripts/build-openclaw-runtime.sh
 ```
 
 ### 3. Verify the image

@@ -49,6 +49,7 @@ mkdir -p /home/node/.openclaw/logs
 # Write a minimal config to select the primary model when provided
 MEMORY_SLOT="${OPENCLAW_MEMORY_SLOT:-}"
 MEMORY_CONFIG=""
+PLUGIN_ENTRIES=""
 
 if [ -z "$MEMORY_SLOT" ]; then
     if [ -d "/app/extensions/memory-lancedb" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
@@ -62,10 +63,15 @@ fi
 
 if [ "$MEMORY_SLOT" = "memory-lancedb" ]; then
     if [ -n "${OPENAI_API_KEY:-}" ]; then
-        MEMORY_CONFIG="\"entries\": { \"memory-lancedb\": { \"enabled\": true, \"config\": { \"embedding\": { \"apiKey\": \"${OPENAI_API_KEY}\", \"model\": \"text-embedding-3-small\" } } } }"
+        MEMORY_CONFIG="\"memory-lancedb\": { \"enabled\": true, \"config\": { \"embedding\": { \"apiKey\": \"${OPENAI_API_KEY}\", \"model\": \"text-embedding-3-small\" } } }"
     else
         MEMORY_SLOT="memory-core"
     fi
+fi
+
+PLUGIN_ENTRIES="\"nova-integrations\": { \"enabled\": true }"
+if [ -n "$MEMORY_CONFIG" ]; then
+    PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, ${MEMORY_CONFIG}"
 fi
 
 json_escape() {
@@ -140,8 +146,10 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
   "plugins": {
     "slots": {
       "memory": "${MEMORY_SLOT}"
-    }${MEMORY_CONFIG:+,
-    ${MEMORY_CONFIG}}
+    },
+    "entries": {
+      ${PLUGIN_ENTRIES}
+    }
   }${MODELS_BLOCK}${TOOLS_BLOCK}
 }
 EOF

@@ -11,6 +11,7 @@
     "process:default",
     "os:default",
     "deep-link:default",
-    "updater:default"
+    "updater:default",
+    "stronghold:default"
   ]
 }

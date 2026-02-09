@@ -10,6 +10,7 @@ import { Logs } from "./Logs";
 import { Settings } from "./Settings";
 import { useAuth } from "../contexts/AuthContext";
 import { createGatewayToken, getProxyUrl } from "../lib/auth";
+import { syncPendingIntegrationImports, startIntegrationRefreshLoop, stopIntegrationRefreshLoop } from "../lib/integrations";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 
 type RuntimeStatus = {
@@ -70,6 +71,18 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     const interval = setInterval(checkGateway, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!gatewayRunning) {
+      stopIntegrationRefreshLoop();
+      return;
+    }
+    syncPendingIntegrationImports().catch((err) => {
+      console.warn("[Nova] Failed to sync integration tokens:", err);
+    });
+    startIntegrationRefreshLoop();
+    return () => stopIntegrationRefreshLoop();
+  }, [gatewayRunning]);
 
   useEffect(() => {
     return () => {

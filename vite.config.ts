@@ -7,6 +7,12 @@ export default defineConfig({
     host: "0.0.0.0",  // Bind to all interfaces (needed for Docker)
     port: 5174,
     strictPort: true,
+    watch: {
+      ignored: [
+        "**/src-tauri/target/**",
+        "**/src-tauri/target-*/*",
+      ],
+    },
   },
   // Tauri expects a fixed port
   clearScreen: false,

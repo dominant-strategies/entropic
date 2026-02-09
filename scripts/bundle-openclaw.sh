@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 RESOURCES_DIR="$PROJECT_ROOT/src-tauri/resources/openclaw"
-OPENCLAW_SOURCE="${OPENCLAW_SOURCE:-$HOME/agent/clawdbot}"
+OPENCLAW_SOURCE="${OPENCLAW_SOURCE:-$HOME/agent/openclaw}"
 
 # Files/patterns that should NEVER be bundled
 SENSITIVE_PATTERNS=(

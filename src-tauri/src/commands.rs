@@ -1,12 +1,19 @@
 use crate::runtime::{Platform, Runtime, RuntimeStatus};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _};
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_shell::ShellExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::time::timeout;
+use url::Url;
 
 /// Get the Docker socket path for the current platform.
 /// On macOS, uses Colima socket. On Linux/Windows, uses default.
@@ -761,6 +768,9 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
         "memory-core"
     };
     cfg["plugins"]["slots"]["memory"] = serde_json::json!(slot);
+
+    // Ensure Nova integrations plugin is enabled (OAuth bridge tools).
+    cfg["plugins"]["entries"]["nova-integrations"]["enabled"] = serde_json::json!(true);
 
     if slot == "memory-lancedb" {
         let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
@@ -2431,4 +2441,322 @@ pub async fn upload_workspace_file(
         return Err("Failed to upload file to container".to_string());
     }
     Ok(())
+}
+
+// =============================================================================
+// Local OAuth (Google integrations)
+// =============================================================================
+
+const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const GOOGLE_USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OAuthTokenBundle {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub token_type: Option<String>,
+    pub expires_at: u64,
+    pub scopes: Vec<String>,
+    pub email: Option<String>,
+    pub provider_user_id: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OAuthTokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    token_type: Option<String>,
+    expires_in: Option<u64>,
+    scope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GoogleUserInfo {
+    email: Option<String>,
+    id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RefreshTokenResponse {
+    pub access_token: String,
+    pub token_type: Option<String>,
+    pub expires_at: u64,
+}
+
+fn google_client_id() -> Result<String, String> {
+    if let Some(val) = option_env!("NOVA_GOOGLE_CLIENT_ID") {
+        return Ok(val.to_string());
+    }
+    if let Ok(val) = std::env::var("NOVA_GOOGLE_CLIENT_ID") {
+        return Ok(val);
+    }
+    Err("Google OAuth client ID not configured (NOVA_GOOGLE_CLIENT_ID)".to_string())
+}
+
+fn google_client_secret() -> Option<String> {
+    if let Some(val) = option_env!("NOVA_GOOGLE_CLIENT_SECRET") {
+        return Some(val.to_string());
+    }
+    if let Ok(val) = std::env::var("NOVA_GOOGLE_CLIENT_SECRET") {
+        return Some(val);
+    }
+    None
+}
+
+fn oauth_scopes(provider: &str) -> Result<Vec<&'static str>, String> {
+    let scopes = match provider {
+        "google_calendar" => vec![
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "openid",
+            "email",
+            "profile",
+        ],
+        "google_email" => vec![
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+            "openid",
+            "email",
+            "profile",
+        ],
+        _ => {
+            return Err(format!(
+                "Unsupported provider: {} (expected google_calendar or google_email)",
+                provider
+            ))
+        }
+    };
+    Ok(scopes)
+}
+
+fn generate_pkce() -> (String, String) {
+    let mut verifier_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut verifier_bytes);
+    let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    (verifier, challenge)
+}
+
+async fn wait_for_oauth_callback(
+    listener: TcpListener,
+    expected_state: &str,
+) -> Result<String, String> {
+    let (mut socket, _) = timeout(Duration::from_secs(300), listener.accept())
+        .await
+        .map_err(|_| "Timed out waiting for OAuth callback".to_string())?
+        .map_err(|e| format!("Failed to accept OAuth callback: {}", e))?;
+
+    let mut buffer = vec![0u8; 8192];
+    let size = socket
+        .read(&mut buffer)
+        .await
+        .map_err(|e| format!("Failed to read OAuth callback: {}", e))?;
+    let request = String::from_utf8_lossy(&buffer[..size]);
+    let first_line = request.lines().next().unwrap_or("");
+    let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+    let url = Url::parse(&format!("http://127.0.0.1{}", path))
+        .map_err(|_| "Invalid OAuth callback URL".to_string())?;
+
+    let code = url
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.to_string())
+        .ok_or_else(|| "OAuth callback missing code".to_string())?;
+    let state = url
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.to_string())
+        .unwrap_or_default();
+    if state != expected_state {
+        return Err("OAuth state mismatch".to_string());
+    }
+
+    let response = [
+        "HTTP/1.1 200 OK",
+        "Content-Type: text/html; charset=utf-8",
+        "Connection: close",
+        "",
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"/>",
+        "<title>Nova OAuth</title></head><body>",
+        "<h1>Authentication complete</h1>",
+        "<p>You can return to the app.</p>",
+        "</body></html>",
+    ]
+    .join("\r\n");
+    let _ = socket.write_all(response.as_bytes()).await;
+
+    Ok(code)
+}
+
+async fn exchange_code_for_tokens(
+    code: String,
+    verifier: String,
+    redirect_uri: String,
+) -> Result<OAuthTokenResponse, String> {
+    let client_id = google_client_id()?;
+    let client = reqwest::Client::new();
+    let mut params = vec![
+        ("client_id", client_id),
+        ("code", code),
+        ("grant_type", "authorization_code".to_string()),
+        ("redirect_uri", redirect_uri),
+        ("code_verifier", verifier),
+    ];
+    if let Some(secret) = google_client_secret() {
+        params.push(("client_secret", secret));
+    }
+    let resp = client
+        .post(GOOGLE_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Token exchange failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown error".to_string());
+        return Err(format!("Token exchange failed: {}", text));
+    }
+
+    resp.json::<OAuthTokenResponse>()
+        .await
+        .map_err(|e| format!("Failed to parse token response: {}", e))
+}
+
+async fn fetch_google_user(access_token: &str) -> Result<GoogleUserInfo, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(GOOGLE_USERINFO_URL)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch user info: {}", e))?;
+    if !resp.status().is_success() {
+        return Ok(GoogleUserInfo { email: None, id: None });
+    }
+    resp.json::<GoogleUserInfo>()
+        .await
+        .map_err(|e| format!("Failed to parse user info: {}", e))
+}
+
+#[tauri::command]
+pub async fn start_google_oauth(app: AppHandle, provider: String) -> Result<OAuthTokenBundle, String> {
+    let scopes = oauth_scopes(&provider)?;
+    let (verifier, challenge) = generate_pkce();
+    let state = URL_SAFE_NO_PAD.encode({
+        let mut bytes = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        bytes
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("Failed to bind OAuth callback server: {}", e))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to read OAuth callback port: {}", e))?
+        .port();
+    let redirect_uri = format!("http://127.0.0.1:{}/oauth/callback", port);
+
+    let mut auth_url = Url::parse(GOOGLE_AUTH_URL)
+        .map_err(|_| "Failed to build OAuth URL".to_string())?;
+    auth_url.query_pairs_mut()
+        .append_pair("client_id", &google_client_id()?)
+        .append_pair("response_type", "code")
+        .append_pair("redirect_uri", &redirect_uri)
+        .append_pair("scope", &scopes.join(" "))
+        .append_pair("code_challenge", &challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", &state)
+        .append_pair("access_type", "offline")
+        .append_pair("prompt", "consent");
+
+    app.shell()
+        .open(auth_url.as_str(), None)
+        .map_err(|e| format!("Failed to open browser: {}", e))?;
+
+    let code = wait_for_oauth_callback(listener, &state).await?;
+    let token_response = exchange_code_for_tokens(code, verifier, redirect_uri).await?;
+    let refresh_token = token_response
+        .refresh_token
+        .ok_or_else(|| "OAuth did not return a refresh token. Re-consent required.".to_string())?;
+    let expires_in = token_response.expires_in.unwrap_or(3600);
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "Clock error".to_string())?
+        .as_millis() as u64;
+    let expires_at = now_ms.saturating_add(expires_in * 1000);
+    let user_info = fetch_google_user(&token_response.access_token).await.unwrap_or(GoogleUserInfo {
+        email: None,
+        id: None,
+    });
+
+    let scopes_list = token_response
+        .scope
+        .map(|s| s.split_whitespace().map(|v| v.to_string()).collect())
+        .unwrap_or_else(|| scopes.iter().map(|s| s.to_string()).collect());
+
+    Ok(OAuthTokenBundle {
+        access_token: token_response.access_token,
+        refresh_token,
+        token_type: token_response.token_type,
+        expires_at,
+        scopes: scopes_list,
+        email: user_info.email,
+        provider_user_id: user_info.id,
+        metadata: serde_json::json!({}),
+    })
+}
+
+#[tauri::command]
+pub async fn refresh_google_token(provider: String, refresh_token: String) -> Result<RefreshTokenResponse, String> {
+    oauth_scopes(&provider)?;
+    let client_id = google_client_id()?;
+    let client = reqwest::Client::new();
+    let mut params = vec![
+        ("client_id", client_id),
+        ("refresh_token", refresh_token),
+        ("grant_type", "refresh_token".to_string()),
+    ];
+    if let Some(secret) = google_client_secret() {
+        params.push(("client_secret", secret));
+    }
+    let resp = client
+        .post(GOOGLE_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Token refresh failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown error".to_string());
+        return Err(format!("Token refresh failed: {}", text));
+    }
+
+    let data = resp
+        .json::<OAuthTokenResponse>()
+        .await
+        .map_err(|e| format!("Failed to parse refresh response: {}", e))?;
+
+    let expires_in = data.expires_in.unwrap_or(3600);
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "Clock error".to_string())?
+        .as_millis() as u64;
+    let expires_at = now_ms.saturating_add(expires_in * 1000);
+
+    Ok(RefreshTokenResponse {
+        access_token: data.access_token,
+        token_type: data.token_type,
+        expires_at,
+    })
 }
