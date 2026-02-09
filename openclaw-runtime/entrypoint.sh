@@ -148,6 +148,9 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
       }${IMAGE_MODEL_BLOCK}
     }
   },
+  "cron": {
+    "store": "/data/cron/jobs.json"
+  },
   "plugins": {
     "slots": {
       "memory": "${MEMORY_SLOT}"
