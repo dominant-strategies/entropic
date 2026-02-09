@@ -40,6 +40,10 @@ mkdir -p "$AUTH_DIR"
     echo "}"
 } > "$AUTH_DIR/auth-profiles.json"
 
+json_escape() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\r/\\r/g' -e 's/\n/\\n/g'
+}
+
 # Create other directories OpenClaw needs
 mkdir -p /home/node/.openclaw/workspace
 mkdir -p /home/node/.openclaw/canvas
@@ -63,7 +67,8 @@ fi
 
 if [ "$MEMORY_SLOT" = "memory-lancedb" ]; then
     if [ -n "${OPENAI_API_KEY:-}" ]; then
-        MEMORY_CONFIG="\"memory-lancedb\": { \"enabled\": true, \"config\": { \"embedding\": { \"apiKey\": \"${OPENAI_API_KEY}\", \"model\": \"text-embedding-3-small\" } } }"
+        OPENAI_API_KEY_ESC="$(json_escape "${OPENAI_API_KEY}")"
+        MEMORY_CONFIG="\"memory-lancedb\": { \"enabled\": true, \"config\": { \"embedding\": { \"apiKey\": \"${OPENAI_API_KEY_ESC}\", \"model\": \"text-embedding-3-small\" } } }"
     else
         MEMORY_SLOT="memory-core"
     fi
@@ -74,14 +79,13 @@ if [ -n "$MEMORY_CONFIG" ]; then
     PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, ${MEMORY_CONFIG}"
 fi
 
-json_escape() {
-    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\r/\\r/g' -e 's/\n/\\n/g'
-}
-
 if [ -n "${OPENCLAW_MODEL:-}" ]; then
     OPENCLAW_MODEL_ESC="$(json_escape "${OPENCLAW_MODEL}")"
+    IMAGE_MODEL_BLOCK=""
     if [ -n "${OPENCLAW_IMAGE_MODEL:-}" ]; then
         OPENCLAW_IMAGE_MODEL_ESC="$(json_escape "${OPENCLAW_IMAGE_MODEL}")"
+        IMAGE_MODEL_BLOCK=",
+      \"imageModel\": { \"primary\": \"${OPENCLAW_IMAGE_MODEL_ESC}\" }"
     else
         OPENCLAW_IMAGE_MODEL_ESC=""
     fi
@@ -139,8 +143,7 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
     "defaults": {
       "model": {
         "primary": "${OPENCLAW_MODEL_ESC}"
-      }${OPENCLAW_IMAGE_MODEL:+,
-      "imageModel": { "primary": "${OPENCLAW_IMAGE_MODEL_ESC}" }}
+      }${IMAGE_MODEL_BLOCK}
     }
   },
   "plugins": {
