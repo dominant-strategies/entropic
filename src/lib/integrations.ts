@@ -26,7 +26,7 @@ const OPENCLAW_SYNC_PROVIDERS = new Set<IntegrationProvider>([
 export type IntegrationProvider = "google_calendar" | "google_email" | "x";
 
 export interface Integration {
-  provider: string;
+  provider: IntegrationProvider;
   connected: boolean;
   email?: string;
   scopes: string[];
@@ -109,7 +109,7 @@ export async function clearPendingImport(provider: IntegrationProvider) {
 
 export async function getIntegrations(): Promise<Integration[]> {
   const records = await listIntegrationSecrets<StoredIntegration>();
-  const local = records.map((record) => ({
+  const local: Integration[] = records.map((record) => ({
     provider: record.provider,
     connected: Boolean(record.access_token),
     stale: !record.access_token,
@@ -119,7 +119,7 @@ export async function getIntegrations(): Promise<Integration[]> {
   try {
     const xStatus = await getXIntegrationStatus();
     if (xStatus) {
-      local.push(xStatus);
+      local.push({ ...xStatus, stale: xStatus.stale ?? false });
     }
   } catch (err) {
     console.warn("Failed to load X integration status:", err);
@@ -130,7 +130,7 @@ export async function getIntegrations(): Promise<Integration[]> {
 export async function getIntegrationsCached(): Promise<Integration[]> {
   const cached = await listIntegrationIndexCache();
   return cached.map((record) => ({
-    provider: record.provider,
+    provider: record.provider as IntegrationProvider,
     connected: true,
     stale: true,
     email: record.email ?? undefined,

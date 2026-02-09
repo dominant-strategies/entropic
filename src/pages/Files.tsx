@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, type ReactNode, type MouseEvent } from "react";
+import { useState, useEffect, useCallback, useRef, type ReactNode, type MouseEvent as ReactMouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
 import {
@@ -157,7 +157,7 @@ function AppWindow({
   position: { x: number; y: number };
   size: { w: number; h: number };
   onClose: () => void;
-  onDragStart: (e: MouseEvent) => void;
+  onDragStart: (e: ReactMouseEvent<HTMLDivElement>) => void;
   onFocus: () => void;
   zIndex: number;
   children: ReactNode;
@@ -357,7 +357,7 @@ export function Files({
       .catch(() => {});
   }, [proxyEnabled]);
 
-  function handleIconMouseDown(id: string, e: MouseEvent) {
+  function handleIconMouseDown(id: string, e: ReactMouseEvent<HTMLElement>) {
     e.stopPropagation();
     const icon = desktopIcons[id];
     if (!icon) return;
@@ -369,7 +369,7 @@ export function Files({
       oy: icon.y,
       moved: false,
     };
-    function onMove(ev: MouseEvent) {
+    function onMove(ev: globalThis.MouseEvent) {
       if (!iconDragRef.current) return;
       const dx = ev.clientX - iconDragRef.current.sx;
       const dy = ev.clientY - iconDragRef.current.sy;
@@ -468,7 +468,7 @@ export function Files({
   }
 
   function startWindowDrag(
-    e: MouseEvent,
+    e: ReactMouseEvent<HTMLElement>,
     ref: React.MutableRefObject<{ sx: number; sy: number; ox: number; oy: number } | null>,
     pos: { x: number; y: number },
     setPos: (next: { x: number; y: number }) => void,
@@ -478,7 +478,7 @@ export function Files({
     e.preventDefault();
     focusWindow(id);
     ref.current = { sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y };
-    function onMove(ev: MouseEvent) {
+    function onMove(ev: globalThis.MouseEvent) {
       if (!ref.current) return;
       setPos({
         x: Math.max(0, ref.current.ox + ev.clientX - ref.current.sx),
@@ -494,11 +494,11 @@ export function Files({
     window.addEventListener("mouseup", onUp);
   }
 
-  function handleFinderDragStart(e: MouseEvent) {
+  function handleFinderDragStart(e: ReactMouseEvent<HTMLElement>) {
     startWindowDrag(e, dragRef, finderPos, setFinderPos, "finder");
   }
 
-  function handleChatDragStart(e: MouseEvent) {
+  function handleChatDragStart(e: ReactMouseEvent<HTMLElement>) {
     startWindowDrag(e, chatDragRef, chatPos, setChatPos, "chat");
   }
 
@@ -845,7 +845,7 @@ export function Files({
                   <button onClick={() => setViewMode("grid")} className="p-1 rounded" style={{ color: viewMode === "grid" ? "#fff" : "#666", background: viewMode === "grid" ? "rgba(255,255,255,0.1)" : "transparent" }}><LayoutGrid className="w-3.5 h-3.5" /></button>
                   <button onClick={() => setViewMode("list")} className="p-1 rounded" style={{ color: viewMode === "list" ? "#fff" : "#666", background: viewMode === "list" ? "rgba(255,255,255,0.1)" : "transparent" }}><List className="w-3.5 h-3.5" /></button>
                   <div className="w-px h-3.5 mx-1" style={{ background: "rgba(255,255,255,0.1)" }} />
-                  <button onClick={handleCreateFolder} className="p-1 rounded hover:bg-white/10"><Plus className="w-3.5 h-3.5" style={{ color: "#aaa" }} /></button>
+                  <button onClick={() => handleCreateFolder(finderOpen ? currentPath : "")} className="p-1 rounded hover:bg-white/10"><Plus className="w-3.5 h-3.5" style={{ color: "#aaa" }} /></button>
                 </div>
               </div>
 

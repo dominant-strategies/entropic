@@ -5,7 +5,6 @@ import { Calendar, Mail, CheckCircle2, ExternalLink, ShieldCheck, Loader2, Twitt
 import {
   getIntegrations,
   getIntegrationsCached,
-  getCachedIntegrationProviders,
   connectIntegration,
   disconnectIntegration,
   syncIntegrationToGateway,
@@ -170,7 +169,7 @@ export function Store({
         setIntegrations(merged.length ? merged : list);
         const connectedIds = new Set(list.filter(i => i.connected).map(i => i.provider));
         for (const id of Array.from(syncedIntegrationsRef.current)) {
-          if (!connectedIds.has(id)) {
+          if (!connectedIds.has(id as IntegrationProvider)) {
             syncedIntegrationsRef.current.delete(id);
           }
         }
