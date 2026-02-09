@@ -243,14 +243,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
               return;
             }
 
-            // If no session, try to refresh (in case tokens exist but session is not loaded)
-            const { data: { session: newSession } } = await supabase.auth.refreshSession();
-            if (newSession) {
-              sessionStorage.removeItem('nova_oauth_pending');
-              setSession(newSession);
-              setUser(newSession.user);
-              console.log('OAuth completed successfully (via refresh)');
-            }
+            // Avoid hammering refresh; wait for the session to land via deep link.
           } catch (error) {
             console.error('Failed to check session after OAuth:', error);
           }
@@ -287,15 +280,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
             return;
           }
 
-          // If no session, try to refresh
-          const { data: { session: newSession } } = await supabase.auth.refreshSession();
-          if (newSession) {
-            sessionStorage.removeItem('nova_oauth_pending');
-            setSession(newSession);
-            setUser(newSession.user);
-            console.log('OAuth completed successfully (via polling refresh)');
-            clearInterval(checkInterval);
-          }
+          // Avoid hammering refresh; let deep-link handler set the session.
         } catch (error) {
           // Ignore errors during polling
         }

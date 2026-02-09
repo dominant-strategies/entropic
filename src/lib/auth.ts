@@ -244,20 +244,53 @@ export async function getAccessToken(): Promise<string | null> {
     return null;
   }
 
-  // First try to get the session
-  let { data: { session }, error } = await supabase.auth.getSession();
+  const { data: { session }, error } = await supabase.auth.getSession();
+  if (error) return session?.access_token || null;
 
-  // If we have a session but it might be expired, refresh it
-  if (session && !error) {
-    const { data: { session: refreshedSession }, error: refreshError } =
-      await supabase.auth.refreshSession({ refresh_token: session.refresh_token });
+  if (!session) return null;
 
-    if (!refreshError && refreshedSession) {
-      session = refreshedSession;
-    }
+  // Avoid hammering the token endpoint; only refresh near expiry and throttle.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expiresAt = session.expires_at ?? 0;
+  const expiresIn = expiresAt - nowSec;
+  if (expiresIn > 90) {
+    return session.access_token;
   }
 
-  return session?.access_token || null;
+  if (!session.refresh_token) {
+    return session.access_token;
+  }
+
+  const refreshed = await throttledRefreshSession(session.refresh_token);
+  return refreshed?.access_token || session.access_token || null;
+}
+
+let refreshInFlight: Promise<Session | null> | null = null;
+let lastRefreshAtMs = 0;
+const REFRESH_THROTTLE_MS = 30_000;
+
+async function throttledRefreshSession(refreshToken: string): Promise<Session | null> {
+  if (!supabase) return null;
+  const now = Date.now();
+  if (refreshInFlight) return refreshInFlight;
+  if (now - lastRefreshAtMs < REFRESH_THROTTLE_MS) {
+    const { data: { session } } = await supabase.auth.getSession();
+    return session ?? null;
+  }
+  lastRefreshAtMs = now;
+  refreshInFlight = supabase.auth
+    .refreshSession({ refresh_token: refreshToken })
+    .then(({ data, error }) => {
+      if (error) {
+        console.warn("Token refresh failed:", error);
+        return null;
+      }
+      return data.session ?? null;
+    })
+    .finally(() => {
+      refreshInFlight = null;
+    });
+  return refreshInFlight;
 }
 
 /**
