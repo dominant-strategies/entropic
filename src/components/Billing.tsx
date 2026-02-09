@@ -219,13 +219,13 @@ export function Billing() {
               </div>
             </div>
 
-            {Object.keys(usage.by_model).length > 0 && (
+            {Object.keys(usage.by_model ?? {}).length > 0 && (
               <div>
                 <div className="text-sm font-medium text-[var(--text-secondary)] mb-2">
                   By Model
                 </div>
                 <div className="space-y-2">
-                  {Object.entries(usage.by_model).map(([model, data]) => {
+                  {Object.entries(usage.by_model ?? {}).map(([model, data]) => {
                     const modelName = model.split("/").pop() || model;
                     return (
                       <div
