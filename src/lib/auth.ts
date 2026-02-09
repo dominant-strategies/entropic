@@ -346,7 +346,7 @@ export interface Model {
 /**
  * Make authenticated API request
  */
-async function apiRequest<T>(
+export async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {

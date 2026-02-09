@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-shell";
 import { Store } from "@tauri-apps/plugin-store";
 import { GatewayClient } from "./gateway";
+import { apiRequest } from "./auth";
 import {
   loadIntegrationSecret,
   saveIntegrationSecret,
@@ -12,13 +14,16 @@ import {
 const INTEGRATION_STORE = "nova-integrations.json";
 const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:19789";
 const GATEWAY_TOKEN = "nova-local-gateway";
+const INTEGRATIONS_REDIRECT_URL =
+  (import.meta as any).env?.VITE_INTEGRATIONS_REDIRECT_URL ||
+  "nova://integrations/success";
 
 const OPENCLAW_SYNC_PROVIDERS = new Set<IntegrationProvider>([
   "google_calendar",
   "google_email",
 ]);
 
-export type IntegrationProvider = "google_calendar" | "google_email";
+export type IntegrationProvider = "google_calendar" | "google_email" | "x";
 
 export interface Integration {
   provider: string;
@@ -104,13 +109,22 @@ export async function clearPendingImport(provider: IntegrationProvider) {
 
 export async function getIntegrations(): Promise<Integration[]> {
   const records = await listIntegrationSecrets<StoredIntegration>();
-  return records.map((record) => ({
+  const local = records.map((record) => ({
     provider: record.provider,
     connected: Boolean(record.access_token),
     stale: !record.access_token,
     email: record.email ?? undefined,
     scopes: record.scopes ?? [],
   }));
+  try {
+    const xStatus = await getXIntegrationStatus();
+    if (xStatus) {
+      local.push(xStatus);
+    }
+  } catch (err) {
+    console.warn("Failed to load X integration status:", err);
+  }
+  return local;
 }
 
 export async function getIntegrationsCached(): Promise<Integration[]> {
@@ -130,6 +144,17 @@ export async function isIntegrationConnected(provider: IntegrationProvider): Pro
 }
 
 export async function connectIntegration(provider: IntegrationProvider): Promise<void> {
+  if (provider === "x") {
+    const result = await apiRequest<{ url: string }>("/x/oauth/start", {
+      method: "POST",
+      body: JSON.stringify({ redirect_uri: INTEGRATIONS_REDIRECT_URL }),
+    });
+    if (result?.url) {
+      await open(result.url);
+    }
+    return;
+  }
+
   const result = await invoke<OAuthExchangeResponse>("start_google_oauth", { provider });
   const record: StoredIntegration = {
     provider,
@@ -151,7 +176,30 @@ export async function connectIntegration(provider: IntegrationProvider): Promise
 }
 
 export async function disconnectIntegration(provider: IntegrationProvider): Promise<void> {
+  if (provider === "x") {
+    await apiRequest("/x/oauth/disconnect", { method: "POST" });
+    return;
+  }
   await removeIntegrationSecret(provider);
+}
+
+async function getXIntegrationStatus(): Promise<Integration | null> {
+  const data = await apiRequest<{
+    connected: boolean;
+    username?: string | null;
+    expires_at?: string | null;
+    scopes?: string[] | null;
+  }>("/x/oauth/status");
+  if (!data?.connected) {
+    return null;
+  }
+  return {
+    provider: "x",
+    connected: true,
+    stale: false,
+    email: data.username ? `@${data.username}` : undefined,
+    scopes: data.scopes ?? [],
+  };
 }
 
 async function refreshIntegration(record: StoredIntegration): Promise<StoredIntegration> {
