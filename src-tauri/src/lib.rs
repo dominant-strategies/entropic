@@ -34,7 +34,7 @@ fn try_forward_deeplink(url: &str) -> bool {
 }
 
 fn should_start_dev_relay() -> bool {
-    std::env::var("NOVA_DEV_RELAY").as_deref() == Ok("1")
+    cfg!(target_os = "macos") && std::env::var("NOVA_DEV_RELAY").as_deref() == Ok("1")
 }
 
 async fn start_deeplink_relay_server(app: AppHandle) {
@@ -100,7 +100,7 @@ async fn start_deeplink_relay_server(app: AppHandle) {
 }
 
 pub fn run() {
-    if cfg!(debug_assertions) {
+    if cfg!(debug_assertions) && cfg!(target_os = "macos") {
         if let Some(url) = extract_deeplink_arg() {
             if try_forward_deeplink(&url) {
                 return;

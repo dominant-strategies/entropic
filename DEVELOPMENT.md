@@ -141,6 +141,29 @@ pnpm tauri:dev
 This uses `src-tauri/tauri.conf.dev.json` and a dev-only deep link scheme
 (`nova-dev://`) plus a separate auth store (`nova-auth-dev.json`).
 
+#### macOS dev deep-link relay
+macOS only registers URL schemes from **bundled `.app` files**, not from the
+`tauri dev` debug binary. That means OAuth deep-links (`nova-dev://...`) will
+launch the **bundled** app unless we forward them back to the running dev server.
+
+To solve this, `pnpm tauri:dev` enables a **dev-only relay** on macOS that listens
+on `127.0.0.1:27100` and forwards deep-links to the running dev instance.
+
+**One-time setup on macOS:**
+```bash
+# Build the dev bundle once so LaunchServices can register nova-dev://
+pnpm tauri:build:dev
+
+# Open the dev bundle once to register the scheme
+open -a "src-tauri/target/debug/bundle/macos/Nova (Dev).app"
+```
+
+After that, keep using `pnpm tauri:dev`. The relay will forward `nova-dev://`
+callbacks to the dev instance instead of opening a second app.
+
+**Linux note:** Linux uses `xdg-mime` to register the debug binary directly,
+so the relay is **not needed** and does not run on Linux.
+
 **Linux host networking (required for local nova-web API)**
 ```bash
 ```
