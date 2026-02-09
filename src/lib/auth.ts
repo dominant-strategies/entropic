@@ -6,6 +6,10 @@ import { Store } from "@tauri-apps/plugin-store";
 const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL || "";
 const SUPABASE_ANON_KEY = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || "";
 const API_URL = (import.meta as any).env?.VITE_API_URL || "";
+const AUTH_REDIRECT_URL =
+  (import.meta as any).env?.VITE_AUTH_REDIRECT_URL || "nova://auth/callback";
+const AUTH_STORE_NAME =
+  (import.meta as any).env?.VITE_AUTH_STORE_NAME || "nova-auth.json";
 
 // Check if auth is configured
 export const isAuthConfigured = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
@@ -20,7 +24,7 @@ export const supabase: SupabaseClient | null = isAuthConfigured
           // Use Tauri store for session persistence
           getItem: async (key: string) => {
             try {
-              const store = await Store.load("nova-auth.json");
+              const store = await Store.load(AUTH_STORE_NAME);
               const value = await store.get(key);
               return value as string | null;
             } catch {
@@ -29,7 +33,7 @@ export const supabase: SupabaseClient | null = isAuthConfigured
           },
           setItem: async (key: string, value: string) => {
             try {
-              const store = await Store.load("nova-auth.json");
+              const store = await Store.load(AUTH_STORE_NAME);
               await store.set(key, value);
               await store.save();
             } catch (error) {
@@ -38,7 +42,7 @@ export const supabase: SupabaseClient | null = isAuthConfigured
           },
           removeItem: async (key: string) => {
             try {
-              const store = await Store.load("nova-auth.json");
+              const store = await Store.load(AUTH_STORE_NAME);
               await store.delete(key);
               await store.save();
             } catch (error) {
@@ -71,7 +75,7 @@ export async function signInWithOAuth(provider: OAuthProvider): Promise<void> {
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider,
     options: {
-      redirectTo: "nova://auth/callback",
+      redirectTo: AUTH_REDIRECT_URL,
       skipBrowserRedirect: true,
     },
   });
@@ -125,7 +129,7 @@ export async function signUpWithEmail(email: string, password: string): Promise<
     email,
     password,
     options: {
-      emailRedirectTo: "nova://auth/callback",
+      emailRedirectTo: AUTH_REDIRECT_URL,
     },
   });
 

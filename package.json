@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
+    "tauri:dev": "TAURI_CONFIG=src-tauri/tauri.conf.dev.json tauri dev",
     "tauri:build": "tauri build",
     "dev:protocol": "bash ./scripts/register-dev-protocol.sh",
     "bundle:colima": "./scripts/bundle-colima.sh",

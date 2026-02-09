@@ -1,0 +1,75 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nova (Dev)",
+  "version": "0.1.0",
+  "identifier": "ai.openclaw.nova.dev",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:5174",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "title": "Nova (Dev)",
+        "width": 900,
+        "height": 700,
+        "minWidth": 600,
+        "minHeight": 500,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "titleBarStyle": "Overlay"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://localhost:* https://*.supabase.co https://*.workers.dev https://openrouter.ai https://api.anthropic.com https://api.openai.com; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "targets": ["app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "resources/bin/*",
+      "resources/share/**/*"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "AI assistant with secure sandboxing",
+    "longDescription": "Nova brings OpenClaw to your desktop with a beautiful interface and secure container-based sandboxing for AI-generated commands.",
+    "macOS": {
+      "entitlements": "entitlements.plist",
+      "exceptionDomain": null,
+      "frameworks": [],
+      "minimumSystemVersion": "12.0",
+      "signingIdentity": null
+    }
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    },
+    "deep-link": {
+      "mobile": [],
+      "desktop": {
+        "schemes": ["nova-dev"]
+      }
+    },
+    "updater": {
+      "pubkey": "REPLACE_WITH_UPDATER_PUBLIC_KEY",
+      "endpoints": [
+        "https://github.com/REPLACE_ORG/nova-releases/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}
