@@ -16,7 +16,9 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             let urls: Vec<String> = args
                 .into_iter()
-                .filter(|arg| arg.starts_with("nova://"))
+                .filter(|arg| {
+                    arg.starts_with("nova://") || arg.starts_with("nova-dev://")
+                })
                 .collect();
 
             if urls.is_empty() {
