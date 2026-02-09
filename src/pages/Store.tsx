@@ -176,12 +176,12 @@ export function Store({
 
   const googleIntegrations: GoogleIntegration[] = useMemo(() => {
     return GOOGLE_INTEGRATIONS.map(gi => {
-      const connected = integrations.find(i => i.provider === gi.id);
+      const entry = integrations.find(i => i.provider === gi.id);
       return {
         ...gi,
-        connected: !!connected && !connected.stale,
-        stale: connected?.stale,
-        email: connected?.email,
+        connected: !!entry && !entry.stale,
+        stale: entry?.stale,
+        email: entry?.email,
       };
     });
   }, [integrations]);
@@ -288,31 +288,55 @@ export function Store({
             <span>Google Services</span>
             <span className="text-xs text-[var(--text-tertiary)]">Requires Google account</span>
           </h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {googleIntegrations.map(integration => {
-              const Icon = integration.icon;
-              return (
-                <div key={integration.id} className="glass-card p-4 flex flex-col">
-                  <div className="flex items-start justify-between mb-2">
+          <div className="glass-card p-4 flex flex-col">
+            <div className="flex items-start justify-between mb-3">
+              <div className="flex items-center gap-3">
+                <div className={clsx(
+                  "w-10 h-10 rounded-lg flex items-center justify-center",
+                  googleIntegrations.every(i => i.connected) ? "bg-green-100" : "bg-black/5"
+                )}>
+                  <Calendar className={clsx(
+                    "w-5 h-5",
+                    googleIntegrations.every(i => i.connected) ? "text-green-600" : "text-[var(--text-tertiary)]"
+                  )} />
+                </div>
+                <div>
+                  <h3 className="font-medium text-[var(--text-primary)] flex items-center gap-2">
+                    Google Workspace
+                    {googleIntegrations.every(i => i.connected) && (
+                      <CheckCircle2 className="w-4 h-4 text-green-600" />
+                    )}
+                  </h3>
+                  <p className="text-xs text-[var(--text-tertiary)]">
+                    Calendar + Gmail
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="space-y-3">
+              {googleIntegrations.map(integration => {
+                const Icon = integration.icon;
+                const statusText = integration.connected
+                  ? "Connected"
+                  : integration.stale
+                    ? "Reconnect"
+                    : "Connect";
+                return (
+                  <div key={integration.id} className="flex items-center justify-between rounded-lg bg-[var(--bg-tertiary)]/60 px-3 py-2">
                     <div className="flex items-center gap-3">
-                      <div className={clsx(
-                        "w-10 h-10 rounded-lg flex items-center justify-center",
-                        integration.connected ? "bg-green-100" : "bg-black/5"
-                      )}>
-                        <Icon className={clsx(
-                          "w-5 h-5",
-                          integration.connected ? "text-green-600" : "text-[var(--text-tertiary)]"
-                        )} />
-                      </div>
+                      <Icon className={clsx(
+                        "w-4 h-4",
+                        integration.connected ? "text-green-600" : "text-[var(--text-tertiary)]"
+                      )} />
                       <div>
-                        <h3 className="font-medium text-[var(--text-primary)] flex items-center gap-2">
+                        <div className="text-sm font-medium text-[var(--text-primary)]">
                           {integration.name}
-                          {integration.connected && (
-                            <CheckCircle2 className="w-4 h-4 text-green-600" />
-                          )}
-                        </h3>
+                        </div>
                         {integration.email && (
-                          <p className="text-xs text-[var(--text-tertiary)]">{integration.email}</p>
+                          <div className="text-xs text-[var(--text-tertiary)]">{integration.email}</div>
+                        )}
+                        {integration.stale && (
+                          <div className="text-xs text-amber-600">Needs reconnect — tokens missing locally.</div>
                         )}
                       </div>
                     </div>
@@ -327,25 +351,13 @@ export function Store({
                         integration.connected && !integration.stale ? "btn-secondary" : "btn-primary"
                       )}
                     >
-                      {connecting === integration.id
-                        ? "..."
-                        : integration.connected && !integration.stale
-                          ? "Disconnect"
-                          : integration.connected && integration.stale
-                            ? "Reconnect"
-                            : "Connect"}
+                      {connecting === integration.id ? "..." : statusText}
                       {(!integration.connected || integration.stale) && <ExternalLink className="w-3 h-3 ml-1" />}
                     </button>
                   </div>
-                  {integration.stale && (
-                    <p className="text-xs text-amber-600 mt-1">
-                      Needs reconnect — tokens missing locally.
-                    </p>
-                  )}
-                  <p className="text-sm text-[var(--text-secondary)] flex-1">{integration.description}</p>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
         </div>
       )}
