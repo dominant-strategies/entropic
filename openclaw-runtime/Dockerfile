@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && \
 
 WORKDIR /app
 
-# Copy OpenClaw dist (built from clawdbot repo)
+# Copy OpenClaw dist (built from openclaw repo)
 COPY dist ./dist
 COPY package.json ./package.json
 COPY node_modules ./node_modules

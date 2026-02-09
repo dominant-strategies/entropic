@@ -33,7 +33,7 @@ type Props = {
 const navItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
   { id: "files", label: "Home", icon: FolderOpen },
   { id: "chat", label: "Chat", icon: MessageSquare },
-  { id: "store", label: "Skills", icon: Sparkles },
+  { id: "store", label: "Plugins", icon: Sparkles },
   { id: "channels", label: "Channels", icon: Radio },
   { id: "tasks", label: "Tasks", icon: CalendarClock },
   { id: "logs", label: "Logs", icon: ScrollText },

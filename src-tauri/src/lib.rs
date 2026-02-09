@@ -1,7 +1,9 @@
 mod runtime;
 mod commands;
 
+use rand::RngCore;
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+use std::fs;
 
 pub fn run() {
     tauri::Builder::default()
@@ -29,6 +31,24 @@ pub fn run() {
             let _ = app.emit("deep-link-open", urls);
         }))
         .setup(|app| {
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|_| "Failed to resolve app data dir".to_string())?;
+            fs::create_dir_all(&data_dir)
+                .map_err(|e| format!("Failed to create app data dir: {}", e))?;
+            let salt_path = data_dir.join("stronghold.salt");
+            if !salt_path.exists() {
+                let mut salt = [0u8; 32];
+                rand::thread_rng().fill_bytes(&mut salt);
+                fs::write(&salt_path, &salt)
+                    .map_err(|e| format!("Failed to write stronghold salt: {}", e))?;
+            }
+
+            app.handle()
+                .plugin(tauri_plugin_stronghold::Builder::with_argon2(&salt_path).build())
+                .map_err(|e| format!("Failed to init stronghold: {}", e))?;
+
             let state = commands::init_state(&app.handle());
             app.manage(state);
             Ok(())
@@ -68,6 +88,8 @@ pub fn run() {
             commands::get_plugin_store,
             commands::set_plugin_enabled,
             commands::scan_plugin,
+            commands::start_google_oauth,
+            commands::refresh_google_token,
             commands::list_workspace_files,
             commands::read_workspace_file,
             commands::read_workspace_file_base64,

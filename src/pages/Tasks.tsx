@@ -253,7 +253,9 @@ function buildGeneratePrompt(editor: EditorState, selected: SkillOption[]): stri
   const goal = editor.description.trim() || editor.name.trim() || "this task";
   const skillLabels = selected.map((skill) => skill.label);
   const skillsLine =
-    skillLabels.length > 0 ? `Selected skills: ${skillLabels.join(", ")}` : "Selected skills: none";
+    skillLabels.length > 0
+      ? `Selected plugins: ${skillLabels.join(", ")}`
+      : "Selected plugins: none";
 
   return [
     "You are helping a user create a scheduled task for Nova/OpenClaw.",
@@ -262,10 +264,10 @@ function buildGeneratePrompt(editor: EditorState, selected: SkillOption[]): stri
     `Goal: ${goal}`,
     skillsLine,
     "",
-    "Infer the most likely user intent from the name/description and selected skills.",
+    "Infer the most likely user intent from the name/description and selected plugins.",
     "Write the task instructions the agent should run on each schedule.",
     "Requirements:",
-    "- Use the selected skills explicitly by name if provided.",
+    "- Use the selected plugins explicitly by name if provided.",
     "- Keep it concise and actionable.",
     "- Output only the task instructions (no preamble or explanations).",
     "- Use a short 'Steps' list and an 'Output' section.",
@@ -448,7 +450,7 @@ export function Tasks({ gatewayRunning }: Props) {
           });
         }
       } catch (e) {
-        setSkillsError("Failed to load connected skills");
+        setSkillsError("Failed to load connected plugins");
       }
 
       if (!cancelled) {
@@ -1236,7 +1238,7 @@ export function Tasks({ gatewayRunning }: Props) {
                       className="block text-sm font-medium"
                       style={{ color: "var(--text-secondary)" }}
                     >
-                      Skills (optional)
+                      Plugins (optional)
                     </label>
                     {skills.length > 0 && (
                       <div className="flex items-center gap-3 text-xs">
@@ -1259,7 +1261,7 @@ export function Tasks({ gatewayRunning }: Props) {
                   </div>
                   {skillsLoading && (
                     <p className="text-xs mb-2" style={{ color: "var(--text-tertiary)" }}>
-                      Loading connected skills…
+                      Loading connected plugins…
                     </p>
                   )}
                   {!skillsLoading && skillsError && (
@@ -1269,7 +1271,7 @@ export function Tasks({ gatewayRunning }: Props) {
                   )}
                   {!skillsLoading && skills.length === 0 && (
                     <p className="text-xs mb-2" style={{ color: "var(--text-tertiary)" }}>
-                      No connected skills yet. Connect one in the Skills tab.
+                      No connected plugins yet. Connect one in the Plugins tab.
                     </p>
                   )}
                   {integrations.length > 0 && (
@@ -1369,7 +1371,7 @@ export function Tasks({ gatewayRunning }: Props) {
                     }}
                   />
                   <p className="text-xs mt-1" style={{ color: "var(--text-tertiary)" }}>
-                    Tip: reference selected skills in your message for more reliable results.
+                    Tip: reference selected plugins in your message for more reliable results.
                   </p>
                   {generateStepsError && (
                     <p className="text-xs mt-2" style={{ color: "#ef4444" }}>

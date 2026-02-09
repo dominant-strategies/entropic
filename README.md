@@ -9,16 +9,16 @@ Nova is a Tauri desktop app that runs OpenClaw in a hardened local container to 
 - Node.js 18+ and pnpm
 - Rust (for Tauri)
 - Docker (Linux) or the app bundles Colima (macOS)
-- **OpenClaw** (clawdbot repo) - built separately
+- **OpenClaw** (openclaw repo) - built separately
 
 ### 1. Build OpenClaw
 
 Nova requires the OpenClaw runtime. Clone and build it first:
 
 ```bash
-# Clone clawdbot as a sibling directory
-git clone https://github.com/dominant-strategies/openclaw ../clawdbot
-cd ../clawdbot
+# Clone openclaw as a sibling directory
+git clone https://github.com/dominant-strategies/openclaw ../openclaw
+cd ../openclaw
 pnpm install
 pnpm build
 cd ../Nova

@@ -6,7 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 RUNTIME_DIR="$PROJECT_ROOT/openclaw-runtime"
-OPENCLAW_SOURCE="${OPENCLAW_SOURCE:-$PROJECT_ROOT/../clawdbot}"
+OPENCLAW_SOURCE="${OPENCLAW_SOURCE:-$PROJECT_ROOT/../openclaw}"
 
 echo "=== Building OpenClaw Runtime Container ==="
 echo ""

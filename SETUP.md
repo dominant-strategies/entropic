@@ -71,8 +71,8 @@ The runtime container runs OpenClaw gateway in a hardened environment.
 ```
 
 This script:
-1. Copies OpenClaw dist from `~/agent/clawdbot/dist`
-2. Copies templates from `~/agent/clawdbot/docs/reference/templates`
+1. Copies OpenClaw dist from `~/agent/openclaw/dist`
+2. Copies templates from `~/agent/openclaw/docs/reference/templates`
 3. Builds Docker image `openclaw-runtime:latest`
 
 ### Container Security
