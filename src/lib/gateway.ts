@@ -311,7 +311,60 @@ export class GatewayClient {
   }
 
   async getCronRuns(id: string, limit = 20): Promise<CronRunLogEntry[]> {
-    const result = await this.rpc<{ runs: CronRunLogEntry[] }>("cron.runs", { id, limit });
+    const result = await this.rpc<{
+      runs?: CronRunLogEntry[];
+      entries?: Array<
+        Partial<CronRunLogEntry> & {
+          action?: string;
+          status?: "ok" | "error" | "skipped";
+          summary?: string;
+          durationMs?: number;
+          runAtMs?: number;
+          ts?: number;
+        }
+      >;
+    }>("cron.runs", { id, limit });
+    const entries = result.entries;
+    if (entries && entries.length > 0) {
+      return entries.map((entry, index) => {
+        const startedAt =
+          (typeof entry.startedAt === "number" && Number.isFinite(entry.startedAt)
+            ? entry.startedAt
+            : undefined) ??
+          (typeof entry.runAtMs === "number" && Number.isFinite(entry.runAtMs)
+            ? entry.runAtMs
+            : undefined) ??
+          (typeof entry.ts === "number" && Number.isFinite(entry.ts) ? entry.ts : undefined);
+        const durationMs =
+          typeof entry.durationMs === "number" && Number.isFinite(entry.durationMs)
+            ? entry.durationMs
+            : undefined;
+        const finishedAt =
+          (typeof entry.finishedAt === "number" && Number.isFinite(entry.finishedAt)
+            ? entry.finishedAt
+            : undefined) ??
+          (startedAt && durationMs ? startedAt + durationMs : undefined);
+        const status =
+          entry.status === "ok" || entry.status === "error" || entry.status === "skipped"
+            ? entry.status
+            : "ok";
+        const jobId = entry.jobId || id;
+        const fallbackId = startedAt ?? entry.ts ?? index;
+        return {
+          id: entry.id || `${jobId}:${fallbackId}`,
+          jobId,
+          startedAt,
+          finishedAt,
+          status,
+          error: entry.error,
+          result: entry.result,
+          summary: entry.summary,
+          durationMs,
+          runAtMs: entry.runAtMs,
+          ts: entry.ts,
+        };
+      });
+    }
     return result.runs || [];
   }
 }
@@ -356,11 +409,15 @@ export type CronJob = {
 export type CronRunLogEntry = {
   id: string;
   jobId: string;
-  startedAt: number;
+  startedAt?: number;
   finishedAt?: number;
-  status: "ok" | "error";
+  status: "ok" | "error" | "skipped";
   error?: string;
   result?: unknown;
+  summary?: string;
+  durationMs?: number;
+  runAtMs?: number;
+  ts?: number;
 };
 
 // Singleton instance

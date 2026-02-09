@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Layout, Page } from "../components/Layout";
-import { Chat } from "./Chat";
+import { Chat, type ChatSession } from "./Chat";
 import { Store } from "./Store";
 import { Channels } from "./Channels";
 import { Files } from "./Files";
@@ -49,6 +49,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const [codeModel, setCodeModel] = useState("openai/gpt-5.2-codex");
   const [imageModel, setImageModel] = useState("google/gemini-3-pro-image-preview");
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [currentChatSession, setCurrentChatSession] = useState<string | null>(null);
+  const [pendingChatSession, setPendingChatSession] = useState<string | null>(null);
   const gatewayTokenRef = useRef<string | null>(null);
   const autoStartAttemptedRef = useRef(false);
   const retryAttemptRef = useRef(0);
@@ -432,6 +435,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             imageModel={imageModel}
             integrationsSyncing={integrationsSyncing}
             integrationsMissing={integrationsMissing}
+            onSessionsChange={(sessions, currentKey) => {
+              setChatSessions(sessions);
+              setCurrentChatSession(currentKey);
+              setPendingChatSession(null);
+            }}
+            requestedSession={pendingChatSession}
           />
         );
         }
@@ -519,6 +528,16 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       onNavigate={setCurrentPage}
       gatewayRunning={gatewayRunning}
       integrationsSyncing={integrationsSyncing}
+      chatSessions={chatSessions}
+      currentChatSession={currentChatSession}
+      onSelectChatSession={(key) => {
+        setPendingChatSession(key);
+        setCurrentPage("chat");
+      }}
+      onNewChat={() => {
+        setPendingChatSession("__new__");
+        setCurrentPage("chat");
+      }}
     >
       {showGatewayStartup && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">

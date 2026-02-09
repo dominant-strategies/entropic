@@ -56,6 +56,23 @@ function statusDot(job: CronJob): { color: string; title: string } {
   return { color: "#22c55e", title: "Enabled" };
 }
 
+function formatRunTime(run: CronRunLogEntry): string {
+  const ts = run.startedAt ?? run.runAtMs ?? run.ts;
+  if (!Number.isFinite(ts)) return "Unknown time";
+  return new Date(ts as number).toLocaleString();
+}
+
+function formatRunDuration(run: CronRunLogEntry): string | null {
+  if (Number.isFinite(run.durationMs)) {
+    return `${((run.durationMs as number) / 1000).toFixed(1)}s`;
+  }
+  if (Number.isFinite(run.startedAt) && Number.isFinite(run.finishedAt)) {
+    const delta = (run.finishedAt as number) - (run.startedAt as number);
+    if (Number.isFinite(delta)) return `${(delta / 1000).toFixed(1)}s`;
+  }
+  return null;
+}
+
 type ScheduleType = "every" | "at" | "cron";
 type SchedulePreset = "every_hour" | "daily" | "weekdays" | "weekends" | "mwf" | "once" | "custom";
 
@@ -1563,25 +1580,40 @@ export function Tasks({ gatewayRunning }: Props) {
                   >
                     <div className="flex items-center justify-between">
                       <span style={{ color: "var(--text-primary)" }}>
-                        {new Date(run.startedAt).toLocaleString()}
+                        {formatRunTime(run)}
                       </span>
                       <span
                         className="text-xs font-medium px-2 py-0.5 rounded-full"
                         style={{
-                          background: run.status === "ok" ? "#dcfce7" : "#fee2e2",
-                          color: run.status === "ok" ? "#16a34a" : "#dc2626",
+                          background:
+                            run.status === "ok"
+                              ? "#dcfce7"
+                              : run.status === "skipped"
+                              ? "#e5e7eb"
+                              : "#fee2e2",
+                          color:
+                            run.status === "ok"
+                              ? "#16a34a"
+                              : run.status === "skipped"
+                              ? "#6b7280"
+                              : "#dc2626",
                         }}
                       >
                         {run.status}
                       </span>
                     </div>
-                    {run.finishedAt && (
+                    {formatRunDuration(run) && (
                       <div className="text-xs mt-1" style={{ color: "var(--text-tertiary)" }}>
-                        Duration: {((run.finishedAt - run.startedAt) / 1000).toFixed(1)}s
+                        Duration: {formatRunDuration(run)}
                       </div>
                     )}
                     {run.error && (
                       <div className="text-xs mt-1 text-red-500 truncate">{run.error}</div>
+                    )}
+                    {!run.error && run.summary && (
+                      <div className="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+                        {run.summary}
+                      </div>
                     )}
                   </div>
                 ))

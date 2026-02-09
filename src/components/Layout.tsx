@@ -10,7 +10,10 @@ import {
   FolderOpen,
   CalendarClock,
   Loader2,
+  Plus,
+  Clock,
 } from "lucide-react";
+import type { ChatSession } from "../pages/Chat";
 import clsx from "clsx";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { loadProfile, type AgentProfile } from "../lib/profile";
@@ -30,11 +33,15 @@ type Props = {
   children: ReactNode;
   gatewayRunning: boolean;
   integrationsSyncing?: boolean;
+  chatSessions?: ChatSession[];
+  currentChatSession?: string | null;
+  onSelectChatSession?: (key: string) => void;
+  onNewChat?: () => void;
 };
 
 const navItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
   { id: "files", label: "Home", icon: FolderOpen },
-  { id: "chat", label: "Chat", icon: MessageSquare },
+  { id: "chat", label: "New Chat", icon: Plus },
   { id: "store", label: "Plugins", icon: Sparkles },
   { id: "channels", label: "Channels", icon: Radio },
   { id: "tasks", label: "Tasks", icon: CalendarClock },
@@ -42,7 +49,21 @@ const navItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
-export function Layout({ currentPage, onNavigate, children, gatewayRunning, integrationsSyncing }: Props) {
+function relativeTime(ts?: number | null): string {
+  if (!ts) return "";
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return "just now";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  if (diff < 604_800_000) return `${Math.floor(diff / 86_400_000)}d ago`;
+  return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function sessionTitle(s: ChatSession): string {
+  return s.label || s.displayName || s.derivedTitle || `Chat ${s.key.slice(0, 8)}`;
+}
+
+export function Layout({ currentPage, onNavigate, children, gatewayRunning, integrationsSyncing, chatSessions, currentChatSession, onSelectChatSession, onNewChat }: Props) {
   const [profile, setProfile] = useState<AgentProfile>({ name: "Nova" });
   const [searchTerm, setSearchTerm] = useState("");
 
@@ -105,21 +126,53 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning, inte
         <nav className="flex-1 p-2 space-y-1 overflow-auto">
           {navItems.map((item) => {
             const Icon = item.icon;
-            const isActive = currentPage === item.id;
+            const isChat = item.id === "chat";
+            const isActive = isChat ? currentPage === "chat" && !currentChatSession : currentPage === item.id;
             return (
-              <button
-                key={item.id}
-                onClick={() => onNavigate(item.id)}
-                className={clsx(
-                  "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
-                  isActive
-                    ? "bg-[#f3e8ff] text-[var(--purple-accent)]" // Light purple background for active
-                    : "text-[var(--text-secondary)] hover:bg-black/5" // Subtle hover
+              <div key={item.id}>
+                <button
+                  onClick={() => isChat ? onNewChat?.() : onNavigate(item.id)}
+                  className={clsx(
+                    "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
+                    isActive
+                      ? "bg-[#f3e8ff] text-[var(--purple-accent)]"
+                      : "text-[var(--text-secondary)] hover:bg-black/5"
+                  )}
+                >
+                  <Icon className={clsx("w-5 h-5", isActive ? 'text-[var(--purple-accent)]' : 'text-[var(--text-tertiary)]')} />
+                  {item.label}
+                </button>
+
+                {/* Recent chat sessions — always visible */}
+                {isChat && chatSessions && chatSessions.length > 0 && (
+                  <div className="mt-1 space-y-0.5 max-h-[180px] overflow-y-auto">
+                    <div className="px-3 pt-1 pb-0.5 text-[10px] uppercase tracking-wider text-[var(--text-tertiary)] font-medium">
+                      Your Chats
+                    </div>
+                    {chatSessions.slice(0, 5).map((session) => (
+                      <button
+                        key={session.key}
+                        onClick={() => onSelectChatSession?.(session.key)}
+                        className={clsx(
+                          "w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-xs transition-colors text-left",
+                          currentChatSession === session.key
+                            ? "bg-[#f3e8ff]/60 text-[var(--purple-accent)] font-medium"
+                            : "text-[var(--text-secondary)] hover:bg-black/5"
+                        )}
+                      >
+                        <MessageSquare className="w-3 h-3 flex-shrink-0 opacity-50" />
+                        <span className="truncate flex-1">{sessionTitle(session)}</span>
+                        {session.updatedAt && (
+                          <span className="flex-shrink-0 text-[10px] text-[var(--text-tertiary)] flex items-center gap-0.5">
+                            <Clock className="w-2.5 h-2.5" />
+                            {relativeTime(session.updatedAt)}
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
                 )}
-              >
-                <Icon className={clsx("w-5 h-5", isActive ? 'text-[var(--purple-accent)]' : 'text-[var(--text-tertiary)]')} />
-                {item.label}
-              </button>
+              </div>
             );
           })}
         </nav>
