@@ -42,6 +42,9 @@ import { Logs } from "./Logs";
 import { Settings } from "./Settings";
 import { Tasks } from "./Tasks";
 import { BillingPage } from "./BillingPage";
+import { ModelSelector } from "../components/ModelSelector";
+import { useAuth } from "../contexts/AuthContext";
+import { getUsage } from "../lib/auth";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -68,6 +71,7 @@ type Props = {
 };
 type ViewMode = "grid" | "list";
 type ChatMessage = { id: string; role: "user" | "assistant"; content: string };
+type DesktopIcon = { id: string; x: number; y: number };
 
 const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md"]);
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
@@ -225,6 +229,7 @@ export function Files({
   onCodeModelChange,
   onImageModelChange,
 }: Props) {
+  const { balance, isAuthenticated, isAuthConfigured } = useAuth();
   const [agentName, setAgentName] = useState("Nova");
 
   // Wallpaper
@@ -302,6 +307,104 @@ export function Files({
   const chatClientRef = useRef<GatewayClient | null>(null);
   const chatSessionRef = useRef<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Billing summary
+  const [usageSummary, setUsageSummary] = useState<{ dollars: string; requests: number } | null>(null);
+
+  const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
+
+  // Desktop icons
+  const [desktopIcons, setDesktopIcons] = useState<Record<string, DesktopIcon>>({
+    workspace: { id: "workspace", x: 28, y: 72 },
+  });
+  const iconDragRef = useRef<{
+    id: string;
+    sx: number;
+    sy: number;
+    ox: number;
+    oy: number;
+    moved: boolean;
+  } | null>(null);
+  const iconClickGuardRef = useRef(false);
+
+  useEffect(() => {
+    if (!proxyEnabled) {
+      setUsageSummary(null);
+      return;
+    }
+    const cacheKey = "nova_usage_cache_v1";
+    try {
+      const raw = sessionStorage.getItem(cacheKey);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { ts: number; data: { dollars: string; requests: number } };
+        if (parsed?.data && Date.now() - parsed.ts < 5 * 60 * 1000) {
+          setUsageSummary(parsed.data);
+        }
+      }
+    } catch {
+      // ignore cache read issues
+    }
+    getUsage(30)
+      .then((data) => {
+        const next = { dollars: data.total_cost_dollars, requests: data.total_requests };
+        setUsageSummary(next);
+        try {
+          sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data: next }));
+        } catch {
+          // ignore cache write issues
+        }
+      })
+      .catch(() => {});
+  }, [proxyEnabled]);
+
+  function handleIconMouseDown(id: string, e: MouseEvent) {
+    e.stopPropagation();
+    const icon = desktopIcons[id];
+    if (!icon) return;
+    iconDragRef.current = {
+      id,
+      sx: e.clientX,
+      sy: e.clientY,
+      ox: icon.x,
+      oy: icon.y,
+      moved: false,
+    };
+    function onMove(ev: MouseEvent) {
+      if (!iconDragRef.current) return;
+      const dx = ev.clientX - iconDragRef.current.sx;
+      const dy = ev.clientY - iconDragRef.current.sy;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+        iconDragRef.current.moved = true;
+        iconClickGuardRef.current = true;
+      }
+      const bounds = containerRef.current?.getBoundingClientRect();
+      const maxX = bounds ? Math.max(0, bounds.width - 84) : undefined;
+      const maxY = bounds ? Math.max(0, bounds.height - 110) : undefined;
+      const nextX = iconDragRef.current.ox + dx;
+      const nextY = iconDragRef.current.oy + dy;
+      setDesktopIcons((prev) => ({
+        ...prev,
+        [id]: {
+          ...prev[id],
+          x: maxX !== undefined ? Math.min(Math.max(0, nextX), maxX) : nextX,
+          y: maxY !== undefined ? Math.min(Math.max(0, nextY), maxY) : nextY,
+        },
+      }));
+    }
+    function onUp() {
+      if (iconDragRef.current?.moved) {
+        iconClickGuardRef.current = true;
+        setTimeout(() => {
+          iconClickGuardRef.current = false;
+        }, 0);
+      }
+      iconDragRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
 
   // ── Init ────────────────────────────────────────────────────────────
 
@@ -455,9 +558,10 @@ export function Files({
     catch (e) { setError(`Delete failed: ${e instanceof Error ? e.message : String(e)}`); }
   }
 
-  async function handleCreateFolder() {
+  async function handleCreateFolder(basePath?: string) {
     const name = prompt("New folder name:"); if (!name?.trim()) return;
-    try { const p = currentPath ? `${currentPath}/${name.trim()}` : name.trim(); await invoke<WorkspaceFileEntry[]>("list_workspace_files", { path: p }); fetchFiles(currentPath); }
+    const root = typeof basePath === "string" ? basePath : currentPath;
+    try { const p = root ? `${root}/${name.trim()}` : name.trim(); await invoke<WorkspaceFileEntry[]>("list_workspace_files", { path: p }); if (finderOpen) fetchFiles(currentPath); }
     catch (e) { setError(`Failed to create folder: ${e instanceof Error ? e.message : String(e)}`); }
   }
 
@@ -542,6 +646,88 @@ export function Files({
 
   return (
     <div className="h-full flex flex-col select-none relative overflow-hidden">
+      {/* Top toolbar */}
+      <div className="absolute top-0 left-0 right-0 z-20">
+        <div
+          className="flex items-center justify-between gap-3 px-4 py-2"
+          style={{
+            background: "#ffffff",
+            borderBottom: "1px solid rgba(0,0,0,0.08)",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
+          }}
+        >
+          <div className="flex items-center gap-3">
+            <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
+              Home
+            </span>
+            <div
+              className="flex items-center gap-2 text-xs px-2.5 py-1 rounded-full"
+              style={{
+                background: "rgba(255,255,255,0.25)",
+                color: "var(--text-secondary)",
+                border: "1px solid rgba(255,255,255,0.35)",
+              }}
+            >
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{
+                  background: gatewayRunning
+                    ? "#22c55e"
+                    : isTogglingGateway
+                    ? "#f59e0b"
+                    : "#ef4444",
+                }}
+              />
+              {gatewayRunning ? "Gateway online" : isTogglingGateway ? "Starting gateway" : "Gateway offline"}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 text-[11px]" style={{ color: "var(--text-tertiary)" }}>
+              <span className="uppercase tracking-wide">Chat</span>
+              <ModelSelector compact selectedModel={selectedModel} onModelChange={onModelChange} />
+            </div>
+            <div className="flex items-center gap-2 text-[11px]" style={{ color: "var(--text-tertiary)" }}>
+              <span className="uppercase tracking-wide">Code</span>
+              <ModelSelector compact selectedModel={codeModel} onModelChange={onCodeModelChange} />
+            </div>
+            <div className="flex items-center gap-2 text-[11px]" style={{ color: "var(--text-tertiary)" }}>
+              <span className="uppercase tracking-wide">Image</span>
+              <ModelSelector compact selectedModel={imageModel} onModelChange={onImageModelChange} />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="text-right">
+              <div className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>
+                ${balance?.balance_dollars || "0.00"}
+              </div>
+              <div className="text-[10px]" style={{ color: "var(--text-tertiary)" }}>
+                {proxyEnabled
+                  ? usageSummary
+                    ? `30d usage $${usageSummary.dollars}`
+                    : "Loading usage…"
+                  : "Local keys"}
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                if (!billingOpen) setBillingOpen(true);
+                focusWindow("billing");
+              }}
+              className="text-xs px-3 py-1.5 rounded-full"
+              style={{
+                background: "rgba(34,197,94,0.15)",
+                color: "#166534",
+                border: "1px solid rgba(34,197,94,0.35)",
+              }}
+            >
+              Billing
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Main area */}
       <div className="flex-1 flex overflow-hidden">
 
@@ -559,18 +745,39 @@ export function Files({
           <div className="absolute inset-0" style={isWpImage ? { backgroundImage: wallpaperCss, backgroundSize: "cover", backgroundPosition: "center" } : { background: wallpaperCss }} />
 
           {/* Desktop icons */}
-          <div className="relative flex-1 p-6 flex flex-col items-start gap-2 h-full">
-            <div
-              className="flex flex-col items-center w-20 p-2 rounded-xl cursor-default transition-all"
-              style={{ background: selected === "__user_folder" ? "rgba(255,255,255,0.18)" : "transparent" }}
-              onClick={(e) => { e.stopPropagation(); setSelected("__user_folder"); }}
-              onDoubleClick={() => openFolder("")}
-            >
-              <FolderIcon size={56} selected={selected === "__user_folder"} />
-              <span className="text-[11px] text-center leading-tight mt-1 w-full truncate" style={{ color: "white", textShadow: "0 1px 3px rgba(0,0,0,0.6)", fontWeight: selected === "__user_folder" ? 600 : 400 }}>
-                {agentName}&apos;s Files
-              </span>
-            </div>
+          <div className="relative flex-1 pt-12 px-0 pb-0 h-full">
+            {(() => {
+              const icon = desktopIcons.workspace;
+              return (
+                <div
+                  className="absolute flex flex-col items-center w-20 p-2 rounded-xl cursor-grab active:cursor-grabbing transition-all"
+                  style={{
+                    left: icon?.x ?? 28,
+                    top: icon?.y ?? 72,
+                    background: selected === "__user_folder" ? "rgba(255,255,255,0.18)" : "transparent",
+                  }}
+                  onMouseDown={(e) => handleIconMouseDown("workspace", e)}
+                  onClick={(e) => {
+                    if (iconClickGuardRef.current) return;
+                    e.stopPropagation();
+                    setSelected("__user_folder");
+                  }}
+                  onDoubleClick={() => openFolder("")}
+                >
+                  <FolderIcon size={56} selected={selected === "__user_folder"} />
+                  <span
+                    className="text-[11px] text-center leading-tight mt-1 w-full truncate"
+                    style={{
+                      color: "white",
+                      textShadow: "0 1px 3px rgba(0,0,0,0.6)",
+                      fontWeight: selected === "__user_folder" ? 600 : 400,
+                    }}
+                  >
+                    {agentName}&apos;s Files
+                  </span>
+                </div>
+              );
+            })()}
           </div>
 
           {/* Drag overlay */}
@@ -713,6 +920,7 @@ export function Files({
           {/* Context menus */}
           {contextMenu && !contextMenu.entry && (
             <div className="fixed z-50 py-1 rounded-lg min-w-[180px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, background: "rgba(30,30,30,0.9)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.4)" }} onClick={(e) => e.stopPropagation()}>
+              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFolder(finderOpen ? currentPath : ""); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" />New Folder</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { setShowWallpaperPicker(true); setContextMenu(null); }}><Image className="w-3.5 h-3.5" />Change Wallpaper</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { fileInputRef.current?.click(); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" />Add Files</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openFolder(""); setContextMenu(null); }}><Folder className="w-3.5 h-3.5" />Open Workspace</button>
