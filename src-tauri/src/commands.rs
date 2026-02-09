@@ -553,9 +553,49 @@ fn read_container_env(key: &str) -> Option<String> {
     }
 }
 
+fn container_path_exists(path: &str) -> bool {
+    docker_command()
+        .args(["exec", OPENCLAW_CONTAINER, "sh", "-c", &format!("test -d \"{}\"", path)])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
     let payload = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     write_container_file("/home/node/.openclaw/openclaw.json", &payload)
+}
+
+fn resolve_default_nova_skills_path() -> Option<String> {
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidates = [
+            cwd.join("..").join("nova-skills"),
+            cwd.join("..").join("..").join("nova-skills"),
+        ];
+        for candidate in candidates {
+            if candidate.is_dir() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn append_nova_skills_mount(docker_args: &mut Vec<String>) {
+    let path = std::env::var("NOVA_SKILLS_PATH")
+        .ok()
+        .and_then(|p| {
+            let trimmed = p.trim().to_string();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        })
+        .or_else(resolve_default_nova_skills_path);
+
+    if let Some(host_path) = path {
+        docker_args.push("-v".to_string());
+        docker_args.push(format!("{}:/data/nova-skills:ro", host_path));
+        docker_args.push("-e".to_string());
+        docker_args.push("NOVA_SKILLS_PATH=/data/nova-skills".to_string());
+    }
 }
 
 async fn call_whatsapp_qr_endpoint(
@@ -875,6 +915,7 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
 
     // Ensure Nova integrations plugin is enabled (OAuth bridge tools).
     cfg["plugins"]["entries"]["nova-integrations"]["enabled"] = serde_json::json!(true);
+
     // Ensure optional plugin tools are allowed without restricting core tools.
     const NOVA_INTEGRATION_TOOLS: [&str; 5] = [
         "calendar_list",
@@ -883,6 +924,39 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
         "gmail_get",
         "gmail_send",
     ];
+    const NOVA_X_TOOLS: [&str; 4] = [
+        "x_search",
+        "x_profile",
+        "x_thread",
+        "x_user_tweets",
+    ];
+
+    // Enable nova-x plugin if it exists (bundled or mounted).
+    let mut has_nova_x = container_path_exists("/app/extensions/nova-x");
+    let mut nova_x_path: Option<String> = None;
+    if let Some(skills_root) = read_container_env("NOVA_SKILLS_PATH") {
+        let candidate = format!("{}/nova-x", skills_root.trim_end_matches('/'));
+        if container_path_exists(&candidate) {
+            has_nova_x = true;
+            nova_x_path = Some(candidate);
+        }
+    }
+    if has_nova_x {
+        cfg["plugins"]["entries"]["nova-x"]["enabled"] = serde_json::json!(true);
+        if let Some(path) = nova_x_path {
+            let load_paths = cfg
+                .pointer_mut("/plugins/load/paths")
+                .and_then(|v| v.as_array_mut());
+            if let Some(list) = load_paths {
+                let exists = list.iter().any(|v| v.as_str() == Some(&path));
+                if !exists {
+                    list.push(serde_json::json!(path));
+                }
+            } else {
+                cfg["plugins"]["load"]["paths"] = serde_json::json!([path]);
+            }
+        }
+    }
     if cfg.get("tools").is_none() || !cfg["tools"].is_object() {
         cfg["tools"] = serde_json::json!({});
     }
@@ -897,6 +971,14 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
                 let exists = list.iter().any(|v| v.as_str() == Some(tool));
                 if !exists {
                     list.push(serde_json::json!(tool));
+                }
+            }
+            if has_nova_x {
+                for tool in NOVA_X_TOOLS {
+                    let exists = list.iter().any(|v| v.as_str() == Some(tool));
+                    if !exists {
+                        list.push(serde_json::json!(tool));
+                    }
                 }
             }
         }
@@ -1280,6 +1362,15 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         docker_args.push(format!("GEMINI_API_KEY={}", key));
     }
 
+    if let Ok(base) = std::env::var("NOVA_WEB_BASE_URL") {
+        if !base.trim().is_empty() {
+            docker_args.push("-e".to_string());
+            docker_args.push(format!("NOVA_WEB_BASE_URL={}", base.trim()));
+        }
+    }
+
+    append_nova_skills_mount(&mut docker_args);
+
     // Add remaining args (always use bridge networking)
     docker_args.extend([
         "-v".to_string(), "nova-openclaw-data:/data".to_string(),
@@ -1444,6 +1535,12 @@ pub async fn start_gateway_with_proxy(
             docker_args.push(format!("OPENCLAW_IMAGE_MODEL={}", image_model));
         }
     }
+
+    // Nova web base URL for plugin tools (billing + proxy endpoints)
+    docker_args.push("-e".to_string());
+    docker_args.push(format!("NOVA_WEB_BASE_URL={}", docker_proxy_url));
+
+    append_nova_skills_mount(&mut docker_args);
 
     // Add remaining args (always use bridge networking)
     docker_args.extend([

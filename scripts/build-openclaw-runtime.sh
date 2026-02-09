@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 RUNTIME_DIR="$PROJECT_ROOT/openclaw-runtime"
 OPENCLAW_SOURCE="${OPENCLAW_SOURCE:-$PROJECT_ROOT/../openclaw}"
+NOVA_SKILLS_SOURCE="${NOVA_SKILLS_SOURCE:-$PROJECT_ROOT/../nova-skills}"
 
 echo "=== Building OpenClaw Runtime Container ==="
 echo ""
@@ -67,6 +68,23 @@ for plugin in "${PLUGINS_TO_BUNDLE[@]}"; do
         echo "WARNING: ${plugin} plugin not found in OpenClaw source."
     fi
 done
+
+# Copy Nova-owned skills/plugins (optional)
+if [ -d "$NOVA_SKILLS_SOURCE" ]; then
+    echo "Copying Nova skills from $NOVA_SKILLS_SOURCE..."
+    for plugin_dir in "$NOVA_SKILLS_SOURCE"/*; do
+        if [ -d "$plugin_dir" ] && [ -f "$plugin_dir/openclaw.plugin.json" ]; then
+            plugin_name="$(basename "$plugin_dir")"
+            echo "Copying ${plugin_name} plugin..."
+            rsync -a --delete \
+                --exclude='node_modules' \
+                --exclude='.git' \
+                "$plugin_dir/" "$STAGING_DIR/extensions/$plugin_name/"
+        fi
+    done
+else
+    echo "No Nova skills directory found at $NOVA_SKILLS_SOURCE (skipping)."
+fi
 
 # Copy node_modules (production only)
 echo "Copying node_modules (this may take a moment)..."

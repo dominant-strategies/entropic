@@ -87,6 +87,16 @@ This creates the `openclaw-runtime:latest` Docker image containing:
 OPENCLAW_SOURCE=/path/to/openclaw ./scripts/build-openclaw-runtime.sh
 ```
 
+**Optional Nova skills (external plugins):**
+```bash
+# Sibling repo (recommended)
+mkdir -p ../nova-skills
+
+# Or customize
+NOVA_SKILLS_SOURCE=/path/to/nova-skills ./scripts/build-openclaw-runtime.sh
+```
+Plugins in the sibling `../nova-skills` repo with `openclaw.plugin.json` will be bundled into the runtime image.
+
 ### 3. Verify the image
 
 ```bash
@@ -141,6 +151,14 @@ Use this when running `pnpm tauri dev` on the host so OpenClaw can reach the loc
 ./scripts/register-dev-protocol.sh
 ```
 Run this on the host (outside the dev container) after the first successful `pnpm tauri:dev` so the debug binary exists. This registers `nova-dev://` so OAuth callbacks open the dev app.
+
+**Nova skills mount (dev, optional)**
+If you want to mount local plugins without rebuilding the image:
+```bash
+export NOVA_SKILLS_PATH=/path/to/nova-skills
+pnpm tauri:dev
+```
+This mounts to `/data/nova-skills` and enables any plugin found under it.
 
 **Supabase OAuth Redirect URLs (dev + prod)**
 - Add `nova://auth/callback` for production.

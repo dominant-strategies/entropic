@@ -32,6 +32,13 @@ cd ../Nova
 
 This creates the `openclaw-runtime:latest` Docker image.
 
+**Optional: bundle Nova skills**
+```bash
+# Sibling repo (recommended)
+NOVA_SKILLS_SOURCE=../nova-skills ./scripts/build-openclaw-runtime.sh
+```
+Plugins under `nova-skills` with `openclaw.plugin.json` are bundled into the image.
+
 ### 3. Run Nova
 
 ```bash

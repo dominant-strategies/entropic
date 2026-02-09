@@ -81,7 +81,13 @@ The runtime container runs OpenClaw gateway in a hardened environment.
 This script:
 1. Copies OpenClaw dist from `~/agent/openclaw/dist`
 2. Copies templates from `~/agent/openclaw/docs/reference/templates`
-3. Builds Docker image `openclaw-runtime:latest`
+3. Bundles any plugins found in the sibling `../nova-skills` repo (if present)
+4. Builds Docker image `openclaw-runtime:latest`
+
+**Optional: custom skills path**
+```bash
+NOVA_SKILLS_SOURCE=/path/to/nova-skills ./scripts/build-openclaw-runtime.sh
+```
 
 ### Container Security
 

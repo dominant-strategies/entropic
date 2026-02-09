@@ -75,6 +75,12 @@ if [ "$MEMORY_SLOT" = "memory-lancedb" ]; then
 fi
 
 PLUGIN_ENTRIES="\"nova-integrations\": { \"enabled\": true }"
+ALSO_ALLOW="\"nova-integrations\""
+
+if [ -d "/app/extensions/nova-x" ] || [ -d "/data/nova-skills/nova-x" ]; then
+    PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"nova-x\": { \"enabled\": true }"
+    ALSO_ALLOW="${ALSO_ALLOW}, \"x_search\", \"x_profile\", \"x_thread\", \"x_user_tweets\""
+fi
 if [ -n "$MEMORY_CONFIG" ]; then
     PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, ${MEMORY_CONFIG}"
 fi
@@ -91,7 +97,7 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
     fi
     TOOLS_BLOCK=",
   \"tools\": {
-    \"alsoAllow\": [\"nova-integrations\"]"
+    \"alsoAllow\": [${ALSO_ALLOW}]"
     if [ -n "${NOVA_PROXY_MODE:-}" ] && [ -n "${NOVA_PROXY_BASE_URL:-}" ]; then
         NOVA_PROXY_BASE_URL_ESC="$(json_escape "${NOVA_PROXY_BASE_URL}")"
         TOOLS_BLOCK="${TOOLS_BLOCK},
@@ -108,6 +114,11 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
   }"
 
     MODELS_BLOCK=""
+    LOAD_PATHS_BLOCK=""
+    if [ -d "/data/nova-skills/nova-x" ]; then
+        LOAD_PATHS_BLOCK=",
+    \"load\": { \"paths\": [\"/data/nova-skills/nova-x\"] }"
+    fi
     if [ -n "${NOVA_PROXY_BASE_URL:-}" ]; then
         NOVA_PROXY_BASE_URL_ESC="$(json_escape "${NOVA_PROXY_BASE_URL}")"
         MODEL_ID_RAW="${OPENCLAW_MODEL#openrouter/}"
@@ -154,7 +165,7 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
   "plugins": {
     "slots": {
       "memory": "${MEMORY_SLOT}"
-    },
+    }${LOAD_PATHS_BLOCK},
     "entries": {
       ${PLUGIN_ENTRIES}
     }
