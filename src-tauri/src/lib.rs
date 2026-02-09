@@ -136,7 +136,7 @@ pub fn run() {
         }))
         .setup(|app| {
             if cfg!(debug_assertions) && should_start_dev_relay() {
-                let app_handle = app.handle();
+                let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     start_deeplink_relay_server(app_handle).await;
                 });
