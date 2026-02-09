@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Sparkles, X, Loader2, Plus, ExternalLink, Paperclip, MessageSquare, Calendar, Globe, Mail, Activity } from "lucide-react";
+import { Send, Sparkles, X, Loader2, ExternalLink, Paperclip, MessageSquare, Calendar, Globe, Mail, Activity } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
@@ -13,7 +13,7 @@ import { syncAllIntegrationsToGateway, getCachedIntegrationProviders } from "../
 
 // NOTE: Most type definitions are omitted for brevity in this example
 type Message = { id: string; role: "user" | "assistant"; content: string };
-type Session = { key: string; label?: string; displayName?: string; derivedTitle?: string };
+export type ChatSession = { key: string; label?: string; displayName?: string; derivedTitle?: string; updatedAt?: number | null };
 type Provider = { id: string; name: string; icon: string; placeholder: string; keyUrl: string };
 type PendingAttachment = { id: string; fileName: string; tempPath: string; savedPath?: string };
 type AuthState = { active_provider: string | null; providers: Array<{ id: string; has_key: boolean }> };
@@ -199,6 +199,8 @@ export function Chat({
   imageModel: _imageModel,
   integrationsSyncing,
   integrationsMissing,
+  onSessionsChange,
+  requestedSession,
 }: {
   gatewayRunning: boolean;
   gatewayStarting: boolean;
@@ -209,6 +211,8 @@ export function Chat({
   imageModel: string;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
+  onSessionsChange?: (sessions: ChatSession[], currentKey: string | null) => void;
+  requestedSession?: string | null;
 }) {
   const { isAuthenticated, isAuthConfigured } = useAuth();
   const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
@@ -218,7 +222,7 @@ export function Chat({
   const [isConnecting, setIsConnecting] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [sessions, setSessions] = useState<Session[]>([]);
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSession, setCurrentSession] = useState<string | null>(null);
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<Provider | null>(null);
@@ -254,6 +258,21 @@ export function Chat({
       return next.slice(-200);
     });
   }
+
+  // Emit session list to parent (for sidebar rendering)
+  useEffect(() => {
+    onSessionsChange?.(sessions, currentSession);
+  }, [sessions, currentSession]);
+
+  // Handle session selection from sidebar
+  useEffect(() => {
+    if (!requestedSession || !clientRef.current) return;
+    if (requestedSession === "__new__") {
+      createNewSession();
+    } else if (requestedSession !== currentSession) {
+      selectSession(requestedSession);
+    }
+  }, [requestedSession]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -426,13 +445,29 @@ export function Chat({
   async function selectSession(sessionId: string) {
     setCurrentSession(sessionId);
     const history = await clientRef.current?.getChatHistory(sessionId) || [];
-    const msgs: Message[] = history.map((m: any, i: number) => ({
-      id: `h-${i}`,
-      role: m.role,
-      content: m.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('')
-    }));
+    const msgs: Message[] = history
+      .map((m: any, i: number) => ({
+        id: `h-${i}`,
+        role: m.role,
+        content: m.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('')
+      }))
+      .filter((m: Message) => {
+        const trimmed = m.content.trim();
+        // Drop empty messages (tool-call/tool-result with no text blocks)
+        if (!trimmed) return false;
+        // Drop assistant messages that are pure JSON tool output — these are
+        // intermediate tool results that the final assistant reply summarizes.
+        if (m.role === "assistant" && (trimmed[0] === "{" || trimmed[0] === "[")) {
+          try {
+            JSON.parse(trimmed);
+            return false;
+          } catch {
+            // not valid JSON, keep the message
+          }
+        }
+        return true;
+      });
     setMessages(msgs);
-    // Hide welcome if there are messages
     if (msgs.length > 0) {
       setShowWelcome(false);
     }
@@ -485,6 +520,10 @@ export function Chat({
       setIsLoading(false);
       addDiag(`send failed: ${e instanceof Error ? e.message : "unknown"}`);
     }
+  }
+
+  function sessionTitle(s: ChatSession): string {
+    return s.label || s.displayName || s.derivedTitle || `Chat ${s.key.slice(0, 8)}`;
   }
 
   function handleSuggestionClick(action: SuggestionAction) {
@@ -684,17 +723,14 @@ export function Chat({
         }}>
         <div className="flex items-center justify-between px-4 py-2">
           <div className="flex items-center gap-2">
-            <select value={currentSession || ""} onChange={e => selectSession(e.target.value)}
-              className="form-input text-sm !py-1 !px-3 !w-auto">
-              {sessions.map(s => <option key={s.key} value={s.key}>{s.label || s.displayName || s.derivedTitle || `Chat ${s.key.slice(0, 8)}`}</option>)}
-            </select>
+            <span className="text-sm font-medium text-[var(--text-primary)] truncate max-w-[200px]">
+              {currentSession ? sessionTitle(sessions.find(s => s.key === currentSession) || { key: currentSession }) : "New Chat"}
+            </span>
             <select value={chatMode} onChange={e => setChatMode(e.target.value as "general" | "code")}
               className="form-input text-sm !py-1 !px-3 !w-auto">
               <option value="general">General</option>
               <option value="code">Code</option>
             </select>
-            <button onClick={createNewSession} title="New Chat"
-              className="p-1.5 rounded-md text-[var(--text-secondary)] hover:bg-black/5 hover:text-[var(--text-primary)]"><Plus className="w-4 h-4" /></button>
           </div>
         <div className="flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${

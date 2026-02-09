@@ -360,9 +360,16 @@ function editorToSchedule(editor: EditorState): CronSchedule {
 }
 
 function editorToPayload(editor: EditorState): CronPayload {
+  const baseMessage = editor.message || "Hello";
+  const message = [
+    "This is a scheduled run. Do NOT create, edit, or run cron jobs.",
+    "Do NOT use gateway or exec tools. Just perform the task now and report results.",
+    "",
+    baseMessage,
+  ].join("\n");
   const payload: CronPayload = {
     kind: "agentTurn",
-    message: editor.message || "Hello",
+    message,
   };
 
   if (editor.notifyEnabled) {
@@ -600,7 +607,7 @@ export function Tasks({ gatewayRunning }: Props) {
     try {
       const schedule = editorToSchedule(editor);
       const payload = editorToPayload(editor);
-      const sessionTarget = editor.sessionTarget || "isolated";
+      const sessionTarget: "main" | "isolated" = "isolated";
       if (editingJob) {
         await withGatewayClient((client) =>
           client.updateCronJob(editingJob.id, {
