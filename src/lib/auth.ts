@@ -10,6 +10,21 @@ const AUTH_REDIRECT_URL =
   (import.meta as any).env?.VITE_AUTH_REDIRECT_URL || "nova://auth/callback";
 const AUTH_STORE_NAME =
   (import.meta as any).env?.VITE_AUTH_STORE_NAME || "nova-auth.json";
+const AUTH_DEBUG =
+  (import.meta as any).env?.VITE_AUTH_DEBUG === "1" ||
+  (import.meta as any).env?.DEV;
+
+function authDebug(message: string, data?: Record<string, unknown>) {
+  if (!AUTH_DEBUG) return;
+  if (data) console.log(`[auth] ${message}`, data);
+  else console.log(`[auth] ${message}`);
+}
+
+function redactToken(token?: string | null) {
+  if (!token) return null;
+  if (token.length <= 10) return "***";
+  return `${token.slice(0, 4)}…${token.slice(-4)}`;
+}
 
 // Check if auth is configured
 export const isAuthConfigured = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
@@ -26,8 +41,10 @@ export const supabase: SupabaseClient | null = isAuthConfigured
             try {
               const store = await Store.load(AUTH_STORE_NAME);
               const value = await store.get(key);
+              authDebug("storage getItem", { key, hasValue: Boolean(value) });
               return value as string | null;
             } catch {
+              authDebug("storage getItem failed", { key });
               return null;
             }
           },
@@ -36,6 +53,7 @@ export const supabase: SupabaseClient | null = isAuthConfigured
               const store = await Store.load(AUTH_STORE_NAME);
               await store.set(key, value);
               await store.save();
+              authDebug("storage setItem", { key, bytes: value.length });
             } catch (error) {
               console.error("Failed to save auth:", error);
             }
@@ -45,6 +63,7 @@ export const supabase: SupabaseClient | null = isAuthConfigured
               const store = await Store.load(AUTH_STORE_NAME);
               await store.delete(key);
               await store.save();
+              authDebug("storage removeItem", { key });
             } catch (error) {
               console.error("Failed to remove auth:", error);
             }
@@ -72,6 +91,8 @@ export async function signInWithOAuth(provider: OAuthProvider): Promise<void> {
     throw new Error("Auth not configured");
   }
 
+  authDebug("signInWithOAuth start", { provider, redirectTo: AUTH_REDIRECT_URL });
+
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider,
     options: {
@@ -86,6 +107,12 @@ export async function signInWithOAuth(provider: OAuthProvider): Promise<void> {
   }
 
   if (data?.url) {
+    try {
+      const parsed = new URL(data.url);
+      authDebug("OAuth URL generated", { host: parsed.host, path: parsed.pathname });
+    } catch {
+      authDebug("OAuth URL generated", { hasUrl: true });
+    }
     // Set a timestamp for OAuth pending (for both dev and production)
     sessionStorage.setItem('nova_oauth_pending', Date.now().toString());
 
@@ -147,6 +174,7 @@ export async function handleAuthCallback(url: string): Promise<boolean> {
   }
 
   try {
+    authDebug("handleAuthCallback", { url });
     // Parse the URL to extract tokens
     const urlObj = new URL(url);
     const hashParams = new URLSearchParams(urlObj.hash.slice(1));
@@ -162,6 +190,15 @@ export async function handleAuthCallback(url: string): Promise<boolean> {
     // Get access token from hash fragment (OAuth implicit flow)
     const accessToken = hashParams.get("access_token");
     const refreshToken = hashParams.get("refresh_token");
+    authDebug("callback tokens", {
+      hasAccessToken: Boolean(accessToken),
+      accessToken: redactToken(accessToken),
+      hasRefreshToken: Boolean(refreshToken),
+      refreshToken: redactToken(refreshToken),
+      hasCode: Boolean(queryParams.get("code")),
+      hashKeys: Array.from(hashParams.keys()),
+      queryKeys: Array.from(queryParams.keys()),
+    });
 
     if (accessToken) {
       // Set the session manually
@@ -175,6 +212,7 @@ export async function handleAuthCallback(url: string): Promise<boolean> {
         return false;
       }
 
+      authDebug("setSession ok");
       return true;
     }
 
@@ -189,6 +227,7 @@ export async function handleAuthCallback(url: string): Promise<boolean> {
         return false;
       }
 
+      authDebug("exchangeCodeForSession ok");
       return true;
     }
 
@@ -301,7 +340,7 @@ async function throttledRefreshSession(refreshToken: string): Promise<Session | 
  * Subscribe to auth state changes
  */
 export function onAuthStateChange(
-  callback: (session: Session | null) => void
+  callback: (session: Session | null, event?: string) => void
 ): () => void {
   if (!supabase) {
     // Return a no-op unsubscribe function
@@ -311,7 +350,7 @@ export function onAuthStateChange(
   const {
     data: { subscription },
   } = supabase.auth.onAuthStateChange((_event: string, session: Session | null) => {
-    callback(session);
+    callback(session, _event);
   });
 
   return () => subscription.unsubscribe();

@@ -127,7 +127,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   // Listen for auth state changes
   useEffect(() => {
-    const unsubscribe = onAuthStateChange(async (newSession) => {
+    const unsubscribe = onAuthStateChange(async (newSession, event) => {
+      if ((import.meta as any).env?.VITE_AUTH_DEBUG === "1" || (import.meta as any).env?.DEV) {
+        console.log("[auth] state change", { event, hasSession: Boolean(newSession) });
+      }
       setSession(newSession);
 
       if (newSession) {
@@ -159,6 +162,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
           if (success) {
             console.log("Auth callback handled successfully");
             // Session will be updated via onAuthStateChange
+          } else {
+            console.warn("Auth callback handled but no session");
           }
         } else if (url.includes("billing/success")) {
           // Refresh balance after successful payment
