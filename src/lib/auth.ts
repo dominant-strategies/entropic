@@ -40,6 +40,7 @@ export const supabase: SupabaseClient | null = isAuthConfigured
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: {
         autoRefreshToken: true,
+        flowType: "pkce",
         persistSession: true,
         storage: {
           // Use Tauri store for session persistence
