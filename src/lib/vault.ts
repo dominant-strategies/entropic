@@ -10,8 +10,8 @@ const INTEGRATION_STORE = "nova-integrations.json";
 
 type StrongholdStore = {
   insert: (key: string, value: number[]) => Promise<void>;
-  get: (key: string) => Promise<number[] | null>;
-  remove: (key: string) => Promise<void>;
+  get: (key: string) => Promise<Uint8Array | null>;
+  remove: (key: string) => Promise<Uint8Array | null>;
 };
 
 type StrongholdSession = {
@@ -19,17 +19,25 @@ type StrongholdSession = {
   store: StrongholdStore;
 };
 
+// Cached session — reused across all vault operations to avoid
+// re-initializing the Stronghold instance on every call.
+let cachedSession: StrongholdSession | null = null;
+let sessionInitPromise: Promise<StrongholdSession> | null = null;
+
 function encodeJson(value: unknown): number[] {
   const encoded = new TextEncoder().encode(JSON.stringify(value));
   return Array.from(encoded);
 }
 
-function decodeJson<T>(value: number[] | null, fallback: T): T {
+function decodeJson<T>(value: Uint8Array | number[] | null, fallback: T): T {
   if (!value || value.length === 0) return fallback;
   try {
-    const decoded = new TextDecoder().decode(new Uint8Array(value));
+    const decoded = new TextDecoder().decode(
+      value instanceof Uint8Array ? value : new Uint8Array(value)
+    );
     return JSON.parse(decoded) as T;
-  } catch {
+  } catch (err) {
+    console.warn("[vault] decodeJson failed:", err);
     return fallback;
   }
 }
@@ -43,7 +51,6 @@ function generatePassword(): string {
 }
 
 async function getVaultPassword(): Promise<string> {
-  // TODO: move vault password to OS keychain once available.
   const store = await Store.load(INTEGRATION_STORE);
   let password = (await store.get(VAULT_PASSWORD_KEY)) as string | null;
   if (!password) {
@@ -54,7 +61,7 @@ async function getVaultPassword(): Promise<string> {
   return password;
 }
 
-async function getStrongholdSession(): Promise<StrongholdSession> {
+async function initStrongholdSession(): Promise<StrongholdSession> {
   const vaultDir = await appDataDir();
   const vaultPath = await join(vaultDir, VAULT_FILE);
   const password = await getVaultPassword();
@@ -62,11 +69,28 @@ async function getStrongholdSession(): Promise<StrongholdSession> {
   let client;
   try {
     client = await stronghold.loadClient(VAULT_CLIENT);
-  } catch {
+  } catch (err) {
+    console.info("[vault] creating new stronghold client (first use or migration):", err);
     client = await stronghold.createClient(VAULT_CLIENT);
   }
   const store = client.getStore() as StrongholdStore;
   return { stronghold, store };
+}
+
+async function getStrongholdSession(): Promise<StrongholdSession> {
+  if (cachedSession) return cachedSession;
+  // Deduplicate concurrent init calls
+  if (!sessionInitPromise) {
+    sessionInitPromise = initStrongholdSession().then((session) => {
+      cachedSession = session;
+      sessionInitPromise = null;
+      return session;
+    }).catch((err) => {
+      sessionInitPromise = null;
+      throw err;
+    });
+  }
+  return sessionInitPromise;
 }
 
 async function loadIndex(store: StrongholdStore): Promise<string[]> {

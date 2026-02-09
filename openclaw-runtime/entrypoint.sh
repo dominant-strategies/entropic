@@ -89,11 +89,12 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
     else
         OPENCLAW_IMAGE_MODEL_ESC=""
     fi
-    TOOLS_BLOCK=""
+    TOOLS_BLOCK=",
+  \"tools\": {
+    \"alsoAllow\": [\"nova-integrations\"]"
     if [ -n "${NOVA_PROXY_MODE:-}" ] && [ -n "${NOVA_PROXY_BASE_URL:-}" ]; then
         NOVA_PROXY_BASE_URL_ESC="$(json_escape "${NOVA_PROXY_BASE_URL}")"
-        TOOLS_BLOCK=",
-  \"tools\": {
+        TOOLS_BLOCK="${TOOLS_BLOCK},
     \"web\": {
       \"search\": {
         \"provider\": \"perplexity\",
@@ -101,9 +102,10 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
           \"baseUrl\": \"${NOVA_PROXY_BASE_URL_ESC}\"
         }
       }
-    }
-  }"
+    }"
     fi
+    TOOLS_BLOCK="${TOOLS_BLOCK}
+  }"
 
     MODELS_BLOCK=""
     if [ -n "${NOVA_PROXY_BASE_URL:-}" ]; then

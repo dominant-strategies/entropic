@@ -873,6 +873,23 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
 
     // Ensure Nova integrations plugin is enabled (OAuth bridge tools).
     cfg["plugins"]["entries"]["nova-integrations"]["enabled"] = serde_json::json!(true);
+    // Ensure optional plugin tools are allowed without restricting core tools.
+    if cfg.get("tools").is_none() || !cfg["tools"].is_object() {
+        cfg["tools"] = serde_json::json!({});
+    }
+    if let Some(tools) = cfg["tools"].as_object_mut() {
+        let allow_entry = tools.entry("alsoAllow").or_insert(serde_json::json!([]));
+        if let Some(list) = allow_entry.as_array_mut() {
+            let has_plugin = list
+                .iter()
+                .any(|v| v.as_str().map(|s| s.eq_ignore_ascii_case("nova-integrations")) == Some(true));
+            if !has_plugin {
+                list.push(serde_json::json!("nova-integrations"));
+            }
+        } else {
+            *allow_entry = serde_json::json!(["nova-integrations"]);
+        }
+    }
 
     if slot == "memory-lancedb" {
         let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
