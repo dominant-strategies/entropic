@@ -11,15 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && \
 
 WORKDIR /app
 
-# Copy OpenClaw dist (built from openclaw repo)
-COPY dist ./dist
-COPY package.json ./package.json
-COPY node_modules ./node_modules
-COPY docs ./docs
-COPY extensions ./extensions
+# Copy OpenClaw package metadata and deps first (stable for caching)
+COPY --chown=node:node package.json ./package.json
+COPY --chown=node:node node_modules ./node_modules
+COPY --chown=node:node docs ./docs
+COPY --chown=node:node extensions ./extensions
 
-# Set ownership
-RUN chown -R node:node /app
+# Copy OpenClaw dist last (changes most often)
+COPY --chown=node:node dist ./dist
 
 # Fix clipboard module for ARM64 Linux (create stub)
 RUN echo "module.exports = { read: () => '', write: () => {}, readSync: () => '', writeSync: () => {}, clear: () => {}, clearSync: () => {} };" > /app/node_modules/.pnpm/@mariozechner+clipboard@0.3.0/node_modules/@mariozechner/clipboard/index.js || true

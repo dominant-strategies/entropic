@@ -18,26 +18,25 @@ if [ ! -d "$OPENCLAW_SOURCE/dist" ]; then
     exit 1
 fi
 
-# Create staging directory
-STAGING_DIR=$(mktemp -d)
-trap "rm -rf $STAGING_DIR" EXIT
+STAGING_DIR="$PROJECT_ROOT/.build/openclaw-runtime"
+mkdir -p "$STAGING_DIR"
 
 echo "Staging OpenClaw files..."
 
 # Copy Dockerfile and entrypoint
-cp "$RUNTIME_DIR/Dockerfile" "$STAGING_DIR/"
-cp "$RUNTIME_DIR/entrypoint.sh" "$STAGING_DIR/"
+rsync -a "$RUNTIME_DIR/Dockerfile" "$STAGING_DIR/Dockerfile"
+rsync -a "$RUNTIME_DIR/entrypoint.sh" "$STAGING_DIR/entrypoint.sh"
 
 # Copy dist
-cp -r "$OPENCLAW_SOURCE/dist" "$STAGING_DIR/"
+rsync -a --delete "$OPENCLAW_SOURCE/dist/" "$STAGING_DIR/dist/"
 
 # Copy package.json
-cp "$OPENCLAW_SOURCE/package.json" "$STAGING_DIR/"
+rsync -a "$OPENCLAW_SOURCE/package.json" "$STAGING_DIR/package.json"
 
 # Copy docs/reference/templates (required for agent workspace)
 echo "Copying templates..."
 mkdir -p "$STAGING_DIR/docs/reference"
-cp -r "$OPENCLAW_SOURCE/docs/reference/templates" "$STAGING_DIR/docs/reference/"
+rsync -a --delete "$OPENCLAW_SOURCE/docs/reference/templates/" "$STAGING_DIR/docs/reference/templates/"
 
 # Copy bundled plugins (curated set for the store)
 mkdir -p "$STAGING_DIR/extensions"
@@ -45,6 +44,7 @@ mkdir -p "$STAGING_DIR/extensions"
 PLUGINS_TO_BUNDLE=(
     "memory-core"
     "memory-lancedb"
+    "nova-integrations"
     "discord"
     "telegram"
     "slack"
@@ -59,7 +59,7 @@ PLUGINS_TO_BUNDLE=(
 for plugin in "${PLUGINS_TO_BUNDLE[@]}"; do
     if [ -d "$OPENCLAW_SOURCE/extensions/$plugin" ]; then
         echo "Copying ${plugin} plugin..."
-        rsync -a \
+        rsync -a --delete \
             --exclude='node_modules' \
             --exclude='.git' \
             "$OPENCLAW_SOURCE/extensions/$plugin/" "$STAGING_DIR/extensions/$plugin/"
@@ -71,7 +71,7 @@ done
 # Copy node_modules (production only)
 echo "Copying node_modules (this may take a moment)..."
 mkdir -p "$STAGING_DIR/node_modules"
-rsync -a \
+rsync -a --delete \
     --exclude='.cache' \
     --exclude='*.map' \
     --exclude='test' \
@@ -92,7 +92,8 @@ echo "Security scan passed."
 # Build container
 echo ""
 echo "Building container image..."
-docker build -t openclaw-runtime:latest "$STAGING_DIR"
+export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
+docker build --cache-from openclaw-runtime:latest -t openclaw-runtime:latest "$STAGING_DIR"
 
 echo ""
 echo "=== OpenClaw runtime image built: openclaw-runtime:latest ==="

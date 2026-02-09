@@ -1,5 +1,6 @@
 use crate::runtime::{Platform, Runtime, RuntimeStatus};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _};
+use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -13,6 +14,7 @@ use tauri_plugin_shell::ShellExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::time::timeout;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
 
 /// Get the Docker socket path for the current platform.
@@ -76,6 +78,87 @@ fn docker_command() -> Command {
         cmd.env("DOCKER_HOST", host);
     }
     cmd
+}
+
+async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, String> {
+    let (mut ws, _) = connect_async(ws_url)
+        .await
+        .map_err(|e| format!("WebSocket connect failed: {}", e))?;
+
+    let result = timeout(Duration::from_secs(3), async {
+        let mut sent_connect = false;
+        let mut sent_health = false;
+        loop {
+            let msg = ws
+                .next()
+                .await
+                .ok_or_else(|| "gateway closed before response".to_string())?
+                .map_err(|e| format!("WebSocket error: {}", e))?;
+            if let Message::Text(text) = msg {
+                let frame: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| format!("Bad frame: {}", e))?;
+                let frame_type = frame.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if frame_type == "event" {
+                    let event = frame.get("event").and_then(|v| v.as_str()).unwrap_or("");
+                    if event == "connect.challenge" && !sent_connect {
+                        sent_connect = true;
+                        let connect = serde_json::json!({
+                            "type": "req",
+                            "id": "1",
+                            "method": "connect",
+                            "params": {
+                                "minProtocol": 3,
+                                "maxProtocol": 3,
+                                "client": {
+                                    "id": "openclaw-probe",
+                                    "displayName": "Nova Health",
+                                    "version": "0.1.0",
+                                    "platform": "desktop",
+                                    "mode": "probe"
+                                },
+                                "role": "operator",
+                                "auth": { "token": token }
+                            }
+                        });
+                        ws.send(Message::Text(connect.to_string()))
+                            .await
+                            .map_err(|e| format!("WebSocket send failed: {}", e))?;
+                    }
+                } else if frame_type == "res" {
+                    let id = frame.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let ok = frame.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if id == "1" {
+                        if !ok {
+                            let msg = frame
+                                .get("error")
+                                .and_then(|v| v.get("message"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("gateway connect rejected");
+                            return Err(msg.to_string());
+                        }
+                        if !sent_health {
+                            sent_health = true;
+                            let health = serde_json::json!({
+                                "type": "req",
+                                "id": "2",
+                                "method": "health"
+                            });
+                            ws.send(Message::Text(health.to_string()))
+                                .await
+                                .map_err(|e| format!("WebSocket send failed: {}", e))?;
+                        }
+                    } else if id == "2" {
+                        return Ok(ok);
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| "gateway health timeout".to_string())?;
+
+    let _ = ws.close(None).await;
+    result
 }
 
 pub struct AppState {
@@ -1407,32 +1490,24 @@ pub async fn get_gateway_status() -> Result<bool, String> {
         return Ok(false);
     }
 
-    // Container is running, check health endpoint
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    // Use container name when in dev container (shared network), localhost otherwise
-    let health_url = if std::path::Path::new("/.dockerenv").exists() {
-        "http://nova-openclaw:18789/health"
+    let ws_url = if std::path::Path::new("/.dockerenv").exists() {
+        "ws://nova-openclaw:18789"
     } else {
-        "http://127.0.0.1:19789/health"
+        "ws://127.0.0.1:19789"
     };
 
-    println!("[Nova] Checking health at: {}", health_url);
-    match client.get(health_url).send().await {
-        Ok(response) => {
-            if response.status().is_success() {
-                println!("[Nova] Health check passed");
-                Ok(true)
-            } else {
-                println!("[Nova] Health check failed with status: {}", response.status());
-                Ok(false)
-            }
+    println!("[Nova] Checking gateway health via WS at: {}", ws_url);
+    match check_gateway_ws_health(ws_url, "nova-local-gateway").await {
+        Ok(true) => {
+            println!("[Nova] Gateway health check passed");
+            Ok(true)
+        }
+        Ok(false) => {
+            println!("[Nova] Gateway health check failed");
+            Ok(false)
         }
         Err(e) => {
-            println!("[Nova] Health check failed: {}", e);
+            println!("[Nova] Gateway health check failed: {}", e);
             // Check if container is actually healthy
             let inspect = docker_command()
                 .args(["inspect", "--format", "{{.State.Health.Status}}", "nova-openclaw"])
