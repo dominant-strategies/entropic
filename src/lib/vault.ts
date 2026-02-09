@@ -172,14 +172,30 @@ export async function removeIntegrationSecret(provider: string): Promise<void> {
 }
 
 export async function listIntegrationSecrets<T>(): Promise<T[]> {
-  const { store } = await getStrongholdSession();
+  const { stronghold, store } = await getStrongholdSession();
   const index = await loadIndex(store);
+  let providers = index;
+  if (providers.length === 0) {
+    const cached = await loadIntegrationIndexCache();
+    providers = cached.map((entry) => entry.provider).filter(Boolean);
+    if (providers.length > 0) {
+      console.info("[vault] integration index empty; attempting cached provider fallback");
+    }
+  }
   const results: T[] = [];
-  for (const provider of index) {
+  for (const provider of providers) {
     const value = await store.get(`integration:${provider}`);
     const parsed = decodeJson<T | null>(value, null);
     if (parsed) {
       results.push(parsed);
+    }
+  }
+  if (index.length === 0 && results.length > 0) {
+    const recoveredProviders = results
+      .map((entry) => (entry as { provider?: string }).provider)
+      .filter((provider): provider is string => typeof provider === "string" && provider.length > 0);
+    if (recoveredProviders.length > 0) {
+      await saveIndex(store, stronghold, recoveredProviders);
     }
   }
   const cacheEntries: IntegrationIndexEntry[] = [];

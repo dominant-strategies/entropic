@@ -13,6 +13,8 @@ import { createGatewayToken, getProxyUrl } from "../lib/auth";
 import {
   hasPendingIntegrationImports,
   syncPendingIntegrationImports,
+  syncAllIntegrationsToGateway,
+  getCachedIntegrationProviders,
   startIntegrationRefreshLoop,
   stopIntegrationRefreshLoop,
 } from "../lib/integrations";
@@ -43,6 +45,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [startupError, setStartupError] = useState<string | null>(null);
   const [gatewayRetryIn, setGatewayRetryIn] = useState<number | null>(null);
   const [integrationsSyncing, setIntegrationsSyncing] = useState(false);
+  const [integrationsMissing, setIntegrationsMissing] = useState(false);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const [codeModel, setCodeModel] = useState("openai/gpt-5.2-codex");
   const [imageModel, setImageModel] = useState("google/gemini-3-pro-image-preview");
@@ -91,6 +94,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     const syncOnce = async () => {
       if (cancelled) return;
       try {
+        setIntegrationsSyncing(true);
+        const synced = await syncAllIntegrationsToGateway();
+        if (!cancelled) {
+          const cached = await getCachedIntegrationProviders().catch(() => []);
+          const missing = synced.length === 0 && cached.length > 0;
+          setIntegrationsMissing(missing);
+        }
         await syncPendingIntegrationImports();
       } catch (err) {
         console.warn("[Nova] Failed to sync integration tokens:", err);
@@ -420,11 +430,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             useLocalKeys={useLocalKeys}
             codeModel={codeModel}
             imageModel={imageModel}
+            integrationsSyncing={integrationsSyncing}
+            integrationsMissing={integrationsMissing}
           />
         );
         }
       case "store":
-        return <Store integrationsSyncing={integrationsSyncing} />;
+        return <Store integrationsSyncing={integrationsSyncing} integrationsMissing={integrationsMissing} />;
       case "channels":
         return <Channels />;
       case "files":

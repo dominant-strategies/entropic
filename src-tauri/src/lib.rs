@@ -103,22 +103,10 @@ pub fn run() {
                 event: WindowEvent::CloseRequested { .. },
                 ..
             } => {
-                println!("[Nova] App closing, cleaning up Docker containers...");
-                // Stop the Docker container before exiting
-                std::process::Command::new("docker")
-                    .args(["stop", "nova-openclaw"])
-                    .output()
-                    .ok();
-                println!("[Nova] Container stopped");
+                println!("[Nova] App closing; leaving gateway running.");
             }
             RunEvent::Exit => {
-                println!("[Nova] App exiting, cleaning up Docker containers...");
-                // Stop the Docker container on exit as well
-                std::process::Command::new("docker")
-                    .args(["stop", "nova-openclaw"])
-                    .output()
-                    .ok();
-                println!("[Nova] Cleanup complete");
+                println!("[Nova] App exiting; leaving gateway running.");
             }
             _ => {}
         });

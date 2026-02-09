@@ -9,6 +9,7 @@ import { SuggestionChip, type SuggestionAction } from "../components/SuggestionC
 import { ChannelSetupModal } from "../components/ChannelSetupModal";
 import { MarkdownContent } from "../components/MarkdownContent";
 import { useAuth } from "../contexts/AuthContext";
+import { syncAllIntegrationsToGateway, getCachedIntegrationProviders } from "../lib/integrations";
 
 // NOTE: Most type definitions are omitted for brevity in this example
 type Message = { id: string; role: "user" | "assistant"; content: string };
@@ -17,64 +18,140 @@ type Provider = { id: string; name: string; icon: string; placeholder: string; k
 type PendingAttachment = { id: string; fileName: string; tempPath: string; savedPath?: string };
 type AuthState = { active_provider: string | null; providers: Array<{ id: string; has_key: boolean }> };
 type CalendarEvent = { id?: string; summary?: string; start?: string; end?: string; attendees?: Array<{ email?: string; displayName?: string }> };
+type ToolError = { tool?: string; error?: string; status?: string };
 
-function findJsonBlock(text: string): { jsonText: string; start: number; end: number } | null {
-  const codeBlock = text.match(/```json\\s*([\\s\\S]*?)```/i);
-  if (codeBlock?.index !== undefined) {
-    return {
-      jsonText: codeBlock[1].trim(),
-      start: codeBlock.index,
-      end: codeBlock.index + codeBlock[0].length,
-    };
+function extractJsonBlocks(text: string): Array<{ jsonText: string; start: number; end: number }> {
+  const blocks: Array<{ jsonText: string; start: number; end: number }> = [];
+  const codeFence = /```json\\s*([\\s\\S]*?)```/gi;
+  let match: RegExpExecArray | null = null;
+  const fencedRanges: Array<{ start: number; end: number }> = [];
+  while ((match = codeFence.exec(text))) {
+    const start = match.index;
+    const end = match.index + match[0].length;
+    blocks.push({ jsonText: match[1].trim(), start, end });
+    fencedRanges.push({ start, end });
   }
 
-  const start = text.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (escape) {
-        escape = false;
-      } else if (ch === "\\\\") {
-        escape = true;
-      } else if (ch === "\"") {
-        inString = false;
-      }
+  const inFence = (pos: number) => fencedRanges.some(range => pos >= range.start && pos < range.end);
+  let i = 0;
+  while (i < text.length) {
+    if (inFence(i)) {
+      i += 1;
       continue;
     }
-    if (ch === "\"") {
-      inString = true;
+    if (text[i] !== "{") {
+      i += 1;
       continue;
     }
-    if (ch === "{") depth += 1;
-    if (ch === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return { jsonText: text.slice(start, i + 1), start, end: i + 1 };
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    const start = i;
+    for (let j = i; j < text.length; j++) {
+      const ch = text[j];
+      if (inString) {
+        if (escape) {
+          escape = false;
+        } else if (ch === "\\\\") {
+          escape = true;
+        } else if (ch === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === "\"") {
+        inString = true;
+        continue;
+      }
+      if (ch === "{") depth += 1;
+      if (ch === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          blocks.push({ jsonText: text.slice(start, j + 1), start, end: j + 1 });
+          i = j;
+          break;
+        }
       }
     }
+    i += 1;
   }
-  return null;
+
+  return blocks.sort((a, b) => a.start - b.start);
 }
 
-function parseCalendarEvents(raw: string): { events: CalendarEvent[]; before: string; after: string } | null {
-  const block = findJsonBlock(raw);
-  if (!block) return null;
+function parseToolPayloads(raw: string): {
+  cleanText: string;
+  events: CalendarEvent[];
+  errors: ToolError[];
+} {
   try {
-    const parsed = JSON.parse(block.jsonText);
-    const events = Array.isArray(parsed?.events) ? parsed.events as CalendarEvent[] : null;
-    if (!events || events.length === 0) return null;
-    return {
-      events,
-      before: raw.slice(0, block.start).trim(),
-      after: raw.slice(block.end).trim(),
-    };
+    const direct = JSON.parse(raw);
+    if (typeof direct === "string") {
+      return parseToolPayloads(direct);
+    }
+    if (direct && typeof direct === "object") {
+      const events = Array.isArray((direct as any).events) ? (direct as any).events as CalendarEvent[] : [];
+      const errors = (direct as any).tool || (direct as any).status === "error"
+        ? [{ tool: (direct as any).tool, error: (direct as any).error, status: (direct as any).status }]
+        : [];
+      if (events.length || errors.length) {
+        return { cleanText: "", events, errors };
+      }
+    }
   } catch {
-    return null;
+    // ignore
   }
+
+  const blocks = extractJsonBlocks(raw);
+  if (blocks.length === 0) {
+    return { cleanText: raw, events: [], errors: [] };
+  }
+
+  const events: CalendarEvent[] = [];
+  const errors: ToolError[] = [];
+  const removalRanges: Array<{ start: number; end: number }> = [];
+
+  for (const block of blocks) {
+    try {
+      const parsed = JSON.parse(block.jsonText);
+      if (parsed && typeof parsed === "object") {
+        if (Array.isArray((parsed as any).events)) {
+          events.push(...(parsed as any).events);
+          removalRanges.push({ start: block.start, end: block.end });
+          continue;
+        }
+        if ((parsed as any).tool || (parsed as any).status === "error") {
+          errors.push({
+            tool: (parsed as any).tool,
+            error: (parsed as any).error,
+            status: (parsed as any).status,
+          });
+          removalRanges.push({ start: block.start, end: block.end });
+          continue;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (removalRanges.length === 0) {
+    return { cleanText: raw, events: [], errors: [] };
+  }
+
+  let clean = "";
+  let cursor = 0;
+  for (const range of removalRanges) {
+    if (range.start > cursor) {
+      clean += raw.slice(cursor, range.start);
+    }
+    cursor = Math.max(cursor, range.end);
+  }
+  if (cursor < raw.length) {
+    clean += raw.slice(cursor);
+  }
+
+  return { cleanText: clean.trim(), events, errors };
 }
 
 function formatEventRange(start?: string, end?: string): { date?: string; time?: string } {
@@ -120,6 +197,8 @@ export function Chat({
   useLocalKeys,
   codeModel,
   imageModel: _imageModel,
+  integrationsSyncing,
+  integrationsMissing,
 }: {
   gatewayRunning: boolean;
   gatewayStarting: boolean;
@@ -128,6 +207,8 @@ export function Chat({
   useLocalKeys: boolean;
   codeModel: string;
   imageModel: string;
+  integrationsSyncing?: boolean;
+  integrationsMissing?: boolean;
 }) {
   const { isAuthenticated, isAuthConfigured } = useAuth();
   const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
@@ -164,6 +245,7 @@ export function Chat({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const clientRef = useRef<GatewayClient | null>(null);
   const lastEventByRunIdRef = useRef<Record<string, number>>({});
+  const lastIntegrationsSyncRef = useRef<number>(0);
 
   function addDiag(message: string) {
     const stamp = new Date().toLocaleTimeString();
@@ -261,6 +343,22 @@ export function Chat({
         setIsConnecting(false);
         setError(null);
         loadSessions();
+        syncAllIntegrationsToGateway()
+          .then((providers) => {
+            addDiag(`integrations synced: ${providers.length ? providers.join(", ") : "none"}`);
+            if (providers.length === 0) {
+              getCachedIntegrationProviders()
+                .then((cached) => {
+                  if (cached.length > 0) {
+                    addDiag("integrations missing secrets; reconnect in Plugins");
+                  }
+                })
+                .catch(() => {});
+            }
+          })
+          .catch((err) => {
+            addDiag(`integrations sync failed: ${String(err)}`);
+          });
         addDiag("gateway connected");
       });
       client.on("disconnected", () => {
@@ -358,6 +456,16 @@ export function Chat({
     setIsLoading(true);
     setError(null);
     try {
+      const now = Date.now();
+      if (gatewayRunning && (connectedProvider || proxyEnabled) && now - lastIntegrationsSyncRef.current > 15_000) {
+        try {
+          const providers = await syncAllIntegrationsToGateway();
+          lastIntegrationsSyncRef.current = now;
+          addDiag(`integrations synced before send: ${providers.length ? providers.join(", ") : "none"}`);
+        } catch (err) {
+          addDiag(`integrations sync before send failed: ${String(err)}`);
+        }
+      }
       addDiag(`send -> session=${currentSession} len=${messageContent.length}`);
       const runId = await clientRef.current?.sendMessage(currentSession, messageContent, []);
       setLastSendId(runId || null);
@@ -394,44 +502,45 @@ export function Chat({
   }
 
   function renderAssistantContent(content: string) {
-    const calendarPayload = parseCalendarEvents(content);
-    if (!calendarPayload) {
+    const payload = parseToolPayloads(content);
+    if (!payload.events.length && !payload.errors.length) {
       return <MarkdownContent content={content} />;
     }
     return (
       <div className="space-y-2">
-        {calendarPayload.before ? <MarkdownContent content={calendarPayload.before} /> : null}
-        <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-3 shadow-sm">
-          <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)] mb-2">
-            <Calendar className="w-3.5 h-3.5" />
-            Calendar
-          </div>
-          <div className="space-y-2">
-            {calendarPayload.events.map((event, idx) => {
-              const { date, time } = formatEventRange(event.start, event.end);
-              const attendees = event.attendees?.length ?? 0;
-              return (
-                <div
-                  key={event.id || `evt-${idx}`}
-                  className="rounded-lg bg-[var(--bg-tertiary)]/60 px-3 py-2"
-                >
-                  <div className="font-semibold text-[var(--text-primary)]">
-                    {event.summary || "Untitled event"}
-                  </div>
-                  {(date || time) && (
-                    <div className="text-xs text-[var(--text-secondary)]">
-                      {date}{date && time ? " · " : ""}{time}
+        {payload.cleanText ? <MarkdownContent content={payload.cleanText} /> : null}
+        {payload.events.length > 0 && (
+          <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-3 shadow-sm">
+            <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)] mb-2">
+              <Calendar className="w-3.5 h-3.5" />
+              Calendar
+            </div>
+            <div className="space-y-2">
+              {payload.events.map((event, idx) => {
+                const { date, time } = formatEventRange(event.start, event.end);
+                const attendees = event.attendees?.length ?? 0;
+                return (
+                  <div
+                    key={event.id || `evt-${idx}`}
+                    className="rounded-lg bg-[var(--bg-tertiary)]/60 px-3 py-2"
+                  >
+                    <div className="font-semibold text-[var(--text-primary)]">
+                      {event.summary || "Untitled event"}
                     </div>
-                  )}
-                  {attendees > 0 && (
-                    <div className="text-xs text-[var(--text-tertiary)]">Attendees: {attendees}</div>
-                  )}
-                </div>
-              );
-            })}
+                    {(date || time) && (
+                      <div className="text-xs text-[var(--text-secondary)]">
+                        {date}{date && time ? " · " : ""}{time}
+                      </div>
+                    )}
+                    {attendees > 0 && (
+                      <div className="text-xs text-[var(--text-tertiary)]">Attendees: {attendees}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>
-        {calendarPayload.after ? <MarkdownContent content={calendarPayload.after} /> : null}
+        )}
       </div>
     );
   }
@@ -600,6 +709,12 @@ export function Chat({
                   ? "Connecting"
                   : "Disconnected"}
           </span>
+          {integrationsSyncing ? (
+            <span className="text-xs text-[var(--text-tertiary)] flex items-center gap-1">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Syncing integrations…
+            </span>
+          ) : null}
         </div>
         <button
           onClick={() => setShowDiagnostics(true)}
@@ -617,6 +732,12 @@ export function Chat({
           {gatewayRetryIn
             ? `Gateway reconnecting — retrying in ${gatewayRetryIn}s.`
             : "Gateway starting…"}
+        </div>
+      )}
+
+      {integrationsMissing && !integrationsSyncing && (
+        <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-700">
+          Integrations need reconnect — open Plugins to reconnect Google Calendar/Gmail.
         </div>
       )}
 

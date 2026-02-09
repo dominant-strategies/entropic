@@ -25,6 +25,7 @@ export interface Integration {
   connected: boolean;
   email?: string;
   scopes: string[];
+  stale?: boolean;
 }
 
 type StoredIntegration = {
@@ -105,7 +106,8 @@ export async function getIntegrations(): Promise<Integration[]> {
   const records = await listIntegrationSecrets<StoredIntegration>();
   return records.map((record) => ({
     provider: record.provider,
-    connected: true,
+    connected: Boolean(record.access_token),
+    stale: !record.access_token,
     email: record.email ?? undefined,
     scopes: record.scopes ?? [],
   }));
@@ -116,6 +118,7 @@ export async function getIntegrationsCached(): Promise<Integration[]> {
   return cached.map((record) => ({
     provider: record.provider,
     connected: true,
+    stale: true,
     email: record.email ?? undefined,
     scopes: record.scopes ?? [],
   }));
@@ -157,7 +160,7 @@ async function refreshIntegration(record: StoredIntegration): Promise<StoredInte
   }
   const refreshed = await invoke<RefreshResponse>("refresh_google_token", {
     provider: record.provider,
-    refresh_token: record.refresh_token,
+    refreshToken: record.refresh_token,
   });
   const updated: StoredIntegration = {
     ...record,
@@ -205,7 +208,7 @@ export async function exportIntegrationTokenBundle(
 async function importIntegrationBundle(bundle: IntegrationTokenBundle): Promise<void> {
   const isRunning = await invoke<boolean>("get_gateway_status").catch(() => false);
   if (!isRunning) {
-    throw new Error("Gateway is offline");
+    console.warn("[integrations] Gateway status check failed; attempting import anyway.");
   }
   const gatewayUrl =
     (await invoke<string>("get_gateway_ws_url").catch(() => "")) || DEFAULT_GATEWAY_URL;
@@ -257,6 +260,27 @@ export async function syncPendingIntegrationImports(): Promise<void> {
 export async function hasPendingIntegrationImports(): Promise<boolean> {
   const pending = await loadPendingImports();
   return Object.keys(pending).length > 0;
+}
+
+export async function syncAllIntegrationsToGateway(): Promise<string[]> {
+  const records = await listIntegrationSecrets<StoredIntegration>();
+  const synced: string[] = [];
+  for (const record of records) {
+    if (!record?.access_token) continue;
+    if (!OPENCLAW_SYNC_PROVIDERS.has(record.provider)) continue;
+    try {
+      await syncIntegrationToGateway(record.provider);
+      synced.push(record.provider);
+    } catch (err) {
+      console.warn(`Failed to sync ${record.provider} to OpenClaw:`, err);
+    }
+  }
+  return synced;
+}
+
+export async function getCachedIntegrationProviders(): Promise<string[]> {
+  const cached = await listIntegrationIndexCache();
+  return cached.map((entry) => entry.provider).filter(Boolean);
 }
 
 export async function removeIntegrationFromGateway(provider: IntegrationProvider): Promise<void> {

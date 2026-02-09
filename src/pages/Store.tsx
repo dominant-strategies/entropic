@@ -5,6 +5,7 @@ import { Calendar, Mail, CheckCircle2, ExternalLink, ShieldCheck, Loader2 } from
 import {
   getIntegrations,
   getIntegrationsCached,
+  getCachedIntegrationProviders,
   connectIntegration,
   disconnectIntegration,
   syncIntegrationToGateway,
@@ -31,6 +32,7 @@ type GoogleIntegration = {
   description: string;
   icon: typeof Calendar;
   connected: boolean;
+  stale?: boolean;
   email?: string;
 };
 
@@ -64,7 +66,13 @@ const CATEGORIES = [
   { id: "memory", label: "Memory" },
 ];
 
-export function Store({ integrationsSyncing }: { integrationsSyncing?: boolean }) {
+export function Store({
+  integrationsSyncing,
+  integrationsMissing,
+}: {
+  integrationsSyncing?: boolean;
+  integrationsMissing?: boolean;
+}) {
   const [plugins, setPlugins] = useState<Plugin[]>([]);
   const [category, setCategory] = useState("all");
   const [installing, setInstalling] = useState<string | null>(null);
@@ -107,25 +115,41 @@ export function Store({ integrationsSyncing }: { integrationsSyncing?: boolean }
 
   async function refreshIntegrations() {
     try {
+      const cached = await getIntegrationsCached();
+      if (cached.length > 0) {
+        setIntegrations(cached);
+      }
       try {
-        const cached = await getIntegrationsCached();
-        if (cached.length > 0) {
-          setIntegrations(cached);
+        const list = await getIntegrations();
+        const listProviders = new Set(list.map((entry) => entry.provider));
+        const merged: Integration[] = [];
+        for (const entry of cached) {
+          if (listProviders.has(entry.provider)) {
+            const real = list.find((item) => item.provider === entry.provider);
+            if (real) merged.push(real);
+          } else {
+            merged.push({ ...entry, connected: false, stale: true });
+          }
         }
+        for (const entry of list) {
+          if (!cached.find((item) => item.provider === entry.provider)) {
+            merged.push(entry);
+          }
+        }
+        setIntegrations(merged.length ? merged : list);
+        const connectedIds = new Set(list.filter(i => i.connected).map(i => i.provider));
+        for (const id of Array.from(syncedIntegrationsRef.current)) {
+          if (!connectedIds.has(id)) {
+            syncedIntegrationsRef.current.delete(id);
+          }
+        }
+        syncConnectedIntegrations(list).catch((err) => {
+          console.warn("Failed to sync integrations:", err);
+        });
+        return;
       } catch (err) {
         // ignore cache failures
       }
-      const list = await getIntegrations();
-      setIntegrations(list);
-      const connectedIds = new Set(list.filter(i => i.connected).map(i => i.provider));
-      for (const id of Array.from(syncedIntegrationsRef.current)) {
-        if (!connectedIds.has(id)) {
-          syncedIntegrationsRef.current.delete(id);
-        }
-      }
-      syncConnectedIntegrations(list).catch((err) => {
-        console.warn("Failed to sync integrations:", err);
-      });
     } catch (err) {
       // User might not be authenticated or backend might not support integrations yet
       console.error("Failed to load integrations:", err);
@@ -155,7 +179,8 @@ export function Store({ integrationsSyncing }: { integrationsSyncing?: boolean }
       const connected = integrations.find(i => i.provider === gi.id);
       return {
         ...gi,
-        connected: !!connected,
+        connected: !!connected && !connected.stale,
+        stale: connected?.stale,
         email: connected?.email,
       };
     });
@@ -240,6 +265,10 @@ export function Store({ integrationsSyncing }: { integrationsSyncing?: boolean }
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
             Syncing integrations
           </div>
+        ) : integrationsMissing ? (
+          <div className="text-xs text-amber-600 uppercase tracking-wide">
+            Integrations need reconnect
+          </div>
         ) : null}
       </div>
 
@@ -288,20 +317,31 @@ export function Store({ integrationsSyncing }: { integrationsSyncing?: boolean }
                       </div>
                     </div>
                     <button
-                      onClick={() => integration.connected
+                      onClick={() => integration.connected && !integration.stale
                         ? handleDisconnectIntegration(integration.id)
                         : handleConnectIntegration(integration.id)
                       }
                       disabled={connecting === integration.id}
                       className={clsx(
                         "btn !text-xs",
-                        integration.connected ? "btn-secondary" : "btn-primary"
+                        integration.connected && !integration.stale ? "btn-secondary" : "btn-primary"
                       )}
                     >
-                      {connecting === integration.id ? "..." : integration.connected ? "Disconnect" : "Connect"}
-                      {!integration.connected && <ExternalLink className="w-3 h-3 ml-1" />}
+                      {connecting === integration.id
+                        ? "..."
+                        : integration.connected && !integration.stale
+                          ? "Disconnect"
+                          : integration.connected && integration.stale
+                            ? "Reconnect"
+                            : "Connect"}
+                      {(!integration.connected || integration.stale) && <ExternalLink className="w-3 h-3 ml-1" />}
                     </button>
                   </div>
+                  {integration.stale && (
+                    <p className="text-xs text-amber-600 mt-1">
+                      Needs reconnect — tokens missing locally.
+                    </p>
+                  )}
                   <p className="text-sm text-[var(--text-secondary)] flex-1">{integration.description}</p>
                 </div>
               );
