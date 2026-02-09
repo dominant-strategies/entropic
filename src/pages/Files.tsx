@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, type ReactNode, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
 import {
@@ -21,6 +21,12 @@ import {
   Send,
   Loader2,
   Image,
+  Sparkles,
+  Radio,
+  ScrollText,
+  Settings as SettingsIcon,
+  CalendarClock,
+  CreditCard,
 } from "lucide-react";
 import {
   getGatewayClient,
@@ -30,6 +36,12 @@ import {
 } from "../lib/gateway";
 import { loadOnboardingData } from "../lib/profile";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
+import { Store as PluginStore } from "./Store";
+import { Channels } from "./Channels";
+import { Logs } from "./Logs";
+import { Settings } from "./Settings";
+import { Tasks } from "./Tasks";
+import { BillingPage } from "./BillingPage";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -39,7 +51,21 @@ type WorkspaceFileEntry = {
   modified_at: number;
 };
 
-type Props = { gatewayRunning: boolean };
+type Props = {
+  gatewayRunning: boolean;
+  integrationsSyncing?: boolean;
+  integrationsMissing?: boolean;
+  onGatewayToggle: () => void;
+  isTogglingGateway: boolean;
+  selectedModel: string;
+  onModelChange: (model: string) => void;
+  useLocalKeys: boolean;
+  onUseLocalKeysChange: (value: boolean) => void;
+  codeModel: string;
+  imageModel: string;
+  onCodeModelChange: (model: string) => void;
+  onImageModelChange: (model: string) => void;
+};
 type ViewMode = "grid" | "list";
 type ChatMessage = { id: string; role: "user" | "assistant"; content: string };
 
@@ -111,8 +137,94 @@ function FolderIcon({ size = 64, selected = false }: { size?: number; selected?:
   );
 }
 
+function AppWindow({
+  title,
+  icon: Icon,
+  position,
+  size,
+  onClose,
+  onDragStart,
+  onFocus,
+  zIndex,
+  children,
+}: {
+  title: string;
+  icon: typeof Folder;
+  position: { x: number; y: number };
+  size: { w: number; h: number };
+  onClose: () => void;
+  onDragStart: (e: MouseEvent) => void;
+  onFocus: () => void;
+  zIndex: number;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className="absolute flex flex-col rounded-xl overflow-hidden animate-scale-in"
+      style={{
+        top: position.y,
+        left: position.x,
+        width: size.w,
+        height: size.h,
+        zIndex,
+        background: "rgba(248,248,248,0.92)",
+        backdropFilter: "blur(18px)",
+        WebkitBackdropFilter: "blur(18px)",
+        boxShadow: "0 24px 70px rgba(0,0,0,0.28), 0 0 0 0.5px rgba(255,255,255,0.6)",
+        border: "1px solid rgba(255,255,255,0.65)",
+      }}
+      onMouseDown={onFocus}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div
+        className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing"
+        style={{ background: "rgba(255,255,255,0.9)", borderBottom: "1px solid rgba(0,0,0,0.08)" }}
+        onMouseDown={onDragStart}
+      >
+        <div className="flex items-center gap-2 z-10">
+          <button
+            onClick={onClose}
+            className="w-3 h-3 rounded-full hover:opacity-80 group relative"
+            style={{ background: "#ff5f57" }}
+            title="Close"
+          >
+            <X className="w-2 h-2 absolute inset-0.5 opacity-0 group-hover:opacity-100 text-black/60" />
+          </button>
+          <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} />
+          <div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
+        </div>
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <div className="flex items-center gap-2">
+            <Icon className="w-3.5 h-3.5" style={{ color: "#7c3aed" }} />
+            <span className="text-xs font-medium" style={{ color: "#2b2b2b" }}>
+              {title}
+            </span>
+          </div>
+        </div>
+      </div>
+      <div className="flex-1 overflow-hidden" style={{ background: "rgba(255,255,255,0.94)" }}>
+        <div className="h-full overflow-auto">{children}</div>
+      </div>
+    </div>
+  );
+}
+
 // ═════════════════════════════════════════════════════════════════════
-export function Files({ gatewayRunning }: Props) {
+export function Files({
+  gatewayRunning,
+  integrationsSyncing,
+  integrationsMissing,
+  onGatewayToggle,
+  isTogglingGateway,
+  selectedModel,
+  onModelChange,
+  useLocalKeys,
+  onUseLocalKeysChange,
+  codeModel,
+  imageModel,
+  onCodeModelChange,
+  onImageModelChange,
+}: Props) {
   const [agentName, setAgentName] = useState("Nova");
 
   // Wallpaper
@@ -124,6 +236,12 @@ export function Files({ gatewayRunning }: Props) {
   // Windows
   const [finderOpen, setFinderOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [pluginsOpen, setPluginsOpen] = useState(false);
+  const [channelsOpen, setChannelsOpen] = useState(false);
+  const [tasksOpen, setTasksOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [billingOpen, setBillingOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Finder drag
   const [finderPos, setFinderPos] = useState({ x: 30, y: 20 });
@@ -133,6 +251,31 @@ export function Files({ gatewayRunning }: Props) {
   // Chat window drag
   const [chatPos, setChatPos] = useState({ x: 120, y: 40 });
   const chatDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+
+  // Plugin windows drag
+  const [pluginsPos, setPluginsPos] = useState({ x: 180, y: 80 });
+  const [channelsPos, setChannelsPos] = useState({ x: 240, y: 120 });
+  const [tasksPos, setTasksPos] = useState({ x: 220, y: 140 });
+  const [logsPos, setLogsPos] = useState({ x: 300, y: 160 });
+  const [billingPos, setBillingPos] = useState({ x: 260, y: 110 });
+  const [settingsPos, setSettingsPos] = useState({ x: 200, y: 70 });
+  const [pluginsSize] = useState({ w: 520, h: 540 });
+  const [channelsSize] = useState({ w: 520, h: 520 });
+  const [tasksSize] = useState({ w: 620, h: 560 });
+  const [logsSize] = useState({ w: 560, h: 420 });
+  const [billingSize] = useState({ w: 520, h: 520 });
+  const [settingsSize] = useState({ w: 740, h: 560 });
+  const pluginsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const channelsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const tasksDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const logsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const billingDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const settingsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const zCounter = useRef(60);
+  const [windowZ, setWindowZ] = useState<Record<string, number>>({
+    finder: 60,
+    chat: 61,
+  });
 
   // File browser
   const [entries, setEntries] = useState<WorkspaceFileEntry[]>([]);
@@ -213,19 +356,34 @@ export function Files({ gatewayRunning }: Props) {
 
   // ── Finder drag ─────────────────────────────────────────────────────
 
-  function handleFinderDragStart(e: React.MouseEvent) {
+  function focusWindow(id: string) {
+    setWindowZ((prev) => {
+      const nextZ = zCounter.current + 1;
+      zCounter.current = nextZ;
+      return { ...prev, [id]: nextZ };
+    });
+  }
+
+  function startWindowDrag(
+    e: MouseEvent,
+    ref: React.MutableRefObject<{ sx: number; sy: number; ox: number; oy: number } | null>,
+    pos: { x: number; y: number },
+    setPos: (next: { x: number; y: number }) => void,
+    id: string
+  ) {
     if ((e.target as HTMLElement).closest("button")) return;
     e.preventDefault();
-    dragRef.current = { sx: e.clientX, sy: e.clientY, ox: finderPos.x, oy: finderPos.y };
+    focusWindow(id);
+    ref.current = { sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y };
     function onMove(ev: MouseEvent) {
-      if (!dragRef.current) return;
-      setFinderPos({
-        x: Math.max(0, dragRef.current.ox + ev.clientX - dragRef.current.sx),
-        y: Math.max(0, dragRef.current.oy + ev.clientY - dragRef.current.sy),
+      if (!ref.current) return;
+      setPos({
+        x: Math.max(0, ref.current.ox + ev.clientX - ref.current.sx),
+        y: Math.max(0, ref.current.oy + ev.clientY - ref.current.sy),
       });
     }
     function onUp() {
-      dragRef.current = null;
+      ref.current = null;
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     }
@@ -233,24 +391,12 @@ export function Files({ gatewayRunning }: Props) {
     window.addEventListener("mouseup", onUp);
   }
 
-  function handleChatDragStart(e: React.MouseEvent) {
-    if ((e.target as HTMLElement).closest("button")) return;
-    e.preventDefault();
-    chatDragRef.current = { sx: e.clientX, sy: e.clientY, ox: chatPos.x, oy: chatPos.y };
-    function onMove(ev: MouseEvent) {
-      if (!chatDragRef.current) return;
-      setChatPos({
-        x: Math.max(0, chatDragRef.current.ox + ev.clientX - chatDragRef.current.sx),
-        y: Math.max(0, chatDragRef.current.oy + ev.clientY - chatDragRef.current.sy),
-      });
-    }
-    function onUp() {
-      chatDragRef.current = null;
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+  function handleFinderDragStart(e: MouseEvent) {
+    startWindowDrag(e, dragRef, finderPos, setFinderPos, "finder");
+  }
+
+  function handleChatDragStart(e: MouseEvent) {
+    startWindowDrag(e, chatDragRef, chatPos, setChatPos, "chat");
   }
 
   // ── File browser logic ──────────────────────────────────────────────
@@ -453,13 +599,15 @@ export function Files({ gatewayRunning }: Props) {
           {/* ── FLOATING FINDER WINDOW (draggable) ────────────────────── */}
           {finderOpen && (
             <div
-              className="absolute z-30 flex flex-col rounded-xl overflow-hidden animate-scale-in"
+              className="absolute flex flex-col rounded-xl overflow-hidden animate-scale-in"
               style={{
                 top: finderPos.y, left: finderPos.x,
                 width: finderSize.w, height: finderSize.h,
                 boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56), 0 0 0 0.5px rgba(255,255,255,0.1)",
                 border: "0.5px solid rgba(255,255,255,0.08)",
+                zIndex: windowZ.finder ?? 60,
               }}
+              onMouseDown={() => focusWindow("finder")}
               onClick={(e) => e.stopPropagation()}
             >
               {/* Title bar — drag handle */}
@@ -674,13 +822,15 @@ export function Files({ gatewayRunning }: Props) {
           {/* ── FLOATING CHAT WINDOW (draggable) ────────────────────── */}
           {chatOpen && (
             <div
-              className="absolute z-30 flex flex-col rounded-xl overflow-hidden animate-scale-in"
+              className="absolute flex flex-col rounded-xl overflow-hidden animate-scale-in"
               style={{
                 top: chatPos.y, left: chatPos.x,
                 width: 360, height: 420,
                 boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56), 0 0 0 0.5px rgba(255,255,255,0.1)",
                 border: "0.5px solid rgba(255,255,255,0.08)",
+                zIndex: windowZ.chat ?? 61,
               }}
+              onMouseDown={() => focusWindow("chat")}
               onClick={(e) => e.stopPropagation()}
             >
               {/* Title bar — drag handle */}
@@ -744,6 +894,129 @@ export function Files({ gatewayRunning }: Props) {
             </div>
           )}
 
+          {/* ── PLUGINS WINDOW ───────────────────────────────────────── */}
+          {pluginsOpen && (
+            <AppWindow
+              title="Plugins"
+              icon={Sparkles}
+              position={pluginsPos}
+              size={pluginsSize}
+              zIndex={windowZ.plugins ?? 62}
+              onClose={() => setPluginsOpen(false)}
+              onFocus={() => focusWindow("plugins")}
+              onDragStart={(e) =>
+                startWindowDrag(e, pluginsDragRef, pluginsPos, setPluginsPos, "plugins")
+              }
+            >
+              <PluginStore
+                integrationsSyncing={integrationsSyncing}
+                integrationsMissing={integrationsMissing}
+              />
+            </AppWindow>
+          )}
+
+          {/* ── CHANNELS WINDOW ──────────────────────────────────────── */}
+          {channelsOpen && (
+            <AppWindow
+              title="Channels"
+              icon={Radio}
+              position={channelsPos}
+              size={channelsSize}
+              zIndex={windowZ.channels ?? 63}
+              onClose={() => setChannelsOpen(false)}
+              onFocus={() => focusWindow("channels")}
+              onDragStart={(e) =>
+                startWindowDrag(e, channelsDragRef, channelsPos, setChannelsPos, "channels")
+              }
+            >
+              <Channels />
+            </AppWindow>
+          )}
+
+          {/* ── TASKS WINDOW ───────────────────────────────────────── */}
+          {tasksOpen && (
+            <AppWindow
+              title="Tasks"
+              icon={CalendarClock}
+              position={tasksPos}
+              size={tasksSize}
+              zIndex={windowZ.tasks ?? 64}
+              onClose={() => setTasksOpen(false)}
+              onFocus={() => focusWindow("tasks")}
+              onDragStart={(e) =>
+                startWindowDrag(e, tasksDragRef, tasksPos, setTasksPos, "tasks")
+              }
+            >
+              <Tasks gatewayRunning={gatewayRunning} />
+            </AppWindow>
+          )}
+
+          {/* ── LOGS WINDOW ─────────────────────────────────────────── */}
+          {logsOpen && (
+            <AppWindow
+              title="Logs"
+              icon={ScrollText}
+              position={logsPos}
+              size={logsSize}
+              zIndex={windowZ.logs ?? 65}
+              onClose={() => setLogsOpen(false)}
+              onFocus={() => focusWindow("logs")}
+              onDragStart={(e) =>
+                startWindowDrag(e, logsDragRef, logsPos, setLogsPos, "logs")
+              }
+            >
+              <Logs />
+            </AppWindow>
+          )}
+
+          {/* ── BILLING WINDOW ─────────────────────────────────────── */}
+          {billingOpen && (
+            <AppWindow
+              title="Billing"
+              icon={CreditCard}
+              position={billingPos}
+              size={billingSize}
+              zIndex={windowZ.billing ?? 66}
+              onClose={() => setBillingOpen(false)}
+              onFocus={() => focusWindow("billing")}
+              onDragStart={(e) =>
+                startWindowDrag(e, billingDragRef, billingPos, setBillingPos, "billing")
+              }
+            >
+              <BillingPage />
+            </AppWindow>
+          )}
+
+          {/* ── SETTINGS WINDOW ─────────────────────────────────────── */}
+          {settingsOpen && (
+            <AppWindow
+              title="Settings"
+              icon={SettingsIcon}
+              position={settingsPos}
+              size={settingsSize}
+              zIndex={windowZ.settings ?? 67}
+              onClose={() => setSettingsOpen(false)}
+              onFocus={() => focusWindow("settings")}
+              onDragStart={(e) =>
+                startWindowDrag(e, settingsDragRef, settingsPos, setSettingsPos, "settings")
+              }
+            >
+              <Settings
+                gatewayRunning={gatewayRunning}
+                onGatewayToggle={onGatewayToggle}
+                isTogglingGateway={isTogglingGateway}
+                selectedModel={selectedModel}
+                onModelChange={onModelChange}
+                useLocalKeys={useLocalKeys}
+                onUseLocalKeysChange={onUseLocalKeysChange}
+                codeModel={codeModel}
+                imageModel={imageModel}
+                onCodeModelChange={onCodeModelChange}
+                onImageModelChange={onImageModelChange}
+              />
+            </AppWindow>
+          )}
+
           {/* ── FLOATING DOCK ─────────────────────────────────────────── */}
           <div
             className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex items-end justify-center gap-2 px-2.5 py-1.5 rounded-[22px]"
@@ -758,7 +1031,13 @@ export function Files({ gatewayRunning }: Props) {
           >
             {/* Finder */}
             <button
-              onClick={() => { if (!finderOpen) { setFinderOpen(true); fetchFiles(currentPath || ""); } else { setFinderOpen(false); } }}
+              onClick={() => {
+                if (!finderOpen) {
+                  setFinderOpen(true);
+                  fetchFiles(currentPath || "");
+                }
+                focusWindow("finder");
+              }}
               className="group flex flex-col items-center"
               title="Finder"
             >
@@ -773,7 +1052,10 @@ export function Files({ gatewayRunning }: Props) {
 
             {/* Chat */}
             <button
-              onClick={() => setChatOpen(!chatOpen)}
+              onClick={() => {
+                if (!chatOpen) setChatOpen(true);
+                focusWindow("chat");
+              }}
               className="group flex flex-col items-center"
               title="Chat"
             >
@@ -784,6 +1066,114 @@ export function Files({ gatewayRunning }: Props) {
                 <MessageSquare className="w-6 h-6 text-white" />
               </div>
               <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${chatOpen ? "bg-white/80" : "opacity-0"}`} />
+            </button>
+
+            {/* Plugins */}
+            <button
+              onClick={() => {
+                if (!pluginsOpen) setPluginsOpen(true);
+                focusWindow("plugins");
+              }}
+              className="group flex flex-col items-center"
+              title="Plugins"
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #c084fc 0%, #7c3aed 100%)", boxShadow: "0 3px 10px rgba(124,58,237,0.4)" }}
+              >
+                <Sparkles className="w-6 h-6 text-white" />
+              </div>
+              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${pluginsOpen ? "bg-white/80" : "opacity-0"}`} />
+            </button>
+
+            {/* Channels */}
+            <button
+              onClick={() => {
+                if (!channelsOpen) setChannelsOpen(true);
+                focusWindow("channels");
+              }}
+              className="group flex flex-col items-center"
+              title="Channels"
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #60a5fa 0%, #2563eb 100%)", boxShadow: "0 3px 10px rgba(37,99,235,0.4)" }}
+              >
+                <Radio className="w-6 h-6 text-white" />
+              </div>
+              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${channelsOpen ? "bg-white/80" : "opacity-0"}`} />
+            </button>
+
+            {/* Tasks */}
+            <button
+              onClick={() => {
+                if (!tasksOpen) setTasksOpen(true);
+                focusWindow("tasks");
+              }}
+              className="group flex flex-col items-center"
+              title="Tasks"
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #f97316 0%, #ea580c 100%)", boxShadow: "0 3px 10px rgba(234,88,12,0.35)" }}
+              >
+                <CalendarClock className="w-6 h-6 text-white" />
+              </div>
+              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${tasksOpen ? "bg-white/80" : "opacity-0"}`} />
+            </button>
+
+            {/* Logs */}
+            <button
+              onClick={() => {
+                if (!logsOpen) setLogsOpen(true);
+                focusWindow("logs");
+              }}
+              className="group flex flex-col items-center"
+              title="Logs"
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #94a3b8 0%, #475569 100%)", boxShadow: "0 3px 10px rgba(71,85,105,0.4)" }}
+              >
+                <ScrollText className="w-6 h-6 text-white" />
+              </div>
+              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${logsOpen ? "bg-white/80" : "opacity-0"}`} />
+            </button>
+
+            {/* Billing */}
+            <button
+              onClick={() => {
+                if (!billingOpen) setBillingOpen(true);
+                focusWindow("billing");
+              }}
+              className="group flex flex-col items-center"
+              title="Billing"
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #22c55e 0%, #16a34a 100%)", boxShadow: "0 3px 10px rgba(34,197,94,0.35)" }}
+              >
+                <CreditCard className="w-6 h-6 text-white" />
+              </div>
+              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${billingOpen ? "bg-white/80" : "opacity-0"}`} />
+            </button>
+
+            {/* Settings */}
+            <button
+              onClick={() => {
+                if (!settingsOpen) setSettingsOpen(true);
+                focusWindow("settings");
+              }}
+              className="group flex flex-col items-center"
+              title="Settings"
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #f3f4f6 0%, #d1d5db 100%)", boxShadow: "0 3px 10px rgba(148,163,184,0.35)" }}
+              >
+                <SettingsIcon className="w-6 h-6 text-[#111827]" />
+              </div>
+              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${settingsOpen ? "bg-white/80" : "opacity-0"}`} />
             </button>
 
             <div className="w-px self-stretch my-1.5 mx-0.5" style={{ background: "rgba(255,255,255,0.25)" }} />

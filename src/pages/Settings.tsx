@@ -1,12 +1,11 @@
 import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
-import { Power, Key, Shield, Sparkles, Cpu, CreditCard, Image } from "lucide-react";
+import { Power, Key, Shield, Sparkles, Cpu, Image } from "lucide-react";
 import clsx from "clsx";
 import { loadProfile, saveProfile, type AgentProfile } from "../lib/profile";
 import { useAuth } from "../contexts/AuthContext";
 import { ModelSelector } from "../components/ModelSelector";
-import { Billing } from "../components/Billing";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
 
 type Props = {
@@ -282,12 +281,7 @@ export function Settings({
         </SettingsSection>
       )}
 
-      {/* Billing - only show when proxy is enabled */}
-      {proxyEnabled && (
-        <SettingsSection title="Billing & Credits" icon={CreditCard}>
-          <Billing />
-        </SettingsSection>
-      )}
+
 
       {/* API Keys - show for power users or when not authenticated */}
       {(!proxyEnabled || useLocalKeys) && (

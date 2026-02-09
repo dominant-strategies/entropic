@@ -9,6 +9,7 @@ import {
   Search,
   FolderOpen,
   CalendarClock,
+  CreditCard,
   Loader2,
   Plus,
   Clock,
@@ -25,7 +26,7 @@ function startDrag(e: React.MouseEvent) {
   }
 }
 
-export type Page = "chat" | "store" | "channels" | "files" | "tasks" | "logs" | "settings";
+export type Page = "chat" | "store" | "channels" | "files" | "tasks" | "logs" | "settings" | "billing";
 
 type Props = {
   currentPage: Page;
@@ -46,6 +47,7 @@ const navItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
   { id: "channels", label: "Channels", icon: Radio },
   { id: "tasks", label: "Tasks", icon: CalendarClock },
   { id: "logs", label: "Logs", icon: ScrollText },
+  { id: "billing", label: "Billing", icon: CreditCard },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 

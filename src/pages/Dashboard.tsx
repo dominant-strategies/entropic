@@ -7,6 +7,7 @@ import { Channels } from "./Channels";
 import { Files } from "./Files";
 import { Tasks } from "./Tasks";
 import { Logs } from "./Logs";
+import { BillingPage } from "./BillingPage";
 import { Settings } from "./Settings";
 import { useAuth } from "../contexts/AuthContext";
 import { createGatewayToken, getProxyUrl } from "../lib/auth";
@@ -449,11 +450,29 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       case "channels":
         return <Channels />;
       case "files":
-        return <Files gatewayRunning={gatewayRunning} />;
+        return (
+          <Files
+            gatewayRunning={gatewayRunning}
+            integrationsSyncing={integrationsSyncing}
+            integrationsMissing={integrationsMissing}
+            onGatewayToggle={toggleGateway}
+            isTogglingGateway={isTogglingGateway}
+            selectedModel={selectedModel}
+            onModelChange={setSelectedModel}
+            useLocalKeys={useLocalKeys}
+            onUseLocalKeysChange={setUseLocalKeys}
+            codeModel={codeModel}
+            imageModel={imageModel}
+            onCodeModelChange={setCodeModel}
+            onImageModelChange={setImageModel}
+          />
+        );
       case "tasks":
         return <Tasks gatewayRunning={gatewayRunning} />;
       case "logs":
         return <Logs />;
+      case "billing":
+        return <BillingPage />;
       case "settings":
         return (
           <Settings
