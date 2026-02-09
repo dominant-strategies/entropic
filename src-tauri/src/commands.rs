@@ -38,13 +38,32 @@ fn get_docker_host() -> Option<String> {
             None
         }
         Platform::Linux => {
-            // Check if we're in a container (dev environment)
-            if std::path::Path::new("/.dockerenv").exists() {
-                // In dev container, use host's Docker socket (mounted)
-                None // Use default DOCKER_HOST or /var/run/docker.sock
-            } else {
-                None // Native Linux, use default
+            if let Ok(host) = std::env::var("DOCKER_HOST") {
+                if !host.trim().is_empty() {
+                    return Some(host);
+                }
             }
+
+            if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+                let socket = format!("{}/docker.sock", runtime_dir);
+                if std::path::Path::new(&socket).exists() {
+                    return Some(format!("unix://{}", socket));
+                }
+            }
+
+            if let Some(home) = dirs::home_dir() {
+                let desktop_socket = home.join(".docker/desktop/docker.sock");
+                if desktop_socket.exists() {
+                    return Some(format!("unix://{}", desktop_socket.display()));
+                }
+                let run_socket = home.join(".docker/run/docker.sock");
+                if run_socket.exists() {
+                    return Some(format!("unix://{}", run_socket.display()));
+                }
+            }
+
+            // Fall back to system default (/var/run/docker.sock)
+            None
         }
         Platform::Windows => None, // Use default named pipe
     }

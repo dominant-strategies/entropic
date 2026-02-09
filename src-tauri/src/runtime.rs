@@ -102,14 +102,27 @@ impl Runtime {
         self.resources_dir.join("resources").join("bin").join("docker")
     }
 
-    /// Find docker - prefer bundled, fall back to system
+    /// Find docker - prefer system on Linux, bundled on macOS
     fn docker_path(&self) -> Option<PathBuf> {
-        let bundled = self.bundled_docker_path();
-        if bundled.exists() {
-            return Some(bundled);
+        match Platform::detect() {
+            Platform::Linux => {
+                if let Ok(system) = which::which("docker") {
+                    return Some(system);
+                }
+                let bundled = self.bundled_docker_path();
+                if bundled.exists() {
+                    return Some(bundled);
+                }
+                None
+            }
+            _ => {
+                let bundled = self.bundled_docker_path();
+                if bundled.exists() {
+                    return Some(bundled);
+                }
+                which::which("docker").ok()
+            }
         }
-        // Check system docker
-        which::which("docker").ok()
     }
 
     pub fn check_status(&self) -> RuntimeStatus {
@@ -261,14 +274,95 @@ impl Runtime {
             Some(p) => p,
             None => return false,
         };
+        debug_log(&format!("Linux docker path: {:?}", docker));
 
-        let output = Command::new(&docker)
-            .args(["info"])
-            .output();
+        // If DOCKER_HOST is set, try it first.
+        if let Ok(host) = std::env::var("DOCKER_HOST") {
+            if !host.trim().is_empty() {
+                debug_log(&format!("Trying DOCKER_HOST={}", host));
+                let output = Command::new(&docker)
+                    .args(["info"])
+                    .env("DOCKER_HOST", host)
+                    .output();
+                match output {
+                    Ok(out) if out.status.success() => {
+                        debug_log("Docker info succeeded with DOCKER_HOST");
+                        return true;
+                    }
+                    Ok(out) => {
+                        debug_log(&format!(
+                            "Docker info failed with DOCKER_HOST: {}",
+                            String::from_utf8_lossy(&out.stderr)
+                        ));
+                    }
+                    Err(err) => {
+                        debug_log(&format!("Docker info error with DOCKER_HOST: {}", err));
+                    }
+                }
+            }
+        }
 
+        // Try common socket locations (rootless + desktop).
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+            debug_log(&format!("XDG_RUNTIME_DIR={}", runtime_dir));
+            candidates.push(PathBuf::from(runtime_dir).join("docker.sock"));
+        } else {
+            debug_log("XDG_RUNTIME_DIR not set");
+        }
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join(".docker/desktop/docker.sock"));
+            candidates.push(home.join(".docker/run/docker.sock"));
+        }
+        candidates.push(PathBuf::from("/var/run/docker.sock"));
+
+        for socket in candidates {
+            if !socket.exists() {
+                debug_log(&format!("Socket missing: {:?}", socket));
+                continue;
+            }
+            let host = format!("unix://{}", socket.display());
+            debug_log(&format!("Trying socket: {}", host));
+            let output = Command::new(&docker)
+                .args(["info"])
+                .env("DOCKER_HOST", host)
+                .output();
+            match output {
+                Ok(out) if out.status.success() => {
+                    debug_log("Docker info succeeded with socket");
+                    return true;
+                }
+                Ok(out) => {
+                    debug_log(&format!(
+                        "Docker info failed with socket: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    ));
+                }
+                Err(err) => {
+                    debug_log(&format!("Docker info error with socket: {}", err));
+                }
+            }
+        }
+
+        // Fall back to default docker context.
+        debug_log("Trying default docker info");
+        let output = Command::new(&docker).args(["info"]).output();
         match output {
-            Ok(out) => out.status.success(),
-            Err(_) => false,
+            Ok(out) if out.status.success() => {
+                debug_log("Docker info succeeded (default)");
+                true
+            }
+            Ok(out) => {
+                debug_log(&format!(
+                    "Docker info failed (default): {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+                false
+            }
+            Err(err) => {
+                debug_log(&format!("Docker info error (default): {}", err));
+                false
+            }
         }
     }
 
@@ -505,7 +599,25 @@ impl Runtime {
     pub fn docker_socket_path(&self) -> String {
         match Platform::detect() {
             Platform::MacOS => self.docker_socket_colima(),
-            Platform::Linux => "unix:///var/run/docker.sock".to_string(),
+            Platform::Linux => {
+                if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+                    let socket = PathBuf::from(runtime_dir).join("docker.sock");
+                    if socket.exists() {
+                        return format!("unix://{}", socket.display());
+                    }
+                }
+                if let Some(home) = dirs::home_dir() {
+                    let desktop = home.join(".docker/desktop/docker.sock");
+                    if desktop.exists() {
+                        return format!("unix://{}", desktop.display());
+                    }
+                    let run_socket = home.join(".docker/run/docker.sock");
+                    if run_socket.exists() {
+                        return format!("unix://{}", run_socket.display());
+                    }
+                }
+                "unix:///var/run/docker.sock".to_string()
+            }
             Platform::Windows => "npipe:////./pipe/docker_engine".to_string(),
         }
     }
