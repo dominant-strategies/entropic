@@ -861,6 +861,8 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
     cfg["agents"]["defaults"]["heartbeat"] = serde_json::json!({
         "every": settings.heartbeat_every
     });
+    // Persist cron jobs across container restarts.
+    cfg["cron"]["store"] = serde_json::json!("/data/cron/jobs.json");
 
     let slot = if !settings.memory_enabled {
         "none"
