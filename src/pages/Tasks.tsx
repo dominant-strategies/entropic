@@ -22,7 +22,7 @@ import {
   type CronPayload,
   type CronRunLogEntry,
 } from "../lib/gateway";
-import { getIntegrations, type Integration } from "../lib/integrations";
+import { getIntegrations, getIntegrationsCached, type Integration } from "../lib/integrations";
 
 type Props = {
   gatewayRunning: boolean;
@@ -414,17 +414,43 @@ export function Tasks({ gatewayRunning }: Props) {
       setSkillsLoading(true);
       setSkillsError(null);
       const next: SkillOption[] = [];
+      const seen = new Set<string>();
 
       try {
+        try {
+          const cached = await getIntegrationsCached();
+          cached
+            .filter((i) => i.connected)
+            .forEach((i: Integration) => {
+              const id = `integration:${i.provider}`;
+              if (seen.has(id)) return;
+              seen.add(id);
+              const meta = INTEGRATION_LABELS[i.provider] || {
+                label: i.provider,
+              };
+              next.push({
+                id,
+                label: meta.label,
+                source: "integration",
+                description: i.email ? `Connected as ${i.email}` : "Connected",
+                hint: meta.hint,
+              });
+            });
+        } catch (e) {
+          // ignore cache failures
+        }
         const integrations = await getIntegrations();
         integrations
           .filter((i) => i.connected)
           .forEach((i: Integration) => {
+            const id = `integration:${i.provider}`;
+            if (seen.has(id)) return;
+            seen.add(id);
             const meta = INTEGRATION_LABELS[i.provider] || {
               label: i.provider,
             };
             next.push({
-              id: `integration:${i.provider}`,
+              id,
               label: meta.label,
               source: "integration",
               description: i.email ? `Connected as ${i.email}` : "Connected",

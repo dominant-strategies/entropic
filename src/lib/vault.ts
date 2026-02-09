@@ -7,6 +7,7 @@ const VAULT_CLIENT = "nova-integrations";
 const VAULT_PASSWORD_KEY = "vaultPassword";
 const INDEX_KEY = "__integration_index__";
 const INTEGRATION_STORE = "nova-integrations.json";
+const INDEX_CACHE_KEY = "integrationIndex";
 
 type StrongholdStore = {
   insert: (key: string, value: number[]) => Promise<void>;
@@ -17,6 +18,12 @@ type StrongholdStore = {
 type StrongholdSession = {
   stronghold: Stronghold;
   store: StrongholdStore;
+};
+
+type IntegrationIndexEntry = {
+  provider: string;
+  email?: string | null;
+  scopes?: string[];
 };
 
 // Cached session — reused across all vault operations to avoid
@@ -59,6 +66,27 @@ async function getVaultPassword(): Promise<string> {
     await store.save();
   }
   return password;
+}
+
+async function loadIntegrationIndexCache(): Promise<IntegrationIndexEntry[]> {
+  const store = await Store.load(INTEGRATION_STORE);
+  const cached = (await store.get(INDEX_CACHE_KEY)) as IntegrationIndexEntry[] | null;
+  return cached ?? [];
+}
+
+async function saveIntegrationIndexCache(entries: IntegrationIndexEntry[]): Promise<void> {
+  const store = await Store.load(INTEGRATION_STORE);
+  await store.set(INDEX_CACHE_KEY, entries);
+  await store.save();
+}
+
+function upsertIndexEntry(
+  entries: IntegrationIndexEntry[],
+  entry: IntegrationIndexEntry,
+): IntegrationIndexEntry[] {
+  const next = entries.filter((e) => e.provider !== entry.provider);
+  next.push(entry);
+  return next;
 }
 
 async function initStrongholdSession(): Promise<StrongholdSession> {
@@ -116,6 +144,14 @@ export async function saveIntegrationSecret<T extends { provider: string }>(
   } else {
     await stronghold.save();
   }
+
+  const entry: IntegrationIndexEntry = {
+    provider,
+    email: (payload as { email?: string | null }).email ?? null,
+    scopes: (payload as { scopes?: string[] }).scopes ?? [],
+  };
+  const cached = await loadIntegrationIndexCache();
+  await saveIntegrationIndexCache(upsertIndexEntry(cached, entry));
 }
 
 export async function loadIntegrationSecret<T>(provider: string): Promise<T | null> {
@@ -130,6 +166,9 @@ export async function removeIntegrationSecret(provider: string): Promise<void> {
   const index = await loadIndex(store);
   const next = index.filter((id) => id !== provider);
   await saveIndex(store, stronghold, next);
+
+  const cached = await loadIntegrationIndexCache();
+  await saveIntegrationIndexCache(cached.filter((entry) => entry.provider !== provider));
 }
 
 export async function listIntegrationSecrets<T>(): Promise<T[]> {
@@ -143,5 +182,23 @@ export async function listIntegrationSecrets<T>(): Promise<T[]> {
       results.push(parsed);
     }
   }
+  const cacheEntries: IntegrationIndexEntry[] = [];
+  for (const entry of results) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as { provider?: string; email?: string | null; scopes?: string[] };
+    if (!record.provider) continue;
+    cacheEntries.push({
+      provider: record.provider,
+      email: record.email ?? null,
+      scopes: record.scopes ?? [],
+    });
+  }
+  if (cacheEntries.length > 0) {
+    await saveIntegrationIndexCache(cacheEntries);
+  }
   return results;
+}
+
+export async function listIntegrationIndexCache(): Promise<IntegrationIndexEntry[]> {
+  return loadIntegrationIndexCache();
 }

@@ -4,6 +4,7 @@ import clsx from "clsx";
 import { Calendar, Mail, CheckCircle2, ExternalLink, ShieldCheck } from "lucide-react";
 import {
   getIntegrations,
+  getIntegrationsCached,
   connectIntegration,
   disconnectIntegration,
   syncIntegrationToGateway,
@@ -106,6 +107,14 @@ export function Store() {
 
   async function refreshIntegrations() {
     try {
+      try {
+        const cached = await getIntegrationsCached();
+        if (cached.length > 0) {
+          setIntegrations(cached);
+        }
+      } catch (err) {
+        // ignore cache failures
+      }
       const list = await getIntegrations();
       setIntegrations(list);
       const connectedIds = new Set(list.filter(i => i.connected).map(i => i.provider));
@@ -114,7 +123,9 @@ export function Store() {
           syncedIntegrationsRef.current.delete(id);
         }
       }
-      await syncConnectedIntegrations(list);
+      syncConnectedIntegrations(list).catch((err) => {
+        console.warn("Failed to sync integrations:", err);
+      });
     } catch (err) {
       // User might not be authenticated or backend might not support integrations yet
       console.error("Failed to load integrations:", err);

@@ -6,6 +6,7 @@ import {
   saveIntegrationSecret,
   removeIntegrationSecret,
   listIntegrationSecrets,
+  listIntegrationIndexCache,
 } from "./vault";
 
 const INTEGRATION_STORE = "nova-integrations.json";
@@ -103,6 +104,16 @@ export async function clearPendingImport(provider: IntegrationProvider) {
 export async function getIntegrations(): Promise<Integration[]> {
   const records = await listIntegrationSecrets<StoredIntegration>();
   return records.map((record) => ({
+    provider: record.provider,
+    connected: true,
+    email: record.email ?? undefined,
+    scopes: record.scopes ?? [],
+  }));
+}
+
+export async function getIntegrationsCached(): Promise<Integration[]> {
+  const cached = await listIntegrationIndexCache();
+  return cached.map((record) => ({
     provider: record.provider,
     connected: true,
     email: record.email ?? undefined,
