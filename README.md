@@ -39,6 +39,13 @@ pnpm install
 pnpm tauri dev
 ```
 
+**Isolated dev OAuth (nova-dev://)**
+```bash
+pnpm tauri:dev
+pnpm dev:protocol   # Linux only, registers nova-dev:// handler
+```
+Add `nova-dev://auth/callback` to Supabase Auth → Additional Redirect URLs.
+
 ## Platform-Specific Setup
 
 ### macOS
@@ -84,6 +91,10 @@ Nova stores data in `~/.local/share/ai.openclaw.nova/`:
 | `nova-auth.json` | OAuth session and tokens |
 | `nova-profile.json` | User profile settings |
 | `localstorage/` | Web storage data |
+
+Dev builds use a separate identifier and auth store:
+- `~/.local/share/ai.openclaw.nova.dev/`
+- `nova-auth-dev.json`
 
 To reset OAuth:
 ```bash

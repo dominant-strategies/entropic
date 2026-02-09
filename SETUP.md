@@ -21,6 +21,13 @@ pnpm install
 pnpm tauri dev
 ```
 
+**Dev OAuth isolation (recommended for local dev):**
+```bash
+pnpm tauri:dev
+pnpm dev:protocol   # Linux only, registers nova-dev:// handler
+```
+Add `nova-dev://auth/callback` to Supabase Auth → Additional Redirect URLs.
+
 ## Architecture Overview
 
 ```
@@ -56,6 +63,7 @@ The dev container provides a consistent build environment with:
 pnpm install        # Install JS dependencies
 pnpm dev            # React frontend only (http://localhost:5174)
 pnpm tauri dev      # Full Tauri app with Rust backend
+pnpm tauri:dev      # Dev config (nova-dev:// scheme + isolated auth store)
 pnpm tauri build    # Build release binary
 ```
 

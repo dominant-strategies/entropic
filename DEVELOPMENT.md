@@ -124,16 +124,34 @@ pnpm tauri dev
 - Compiles Rust (~2-3 min first time, fast after)
 - Opens native window on your desktop
 
+**Run isolated dev OAuth build (nova-dev://):**
+```bash
+pnpm tauri:dev
+```
+This uses `src-tauri/tauri.conf.dev.json` and a dev-only deep link scheme
+(`nova-dev://`) plus a separate auth store (`nova-auth-dev.json`).
+
 **Linux host networking (required for local nova-web API)**
 ```bash
 ```
 Use this when running `pnpm tauri dev` on the host so OpenClaw can reach the local `nova-web` server.
 
-**Linux dev deep links (nova://)**
+**Linux dev deep links (nova-dev://)**
 ```bash
 ./scripts/register-dev-protocol.sh
 ```
-Run this on the host (outside the dev container) after the first successful `pnpm tauri dev` so the debug binary exists. This registers `nova://` so OAuth callbacks open the dev app.
+Run this on the host (outside the dev container) after the first successful `pnpm tauri:dev` so the debug binary exists. This registers `nova-dev://` so OAuth callbacks open the dev app.
+
+**Supabase OAuth Redirect URLs (dev + prod)**
+- Add `nova://auth/callback` for production.
+- Add `nova-dev://auth/callback` for dev isolation.
+
+**Dev-only env overrides**
+```bash
+# .env.development (checked in)
+VITE_AUTH_REDIRECT_URL="nova-dev://auth/callback"
+VITE_AUTH_STORE_NAME="nova-auth-dev.json"
+```
 
 **Or run React UI only (faster, no Rust):**
 ```bash
