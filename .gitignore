@@ -43,6 +43,7 @@ coverage/
 *.tmp
 *.temp
 .cache/
+.build/
 
 # Nova local data (contains API keys)
 .nova-data/
