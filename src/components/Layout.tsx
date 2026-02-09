@@ -9,6 +9,7 @@ import {
   Search,
   FolderOpen,
   CalendarClock,
+  Loader2,
 } from "lucide-react";
 import clsx from "clsx";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -28,6 +29,7 @@ type Props = {
   onNavigate: (page: Page) => void;
   children: ReactNode;
   gatewayRunning: boolean;
+  integrationsSyncing?: boolean;
 };
 
 const navItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
@@ -40,7 +42,7 @@ const navItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
-export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Props) {
+export function Layout({ currentPage, onNavigate, children, gatewayRunning, integrationsSyncing }: Props) {
   const [profile, setProfile] = useState<AgentProfile>({ name: "Nova" });
   const [searchTerm, setSearchTerm] = useState("");
 
@@ -152,14 +154,22 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning }: Pr
 
         {/* Gateway Status */}
         <div className="p-2 flex-shrink-0" style={{ borderTop: '1px solid var(--glass-border-subtle)' }}>
-          <div className="flex items-center gap-2 px-3 py-2">
-            <div
-              className="w-2 h-2 rounded-full"
-              style={{ background: gatewayRunning ? '#22c55e' : '#e0e0e0' }}
-            />
-            <span className="text-xs text-[var(--text-tertiary)]">
-              {gatewayRunning ? 'Connected' : 'Offline'}
-            </span>
+          <div className="flex items-center justify-between gap-2 px-3 py-2">
+            <div className="flex items-center gap-2">
+              <div
+                className="w-2 h-2 rounded-full"
+                style={{ background: gatewayRunning ? '#22c55e' : '#e0e0e0' }}
+              />
+              <span className="text-xs text-[var(--text-tertiary)]">
+                {gatewayRunning ? 'Connected' : 'Offline'}
+              </span>
+            </div>
+            {integrationsSyncing ? (
+              <div className="flex items-center gap-1 text-[var(--text-tertiary)] text-[10px] uppercase tracking-wide">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Syncing integrations
+              </div>
+            ) : null}
           </div>
         </div>
       </div>

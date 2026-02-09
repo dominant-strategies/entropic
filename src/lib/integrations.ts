@@ -254,6 +254,11 @@ export async function syncPendingIntegrationImports(): Promise<void> {
   }
 }
 
+export async function hasPendingIntegrationImports(): Promise<boolean> {
+  const pending = await loadPendingImports();
+  return Object.keys(pending).length > 0;
+}
+
 export async function removeIntegrationFromGateway(provider: IntegrationProvider): Promise<void> {
   if (!OPENCLAW_SYNC_PROVIDERS.has(provider)) {
     return;

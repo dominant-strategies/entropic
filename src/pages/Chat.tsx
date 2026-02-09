@@ -7,6 +7,7 @@ import { GatewayClient, createGatewayClient, type ChatEvent } from "../lib/gatew
 import { loadOnboardingData, type OnboardingData } from "../lib/profile";
 import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
 import { ChannelSetupModal } from "../components/ChannelSetupModal";
+import { MarkdownContent } from "../components/MarkdownContent";
 import { useAuth } from "../contexts/AuthContext";
 
 // NOTE: Most type definitions are omitted for brevity in this example
@@ -15,6 +16,83 @@ type Session = { key: string; label?: string; displayName?: string; derivedTitle
 type Provider = { id: string; name: string; icon: string; placeholder: string; keyUrl: string };
 type PendingAttachment = { id: string; fileName: string; tempPath: string; savedPath?: string };
 type AuthState = { active_provider: string | null; providers: Array<{ id: string; has_key: boolean }> };
+type CalendarEvent = { id?: string; summary?: string; start?: string; end?: string; attendees?: Array<{ email?: string; displayName?: string }> };
+
+function findJsonBlock(text: string): { jsonText: string; start: number; end: number } | null {
+  const codeBlock = text.match(/```json\\s*([\\s\\S]*?)```/i);
+  if (codeBlock?.index !== undefined) {
+    return {
+      jsonText: codeBlock[1].trim(),
+      start: codeBlock.index,
+      end: codeBlock.index + codeBlock[0].length,
+    };
+  }
+
+  const start = text.indexOf("{");
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (ch === "\\\\") {
+        escape = true;
+      } else if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === "\"") {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return { jsonText: text.slice(start, i + 1), start, end: i + 1 };
+      }
+    }
+  }
+  return null;
+}
+
+function parseCalendarEvents(raw: string): { events: CalendarEvent[]; before: string; after: string } | null {
+  const block = findJsonBlock(raw);
+  if (!block) return null;
+  try {
+    const parsed = JSON.parse(block.jsonText);
+    const events = Array.isArray(parsed?.events) ? parsed.events as CalendarEvent[] : null;
+    if (!events || events.length === 0) return null;
+    return {
+      events,
+      before: raw.slice(0, block.start).trim(),
+      after: raw.slice(block.end).trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatEventRange(start?: string, end?: string): { date?: string; time?: string } {
+  if (!start) return {};
+  const startDate = new Date(start);
+  if (Number.isNaN(startDate.getTime())) return { date: start, time: end };
+  const dateFmt = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+  const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+  const date = dateFmt.format(startDate);
+  let time = timeFmt.format(startDate);
+  if (end) {
+    const endDate = new Date(end);
+    if (!Number.isNaN(endDate.getTime())) {
+      time = `${time} - ${timeFmt.format(endDate)}`;
+    }
+  }
+  return { date, time };
+}
 
 const PROVIDERS: Provider[] = [
   { id: "anthropic", name: "Anthropic", icon: "A", placeholder: "sk-ant-...", keyUrl: "https://console.anthropic.com/settings/keys" },
@@ -144,6 +222,11 @@ export function Chat({
 
   // Simplified connection effect
   useEffect(() => {
+    if (gatewayStarting) {
+      clientRef.current?.disconnect();
+      clientRef.current = null;
+      return;
+    }
     if (gatewayRunning && (connectedProvider || proxyEnabled) && !clientRef.current) {
       connectToGateway();
     }
@@ -151,7 +234,7 @@ export function Chat({
       clientRef.current?.disconnect();
       clientRef.current = null;
     };
-  }, [gatewayRunning, connectedProvider, proxyEnabled]);
+  }, [gatewayRunning, gatewayStarting, connectedProvider, proxyEnabled]);
 
   useEffect(() => {
     if (gatewayStarting) {
@@ -159,6 +242,12 @@ export function Chat({
       setIsConnecting(true);
     }
   }, [gatewayStarting]);
+
+  useEffect(() => {
+    if (isConnecting) {
+      setError(null);
+    }
+  }, [isConnecting]);
 
   async function connectToGateway() {
     setIsConnecting(true);
@@ -180,7 +269,8 @@ export function Chat({
       });
       client.on("chat", handleChatEvent);
       client.on("error", (err) => {
-        if (!gatewayStarting) {
+        const suppressError = gatewayStarting || isConnecting || !gatewayRunning;
+        if (!suppressError) {
           setError(err);
         }
         setIsConnecting(false);
@@ -301,6 +391,49 @@ export function Chat({
     setChannelModal({ isOpen: false, channel });
     const channelName = channel === "imessage" ? "iMessage" : "WhatsApp";
     handleSend(`I've connected ${channelName}. Please send me a test message!`);
+  }
+
+  function renderAssistantContent(content: string) {
+    const calendarPayload = parseCalendarEvents(content);
+    if (!calendarPayload) {
+      return <MarkdownContent content={content} />;
+    }
+    return (
+      <div className="space-y-2">
+        {calendarPayload.before ? <MarkdownContent content={calendarPayload.before} /> : null}
+        <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-3 shadow-sm">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)] mb-2">
+            <Calendar className="w-3.5 h-3.5" />
+            Calendar
+          </div>
+          <div className="space-y-2">
+            {calendarPayload.events.map((event, idx) => {
+              const { date, time } = formatEventRange(event.start, event.end);
+              const attendees = event.attendees?.length ?? 0;
+              return (
+                <div
+                  key={event.id || `evt-${idx}`}
+                  className="rounded-lg bg-[var(--bg-tertiary)]/60 px-3 py-2"
+                >
+                  <div className="font-semibold text-[var(--text-primary)]">
+                    {event.summary || "Untitled event"}
+                  </div>
+                  {(date || time) && (
+                    <div className="text-xs text-[var(--text-secondary)]">
+                      {date}{date && time ? " · " : ""}{time}
+                    </div>
+                  )}
+                  {attendees > 0 && (
+                    <div className="text-xs text-[var(--text-tertiary)]">Attendees: {attendees}</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        {calendarPayload.after ? <MarkdownContent content={calendarPayload.after} /> : null}
+      </div>
+    );
   }
 
   // Simplified render helpers for different states
@@ -426,6 +559,7 @@ export function Chat({
 
   if (isConnecting) return renderConnecting();
   if (!connectedProvider && !proxyEnabled) return renderNoProvider();
+  const autoStartExpected = proxyEnabled && !gatewayRunning;
 
   // Main Chat UI
   return (
@@ -478,13 +612,15 @@ export function Chat({
       </div>
     </div>
 
-      {gatewayStarting && (
+      {(gatewayStarting || autoStartExpected) && (
         <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-600">
-          {gatewayRetryIn ? `Gateway reconnecting — retrying in ${gatewayRetryIn}s.` : "Gateway starting…"}
+          {gatewayRetryIn
+            ? `Gateway reconnecting — retrying in ${gatewayRetryIn}s.`
+            : "Gateway starting…"}
         </div>
       )}
 
-      {!gatewayRunning && !gatewayStarting && (
+      {!gatewayRunning && !gatewayStarting && !autoStartExpected && (
         <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-600 flex items-center justify-center gap-3">
           <span>Gateway offline — start the sandbox to chat.</span>
           {onStartGateway && (
@@ -520,7 +656,7 @@ export function Chat({
             <div key={msg.id} className={clsx("flex", msg.role === "user" ? "justify-end" : "justify-start")}>
               <div className={clsx("max-w-[85%] px-4 py-2.5 rounded-2xl",
                 msg.role === "user" ? "bg-[var(--purple-accent)] text-white" : "bg-[var(--bg-tertiary)] text-[var(--text-primary)]")}>
-                <p className="whitespace-pre-wrap">{msg.content}</p>
+                {msg.role === "assistant" ? renderAssistantContent(msg.content) : <p className="whitespace-pre-wrap">{msg.content}</p>}
               </div>
             </div>
           ))}

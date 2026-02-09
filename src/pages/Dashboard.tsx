@@ -10,7 +10,12 @@ import { Logs } from "./Logs";
 import { Settings } from "./Settings";
 import { useAuth } from "../contexts/AuthContext";
 import { createGatewayToken, getProxyUrl } from "../lib/auth";
-import { syncPendingIntegrationImports, startIntegrationRefreshLoop, stopIntegrationRefreshLoop } from "../lib/integrations";
+import {
+  hasPendingIntegrationImports,
+  syncPendingIntegrationImports,
+  startIntegrationRefreshLoop,
+  stopIntegrationRefreshLoop,
+} from "../lib/integrations";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 
 type RuntimeStatus = {
@@ -37,6 +42,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [showGatewayStartup, setShowGatewayStartup] = useState(false);
   const [startupError, setStartupError] = useState<string | null>(null);
   const [gatewayRetryIn, setGatewayRetryIn] = useState<number | null>(null);
+  const [integrationsSyncing, setIntegrationsSyncing] = useState(false);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const [codeModel, setCodeModel] = useState("openai/gpt-5.2-codex");
   const [imageModel, setImageModel] = useState("google/gemini-3-pro-image-preview");
@@ -75,13 +81,50 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   useEffect(() => {
     if (!gatewayRunning) {
       stopIntegrationRefreshLoop();
+      setIntegrationsSyncing(false);
       return;
     }
-    syncPendingIntegrationImports().catch((err) => {
-      console.warn("[Nova] Failed to sync integration tokens:", err);
-    });
+    let cancelled = false;
+    let intervalId: number | null = null;
+    const deadline = Date.now() + 2 * 60_000;
+
+    const syncOnce = async () => {
+      if (cancelled) return;
+      try {
+        await syncPendingIntegrationImports();
+      } catch (err) {
+        console.warn("[Nova] Failed to sync integration tokens:", err);
+      }
+      try {
+        const stillPending = await hasPendingIntegrationImports();
+        if (!cancelled) {
+          setIntegrationsSyncing(stillPending);
+        }
+        if (!stillPending || Date.now() > deadline) {
+          if (intervalId !== null) {
+            window.clearInterval(intervalId);
+            intervalId = null;
+          }
+        }
+      } catch {
+        // If we can't read pending state, keep trying until deadline.
+        if (Date.now() > deadline && intervalId !== null) {
+          window.clearInterval(intervalId);
+          intervalId = null;
+        }
+      }
+    };
+
+    syncOnce();
+    intervalId = window.setInterval(syncOnce, 5000);
     startIntegrationRefreshLoop();
-    return () => stopIntegrationRefreshLoop();
+    return () => {
+      cancelled = true;
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
+      stopIntegrationRefreshLoop();
+    };
   }, [gatewayRunning]);
 
   useEffect(() => {
@@ -174,6 +217,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
     setStartupError(null);
     setShowGatewayStartup(true);
+    setGatewayRunning(false);
     try {
       if (stopFirst) {
         try {
@@ -292,8 +336,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         console.log("[Nova] Stopping gateway...");
         await invoke("stop_gateway");
         console.log("[Nova] Gateway stopped successfully");
+        setGatewayRunning(false);
       } else {
         console.log("[Nova] Starting gateway...");
+        setGatewayRunning(false);
         // If authenticated via OAuth, use proxy mode
         if (isAuthConfigured && isAuthenticated && !useLocalKeys) {
           const started = await startGatewayProxyFlow({
@@ -362,10 +408,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   function renderPage() {
     switch (currentPage) {
       case "chat":
+        {
+          const gatewayStarting =
+            showGatewayStartup || (isTogglingGateway && !gatewayRunning) || gatewayRetryIn !== null;
         return (
           <Chat
             gatewayRunning={gatewayRunning}
-            gatewayStarting={showGatewayStartup}
+            gatewayStarting={gatewayStarting}
             gatewayRetryIn={gatewayRetryIn}
             onStartGateway={startGatewayFromChat}
             useLocalKeys={useLocalKeys}
@@ -373,8 +422,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             imageModel={imageModel}
           />
         );
+        }
       case "store":
-        return <Store />;
+        return <Store integrationsSyncing={integrationsSyncing} />;
       case "channels":
         return <Channels />;
       case "files":
@@ -456,6 +506,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       currentPage={currentPage}
       onNavigate={setCurrentPage}
       gatewayRunning={gatewayRunning}
+      integrationsSyncing={integrationsSyncing}
     >
       {showGatewayStartup && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
-import { Calendar, Mail, CheckCircle2, ExternalLink, ShieldCheck } from "lucide-react";
+import { Calendar, Mail, CheckCircle2, ExternalLink, ShieldCheck, Loader2 } from "lucide-react";
 import {
   getIntegrations,
   getIntegrationsCached,
@@ -64,7 +64,7 @@ const CATEGORIES = [
   { id: "memory", label: "Memory" },
 ];
 
-export function Store() {
+export function Store({ integrationsSyncing }: { integrationsSyncing?: boolean }) {
   const [plugins, setPlugins] = useState<Plugin[]>([]);
   const [category, setCategory] = useState("all");
   const [installing, setInstalling] = useState<string | null>(null);
@@ -230,9 +230,17 @@ export function Store() {
 
   return (
     <div className="max-w-4xl">
-      <div className="mb-6">
+      <div className="mb-6 flex items-center justify-between">
+        <div>
         <h1 className="text-xl font-semibold text-[var(--text-primary)]">Plugins</h1>
         <p className="text-sm text-[var(--text-secondary)]">Extend your AI with plugins and integrations</p>
+        </div>
+        {integrationsSyncing ? (
+          <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)]">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            Syncing integrations
+          </div>
+        ) : null}
       </div>
 
       <div className="flex gap-2 mb-6">
