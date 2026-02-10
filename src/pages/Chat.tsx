@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Sparkles, X, Loader2, ExternalLink, Paperclip, MessageSquare, Calendar, Globe, Mail, Activity } from "lucide-react";
+import { Send, Sparkles, X, Loader2, ExternalLink, Paperclip, MessageSquare, Calendar, Globe, Mail, Activity, TrendingUp } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
@@ -187,6 +187,7 @@ const SUGGESTIONS = [
   { icon: MessageSquare, label: "Message me on WhatsApp", action: { type: "channel", channel: "whatsapp" } as SuggestionAction },
   { icon: Mail, label: "Clean up my inbox", action: { type: "agent", message: "Help me clean up and organize my email inbox", requiresIntegration: "google_email" } as SuggestionAction },
   { icon: Calendar, label: "Check my calendar", action: { type: "agent", message: "What's on my calendar for today and tomorrow?", requiresIntegration: "google_calendar" } as SuggestionAction },
+  { icon: TrendingUp, label: "Search Trending News on X", action: { type: "agent", message: "Search trending news on X and summarize what’s popular right now.", requiresIntegration: "x" } as SuggestionAction },
   { icon: Globe, label: "Browse the web for me", action: { type: "agent", message: "I'd like you to browse the web and research something for me." } as SuggestionAction },
 ];
 
@@ -244,6 +245,7 @@ export function Chat({
   const [lastSendId, setLastSendId] = useState<string | null>(null);
   const [lastSendAt, setLastSendAt] = useState<number | null>(null);
   const [chatMode, setChatMode] = useState<"general" | "code">("general");
+  const [channelConfig, setChannelConfig] = useState<{ imessageEnabled: boolean; whatsappEnabled: boolean } | null>(null);
   const [channelModal, setChannelModal] = useState<{ isOpen: boolean; channel: "imessage" | "whatsapp" }>({
     isOpen: false,
     channel: "imessage",
@@ -259,6 +261,20 @@ export function Chat({
   }>({});
   const lastEventByRunIdRef = useRef<Record<string, number>>({});
   const lastIntegrationsSyncRef = useRef<number>(0);
+
+  useEffect(() => {
+    invoke<{
+      imessage_enabled: boolean;
+      whatsapp_enabled: boolean;
+    }>("get_agent_profile_state")
+      .then((state) => {
+        setChannelConfig({
+          imessageEnabled: state.imessage_enabled ?? false,
+          whatsappEnabled: state.whatsapp_enabled ?? false,
+        });
+      })
+      .catch(() => {});
+  }, []);
 
   function addDiag(message: string) {
     const stamp = new Date().toLocaleTimeString();
@@ -558,6 +574,30 @@ export function Chat({
 
   async function handleSuggestionClick(action: SuggestionAction) {
     if (action.type === "channel") {
+      let config = channelConfig;
+      if (!config) {
+        try {
+          const state = await invoke<{
+            imessage_enabled: boolean;
+            whatsapp_enabled: boolean;
+          }>("get_agent_profile_state");
+          config = {
+            imessageEnabled: state.imessage_enabled ?? false,
+            whatsappEnabled: state.whatsapp_enabled ?? false,
+          };
+          setChannelConfig(config);
+        } catch {
+          onNavigate?.("channels");
+          return;
+        }
+      }
+      const enabled =
+        action.channel === "imessage" ? config.imessageEnabled : config.whatsappEnabled;
+      if (!enabled) {
+        addDiag(`channel ${action.channel} not configured; redirecting to Channels`);
+        onNavigate?.("channels");
+        return;
+      }
       setChannelModal({ isOpen: true, channel: action.channel });
     } else if (action.type === "agent") {
       if (action.requiresIntegration) {
@@ -580,6 +620,12 @@ export function Chat({
 
   function handleChannelSetupComplete(channel: "imessage" | "whatsapp") {
     setChannelModal({ isOpen: false, channel });
+    setChannelConfig((prev) => {
+      const next = prev ?? { imessageEnabled: false, whatsappEnabled: false };
+      return channel === "imessage"
+        ? { ...next, imessageEnabled: true }
+        : { ...next, whatsappEnabled: true };
+    });
     const channelName = channel === "imessage" ? "iMessage" : "WhatsApp";
     handleSend(`I've connected ${channelName}. Please send me a test message!`);
   }
