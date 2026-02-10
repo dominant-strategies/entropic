@@ -631,7 +631,15 @@ export function Files({
 
   function handleChatEvent(event: ChatEvent) {
     if (event.state === "delta" || event.state === "final") {
-      const text = event.message?.content?.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text: string }) => c.text).join("") || "";
+      let text = "";
+      if (typeof event.message?.content === "string") {
+        text = event.message.content;
+      } else if (Array.isArray(event.message?.content)) {
+        text = event.message.content
+          .filter((c) => c.type === "text")
+          .map((c) => c.text || "")
+          .join("");
+      }
       if (!text) return;
       setChatMessages((prev) => { const idx = prev.findIndex((m) => m.id === event.runId && m.role === "assistant"); if (idx >= 0) { const u = [...prev]; u[idx] = { ...u[idx], content: text }; return u; } return [...prev, { id: event.runId, role: "assistant", content: text }]; });
       if (event.state === "final") setChatLoading(false);

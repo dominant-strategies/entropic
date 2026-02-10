@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { MessageCircle, CheckCircle2, QrCode, RefreshCw, MessageSquare, Smartphone } from "lucide-react";
+import { MessageCircle, CheckCircle2, QrCode, RefreshCw, MessageSquare, Loader2, Smartphone } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import clsx from "clsx";
 
 function ChannelGroup({ title, children }: { title: string, children: React.ReactNode }) {
   return (
@@ -180,22 +179,6 @@ export function Channels() {
     return () => stopWhatsAppPolling();
   }, []);
 
-  async function checkWhatsAppLogin() {
-    setWhatsappLoading(true);
-    try {
-      const result = await fetchWhatsAppLogin();
-      if (result?.connected) {
-        setWhatsappStatus("Connected");
-      } else if (result?.message) {
-        setWhatsappStatus(result.message);
-      }
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      setWhatsappStatus(`Still waiting for scan. ${detail}`);
-    } finally {
-      setWhatsappLoading(false);
-    }
-  }
 
   async function saveIMessage() {
     setSavingIMessage(true);
@@ -262,7 +245,7 @@ export function Channels() {
                 
                 <div className="flex gap-2">
                   <button onClick={() => showWhatsAppQr(false)} disabled={whatsappLoading} className="btn btn-primary bg-black text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-gray-800 disabled:opacity-50">
-                    {whatsappLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <QrCode className="w-4 h-4 mr-2" />}
+                    {whatsappLoading ? <><Loader2 className="w-4 h-4 animate-spin" /></> : <><QrCode className="w-4 h-4 mr-2" /></>}
                     Show QR Code
                   </button>
                   <button onClick={() => showWhatsAppQr(true)} className="btn btn-secondary px-4 py-2 border border-[var(--border-subtle)] rounded-lg text-sm font-semibold hover:bg-[var(--system-gray-6)]">

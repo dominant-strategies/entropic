@@ -7,8 +7,6 @@ import {
   Pencil,
   Clock,
   Trash2,
-  ToggleLeft,
-  ToggleRight,
   X,
   Smartphone,
 } from "lucide-react";
@@ -327,9 +325,15 @@ function waitForChatCompletion(
     const handler = (event: ChatEvent) => {
       if (!event?.runId || event.runId !== runId) return;
       if (event.state === "delta" || event.state === "final") {
-        const text =
-          event.message?.content?.filter((c) => c.type === "text").map((c) => c.text).join("") ??
-          "";
+        let text = "";
+        if (typeof event.message?.content === "string") {
+          text = event.message.content;
+        } else if (Array.isArray(event.message?.content)) {
+          text = event.message.content
+            .filter((c: any) => c.type === "text")
+            .map((c: any) => c.text || "")
+            .join("");
+        }
         if (text) lastText = text;
         if (event.state === "final") {
           cleanup();
