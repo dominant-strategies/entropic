@@ -296,29 +296,31 @@ export function Settings({
 
 
       {proxyEnabled && (
-        <SettingsGroup title="Intelligence">
-          <SettingsRow label="Primary Model" icon={Cpu}>
-            <div className="w-80">
-              <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} />
-            </div>
-          </SettingsRow>
-          <SettingsRow label="Coding Model" icon={Cpu}>
-            <div className="w-80">
-              <ModelSelector selectedModel={codeModel} onModelChange={onCodeModelChange} />
-            </div>
-          </SettingsRow>
-          <SettingsRow label="Vision Model" icon={Image}>
-            <div className="w-80">
-              <ModelSelector selectedModel={imageModel} onModelChange={onImageModelChange} />
-            </div>
-          </SettingsRow>
-        </SettingsGroup>
+        <div className="relative">
+          <SettingsGroup title="Intelligence">
+            <SettingsRow label="Primary Model" icon={Cpu}>
+              <div className="w-80">
+                <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} />
+              </div>
+            </SettingsRow>
+            <SettingsRow label="Coding Model" icon={Cpu}>
+              <div className="w-80">
+                <ModelSelector selectedModel={codeModel} onModelChange={onCodeModelChange} />
+              </div>
+            </SettingsRow>
+            <SettingsRow label="Vision Model" icon={Image}>
+              <div className="w-80">
+                <ModelSelector selectedModel={imageModel} onModelChange={onImageModelChange} />
+              </div>
+            </SettingsRow>
+          </SettingsGroup>
+        </div>
       )}
 
       {/* Wallpaper Picker Modal */}
       {wallpaperPickerOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/20"
           onClick={() => setWallpaperPickerOpen(false)}
         >
           <div

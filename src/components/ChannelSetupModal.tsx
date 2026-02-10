@@ -75,11 +75,11 @@ export function ChannelSetupModal({ channel, isOpen, onClose, onSetupComplete }:
 
   return (
     <div
-      className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 backdrop-blur-sm"
+      className="fixed inset-0 flex items-center justify-center z-50"
       onClick={onClose}
     >
       <div
-        className="glass-card p-6 w-full max-w-md m-4"
+        className="w-full max-w-sm m-4 rounded-2xl bg-white border border-[var(--border-subtle)] shadow-xl p-6"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -107,16 +107,25 @@ export function ChannelSetupModal({ channel, isOpen, onClose, onSetupComplete }:
 
         {/* Content */}
         {isLoading ? (
-          <div className="py-12 text-center">
-            <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3 text-[var(--text-accent)]" />
-            <p className="text-[var(--text-secondary)]">Checking connection status...</p>
+          <div className="py-8 text-center">
+            <Loader2 className="w-7 h-7 animate-spin mx-auto mb-3 text-[var(--text-primary)]" />
+            <p className="text-sm font-medium text-[var(--text-primary)]">Checking connection…</p>
+            <p className="text-xs text-[var(--text-tertiary)] mt-1">Hang tight while Nova verifies your channel.</p>
           </div>
         ) : error ? (
-          <div className="py-8 text-center">
-            <p className="text-red-500 mb-4">{error}</p>
-            <button onClick={handleRefresh} className="btn-secondary">
-              Try Again
-            </button>
+          <div className="py-6 text-center">
+            <div className="text-sm font-semibold text-[var(--text-primary)]">Connection check failed</div>
+            <p className="text-xs text-[var(--text-secondary)] mt-2 mb-4">
+              {error}. Make sure the secure sandbox is running, then try again.
+            </p>
+            <div className="flex items-center justify-center gap-2">
+              <button onClick={handleRefresh} className="btn-primary !text-xs">
+                Try Again
+              </button>
+              <button onClick={onClose} className="btn-secondary !text-xs">
+                Close
+              </button>
+            </div>
           </div>
         ) : status.connected ? (
           <div className="py-8 text-center">

@@ -60,9 +60,9 @@ export function ScanResultModal({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 backdrop-blur-sm"
+    <div className="fixed inset-0 bg-black/20 flex items-center justify-center z-50"
          onClick={onClose}>
-      <div className="glass-card p-6 w-full max-w-lg m-4 max-h-[80vh] overflow-y-auto"
+      <div className="bg-white p-6 w-full max-w-lg m-4 max-h-[80vh] overflow-y-auto rounded-2xl shadow-xl border border-[var(--border-subtle)]"
            onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
@@ -126,7 +126,7 @@ export function ScanResultModal({
             {scanResult.findings.length > 0 && (
               <div className="space-y-2 mb-4">
                 {scanResult.findings.map((finding, idx) => (
-                  <div key={idx} className="border border-[var(--glass-border)] rounded-lg overflow-hidden">
+                  <div key={idx} className="border border-[var(--border-subtle)] rounded-lg overflow-hidden">
                     <button onClick={() => toggleFinding(idx)}
                       className="w-full flex items-center gap-2 p-3 text-left hover:bg-black/5">
                       {expandedFindings.has(idx)
@@ -150,7 +150,7 @@ export function ScanResultModal({
                           </p>
                         )}
                         {finding.snippet && (
-                          <pre className="text-xs bg-black/5 p-2 rounded overflow-x-auto">
+                          <pre className="text-xs bg-[var(--bg-tertiary)] p-2 rounded overflow-x-auto border border-[var(--border-subtle)]">
                             {finding.snippet}
                           </pre>
                         )}

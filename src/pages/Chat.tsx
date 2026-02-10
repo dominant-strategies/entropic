@@ -791,9 +791,9 @@ export function Chat({
   };
 
   const ApiKeyModal = () => (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 backdrop-blur-sm"
+    <div className="fixed inset-0 bg-black/20 flex items-center justify-center z-50"
       onClick={() => setShowKeyModal(false)}>
-      <div className="glass-card p-6 w-full max-w-md m-4" onClick={e => e.stopPropagation()}>
+      <div className="bg-white p-6 w-full max-w-md m-4 rounded-2xl shadow-xl border border-[var(--border-subtle)]" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold text-[var(--text-primary)]">Connect {selectedProvider?.name}</h3>
           <button onClick={() => setShowKeyModal(false)} className="p-1 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
@@ -992,47 +992,47 @@ export function Chat({
       />
 
       {showDiagnostics && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 backdrop-blur-sm"
+        <div className="fixed inset-0 bg-black/20 flex items-center justify-center z-50"
           onClick={() => setShowDiagnostics(false)}>
-          <div className="glass-card p-6 w-full max-w-2xl m-4" onClick={e => e.stopPropagation()}>
+          <div className="bg-white p-6 w-full max-w-2xl m-4 rounded-2xl shadow-xl border border-[var(--border-subtle)]" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-[var(--text-primary)]">Gateway Diagnostics</h3>
               <button onClick={() => setShowDiagnostics(false)} className="p-1 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
             </div>
             <div className="grid grid-cols-2 gap-3 text-sm mb-4">
-              <div className="glass-card p-3">
+              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
                 <p className="text-[var(--text-tertiary)]">Gateway URL</p>
                 <p className="text-[var(--text-primary)] break-all">{gatewayUrl}</p>
               </div>
-              <div className="glass-card p-3">
+              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
                 <p className="text-[var(--text-tertiary)]">Proxy Enabled</p>
                 <p className="text-[var(--text-primary)]">{proxyEnabled ? "true" : "false"}</p>
               </div>
-              <div className="glass-card p-3">
+              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
                 <p className="text-[var(--text-tertiary)]">Connected Provider</p>
                 <p className="text-[var(--text-primary)]">{connectedProvider || "—"}</p>
               </div>
-              <div className="glass-card p-3">
+              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
                 <p className="text-[var(--text-tertiary)]">Connected</p>
                 <p className="text-[var(--text-primary)]">{connected ? "true" : "false"}</p>
               </div>
-              <div className="glass-card p-3">
+              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
                 <p className="text-[var(--text-tertiary)]">Last Send</p>
                 <p className="text-[var(--text-primary)] break-all">{lastSendId || "—"}</p>
                 <p className="text-xs text-[var(--text-tertiary)]">
                   {lastSendAt ? new Date(lastSendAt).toLocaleTimeString() : "—"}
                 </p>
               </div>
-              <div className="glass-card p-3">
+              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
                 <p className="text-[var(--text-tertiary)]">Last Gateway Error</p>
                 <p className="text-[var(--text-primary)] break-all">{lastGatewayError || "—"}</p>
               </div>
-              <div className="glass-card p-3">
+              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
                 <p className="text-[var(--text-tertiary)]">Last Chat Event</p>
                 <p className="text-[var(--text-primary)] break-all">{lastChatEvent?.state || "—"}</p>
               </div>
             </div>
-            <div className="glass-card p-3 max-h-64 overflow-auto text-xs font-mono whitespace-pre-wrap">
+            <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)] max-h-64 overflow-auto text-xs font-mono whitespace-pre-wrap">
               {diagLogs.length ? diagLogs.join("\n") : "No diagnostics yet."}
             </div>
           </div>

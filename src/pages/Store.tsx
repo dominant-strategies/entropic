@@ -613,8 +613,8 @@ export function Store({
       />
 
       {setupProvider && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-          <div className="w-full max-w-sm rounded-2xl bg-[var(--bg-primary)] p-6 shadow-xl border border-[var(--glass-border)]">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl border border-[var(--border-subtle)]">
             <div className="flex items-start gap-3">
               <div className="mt-0.5 rounded-full bg-[var(--bg-tertiary)] p-2">
                 <Loader2 className="w-4 h-4 animate-spin text-[var(--text-primary)]" />

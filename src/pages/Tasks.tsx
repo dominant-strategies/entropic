@@ -1065,11 +1065,11 @@ export function Tasks({ gatewayRunning }: Props) {
       {/* ── Editor Modal ────────────────────────────────────────── */}
       {editorOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/20"
           onClick={() => setEditorOpen(false)}
         >
           <div
-            className="glass-card p-6 w-full max-w-lg mx-4 max-h-[85vh] overflow-auto"
+            className="bg-white p-6 w-full max-w-lg mx-4 max-h-[85vh] overflow-auto rounded-2xl shadow-xl border border-[var(--border-subtle)]"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
@@ -1528,11 +1528,11 @@ export function Tasks({ gatewayRunning }: Props) {
       {/* ── History Modal ───────────────────────────────────────── */}
       {historyJobId !== null && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/20"
           onClick={() => setHistoryJobId(null)}
         >
           <div
-            className="glass-card p-6 w-full max-w-lg mx-4 max-h-[80vh] flex flex-col"
+            className="bg-white p-6 w-full max-w-lg mx-4 max-h-[80vh] flex flex-col rounded-2xl shadow-xl border border-[var(--border-subtle)]"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">

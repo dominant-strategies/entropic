@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, type CSSProperties } from "react";
 import { ChevronDown, Zap, Star, Brain, Sparkles } from "lucide-react";
 import { Model } from "../lib/auth";
 
@@ -45,6 +45,8 @@ export function ModelSelector({ selectedModel, onModelChange, compact = false }:
   const [models, _setModels] = useState<Model[]>(FALLBACK_MODELS);
   const [isOpen, setIsOpen] = useState(false);
   const [_isLoading, setIsLoading] = useState(true);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
 
   useEffect(() => {
     setIsLoading(false);
@@ -67,6 +69,30 @@ export function ModelSelector({ selectedModel, onModelChange, compact = false }:
     acc[model.provider].push(model);
     return acc;
   }, {} as Record<string, Model[]>);
+
+  useEffect(() => {
+    if (!isOpen || !wrapperRef.current) {
+      setMenuStyle(null);
+      return;
+    }
+    const rect = wrapperRef.current.getBoundingClientRect();
+    const spacing = 8;
+    const maxMenuHeight = Math.min(400, window.innerHeight - 16);
+    let top = rect.bottom + spacing;
+    if (top + maxMenuHeight > window.innerHeight - spacing) {
+      top = Math.max(spacing, rect.top - spacing - maxMenuHeight);
+    }
+    const left = rect.left;
+    const width = rect.width;
+    setMenuStyle({
+      position: "fixed",
+      top,
+      left,
+      width,
+      zIndex: 60,
+      maxHeight: `${maxMenuHeight}px`,
+    });
+  }, [isOpen]);
 
   if (compact) {
     return (
@@ -131,7 +157,7 @@ export function ModelSelector({ selectedModel, onModelChange, compact = false }:
 
   // Full version for settings page
   return (
-    <div className="relative">
+    <div className="relative" ref={wrapperRef}>
       <button
         onClick={() => setIsOpen(!isOpen)}
         className="w-full flex items-center justify-between gap-3 px-4 py-3
@@ -155,9 +181,10 @@ export function ModelSelector({ selectedModel, onModelChange, compact = false }:
       {isOpen && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
-          <div className="absolute left-0 right-0 mt-2 max-h-[400px] overflow-y-auto z-50
-                        bg-white border border-[var(--border-subtle)]
-                        rounded-xl shadow-2xl animate-scale-in">
+          <div
+            style={menuStyle ?? undefined}
+            className="overflow-y-auto bg-white border border-[var(--border-subtle)] rounded-xl shadow-2xl animate-scale-in"
+          >
             {Object.entries(groupedModels).map(([provider, providerModels]) => (
               <div key={provider}>
                 <div className="sticky top-0 px-4 py-2 text-[11px] font-bold text-[var(--text-tertiary)]
