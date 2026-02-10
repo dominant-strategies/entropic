@@ -248,6 +248,12 @@ export function Chat({
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const clientRef = useRef<GatewayClient | null>(null);
+  const handlersRef = useRef<{
+    connected?: () => void;
+    disconnected?: () => void;
+    chat?: (event: ChatEvent) => void;
+    error?: (error: string) => void;
+  }>({});
   const lastEventByRunIdRef = useRef<Record<string, number>>({});
   const lastIntegrationsSyncRef = useRef<number>(0);
 
@@ -332,8 +338,10 @@ export function Chat({
       connectToGateway();
     }
     return () => {
-      clientRef.current?.disconnect();
-      clientRef.current = null;
+      if (clientRef.current) {
+        detachGatewayListeners(clientRef.current);
+        clientRef.current = null;
+      }
     };
   }, [gatewayRunning, gatewayStarting, connectedProvider, proxyEnabled]);
 
@@ -357,7 +365,8 @@ export function Chat({
       addDiag(`connect -> ${gatewayUrl}`);
       const client = createGatewayClient(gatewayUrl, GATEWAY_TOKEN);
       clientRef.current = client;
-      client.on("connected", () => {
+      detachGatewayListeners(client);
+      const onConnected = () => {
         setConnected(true);
         setIsConnecting(false);
         setError(null);
@@ -379,13 +388,13 @@ export function Chat({
             addDiag(`integrations sync failed: ${String(err)}`);
           });
         addDiag("gateway connected");
-      });
-      client.on("disconnected", () => {
+      };
+      const onDisconnected = () => {
         setConnected(false);
         addDiag("gateway disconnected");
-      });
-      client.on("chat", handleChatEvent);
-      client.on("error", (err) => {
+      };
+      const onChat = (event: ChatEvent) => handleChatEvent(event);
+      const onError = (err: string) => {
         const suppressError = gatewayStarting || isConnecting || !gatewayRunning;
         if (!suppressError) {
           setError(err);
@@ -393,8 +402,17 @@ export function Chat({
         setIsConnecting(false);
         setLastGatewayError(err);
         addDiag(`gateway error: ${err}`);
-      });
-      await client.connect();
+      };
+      client.on("connected", onConnected);
+      client.on("disconnected", onDisconnected);
+      client.on("chat", onChat);
+      client.on("error", onError);
+      handlersRef.current = { connected: onConnected, disconnected: onDisconnected, chat: onChat, error: onError };
+      if (client.isConnected()) {
+        onConnected();
+      } else {
+        await client.connect();
+      }
     } catch (e) {
       if (!gatewayStarting) {
         setError(e instanceof Error ? e.message : "Connection failed");
@@ -402,6 +420,15 @@ export function Chat({
       setIsConnecting(false);
       addDiag(`connect failed: ${e instanceof Error ? e.message : "unknown"}`);
     }
+  }
+
+  function detachGatewayListeners(client: GatewayClient) {
+    const handlers = handlersRef.current;
+    if (handlers.connected) client.off("connected", handlers.connected);
+    if (handlers.disconnected) client.off("disconnected", handlers.disconnected);
+    if (handlers.chat) client.off("chat", handlers.chat);
+    if (handlers.error) client.off("error", handlers.error);
+    handlersRef.current = {};
   }
 
   function handleChatEvent(event: any) {

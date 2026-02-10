@@ -422,15 +422,20 @@ export type CronRunLogEntry = {
 
 // Singleton instance
 let client: GatewayClient | null = null;
+let clientConfig: { url: string; token: string } | null = null;
 
 export function getGatewayClient(): GatewayClient | null {
   return client;
 }
 
 export function createGatewayClient(url: string, token: string): GatewayClient {
+  if (client && clientConfig?.url === url && clientConfig?.token === token) {
+    return client;
+  }
   if (client) {
     client.disconnect();
   }
   client = new GatewayClient(url, token);
+  clientConfig = { url, token };
   return client;
 }

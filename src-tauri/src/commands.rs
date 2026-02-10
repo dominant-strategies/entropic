@@ -566,29 +566,13 @@ fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
     write_container_file("/home/node/.openclaw/openclaw.json", &payload)
 }
 
-fn resolve_default_nova_skills_path() -> Option<String> {
-    if let Ok(cwd) = std::env::current_dir() {
-        let candidates = [
-            cwd.join("..").join("nova-skills"),
-            cwd.join("..").join("..").join("nova-skills"),
-        ];
-        for candidate in candidates {
-            if candidate.is_dir() {
-                return Some(candidate.to_string_lossy().to_string());
-            }
-        }
-    }
-    None
-}
-
 fn append_nova_skills_mount(docker_args: &mut Vec<String>) {
     let path = std::env::var("NOVA_SKILLS_PATH")
         .ok()
         .and_then(|p| {
             let trimmed = p.trim().to_string();
             if trimmed.is_empty() { None } else { Some(trimmed) }
-        })
-        .or_else(resolve_default_nova_skills_path);
+        });
 
     if let Some(host_path) = path {
         docker_args.push("-v".to_string());

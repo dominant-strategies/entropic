@@ -168,11 +168,10 @@ export async function connectIntegration(provider: IntegrationProvider): Promise
     metadata: result.metadata ?? {},
   };
   await saveIntegrationSecret(provider, record);
-  try {
-    await syncIntegrationToGateway(provider);
-  } catch (err) {
+  // Sync in the background so the UI can update immediately.
+  syncIntegrationToGateway(provider).catch((err) => {
     console.warn(`Failed to sync ${provider} after connect:`, err);
-  }
+  });
 }
 
 export async function disconnectIntegration(provider: IntegrationProvider): Promise<void> {

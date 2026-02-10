@@ -50,6 +50,23 @@
 body {
   background-color: var(--bg-primary);
   min-height: 100vh;
+  /* Tauri rounded corners support */
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* Root app container with rounded corners for Tauri */
+#root {
+  border-radius: 12px;
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* Ensure all direct children respect rounded corners */
+#root > div {
+  border-radius: 12px;
+  overflow: hidden;
 }
 
 /* Custom Scrollbar */

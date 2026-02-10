@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
-import { Calendar, Mail, CheckCircle2, ExternalLink, ShieldCheck, Loader2, Twitter } from "lucide-react";
+import { Calendar, Mail, CheckCircle2, ExternalLink, ShieldCheck, Loader2 } from "lucide-react";
 import {
   getIntegrations,
   getIntegrationsCached,
@@ -29,7 +29,7 @@ type GoogleIntegration = {
   id: IntegrationProvider;
   name: string;
   description: string;
-  icon: typeof Calendar;
+  icon: ComponentType<{ className?: string }>;
   connected: boolean;
   stale?: boolean;
   email?: string;
@@ -39,11 +39,20 @@ type ExternalIntegration = {
   id: IntegrationProvider;
   name: string;
   description: string;
-  icon: typeof Calendar;
+  icon: ComponentType<{ className?: string }>;
   connected: boolean;
   stale?: boolean;
   email?: string;
 };
+
+const XLogo = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
+    <path
+      fill="currentColor"
+      d="M18.9 3H22l-6.8 7.8L23 21h-6.2l-4.9-6.1L6.6 21H3.5l7.3-8.3L1 3h6.3l4.4 5.6L18.9 3zm-1.1 16h1.7L7.5 4.9H5.7L17.8 19z"
+    />
+  </svg>
+);
 
 const META: Record<string, Partial<Plugin>> = {
   "memory-lancedb": { name: "Memory (Long‑Term)", description: "Keeps long‑term memories and recalls them automatically.", category: "memory" },
@@ -72,8 +81,8 @@ const EXTERNAL_INTEGRATIONS: Omit<ExternalIntegration, 'connected' | 'email'>[] 
   {
     id: 'x',
     name: 'X (Twitter)',
-    description: 'Read your timeline and search public posts with Nova.',
-    icon: Twitter,
+    description: 'Search public posts, view profiles, and fetch recent tweets by handle. Personalized feeds (For You/Following) are not available via the X API.',
+    icon: XLogo,
   },
 ];
 

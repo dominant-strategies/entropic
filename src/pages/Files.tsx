@@ -599,17 +599,30 @@ export function Files({
     const existing = getGatewayClient();
     if (existing?.isConnected()) { chatClientRef.current = existing; setChatConnected(true); if (!chatSessionRef.current) chatSessionRef.current = existing.createSessionKey(); return; }
     let cancelled = false;
+    let attachedClient: ReturnType<typeof createGatewayClient> | null = null;
+    let onConnected: (() => void) | null = null;
+    let onDisconnected: (() => void) | null = null;
+    let onChat: ((ev: ChatEvent) => void) | null = null;
     (async () => {
       setChatConnecting(true);
       try {
         const client = createGatewayClient(GATEWAY_URL, GATEWAY_TOKEN);
-        client.on("connected", () => { if (cancelled) return; chatClientRef.current = client; setChatConnected(true); setChatConnecting(false); if (!chatSessionRef.current) chatSessionRef.current = client.createSessionKey(); });
-        client.on("disconnected", () => { if (!cancelled) setChatConnected(false); });
-        client.on("chat", (ev: ChatEvent) => { if (!cancelled) handleChatEvent(ev); });
+        attachedClient = client;
+        onConnected = () => { if (cancelled) return; chatClientRef.current = client; setChatConnected(true); setChatConnecting(false); if (!chatSessionRef.current) chatSessionRef.current = client.createSessionKey(); };
+        onDisconnected = () => { if (!cancelled) setChatConnected(false); };
+        onChat = (ev: ChatEvent) => { if (!cancelled) handleChatEvent(ev); };
+        client.on("connected", onConnected);
+        client.on("disconnected", onDisconnected);
+        client.on("chat", onChat);
         await client.connect();
       } catch { if (!cancelled) setChatConnecting(false); }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (attachedClient && onConnected) attachedClient.off("connected", onConnected);
+      if (attachedClient && onDisconnected) attachedClient.off("disconnected", onDisconnected);
+      if (attachedClient && onChat) attachedClient.off("chat", onChat);
+    };
   }, [chatOpen, gatewayRunning]);
 
   function handleChatEvent(event: ChatEvent) {
