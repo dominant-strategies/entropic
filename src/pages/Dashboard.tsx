@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Loader2 } from "lucide-react";
 import { Layout, Page } from "../components/Layout";
 import { Chat, type ChatSession } from "./Chat";
 import { Store } from "./Store";
@@ -452,6 +453,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             imageModel={imageModel}
             integrationsSyncing={integrationsSyncing}
             integrationsMissing={integrationsMissing}
+            onNavigate={setCurrentPage}
             onSessionsChange={(sessions, currentKey) => {
               setChatSessions(sessions);
               setCurrentChatSession(currentKey);
@@ -575,29 +577,38 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       }}
     >
       {showGatewayStartup && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-          <div className="glass-card p-8 w-full max-w-md mx-4 text-center">
-            <div className="w-12 h-12 rounded-xl mx-auto mb-4 bg-[var(--purple-accent)] animate-pulse-subtle" />
-            <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-2">
-              {gatewayRetryIn ? "Reconnecting secure sandbox" : "Starting secure sandbox"}
-            </h2>
-            <p className="text-sm text-[var(--text-secondary)] mb-4">
-              {gatewayRetryIn
-                ? `Retrying in ${gatewayRetryIn}s…`
-                : "We’re spinning up the Docker container for your assistant."}
-            </p>
-            <div className="text-left text-sm space-y-2">
+        <div className="absolute inset-0 z-50 flex items-center justify-center">
+          <div className="w-full max-w-sm mx-4 rounded-2xl bg-white border border-[var(--border-subtle)] shadow-xl p-6">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 rounded-full bg-[var(--system-gray-6)] p-2">
+                <Loader2 className="w-4 h-4 animate-spin text-[var(--text-primary)]" />
+              </div>
+              <div>
+                <h2 className="text-sm font-semibold text-[var(--text-primary)]">
+                  {gatewayRetryIn ? "Reconnecting secure sandbox" : "Starting secure sandbox"}
+                </h2>
+                <p className="text-xs text-[var(--text-secondary)] mt-1">
+                  {gatewayRetryIn
+                    ? `Retrying in ${gatewayRetryIn}s. We’ll keep trying until the sandbox is ready.`
+                    : "Nova is preparing the secure sandbox so tools and plugins are available."}
+                </p>
+                <div className="mt-3 text-xs text-[var(--text-tertiary)]">
+                  This can take a few seconds the first time.
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 space-y-2 text-xs text-[var(--text-secondary)]">
               <div className="flex items-center gap-2">
-                <span className={`h-2 w-2 rounded-full ${isTogglingGateway ? "bg-amber-400" : "bg-green-500"}`} />
-                <span className="text-[var(--text-secondary)]">Starting gateway container</span>
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--text-tertiary)]" />
+                <span>Launching gateway container</span>
               </div>
               <div className="flex items-center gap-2">
-                <span className={`h-2 w-2 rounded-full ${gatewayRunning ? "bg-green-500" : "bg-amber-400"}`} />
-                <span className="text-[var(--text-secondary)]">Waiting for health check</span>
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--text-tertiary)]" />
+                <span>Waiting for health check</span>
               </div>
             </div>
             {startupError && (
-              <div className="mt-4 text-sm text-red-500">
+              <div className="mt-3 text-xs text-red-600">
                 {startupError}
               </div>
             )}

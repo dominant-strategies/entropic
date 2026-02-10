@@ -918,6 +918,7 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
         "x_thread",
         "x_user_tweets",
     ];
+    const NOVA_CORE_TOOLS: [&str; 1] = ["image"];
 
     // Enable nova-x plugin if it exists (bundled or mounted).
     let mut has_nova_x = container_path_exists("/app/extensions/nova-x");
@@ -967,6 +968,12 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
                     if !exists {
                         list.push(serde_json::json!(tool));
                     }
+                }
+            }
+            for tool in NOVA_CORE_TOOLS {
+                let exists = list.iter().any(|v| v.as_str() == Some(tool));
+                if !exists {
+                    list.push(serde_json::json!(tool));
                 }
             }
         }

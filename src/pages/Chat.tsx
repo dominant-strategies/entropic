@@ -9,7 +9,8 @@ import { SuggestionChip, type SuggestionAction } from "../components/SuggestionC
 import { ChannelSetupModal } from "../components/ChannelSetupModal";
 import { MarkdownContent } from "../components/MarkdownContent";
 import { useAuth } from "../contexts/AuthContext";
-import { syncAllIntegrationsToGateway, getCachedIntegrationProviders } from "../lib/integrations";
+import { syncAllIntegrationsToGateway, getCachedIntegrationProviders, getIntegrations } from "../lib/integrations";
+import type { Page } from "../components/Layout";
 
 // NOTE: Most type definitions are omitted for brevity in this example
 type Message = { id: string; role: "user" | "assistant"; content: string };
@@ -184,8 +185,8 @@ const GATEWAY_TOKEN = "nova-local-gateway";
 const SUGGESTIONS = [
   { icon: MessageSquare, label: "Message me on iMessage", action: { type: "channel", channel: "imessage" } as SuggestionAction },
   { icon: MessageSquare, label: "Message me on WhatsApp", action: { type: "channel", channel: "whatsapp" } as SuggestionAction },
-  { icon: Mail, label: "Clean up my inbox", action: { type: "agent", message: "Help me clean up and organize my email inbox" } as SuggestionAction },
-  { icon: Calendar, label: "Check my calendar", action: { type: "agent", message: "What's on my calendar for today and tomorrow?" } as SuggestionAction },
+  { icon: Mail, label: "Clean up my inbox", action: { type: "agent", message: "Help me clean up and organize my email inbox", requiresIntegration: "google_email" } as SuggestionAction },
+  { icon: Calendar, label: "Check my calendar", action: { type: "agent", message: "What's on my calendar for today and tomorrow?", requiresIntegration: "google_calendar" } as SuggestionAction },
   { icon: Globe, label: "Browse the web for me", action: { type: "agent", message: "I'd like you to browse the web and research something for me." } as SuggestionAction },
 ];
 
@@ -199,6 +200,7 @@ export function Chat({
   imageModel: _imageModel,
   integrationsSyncing,
   integrationsMissing,
+  onNavigate,
   onSessionsChange,
   requestedSession,
 }: {
@@ -211,6 +213,7 @@ export function Chat({
   imageModel: string;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
+  onNavigate?: (page: Page) => void;
   onSessionsChange?: (sessions: ChatSession[], currentKey: string | null) => void;
   requestedSession?: string | null;
 }) {
@@ -553,10 +556,24 @@ export function Chat({
     return s.label || s.displayName || s.derivedTitle || `Chat ${s.key.slice(0, 8)}`;
   }
 
-  function handleSuggestionClick(action: SuggestionAction) {
+  async function handleSuggestionClick(action: SuggestionAction) {
     if (action.type === "channel") {
       setChannelModal({ isOpen: true, channel: action.channel });
     } else if (action.type === "agent") {
+      if (action.requiresIntegration) {
+        try {
+          const integrations = await getIntegrations();
+          const entry = integrations.find((item) => item.provider === action.requiresIntegration);
+          if (!entry || !entry.connected || entry.stale) {
+            addDiag(`suggestion requires ${action.requiresIntegration}; redirecting to Plugins`);
+            onNavigate?.("store");
+            return;
+          }
+        } catch {
+          onNavigate?.("store");
+          return;
+        }
+      }
       handleSend(action.message);
     }
   }

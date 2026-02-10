@@ -259,7 +259,7 @@ export function Settings({
           onClick={() => setWallpaperPickerOpen(true)}
         >
           <div className="flex items-center gap-2">
-            <div className="w-12 h-12 rounded-md bg-[var(--system-gray-5)] border border-[var(--border-subtle)] overflow-hidden shadow-sm">
+            <div className="w-24 h-[72px] rounded-md bg-[var(--system-gray-5)] border border-[var(--border-subtle)] overflow-hidden shadow-sm">
               {(() => {
                 const wp = getWallpaperById(wallpaperId);
                 const isPhoto = (wallpaperId === "custom" && customWallpaper) || wp?.type === "photo";
@@ -281,13 +281,13 @@ export function Settings({
             disabled={isTogglingGateway}
             className={clsx(
               "relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
-              gatewayRunning ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-4)]"
+              (gatewayRunning || isTogglingGateway) ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-4)]"
             )}
           >
             <span
               className={clsx(
                 "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
-                gatewayRunning ? "translate-x-5" : "translate-x-0"
+                (gatewayRunning || isTogglingGateway) ? "translate-x-5" : "translate-x-0"
               )}
             />
           </button>

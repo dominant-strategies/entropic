@@ -1,8 +1,9 @@
 import { LucideIcon } from "lucide-react";
+import type { IntegrationProvider } from "../lib/integrations";
 
 export type SuggestionAction =
   | { type: "channel"; channel: "imessage" | "whatsapp" }
-  | { type: "agent"; message: string };
+  | { type: "agent"; message: string; requiresIntegration?: IntegrationProvider };
 
 type Props = {
   icon: LucideIcon;
