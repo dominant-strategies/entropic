@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
 import { Store } from "@tauri-apps/plugin-store";
-import { GatewayClient } from "./gateway";
+import { createGatewayClient } from "./gateway";
+import { getGatewayStatusCached } from "./gateway-status";
 import { apiRequest } from "./auth";
 import {
   loadIntegrationSecret,
@@ -22,6 +23,10 @@ const OPENCLAW_SYNC_PROVIDERS = new Set<IntegrationProvider>([
   "google_calendar",
   "google_email",
 ]);
+
+const INTEGRATIONS_CACHE_TTL_MS = 30_000;
+let integrationsCache: { ts: number; data: Integration[] } | null = null;
+let integrationsCachedIndex: { ts: number; data: Integration[] } | null = null;
 
 export type IntegrationProvider = "google_calendar" | "google_email" | "x";
 
@@ -107,7 +112,11 @@ export async function clearPendingImport(provider: IntegrationProvider) {
   }
 }
 
-export async function getIntegrations(): Promise<Integration[]> {
+export async function getIntegrations(opts?: { force?: boolean }): Promise<Integration[]> {
+  const now = Date.now();
+  if (!opts?.force && integrationsCache && now - integrationsCache.ts < INTEGRATIONS_CACHE_TTL_MS) {
+    return integrationsCache.data;
+  }
   const records = await listIntegrationSecrets<StoredIntegration>();
   const local: Integration[] = records.map((record) => ({
     provider: record.provider,
@@ -124,18 +133,25 @@ export async function getIntegrations(): Promise<Integration[]> {
   } catch (err) {
     console.warn("Failed to load X integration status:", err);
   }
+  integrationsCache = { ts: now, data: local };
   return local;
 }
 
-export async function getIntegrationsCached(): Promise<Integration[]> {
+export async function getIntegrationsCached(opts?: { force?: boolean }): Promise<Integration[]> {
+  const now = Date.now();
+  if (!opts?.force && integrationsCachedIndex && now - integrationsCachedIndex.ts < INTEGRATIONS_CACHE_TTL_MS) {
+    return integrationsCachedIndex.data;
+  }
   const cached = await listIntegrationIndexCache();
-  return cached.map((record) => ({
+  const mapped = cached.map((record) => ({
     provider: record.provider as IntegrationProvider,
     connected: true,
     stale: true,
     email: record.email ?? undefined,
     scopes: record.scopes ?? [],
   }));
+  integrationsCachedIndex = { ts: now, data: mapped };
+  return mapped;
 }
 
 export async function isIntegrationConnected(provider: IntegrationProvider): Promise<boolean> {
@@ -168,6 +184,9 @@ export async function connectIntegration(provider: IntegrationProvider): Promise
     metadata: result.metadata ?? {},
   };
   await saveIntegrationSecret(provider, record);
+  integrationsCache = null;
+  integrationsCachedIndex = null;
+  window.dispatchEvent(new Event("nova-integration-updated"));
   // Sync in the background so the UI can update immediately.
   syncIntegrationToGateway(provider).catch((err) => {
     console.warn(`Failed to sync ${provider} after connect:`, err);
@@ -177,9 +196,15 @@ export async function connectIntegration(provider: IntegrationProvider): Promise
 export async function disconnectIntegration(provider: IntegrationProvider): Promise<void> {
   if (provider === "x") {
     await apiRequest("/x/oauth/disconnect", { method: "POST" });
+    integrationsCache = null;
+    integrationsCachedIndex = null;
+    window.dispatchEvent(new Event("nova-integration-updated"));
     return;
   }
   await removeIntegrationSecret(provider);
+  integrationsCache = null;
+  integrationsCachedIndex = null;
+  window.dispatchEvent(new Event("nova-integration-updated"));
 }
 
 async function getXIntegrationStatus(): Promise<Integration | null> {
@@ -253,28 +278,26 @@ export async function exportIntegrationTokenBundle(
 }
 
 async function importIntegrationBundle(bundle: IntegrationTokenBundle): Promise<void> {
-  const isRunning = await invoke<boolean>("get_gateway_status").catch(() => false);
+  const isRunning = await getGatewayStatusCached().catch(() => false);
   if (!isRunning) {
     console.warn("[integrations] Gateway status check failed; attempting import anyway.");
   }
   const gatewayUrl =
     (await invoke<string>("get_gateway_ws_url").catch(() => "")) || DEFAULT_GATEWAY_URL;
-  const client = new GatewayClient(gatewayUrl, GATEWAY_TOKEN);
-  try {
+  const client = createGatewayClient(gatewayUrl, GATEWAY_TOKEN);
+  if (!client.isConnected()) {
     await client.connect();
-    await client.rpc("integrations.import", {
-      provider: bundle.provider,
-      access_token: bundle.access_token,
-      token_type: bundle.token_type ?? undefined,
-      expires_at: bundle.expires_at ?? undefined,
-      scopes: bundle.scopes ?? [],
-      provider_email: bundle.provider_email ?? undefined,
-      provider_user_id: bundle.provider_user_id ?? undefined,
-      metadata: bundle.metadata ?? {},
-    });
-  } finally {
-    client.disconnect();
   }
+  await client.rpc("integrations.import", {
+    provider: bundle.provider,
+    access_token: bundle.access_token,
+    token_type: bundle.token_type ?? undefined,
+    expires_at: bundle.expires_at ?? undefined,
+    scopes: bundle.scopes ?? [],
+    provider_email: bundle.provider_email ?? undefined,
+    provider_user_id: bundle.provider_user_id ?? undefined,
+    metadata: bundle.metadata ?? {},
+  });
 }
 
 export async function syncIntegrationToGateway(provider: IntegrationProvider): Promise<void> {
@@ -334,19 +357,17 @@ export async function removeIntegrationFromGateway(provider: IntegrationProvider
   if (!OPENCLAW_SYNC_PROVIDERS.has(provider)) {
     return;
   }
-  const isRunning = await invoke<boolean>("get_gateway_status").catch(() => false);
+  const isRunning = await getGatewayStatusCached().catch(() => false);
   if (!isRunning) {
     return;
   }
   const gatewayUrl =
     (await invoke<string>("get_gateway_ws_url").catch(() => "")) || DEFAULT_GATEWAY_URL;
-  const client = new GatewayClient(gatewayUrl, GATEWAY_TOKEN);
-  try {
+  const client = createGatewayClient(gatewayUrl, GATEWAY_TOKEN);
+  if (!client.isConnected()) {
     await client.connect();
-    await client.rpc("integrations.remove", { provider });
-  } finally {
-    client.disconnect();
   }
+  await client.rpc("integrations.remove", { provider });
 }
 
 let refreshIntervalId: number | null = null;
@@ -369,7 +390,7 @@ export function startIntegrationRefreshLoop(): void {
     } catch (err) {
       console.warn("Integration refresh loop failed:", err);
     }
-  }, 60_000);
+  }, 5 * 60_000);
 }
 
 export function stopIntegrationRefreshLoop(): void {

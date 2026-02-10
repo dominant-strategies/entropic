@@ -49,24 +49,28 @@ export function Billing() {
   useEffect(() => {
     const cached = readUsageCache();
     if (cached) {
-      setUsage(cached);
+      setUsage(cached.data);
       setIsLoadingUsage(false);
     }
-    loadUsage({ background: Boolean(cached) });
-    refreshBalance();
+    if (!cached) {
+      loadUsage();
+    }
+    if (!balance) {
+      refreshBalance();
+    }
     return () => {
       stopBalancePolling();
     };
-  }, [refreshBalance]);
+  }, [refreshBalance, balance]);
 
-  function readUsageCache(): UsageResponse | null {
+  function readUsageCache(): { data: UsageResponse; ts: number } | null {
     try {
       const raw = sessionStorage.getItem(USAGE_CACHE_KEY);
       if (!raw) return null;
       const parsed = JSON.parse(raw) as { ts: number; data: UsageResponse };
       if (!parsed?.data || typeof parsed.ts !== "number") return null;
       if (Date.now() - parsed.ts > USAGE_CACHE_TTL_MS) return null;
-      return parsed.data;
+      return parsed;
     } catch {
       return null;
     }
@@ -83,9 +87,17 @@ export function Billing() {
     }
   }
 
-  async function loadUsage(opts?: { background?: boolean }) {
+  async function loadUsage(opts?: { background?: boolean; force?: boolean }) {
     if (!opts?.background) {
       setIsLoadingUsage(true);
+    }
+    if (!opts?.force) {
+      const cached = readUsageCache();
+      if (cached) {
+        setUsage(cached.data);
+        setIsLoadingUsage(false);
+        return;
+      }
     }
     try {
       const data = await getUsage(30);

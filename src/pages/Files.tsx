@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, type ReactNode, type MouseEvent as ReactMouseEvent } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense, type ReactNode, type MouseEvent as ReactMouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
 import {
@@ -36,12 +36,12 @@ import {
 } from "../lib/gateway";
 import { loadOnboardingData } from "../lib/profile";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
-import { Store as PluginStore } from "./Store";
-import { Channels } from "./Channels";
-import { Logs } from "./Logs";
-import { Settings } from "./Settings";
-import { Tasks } from "./Tasks";
-import { BillingPage } from "./BillingPage";
+const PluginStore = lazy(() => import("./Store").then((m) => ({ default: m.Store })));
+const Channels = lazy(() => import("./Channels").then((m) => ({ default: m.Channels })));
+const Logs = lazy(() => import("./Logs").then((m) => ({ default: m.Logs })));
+const Settings = lazy(() => import("./Settings").then((m) => ({ default: m.Settings })));
+const Tasks = lazy(() => import("./Tasks").then((m) => ({ default: m.Tasks })));
+const BillingPage = lazy(() => import("./BillingPage").then((m) => ({ default: m.BillingPage })));
 import { ModelSelector } from "../components/ModelSelector";
 import { useAuth } from "../contexts/AuthContext";
 import { getUsage } from "../lib/auth";
@@ -78,6 +78,9 @@ const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
 const GATEWAY_URL = "ws://127.0.0.1:19789";
 const GATEWAY_TOKEN = "nova-local-gateway";
+const PANEL_FALLBACK = (
+  <div className="p-4 text-xs text-[var(--text-tertiary)]">Loading…</div>
+);
 
 type PreviewState =
   | { kind: "text"; name: string; content: string }
@@ -339,6 +342,7 @@ export function Files({
         const parsed = JSON.parse(raw) as { ts: number; data: { dollars: string; requests: number } };
         if (parsed?.data && Date.now() - parsed.ts < 5 * 60 * 1000) {
           setUsageSummary(parsed.data);
+          return;
         }
       }
     } catch {
@@ -1129,10 +1133,12 @@ export function Files({
                 startWindowDrag(e, pluginsDragRef, pluginsPos, setPluginsPos, "plugins")
               }
             >
-              <PluginStore
-                integrationsSyncing={integrationsSyncing}
-                integrationsMissing={integrationsMissing}
-              />
+              <Suspense fallback={PANEL_FALLBACK}>
+                <PluginStore
+                  integrationsSyncing={integrationsSyncing}
+                  integrationsMissing={integrationsMissing}
+                />
+              </Suspense>
             </AppWindow>
           )}
 
@@ -1150,7 +1156,9 @@ export function Files({
                 startWindowDrag(e, channelsDragRef, channelsPos, setChannelsPos, "channels")
               }
             >
-              <Channels />
+              <Suspense fallback={PANEL_FALLBACK}>
+                <Channels />
+              </Suspense>
             </AppWindow>
           )}
 
@@ -1168,7 +1176,9 @@ export function Files({
                 startWindowDrag(e, tasksDragRef, tasksPos, setTasksPos, "tasks")
               }
             >
-              <Tasks gatewayRunning={gatewayRunning} />
+              <Suspense fallback={PANEL_FALLBACK}>
+                <Tasks gatewayRunning={gatewayRunning} />
+              </Suspense>
             </AppWindow>
           )}
 
@@ -1186,7 +1196,9 @@ export function Files({
                 startWindowDrag(e, logsDragRef, logsPos, setLogsPos, "logs")
               }
             >
-              <Logs />
+              <Suspense fallback={PANEL_FALLBACK}>
+                <Logs />
+              </Suspense>
             </AppWindow>
           )}
 
@@ -1204,7 +1216,9 @@ export function Files({
                 startWindowDrag(e, billingDragRef, billingPos, setBillingPos, "billing")
               }
             >
-              <BillingPage />
+              <Suspense fallback={PANEL_FALLBACK}>
+                <BillingPage />
+              </Suspense>
             </AppWindow>
           )}
 
@@ -1222,19 +1236,21 @@ export function Files({
                 startWindowDrag(e, settingsDragRef, settingsPos, setSettingsPos, "settings")
               }
             >
-              <Settings
-                gatewayRunning={gatewayRunning}
-                onGatewayToggle={onGatewayToggle}
-                isTogglingGateway={isTogglingGateway}
-                selectedModel={selectedModel}
-                onModelChange={onModelChange}
-                useLocalKeys={useLocalKeys}
-                onUseLocalKeysChange={onUseLocalKeysChange}
-                codeModel={codeModel}
-                imageModel={imageModel}
-                onCodeModelChange={onCodeModelChange}
-                onImageModelChange={onImageModelChange}
-              />
+              <Suspense fallback={PANEL_FALLBACK}>
+                <Settings
+                  gatewayRunning={gatewayRunning}
+                  onGatewayToggle={onGatewayToggle}
+                  isTogglingGateway={isTogglingGateway}
+                  selectedModel={selectedModel}
+                  onModelChange={onModelChange}
+                  useLocalKeys={useLocalKeys}
+                  onUseLocalKeysChange={onUseLocalKeysChange}
+                  codeModel={codeModel}
+                  imageModel={imageModel}
+                  onCodeModelChange={onCodeModelChange}
+                  onImageModelChange={onImageModelChange}
+                />
+              </Suspense>
             </AppWindow>
           )}
 

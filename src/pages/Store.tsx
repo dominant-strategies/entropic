@@ -281,6 +281,13 @@ export function Store({
     setConnecting(provider);
     try {
       await connectIntegration(provider);
+      setIntegrations((prev) => {
+        const exists = prev.some((i) => i.provider === provider);
+        if (!exists) return prev;
+        return prev.map((i) =>
+          i.provider === provider ? { ...i, connected: true, stale: false } : i
+        );
+      });
       await refreshIntegrations();
     } catch (err) {
       console.error("Failed to start OAuth:", err);

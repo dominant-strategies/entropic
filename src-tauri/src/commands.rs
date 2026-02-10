@@ -885,6 +885,9 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
     cfg["agents"]["defaults"]["heartbeat"] = serde_json::json!({
         "every": settings.heartbeat_every
     });
+    // Stream assistant blocks by default for faster first-token feedback.
+    cfg["agents"]["defaults"]["blockStreamingDefault"] = serde_json::json!("on");
+    cfg["agents"]["defaults"]["blockStreamingBreak"] = serde_json::json!("text_end");
     // Persist cron jobs across container restarts.
     cfg["cron"]["store"] = serde_json::json!("/data/cron/jobs.json");
 
@@ -1458,6 +1461,26 @@ pub async fn start_gateway_with_proxy(
         .map_err(|e| format!("Failed to check container: {}", e))?;
 
     if !check.stdout.is_empty() {
+        let expected_proxy_env = format!("{}/v1", docker_proxy_url);
+        let current_proxy = read_container_env("NOVA_PROXY_BASE_URL");
+        let current_token = read_container_env("OPENROUTER_API_KEY");
+        let current_model = read_container_env("OPENCLAW_MODEL");
+        let current_image = read_container_env("OPENCLAW_IMAGE_MODEL");
+        let expected_image = image_model.clone().unwrap_or_default();
+
+        let proxy_matches = current_proxy.as_deref() == Some(expected_proxy_env.as_str());
+        let token_matches = current_token.as_deref() == Some(gateway_token.as_str());
+        let model_matches = current_model.as_deref() == Some(model.as_str());
+        let image_matches = expected_image.is_empty()
+            || current_image.as_deref() == Some(expected_image.as_str());
+
+        if proxy_matches && token_matches && model_matches && image_matches {
+            println!("[Nova] Proxy container already running with matching config. Reusing.");
+            apply_agent_settings(&app, &state)?;
+            start_scanner_sidecar();
+            return Ok(());
+        }
+
         // Remove running container to ensure proxy config/model updates take effect
         let _ = docker_command()
             .args(["rm", "-f", "nova-openclaw"])

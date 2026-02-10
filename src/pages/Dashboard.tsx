@@ -19,6 +19,7 @@ import {
   startIntegrationRefreshLoop,
   stopIntegrationRefreshLoop,
 } from "../lib/integrations";
+import { getGatewayStatusCached } from "../lib/gateway-status";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 
 type RuntimeStatus = {
@@ -58,6 +59,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const retryAttemptRef = useRef(0);
   const retryTimeoutRef = useRef<number | null>(null);
   const retryIntervalRef = useRef<number | null>(null);
+  const fullSyncRef = useRef(false);
 
   // Load saved model preference
   useEffect(() => {
@@ -80,48 +82,56 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }, []);
 
   useEffect(() => {
+    const intervalMs =
+      gatewayRunning && !showGatewayStartup && !isTogglingGateway ? 15_000 : 5_000;
     checkGateway();
-    const interval = setInterval(checkGateway, 5000);
-    return () => clearInterval(interval);
-  }, []);
+    const interval = window.setInterval(checkGateway, intervalMs);
+    return () => window.clearInterval(interval);
+  }, [gatewayRunning, showGatewayStartup, isTogglingGateway]);
 
   useEffect(() => {
     if (!gatewayRunning) {
       stopIntegrationRefreshLoop();
       setIntegrationsSyncing(false);
+      fullSyncRef.current = false;
       return;
     }
     let cancelled = false;
     let intervalId: number | null = null;
-    const deadline = Date.now() + 2 * 60_000;
+    const deadline = Date.now() + 5 * 60_000;
 
     const syncOnce = async () => {
       if (cancelled) return;
+      let didWork = false;
       try {
-        setIntegrationsSyncing(true);
-        const synced = await syncAllIntegrationsToGateway();
-        if (!cancelled) {
-          const cached = await getCachedIntegrationProviders().catch(() => []);
-          const missing = synced.length === 0 && cached.length > 0;
-          setIntegrationsMissing(missing);
+        if (!fullSyncRef.current) {
+          setIntegrationsSyncing(true);
+          const synced = await syncAllIntegrationsToGateway();
+          fullSyncRef.current = true;
+          didWork = true;
+          if (!cancelled) {
+            const cached = await getCachedIntegrationProviders().catch(() => []);
+            const missing = synced.length === 0 && cached.length > 0;
+            setIntegrationsMissing(missing);
+          }
         }
         await syncPendingIntegrationImports();
+        didWork = true;
       } catch (err) {
         console.warn("[Nova] Failed to sync integration tokens:", err);
       }
       try {
         const stillPending = await hasPendingIntegrationImports();
         if (!cancelled) {
-          setIntegrationsSyncing(stillPending);
+          setIntegrationsSyncing(stillPending || (!fullSyncRef.current && didWork));
         }
-        if (!stillPending || Date.now() > deadline) {
+        if ((!stillPending && fullSyncRef.current) || Date.now() > deadline) {
           if (intervalId !== null) {
             window.clearInterval(intervalId);
             intervalId = null;
           }
         }
       } catch {
-        // If we can't read pending state, keep trying until deadline.
         if (Date.now() > deadline && intervalId !== null) {
           window.clearInterval(intervalId);
           intervalId = null;
@@ -130,7 +140,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     };
 
     syncOnce();
-    intervalId = window.setInterval(syncOnce, 5000);
+    intervalId = window.setInterval(syncOnce, 10_000);
     startIntegrationRefreshLoop();
     return () => {
       cancelled = true;
@@ -305,6 +315,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         !isTogglingGateway &&
         gatewayRetryIn === null
       ) {
+        const alreadyRunning = await getGatewayStatusCached({ force: true });
+        if (alreadyRunning) {
+          setGatewayRunning(true);
+          autoStartAttemptedRef.current = true;
+          return;
+        }
         autoStartAttemptedRef.current = true;
         console.log("[Nova] Auto-starting gateway for authenticated user...");
 
@@ -330,7 +346,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
   async function checkGateway() {
     try {
-      const running = await invoke<boolean>("get_gateway_status");
+      const running = await getGatewayStatusCached({ force: true });
       setGatewayRunning(running);
       console.log("[Nova] Gateway health check:", running ? "healthy" : "not responding");
       if (running) {

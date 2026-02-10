@@ -519,7 +519,7 @@ export function Chat({
     setError(null);
     try {
       const now = Date.now();
-      if (gatewayRunning && (connectedProvider || proxyEnabled) && now - lastIntegrationsSyncRef.current > 15_000) {
+      if (gatewayRunning && (connectedProvider || proxyEnabled) && now - lastIntegrationsSyncRef.current > 60_000) {
         try {
           const providers = await syncAllIntegrationsToGateway();
           lastIntegrationsSyncRef.current = now;

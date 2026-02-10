@@ -15,6 +15,8 @@ import clsx from "clsx";
 import { invoke } from "@tauri-apps/api/core";
 import {
   GatewayClient,
+  createGatewayClient,
+  getGatewayClient,
   type ChatEvent,
   type CronJob,
   type CronSchedule,
@@ -578,7 +580,6 @@ export function Tasks({ gatewayRunning }: Props) {
   useEffect(() => {
     let cancelled = false;
     if (!gatewayRunning) {
-      tasksClientRef.current?.disconnect();
       tasksClientRef.current = null;
       setJobs([]);
       return;
@@ -608,7 +609,6 @@ export function Tasks({ gatewayRunning }: Props) {
 
   useEffect(() => {
     return () => {
-      tasksClientRef.current?.disconnect();
       tasksClientRef.current = null;
     };
   }, []);
@@ -828,7 +828,8 @@ export function Tasks({ gatewayRunning }: Props) {
     }
     tasksConnectingRef.current = (async () => {
       const url = await resolveGatewayUrl();
-      const client = tasksClientRef.current ?? new GatewayClient(url, GATEWAY_TOKEN);
+      const existing = getGatewayClient();
+      const client = existing ?? createGatewayClient(url, GATEWAY_TOKEN);
       if (!client.isConnected()) {
         const timeoutMs = 8_000;
         let timeoutId: number | null = null;
