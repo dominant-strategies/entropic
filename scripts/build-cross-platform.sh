@@ -30,12 +30,33 @@ case "$PLATFORM" in
         pnpm bundle:colima
         pnpm bundle:docker
 
+        # Bundle the OpenClaw runtime Docker image (if available)
+        if docker image inspect openclaw-runtime:latest > /dev/null 2>&1; then
+            echo "Bundling OpenClaw runtime image..."
+            pnpm bundle:runtime-image
+        else
+            echo "⚠️  openclaw-runtime:latest image not found locally."
+            echo "   The app will pull it from the registry on first launch."
+            echo "   To bundle it: ./scripts/build-openclaw-runtime.sh && pnpm bundle:runtime-image"
+        fi
+
         # Verify macOS runtime components
         echo "Verifying bundled components:"
         ls -lah src-tauri/resources/bin/ | head -10
 
         echo "Building macOS app bundle..."
         pnpm tauri build
+
+        # Copy bundled runtime image into the app bundle (if available)
+        # Tauri doesn't support optional resources, so we copy it post-build
+        APP_RESOURCES="src-tauri/target/release/bundle/macos/Nova.app/Contents/Resources"
+        if [ -f src-tauri/resources/openclaw-runtime.tar.gz ]; then
+            echo "Copying bundled runtime image into app..."
+            cp src-tauri/resources/openclaw-runtime.tar.gz "$APP_RESOURCES/"
+        elif [ -f src-tauri/resources/openclaw-runtime.tar ]; then
+            echo "Copying bundled runtime image into app..."
+            cp src-tauri/resources/openclaw-runtime.tar "$APP_RESOURCES/"
+        fi
 
         # Show build results
         echo ""
@@ -47,6 +68,11 @@ case "$PLATFORM" in
         echo "  ✅ Colima (container runtime)"
         echo "  ✅ Lima (virtualization)"
         echo "  ✅ Docker CLI"
+        if [ -f src-tauri/resources/openclaw-runtime.tar.gz ]; then
+            echo "  ✅ OpenClaw runtime image (bundled)"
+        else
+            echo "  ⚠️  OpenClaw runtime image (will pull from registry)"
+        fi
         echo "  ✅ Self-contained - no Docker Desktop required"
         ;;
 

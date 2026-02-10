@@ -30,10 +30,15 @@ fn get_docker_host() -> Option<String> {
                 return Some(format!("unix://{}", colima_socket));
             }
 
-            // Fall back to Docker Desktop
+            // Fall back to Docker Desktop (user-level socket)
             let docker_desktop_socket = format!("{}/.docker/run/docker.sock", home.display());
             if std::path::Path::new(&docker_desktop_socket).exists() {
                 return Some(format!("unix://{}", docker_desktop_socket));
+            }
+
+            // Fall back to system-level Docker socket (Docker Desktop symlink)
+            if std::path::Path::new("/var/run/docker.sock").exists() {
+                return Some("unix:///var/run/docker.sock".to_string());
             }
 
             // Default fallback (use environment or system default)
@@ -71,13 +76,162 @@ fn get_docker_host() -> Option<String> {
     }
 }
 
+/// Find the docker binary – try bundled location first, then common install
+/// paths, then fall back to bare "docker" (relies on PATH).
+fn find_docker_binary() -> String {
+    // 1. Check the bundled binary next to our own executable
+    //    In a Tauri macOS bundle: Nova.app/Contents/MacOS/Nova
+    //    Resources live at:       Nova.app/Contents/Resources/resources/bin/docker
+    if let Ok(exe) = std::env::current_exe() {
+        // exe  = .../Contents/MacOS/Nova  → macos_dir = .../Contents/MacOS
+        if let Some(macos_dir) = exe.parent() {
+            let bundled = macos_dir
+                .parent() // .../Contents
+                .map(|c| c.join("Resources").join("resources").join("bin").join("docker"));
+            if let Some(ref p) = bundled {
+                if p.exists() {
+                    return p.display().to_string();
+                }
+            }
+        }
+    }
+
+    // 2. Well-known install locations (macOS / Linux)
+    for candidate in &[
+        "/usr/local/bin/docker",
+        "/opt/homebrew/bin/docker",
+        "/usr/bin/docker",
+    ] {
+        if std::path::Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+
+    // 3. Fall back to bare name (relies on PATH)
+    "docker".to_string()
+}
+
 /// Create a Docker command with the correct DOCKER_HOST set
 fn docker_command() -> Command {
-    let mut cmd = Command::new("docker");
+    let docker = find_docker_binary();
+    let mut cmd = Command::new(docker);
     if let Some(host) = get_docker_host() {
         cmd.env("DOCKER_HOST", host);
     }
     cmd
+}
+
+/// The Docker image used for the gateway container.
+const RUNTIME_IMAGE: &str = "openclaw-runtime:latest";
+
+/// Registry to pull the runtime image from when not available locally.
+/// Override at build time with NOVA_RUNTIME_REGISTRY env var.
+fn runtime_registry_image() -> String {
+    // Build-time override
+    if let Some(val) = option_env!("NOVA_RUNTIME_REGISTRY") {
+        return val.to_string();
+    }
+    // Runtime override
+    if let Ok(val) = std::env::var("NOVA_RUNTIME_REGISTRY") {
+        if !val.trim().is_empty() {
+            return val;
+        }
+    }
+    // Default: GitHub Container Registry
+    "ghcr.io/nickthecook/openclaw-runtime:latest".to_string()
+}
+
+/// Ensure the openclaw-runtime image is available locally.
+/// 1. If already present → return Ok immediately.
+/// 2. Try loading a bundled tar (resources/openclaw-runtime.tar.gz or .tar).
+/// 3. Try pulling from the configured registry.
+/// 4. Return a descriptive Err if nothing works.
+fn ensure_runtime_image() -> Result<(), String> {
+    // 1. Already present?
+    let check = docker_command()
+        .args(["image", "inspect", RUNTIME_IMAGE])
+        .output()
+        .map_err(|e| format!("Failed to check image: {}", e))?;
+    if check.status.success() {
+        return Ok(());
+    }
+
+    println!("[Nova] Runtime image not found locally, attempting to load/pull...");
+
+    // 2. Try bundled tar in the app resources (next to our binary)
+    let tar_loaded = (|| -> Result<bool, String> {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let contents_dir = exe
+            .parent() // MacOS/
+            .and_then(|p| p.parent()) // Contents/
+            .ok_or("Cannot resolve Contents dir")?;
+        let resources = contents_dir.join("Resources");
+
+        // Search both top-level Resources/ and the nested resources/ subdir
+        // (Tauri bundles "resources/*" entries into Contents/Resources/resources/)
+        let search_dirs = vec![
+            resources.clone(),
+            resources.join("resources"),
+        ];
+
+        for dir in &search_dirs {
+            for name in &["openclaw-runtime.tar.gz", "openclaw-runtime.tar"] {
+                let tar_path = dir.join(name);
+                if tar_path.exists() {
+                    println!("[Nova] Loading runtime image from {}", tar_path.display());
+                    let load = docker_command()
+                        .args(["load", "-i"])
+                        .arg(&tar_path)
+                        .output()
+                        .map_err(|e| format!("docker load failed: {}", e))?;
+                    if load.status.success() {
+                        println!("[Nova] Runtime image loaded from bundled tar");
+                        return Ok(true);
+                    }
+                    let stderr = String::from_utf8_lossy(&load.stderr);
+                    println!("[Nova] docker load failed: {}", stderr);
+                }
+            }
+        }
+        Ok(false)
+    })();
+
+    match tar_loaded {
+        Ok(true) => return Ok(()),
+        Ok(false) => {} // no tar found, continue
+        Err(e) => println!("[Nova] Bundled tar check failed: {}", e),
+    }
+
+    // 3. Pull from registry
+    let registry_image = runtime_registry_image();
+    println!("[Nova] Pulling runtime image from {}...", registry_image);
+    let pull = docker_command()
+        .args(["pull", &registry_image])
+        .output()
+        .map_err(|e| format!("docker pull failed: {}", e))?;
+
+    if pull.status.success() {
+        // Tag as the expected local name if the registry image differs
+        if registry_image != RUNTIME_IMAGE {
+            let _ = docker_command()
+                .args(["tag", &registry_image, RUNTIME_IMAGE])
+                .output();
+        }
+        println!("[Nova] Runtime image pulled successfully");
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&pull.stderr);
+    println!("[Nova] Pull failed: {}", stderr);
+
+    Err(format!(
+        "OpenClaw runtime image not available.\n\
+         • Pull failed from {}: {}\n\
+         • No bundled image tar found in app resources.\n\
+         • To build locally: ./scripts/build-openclaw-runtime.sh",
+        registry_image,
+        stderr.trim()
+    ))
 }
 
 async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, String> {
@@ -1304,15 +1458,8 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         .args(["network", "create", "nova-net"])
         .output(); // Ignore error if already exists
 
-    // Check if image exists
-    let image_check = docker_command()
-        .args(["image", "inspect", "openclaw-runtime:latest"])
-        .output()
-        .map_err(|e| format!("Failed to check image: {}", e))?;
-
-    if !image_check.status.success() {
-        return Err("OpenClaw runtime image not found. Run: ./scripts/build-openclaw-runtime.sh".to_string());
-    }
+    // Ensure runtime image is available (load from bundle or pull from registry)
+    ensure_runtime_image()?;
 
     // Determine which provider/model to use based on active provider, then fall back
     let model = match active_provider.as_deref() {
@@ -1513,15 +1660,8 @@ pub async fn start_gateway_with_proxy(
         .args(["network", "create", "nova-net"])
         .output();
 
-    // Check if image exists
-    let image_check = docker_command()
-        .args(["image", "inspect", "openclaw-runtime:latest"])
-        .output()
-        .map_err(|e| format!("Failed to check image: {}", e))?;
-
-    if !image_check.status.success() {
-        return Err("OpenClaw runtime image not found. Run: ./scripts/build-openclaw-runtime.sh".to_string());
-    }
+    // Ensure runtime image is available (load from bundle or pull from registry)
+    ensure_runtime_image()?;
 
     // Build docker run command with proxy configuration
     let mut docker_args = vec![
@@ -2507,19 +2647,23 @@ pub async fn run_first_time_setup(
         };
     }
 
-    let image_check = docker_command()
-        .args(["image", "inspect", "openclaw-runtime:latest"])
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    if !image_check.status.success() {
-        // Image not found - this is expected on first run
-        // For now, mark as complete and let the dashboard handle image loading
-        {
+    match ensure_runtime_image() {
+        Ok(()) => {
             let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
             *progress = SetupProgress {
                 stage: "image".to_string(),
-                message: "OpenClaw runtime will be set up on first use...".to_string(),
+                message: "OpenClaw runtime ready.".to_string(),
+                percent: 90,
+                complete: false,
+                error: None,
+            };
+        }
+        Err(e) => {
+            println!("[Nova] Runtime image not available during setup: {}", e);
+            let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
+            *progress = SetupProgress {
+                stage: "image".to_string(),
+                message: "Runtime image will be downloaded on first use.".to_string(),
                 percent: 90,
                 complete: false,
                 error: None,

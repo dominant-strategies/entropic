@@ -27,7 +27,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://localhost:* https://*.supabase.co https://*.workers.dev https://openrouter.ai https://api.anthropic.com https://api.openai.com; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src 'self' http://localhost:* ws://localhost:* ws://127.0.0.1:* https://*.supabase.co https://*.workers.dev https://openrouter.ai https://api.anthropic.com https://api.openai.com https://nova.qu.ai https://*.qu.ai; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {
