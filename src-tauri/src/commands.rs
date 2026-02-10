@@ -2885,10 +2885,6 @@ async fn wait_for_localhost_auth_callback(
 
 #[tauri::command]
 pub async fn start_auth_localhost(app: AppHandle) -> Result<LocalhostAuthStart, String> {
-    if !cfg!(debug_assertions) {
-        return Err("Localhost OAuth is only available in dev builds".to_string());
-    }
-
     let port = std::env::var(AUTH_LOCALHOST_PORT_ENV)
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
