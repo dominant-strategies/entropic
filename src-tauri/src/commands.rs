@@ -404,6 +404,7 @@ fn get_runtime(app: &AppHandle) -> Runtime {
 
 const OPENCLAW_CONTAINER: &str = "nova-openclaw";
 const SCANNER_CONTAINER: &str = "nova-skill-scanner";
+const MANAGED_PLUGIN_IDS: &[&str] = &["nova-integrations", "nova-x"];
 
 fn start_scanner_sidecar() {
     // Check if scanner container is already running
@@ -2251,7 +2252,7 @@ pub async fn get_plugin_store() -> Result<Vec<PluginInfo>, String> {
             entry_enabled.unwrap_or(false)
         };
 
-        let managed = kind.as_deref() == Some("memory");
+        let managed = kind.as_deref() == Some("memory") || MANAGED_PLUGIN_IDS.contains(&id.as_str());
 
         out.push(PluginInfo {
             id,
@@ -2268,6 +2269,9 @@ pub async fn get_plugin_store() -> Result<Vec<PluginInfo>, String> {
 
 #[tauri::command]
 pub async fn set_plugin_enabled(id: String, enabled: bool) -> Result<(), String> {
+    if MANAGED_PLUGIN_IDS.contains(&id.as_str()) {
+        return Err("Plugin is managed by Nova".to_string());
+    }
     let mut cfg = read_openclaw_config();
     cfg["plugins"]["entries"][&id]["enabled"] = serde_json::json!(enabled);
     write_openclaw_config(&cfg)

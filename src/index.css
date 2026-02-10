@@ -3,42 +3,42 @@
 @tailwind utilities;
 
 :root {
-  /* Muted Purple Accent */
-  --purple-accent: #9333ea; /* Kept for subtle highlights */
-
-  /* Neutral Backgrounds & Surfaces */
-  --bg-primary: #f9f9f9;
-  --bg-secondary: #ffffff;
-  --bg-tertiary: #f0f0f0;
-  --bg-sidebar: #f8f8f8; /* New opaque sidebar background */
+  /* Apple System Colors */
+  --system-blue: #007AFF;
+  --system-gray-1: #8E8E93;
+  --system-gray-2: #AEAEB2;
+  --system-gray-3: #C7C7CC;
+  --system-gray-4: #D1D1D6;
+  --system-gray-5: #E5E5EA;
+  --system-gray-6: #F2F2F7;
   
-  /* Surfaces */
-  --glass-bg: #f5f5f5; /* Opaque surface */
-  --glass-bg-sidebar: #f1f1f1; /* Slightly darker for sidebar */
-  --glass-border: rgba(0, 0, 0, 0.1);
-  --glass-border-subtle: rgba(0, 0, 0, 0.06);
-  --border-primary: rgba(0, 0, 0, 0.12);
+  /* Semantic Colors */
+  --purple-accent: #9333ea; /* Keeping project accent */
   
-  /* Text Colors */
-  --text-primary: #1a1a1a;
-  --text-secondary: #5a5a5a;
-  --text-tertiary: #8c8c8c;
-  --text-accent: var(--purple-accent);
+  /* Backgrounds */
+  --bg-app: #f5f5f7; /* Light gray window background */
+  --bg-sidebar: #f5f5f7; /* Transparent/Matching sidebar */
+  --bg-card: #ffffff; /* White content cards */
   
-  /* Shadows */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
-  --shadow-lg: 0 10px 24px rgba(0, 0, 0, 0.1);
+  /* Text */
+  --text-primary: #1d1d1f;
+  --text-secondary: #86868b;
+  --text-tertiary: #a1a1a6;
+  
+  /* Borders & Shadows */
+  --border-subtle: rgba(0, 0, 0, 0.05);
+  --border-default: rgba(0, 0, 0, 0.1);
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+  --shadow-floating: 0 8px 24px rgba(0, 0, 0, 0.08);
 
   /* Typography */
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  font-size: 14px;
-  line-height: 1.5;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 13px; /* Slightly smaller base size for density */
+  line-height: 1.4;
   font-weight: 400;
   color: var(--text-primary);
-  background-color: var(--bg-primary);
+  background-color: var(--bg-app);
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
 }
 
 * {
@@ -48,104 +48,67 @@
 }
 
 body {
-  background-color: var(--bg-primary);
+  background-color: var(--bg-app);
   min-height: 100vh;
-  /* Tauri rounded corners support */
-  border-radius: 12px;
+  border-radius: 10px; /* Window corners */
   overflow: hidden;
 }
 
-/* Root app container with rounded corners for Tauri */
 #root {
-  border-radius: 12px;
-  overflow: hidden;
   height: 100vh;
   width: 100vw;
-}
-
-/* Ensure all direct children respect rounded corners */
-#root > div {
-  border-radius: 12px;
+  border-radius: 10px;
   overflow: hidden;
+  background-color: var(--bg-app);
 }
 
-/* Custom Scrollbar */
+/* Custom Scrollbar - Minimal */
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.3);
+  background: rgba(0, 0, 0, 0.2);
 }
 
-/* Base Component Styles */
 @layer components {
+  /* Apple-style Buttons */
   .btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 8px 16px;
-    border-radius: 8px;
-    font-weight: 500;
-    transition: background-color 0.2s, box-shadow 0.2s;
-    border: none;
-    cursor: pointer;
+    @apply inline-flex items-center justify-center px-4 py-1.5 rounded-lg font-medium transition-all duration-200 active:scale-95;
+    font-size: 13px;
   }
-
+  
   .btn-primary {
-    @apply btn;
-    background-color: var(--purple-accent);
-    color: white;
-  }
-  .btn-primary:hover {
-    background-color: #7e22ce;
-  }
-  .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+    @apply btn bg-[var(--text-primary)] text-white hover:bg-black shadow-sm;
   }
   
   .btn-secondary {
-    @apply btn;
-    background-color: #e0e0e0;
-    color: var(--text-primary);
-  }
-  .btn-secondary:hover {
-    background-color: #d1d1d1;
+    @apply btn bg-white text-[var(--text-primary)] border border-[var(--border-default)] hover:bg-[var(--system-gray-6)] shadow-sm;
   }
   
-  .glass-card {
-    background: var(--glass-bg);
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
-    border: 1px solid var(--glass-border-subtle);
-    border-radius: 12px;
-    box-shadow: var(--shadow-md);
+  .btn-ghost {
+    @apply btn bg-transparent hover:bg-[var(--border-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)];
   }
 
+  /* Content Card - The main white area */
+  .content-card {
+    @apply bg-white rounded-xl shadow-sm border border-[var(--border-subtle)] h-full overflow-hidden flex flex-col;
+  }
+
+  /* Inputs */
   .form-input {
-    width: 100%;
-    padding: 8px 12px;
-    border-radius: 8px;
-    border: 1px solid var(--border-primary);
-    background-color: var(--bg-secondary);
-    color: var(--text-primary);
-    transition: border-color 0.2s, box-shadow 0.2s;
+    @apply w-full px-3 py-2 rounded-lg bg-[var(--system-gray-6)] border-transparent text-[var(--text-primary)] transition-all;
+    font-size: 13px;
   }
   .form-input:focus {
-    outline: none;
-    border-color: var(--purple-accent);
-    box-shadow: 0 0 0 2px rgba(147, 51, 234, 0.2);
-  }
-  .form-input::placeholder {
-    color: var(--text-tertiary);
+    @apply outline-none bg-white ring-2 ring-blue-500/20;
   }
 }
 
@@ -154,27 +117,9 @@ body {
   from { opacity: 0; }
   to { opacity: 1; }
 }
-
 @keyframes scaleIn {
-  from { opacity: 0; transform: scale(0.92); }
+  from { opacity: 0; transform: scale(0.98); }
   to { opacity: 1; transform: scale(1); }
 }
-
-@keyframes dockBounce {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-6px); }
-}
-
-.animate-fade-in {
-  animation: fadeIn 0.3s ease-out forwards;
-}
-
-.animate-scale-in {
-  animation: scaleIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-}
-
-/* Selection color */
-::selection {
-  background: color-mix(in srgb, var(--purple-accent) 30%, transparent);
-  color: var(--text-primary);
-}
+.animate-fade-in { animation: fadeIn 0.2s ease-out forwards; }
+.animate-scale-in { animation: scaleIn 0.2s cubic-bezier(0.2, 0.8, 0.2, 1) forwards; }

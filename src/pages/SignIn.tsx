@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Sparkles, Mail, Eye, EyeOff, ChevronLeft } from "lucide-react";
+import { Sparkles, Mail, Eye, EyeOff, ChevronLeft, ArrowRight } from "lucide-react";
 import {
   signInWithGoogle,
   signInWithApple,
@@ -62,13 +62,12 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
       else if (provider === "discord") await signInWithDiscord();
       onSignInStarted?.();
 
-      // Set a timeout to show error message if OAuth takes too long
       setTimeout(() => {
         if (sessionStorage.getItem('nova_oauth_pending')) {
           setError("Sign in is taking longer than expected. If the browser window didn't open, please try again.");
           setIsLoading(false);
         }
-      }, 10000); // 10 seconds timeout for user feedback
+      }, 10000);
     } catch (err) {
       console.error("Sign in failed:", err);
       setError("Failed to start sign in. Please try again.");
@@ -87,7 +86,6 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
       if (mode === "email-signup") {
         await signUpWithEmail(email, password);
         setError(null);
-        // Show success message for signup
         setMode("options");
         alert("Check your email for a confirmation link!");
       } else {
@@ -113,45 +111,47 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
     }
   };
 
+  // Shared container styles
+  const containerClasses = "h-screen w-screen flex items-center justify-center bg-[var(--bg-primary)] p-4 transition-colors duration-500";
+  const cardClasses = "w-full max-w-[400px] bg-white rounded-3xl shadow-xl p-10 animate-scale-in border border-gray-100/50";
+  
   // Own keys mode
   if (mode === "own-keys") {
     return (
-      <div className="h-screen w-screen flex items-center justify-center bg-[var(--bg-primary)]">
-        <div className="w-full max-w-md p-8">
+      <div className={containerClasses}>
+        <div className={cardClasses}>
           <div className="text-center mb-8">
-            <div className="w-20 h-20 rounded-2xl bg-[var(--purple-accent)] mx-auto flex items-center justify-center mb-6">
-              <Sparkles className="w-10 h-10 text-white" />
+            <div className="w-16 h-16 rounded-2xl bg-[var(--purple-accent)] mx-auto flex items-center justify-center mb-6 shadow-lg">
+              <Sparkles className="w-8 h-8 text-white" />
             </div>
-            <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-2">
-              Use Your Own API Keys
+            <h1 className="text-2xl font-bold text-gray-900 mb-2">
+              Developer Mode
             </h1>
-            <p className="text-[var(--text-secondary)]">
-              Skip the managed service and use your own provider keys
+            <p className="text-gray-500">
+              Use your own API keys
             </p>
           </div>
 
-          <div className="glass-card p-8 space-y-6">
-            <div className="p-4 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
-              <p className="text-sm text-yellow-300">
-                <strong>Advanced Mode:</strong> You'll need to configure API keys in Settings after setup.
-                This bypasses Nova's billing system.
-              </p>
+          <div className="space-y-6">
+            <div className="p-4 rounded-2xl bg-amber-50 border border-amber-100 text-amber-900 text-sm">
+              <span className="font-semibold block mb-1">Advanced Setup</span>
+              Bypasses Nova billing. You'll need to configure your own API keys in Settings.
             </div>
 
             <button
               onClick={() => onSkipAuth?.()}
-              className="w-full py-3 px-4 rounded-xl bg-[var(--purple-accent)] hover:bg-[var(--purple-accent-hover)]
-                       text-white font-medium transition-all"
+              className="w-full py-4 px-4 rounded-2xl bg-black hover:bg-gray-800
+                       text-white font-medium transition-all shadow-lg hover:shadow-xl active:scale-95 duration-200"
             >
-              Continue Without Account
+              Continue Locally
             </button>
 
             <button
               onClick={() => setMode("options")}
-              className="w-full flex items-center justify-center gap-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              className="w-full flex items-center justify-center gap-2 text-sm text-gray-500 hover:text-gray-900 transition-colors py-2"
             >
               <ChevronLeft className="w-4 h-4" />
-              Back to sign in options
+              Back
             </button>
           </div>
         </div>
@@ -164,121 +164,87 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
     const isSignUp = mode === "email-signup";
 
     return (
-      <div className="h-screen w-screen flex items-center justify-center bg-[var(--bg-primary)]">
-        <div className="w-full max-w-md p-8">
+      <div className={containerClasses}>
+        <div className={cardClasses}>
           <div className="text-center mb-8">
-            <div className="w-20 h-20 rounded-2xl bg-[var(--purple-accent)] mx-auto flex items-center justify-center mb-6">
-              <Sparkles className="w-10 h-10 text-white" />
-            </div>
-            <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-2">
-              {isSignUp ? "Create an Account" : "Sign In with Email"}
+            <h1 className="text-2xl font-bold text-gray-900 mb-2">
+              {isSignUp ? "Create account" : "Welcome back"}
             </h1>
+            <p className="text-gray-500 text-sm">
+              {isSignUp ? "Enter your details to get started" : "Enter your email to sign in"}
+            </p>
           </div>
 
-          <div className="glass-card p-8">
-            <form onSubmit={handleEmailSubmit} className="space-y-4">
-              {error && (
-                <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
-                  {error}
-                </div>
-              )}
+          <form onSubmit={handleEmailSubmit} className="space-y-5">
+            {error && (
+              <div className="p-3 rounded-xl bg-red-50 text-red-600 text-sm border border-red-100 text-center animate-fade-in">
+                {error}
+              </div>
+            )}
 
+            <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">
-                  Email
-                </label>
                 <input
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
-                  className="form-input w-full"
+                  placeholder="name@example.com"
+                  className="w-full px-4 py-4 rounded-2xl bg-gray-50 border-none focus:ring-2 focus:ring-black/5 text-gray-900 placeholder:text-gray-400 transition-all text-lg"
                   required
                   autoFocus
                 />
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">
-                  Password
-                </label>
-                <div className="relative">
-                  <input
-                    type={showPassword ? "text" : "password"}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder={isSignUp ? "Create a password" : "Enter password"}
-                    className="form-input w-full pr-10"
-                    required
-                    minLength={isSignUp ? 8 : undefined}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]"
-                  >
-                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-                {isSignUp && (
-                  <p className="text-xs text-[var(--text-tertiary)] mt-1">
-                    Must be at least 8 characters
-                  </p>
-                )}
+              <div className="relative">
+                <input
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={isSignUp ? "Create password" : "Password"}
+                  className="w-full px-4 py-4 rounded-2xl bg-gray-50 border-none focus:ring-2 focus:ring-black/5 text-gray-900 placeholder:text-gray-400 transition-all text-lg pr-12"
+                  required
+                  minLength={isSignUp ? 8 : undefined}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1"
+                >
+                  {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                </button>
               </div>
+            </div>
 
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="w-full py-4 px-4 rounded-2xl bg-black hover:bg-gray-800
+                       text-white font-semibold transition-all shadow-lg hover:shadow-xl active:scale-95 duration-200
+                       disabled:opacity-50 disabled:scale-100 flex items-center justify-center gap-2"
+            >
+              {isLoading && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
+              {isSignUp ? "Create Account" : "Sign In"}
+            </button>
+
+            <div className="flex flex-col items-center gap-4 pt-2">
               <button
-                type="submit"
-                disabled={isLoading}
-                className="w-full py-3 px-4 rounded-xl bg-[var(--purple-accent)] hover:bg-[var(--purple-accent-hover)]
-                         text-white font-medium transition-all disabled:opacity-50"
+                type="button"
+                onClick={() => { setMode(isSignUp ? "email-signin" : "email-signup"); setError(null); }}
+                className="text-sm text-gray-600 hover:text-black font-medium transition-colors"
               >
-                {isLoading ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    {isSignUp ? "Creating account..." : "Signing in..."}
-                  </span>
-                ) : (
-                  isSignUp ? "Create Account" : "Sign In"
-                )}
+                {isSignUp ? "Already have an account? Sign in" : "No account? Create one"}
               </button>
-
-              <div className="text-center text-sm">
-                {isSignUp ? (
-                  <p className="text-[var(--text-secondary)]">
-                    Already have an account?{" "}
-                    <button
-                      type="button"
-                      onClick={() => { setMode("email-signin"); setError(null); }}
-                      className="text-[var(--text-accent)] hover:underline"
-                    >
-                      Sign in
-                    </button>
-                  </p>
-                ) : (
-                  <p className="text-[var(--text-secondary)]">
-                    Don't have an account?{" "}
-                    <button
-                      type="button"
-                      onClick={() => { setMode("email-signup"); setError(null); }}
-                      className="text-[var(--text-accent)] hover:underline"
-                    >
-                      Sign up
-                    </button>
-                  </p>
-                )}
-              </div>
 
               <button
                 type="button"
                 onClick={() => { setMode("options"); setError(null); }}
-                className="w-full flex items-center justify-center gap-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                className="flex items-center gap-1 text-sm text-gray-400 hover:text-gray-600 transition-colors"
               >
-                <ChevronLeft className="w-4 h-4" />
-                Back to all options
+                <ChevronLeft className="w-3 h-3" />
+                All options
               </button>
-            </form>
-          </div>
+            </div>
+          </form>
         </div>
       </div>
     );
@@ -286,118 +252,96 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
 
   // Main options view
   return (
-    <div className="h-screen w-screen flex items-center justify-center bg-[var(--bg-primary)]">
-      <div className="w-full max-w-md p-8">
-        {/* Logo - clickable for hidden skip */}
-        <div className="text-center mb-8">
+    <div className={containerClasses}>
+      <div className={cardClasses}>
+        <div className="text-center mb-10">
           <button
             onClick={handleLogoClick}
-            className="w-20 h-20 rounded-2xl bg-[var(--purple-accent)] mx-auto flex items-center justify-center mb-6
-                     cursor-default focus:outline-none"
+            className="w-20 h-20 rounded-[2rem] bg-[var(--purple-accent)] mx-auto flex items-center justify-center mb-8 shadow-2xl shadow-purple-900/20
+                     cursor-default focus:outline-none transition-transform hover:scale-105 active:scale-95 duration-300"
             aria-label="Nova logo"
           >
             <Sparkles className="w-10 h-10 text-white" />
           </button>
-          <h1 className="text-3xl font-bold text-[var(--text-primary)] mb-2">
-            Welcome to Nova
+          <h1 className="text-3xl font-bold text-gray-900 mb-3 tracking-tight">
+            Nova
           </h1>
-          <p className="text-[var(--text-secondary)]">
-            Your personal AI assistant
+          <p className="text-gray-500 font-medium">
+            Your personal AI workspace
           </p>
         </div>
 
-        {/* Sign In Card */}
-        <div className="glass-card p-8 space-y-4">
-          <div className="text-center mb-2">
-            <h2 className="text-xl font-semibold text-[var(--text-primary)] mb-1">
-              Sign in to continue
-            </h2>
-            <p className="text-sm text-[var(--text-secondary)]">
-              Choose your preferred sign-in method
-            </p>
+        {error && (
+          <div className="mb-6 p-3 rounded-xl bg-red-50 text-red-600 text-sm border border-red-100 text-center animate-fade-in">
+            {error}
           </div>
+        )}
 
-          {error && (
-            <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm text-center">
-              {error}
-            </div>
-          )}
+        <div className="space-y-3">
+          <button
+            onClick={() => handleOAuthSignIn("google")}
+            disabled={isLoading}
+            className="w-full flex items-center justify-center gap-3 px-4 py-4
+                     bg-white hover:bg-gray-50 text-gray-700 font-medium
+                     rounded-2xl border border-gray-200 transition-all hover:border-gray-300
+                     active:scale-95 duration-200 disabled:opacity-50"
+          >
+            <GoogleIcon className="w-5 h-5" />
+            <span>Continue with Google</span>
+          </button>
 
-          {/* OAuth Buttons */}
-          <div className="space-y-3">
-            <button
-              onClick={() => handleOAuthSignIn("google")}
-              disabled={isLoading}
-              className="w-full flex items-center justify-center gap-3 px-4 py-3
-                       bg-white hover:bg-gray-50 text-gray-800 font-medium
-                       rounded-xl border border-gray-200 transition-all
-                       disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <GoogleIcon className="w-5 h-5" />
-              <span>Continue with Google</span>
-            </button>
+          <button
+            onClick={() => handleOAuthSignIn("apple")}
+            disabled={isLoading}
+            className="w-full flex items-center justify-center gap-3 px-4 py-4
+                     bg-black hover:bg-gray-800 text-white font-medium
+                     rounded-2xl transition-all shadow-md hover:shadow-lg active:scale-95 duration-200
+                     disabled:opacity-50"
+          >
+            <AppleIcon className="w-5 h-5" />
+            <span>Continue with Apple</span>
+          </button>
 
-            <button
-              onClick={() => handleOAuthSignIn("apple")}
-              disabled={isLoading}
-              className="w-full flex items-center justify-center gap-3 px-4 py-3
-                       bg-black hover:bg-gray-900 text-white font-medium
-                       rounded-xl transition-all
-                       disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <AppleIcon className="w-5 h-5" />
-              <span>Continue with Apple</span>
-            </button>
+          <button
+            onClick={() => handleOAuthSignIn("discord")}
+            disabled={isLoading}
+            className="w-full flex items-center justify-center gap-3 px-4 py-4
+                     bg-[#5865F2] hover:bg-[#4752C4] text-white font-medium
+                     rounded-2xl transition-all shadow-md hover:shadow-lg active:scale-95 duration-200
+                     disabled:opacity-50"
+          >
+            <DiscordIcon className="w-5 h-5" />
+            <span>Continue with Discord</span>
+          </button>
 
-            <button
-              onClick={() => handleOAuthSignIn("discord")}
-              disabled={isLoading}
-              className="w-full flex items-center justify-center gap-3 px-4 py-3
-                       bg-[#5865F2] hover:bg-[#4752C4] text-white font-medium
-                       rounded-xl transition-all
-                       disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <DiscordIcon className="w-5 h-5" />
-              <span>Continue with Discord</span>
-            </button>
-          </div>
-
-          {/* Divider */}
-          <div className="relative">
+          <div className="relative py-4">
             <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-[var(--glass-border-subtle)]" />
+              <div className="w-full border-t border-gray-100" />
             </div>
-            <div className="relative flex justify-center text-sm">
-              <span className="px-3 bg-[var(--bg-secondary)] text-[var(--text-tertiary)]">
-                or
-              </span>
+            <div className="relative flex justify-center text-xs uppercase tracking-wider">
+              <span className="bg-white px-2 text-gray-400">or</span>
             </div>
           </div>
 
-          {/* Email Button */}
           <button
             onClick={() => setMode("email-signin")}
             disabled={isLoading}
-            className="w-full flex items-center justify-center gap-3 px-4 py-3
-                     bg-[var(--glass-bg)] hover:bg-[var(--glass-bg-hover)]
-                     text-[var(--text-primary)] font-medium
-                     rounded-xl border border-[var(--glass-border)] transition-all
-                     disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full flex items-center justify-center gap-3 px-4 py-4
+                     bg-gray-50 hover:bg-gray-100
+                     text-gray-900 font-medium
+                     rounded-2xl transition-all active:scale-95 duration-200
+                     disabled:opacity-50"
           >
-            <Mail className="w-5 h-5" />
+            <Mail className="w-5 h-5 text-gray-500" />
             <span>Continue with Email</span>
           </button>
-
-          <p className="text-xs text-center text-[var(--text-tertiary)] pt-2">
-            By signing in, you agree to our Terms of Service and Privacy Policy
-          </p>
         </div>
 
-        {/* Pricing Info */}
-        <div className="mt-6 text-center text-sm text-[var(--text-tertiary)]">
-          <p>Pay-as-you-go pricing. New accounts get $0.50 free credits.</p>
-        </div>
+        <p className="text-[10px] text-center text-gray-400 mt-8 max-w-xs mx-auto leading-relaxed">
+          By continuing, you agree to our Terms of Service and Privacy Policy.
+        </p>
       </div>
     </div>
   );
 }
+

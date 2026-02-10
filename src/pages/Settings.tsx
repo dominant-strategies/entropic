@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
-import { Power, Key, Shield, Sparkles, Cpu, Image } from "lucide-react";
+import { Power, Key, Shield, Sparkles, Cpu, Image, ChevronRight, User, Palette } from "lucide-react";
 import clsx from "clsx";
 import { loadProfile, saveProfile, type AgentProfile } from "../lib/profile";
 import { useAuth } from "../contexts/AuthContext";
@@ -22,18 +22,51 @@ type Props = {
   onImageModelChange: (model: string) => void;
 };
 
-// A section wrapper for consistent styling
-function SettingsSection({ title, icon: Icon, children }: { title: string, icon: any, children: React.ReactNode }) {
+function SettingsGroup({ title, children }: { title?: string, children: React.ReactNode }) {
   return (
-    <section>
-      <h2 className="text-lg font-semibold mb-3 flex items-center gap-2 text-[var(--text-primary)]">
-        <Icon className="w-5 h-5 text-[var(--text-accent)]" />
-        {title}
-      </h2>
-      <div className="glass-card p-4 space-y-4">
+    <div className="mb-8">
+      {title && (
+        <h3 className="text-[13px] font-medium text-[var(--text-secondary)] uppercase tracking-wide mb-2 px-1">
+          {title}
+        </h3>
+      )}
+      <div className="bg-white border border-[var(--border-subtle)] rounded-xl overflow-hidden shadow-sm divide-y divide-[var(--border-subtle)]">
         {children}
       </div>
-    </section>
+    </div>
+  );
+}
+
+function SettingsRow({ 
+  label, 
+  children, 
+  icon: Icon,
+  description,
+  onClick
+}: { 
+  label: string, 
+  children?: React.ReactNode, 
+  icon?: any,
+  description?: string,
+  onClick?: () => void
+}) {
+  return (
+    <div className={clsx("p-4 flex items-center justify-between gap-4 transition-colors", onClick && "cursor-pointer hover:bg-[var(--system-gray-6)]")} onClick={onClick}>
+      <div className="flex items-center gap-3 overflow-hidden">
+        {Icon && (
+          <div className="w-7 h-7 rounded-md bg-[var(--system-blue)]/10 text-[var(--system-blue)] flex items-center justify-center flex-shrink-0">
+            <Icon className="w-4 h-4" />
+          </div>
+        )}
+        <div className="min-w-0">
+          <div className="text-[14px] font-medium text-[var(--text-primary)]">{label}</div>
+          {description && <div className="text-[12px] text-[var(--text-secondary)] truncate">{description}</div>}
+        </div>
+      </div>
+      <div className="flex-shrink-0 flex items-center gap-2">
+        {children}
+      </div>
+    </div>
   );
 }
 
@@ -56,12 +89,7 @@ export function Settings({
   const [profile, setProfile] = useState<AgentProfile>({ name: "Nova" });
   const [saving, setSaving] = useState(false);
   const [soul, setSoul] = useState("");
-  const [_heartbeatEvery, setHeartbeatEvery] = useState("30m");
-  const [_heartbeatTasks, setHeartbeatTasks] = useState<string[]>([]);
-  const [_memoryEnabled, setMemoryEnabled] = useState(true);
-  const [_memoryLongTerm, setMemoryLongTerm] = useState(true);
-  const [_capabilities, setCapabilities] = useState<{ id: string; label: string; enabled: boolean }[]>([]);
-
+  
   // Wallpaper state
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
   const [customWallpaper, setCustomWallpaper] = useState<string | null>(null);
@@ -73,11 +101,6 @@ export function Settings({
     loadProfile().then(setProfile).catch(() => {});
     invoke<any>("get_agent_profile_state").then(state => {
       setSoul(state.soul || "");
-      setHeartbeatEvery(state.heartbeat_every || "30m");
-      setHeartbeatTasks(state.heartbeat_tasks || []);
-      setMemoryEnabled(state.memory_enabled);
-      setMemoryLongTerm(state.memory_long_term);
-      setCapabilities(state.capabilities || []);
     }).catch(() => {});
     Store.load("nova-settings.json").then(async (store) => {
       const wp = (await store.get("desktopWallpaper")) as string | null;
@@ -115,328 +138,261 @@ export function Settings({
     reader.readAsDataURL(file);
   }
 
-  async function handleSave(saveAction: () => Promise<any>) {
-    setSaving(true);
-    try {
-      await saveAction();
-    } finally {
-      setSaving(false);
-    }
-  }
+  const [isEditingPersonality, setIsEditingPersonality] = useState(false);
+
+  const PERSONALITY_TEMPLATES = [
+    { label: "Helpful Assistant", text: "You are a helpful, knowledgeable, and friendly AI assistant." },
+    { label: "Health Coach", text: "You are an encouraging and knowledgeable health coach. Focus on wellness, nutrition, and positive habits." },
+    { label: "Comedian", text: "You are a witty stand-up comedian. Be funny, sarcastic, and entertaining in your responses." },
+    { label: "Mentor", text: "You are a wise and patient mentor. Guide the user with insightful advice and Socratic questioning." },
+    { label: "Coder", text: "You are an expert software engineer. Focus on clean, efficient code and best practices." },
+  ];
 
   return (
-    <div className="w-full max-w-6xl mx-auto px-4 pb-10">
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
-        <div className="space-y-8">
-          <SettingsSection title="Agent Profile" icon={Shield}>
-        <div className="flex items-center gap-4">
-          <div className="w-14 h-14 rounded-full bg-black/5 flex-shrink-0 overflow-hidden flex items-center justify-center">
-            {profile.avatarDataUrl ? (
-              <img src={profile.avatarDataUrl} alt="Agent avatar" className="w-full h-full object-cover" />
-            ) : (
-              <span className="text-sm font-semibold text-[var(--text-accent)]">{profile.name.slice(0, 2).toUpperCase()}</span>
-            )}
-          </div>
-          <input type="file" accept="image/*" className="text-sm text-[var(--text-secondary)]"
-            onChange={e => e.target.files?.[0] && (() => {
-              const reader = new FileReader();
-              reader.onload = () => setProfile(p => ({ ...p, avatarDataUrl: reader.result as string }));
-              reader.readAsDataURL(e.target.files[0]);
-            })()} />
-        </div>
-        <div>
-          <label className="block text-sm font-medium mb-1 text-[var(--text-secondary)]">Name</label>
-          <input type="text" value={profile.name} onChange={e => setProfile(p => ({ ...p, name: e.target.value }))}
-            placeholder="Nova" className="form-input" />
-        </div>
-        <div className="flex justify-end">
-          <button onClick={() => handleSave(() => saveProfile(profile))} disabled={saving} className="btn-primary">
-            {saving ? "Saving..." : "Save Profile"}
-          </button>
-        </div>
-          </SettingsSection>
+    <div className="max-w-3xl mx-auto py-8 px-4">
+      <h1 className="text-2xl font-bold mb-8 px-1">Settings</h1>
 
-          <SettingsSection title="Personality" icon={Sparkles}>
-            <p className="text-sm text-[var(--text-tertiary)]">Describe how your assistant should sound and behave.</p>
-            <textarea value={soul} onChange={e => setSoul(e.target.value)} rows={6}
-              placeholder="Be concise, helpful, and a little witty." className="form-input" />
-            <div className="flex justify-end">
-              <button onClick={() => handleSave(() => invoke("set_personality", { soul }))} disabled={saving} className="btn-primary">
-                {saving ? "Saving..." : "Save Personality"}
-              </button>
+      <SettingsGroup title="Profile">
+        <div className="p-4 flex items-start gap-6">
+          <div className="relative group cursor-pointer flex-shrink-0">
+            <div className="w-20 h-20 rounded-full bg-[var(--system-gray-5)] overflow-hidden shadow-sm">
+              {profile.avatarDataUrl ? (
+                <img src={profile.avatarDataUrl} alt="Avatar" className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-2xl font-semibold text-[var(--text-secondary)]">
+                  {profile.name.slice(0, 2).toUpperCase()}
+                </div>
+              )}
             </div>
-          </SettingsSection>
-
-          <SettingsSection title="Desktop Wallpaper" icon={Image}>
-        <p className="text-sm text-[var(--text-tertiary)] mb-3">Choose a background for the Files desktop view.</p>
-
-        {/* Preview */}
-        {(() => {
-          const wp = getWallpaperById(wallpaperId);
-          const isPhoto = (wallpaperId === "custom" && customWallpaper) || wp?.type === "photo";
-          const css = wallpaperId === "custom" && customWallpaper
-            ? `url(${customWallpaper})`
-            : wp?.css || WALLPAPERS[0].css;
-          return (
-            <div
-              className="w-full h-32 rounded-lg mb-4 flex items-end justify-end p-2"
-              style={
-                isPhoto
-                  ? { backgroundImage: css, backgroundSize: "cover", backgroundPosition: "center" }
-                  : { background: css }
-              }
-            >
-              <span className="text-[10px] px-2 py-0.5 rounded-full" style={{ background: "rgba(0,0,0,0.4)", color: "white" }}>
-                {wallpaperId === "custom" ? "Custom" : wp?.label || "Unknown"}
-              </span>
-            </div>
-          );
-        })()}
-        <div className="flex items-center justify-between">
-          <button onClick={() => setWallpaperPickerOpen(true)} className="btn-secondary text-sm">
-            Change wallpaper
-          </button>
-          <button onClick={() => wallpaperInputRef.current?.click()} className="btn-secondary text-sm">
-            Upload custom
-          </button>
-        </div>
-        <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleCustomWallpaperUpload} />
-          </SettingsSection>
-        </div>
-
-        <div className="space-y-8">
-          <SettingsSection title="Gateway" icon={Shield}>
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="font-medium text-[var(--text-primary)]">OpenClaw Gateway</p>
-            <p className="text-sm text-[var(--text-tertiary)]">{gatewayRunning ? "Running on localhost:19789" : "Secure sandbox for AI execution"}</p>
+            <input
+              type="file"
+              accept="image/*"
+              className="absolute inset-0 opacity-0 cursor-pointer"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const avatarDataUrl = reader.result as string;
+                  setProfile((p) => {
+                    const next = { ...p, avatarDataUrl };
+                    saveProfile(next)
+                      .then(() => window.dispatchEvent(new Event("nova-profile-updated")))
+                      .catch(() => {});
+                    return next;
+                  });
+                };
+                reader.readAsDataURL(file);
+              }}
+            />
           </div>
-          <button onClick={onGatewayToggle} disabled={isTogglingGateway}
-            className={clsx("btn", gatewayRunning ? "bg-red-500/10 text-red-500 hover:bg-red-500/20" : "btn-primary")}>
-            <Power className="w-4 h-4 mr-2" />
-            {isTogglingGateway ? "..." : gatewayRunning ? "Stop" : "Start"}
-          </button>
-        </div>
-          </SettingsSection>
-
-      {/* Proxy Mode */}
-      {isAuthConfigured && isAuthenticated && (
-        <SettingsSection title="AI Service Mode" icon={Sparkles}>
-          <div className="flex items-center justify-between">
+          
+          <div className="flex-1 space-y-4 pt-1">
             <div>
-              <p className="font-medium text-[var(--text-primary)]">Use Nova Managed Service</p>
-              <p className="text-sm text-[var(--text-tertiary)]">
-                Default option. Uses Nova credits and supports model switching automatically.
-              </p>
+              <label className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wide block mb-1">Name</label>
+              <input
+                type="text"
+                value={profile.name}
+                onChange={(e) => {
+                  const newName = e.target.value;
+                  setProfile(p => ({ ...p, name: newName }));
+                  saveProfile({ ...profile, name: newName }).catch(() => {});
+                  window.dispatchEvent(new Event("nova-profile-updated"));
+                }}
+                className="w-full bg-transparent text-xl font-bold text-[var(--text-primary)] focus:outline-none border-b border-transparent focus:border-[var(--system-blue)] transition-colors placeholder:text-[var(--text-tertiary)]"
+                placeholder="Name your agent"
+              />
             </div>
-            <button
-              onClick={() => onUseLocalKeysChange(!useLocalKeys)}
-              className={clsx("btn", useLocalKeys ? "btn-secondary" : "btn-primary")}
-            >
-              {useLocalKeys ? "Switch to Nova" : "Using Nova"}
-            </button>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-wide">Personality</label>
+                <button 
+                  onClick={() => setIsEditingPersonality(!isEditingPersonality)}
+                  className="text-xs font-semibold text-[var(--system-blue)] hover:underline"
+                >
+                  {isEditingPersonality ? "Done" : "Edit"}
+                </button>
+              </div>
+              
+              {isEditingPersonality ? (
+                <div className="space-y-3 animate-fade-in">
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    {PERSONALITY_TEMPLATES.map((t) => (
+                      <button
+                        key={t.label}
+                        onClick={() => {
+                          setSoul(t.text);
+                          invoke("set_personality", { soul: t.text });
+                        }}
+                        className="px-3 py-1 text-xs rounded-full bg-[var(--system-gray-6)] hover:bg-[var(--system-blue)] hover:text-white transition-colors border border-[var(--border-subtle)]"
+                      >
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
+                  <textarea 
+                    value={soul} 
+                    onChange={e => setSoul(e.target.value)}
+                    onBlur={() => invoke("set_personality", { soul })}
+                    className="w-full p-3 rounded-xl bg-[var(--system-gray-6)] border-transparent focus:bg-white focus:ring-2 focus:ring-[var(--system-blue)]/20 transition-all text-sm text-[var(--text-primary)] resize-none"
+                    rows={4}
+                    placeholder="Describe how your assistant should behave..."
+                    autoFocus
+                  />
+                </div>
+              ) : (
+                <p className="text-sm text-[var(--text-secondary)] line-clamp-3 leading-relaxed">
+                  {soul || "Default helpful assistant personality."}
+                </p>
+              )}
+            </div>
           </div>
-          <div className="mt-3 text-xs text-[var(--text-tertiary)]">
-            Power users can switch to local API keys below.
-          </div>
-        </SettingsSection>
-      )}
-
-      {/* Model Selection - only show when proxy is enabled */}
-      {proxyEnabled && (
-        <SettingsSection title="AI Model" icon={Cpu}>
-          <ModelSelector
-            selectedModel={selectedModel}
-            onModelChange={onModelChange}
-          />
-          <p className="text-sm text-[var(--text-tertiary)] mt-2">
-            Choose the AI model to use. Different models have different capabilities and costs.
-          </p>
-        </SettingsSection>
-      )}
-
-      {/* Code Model Selection */}
-      {proxyEnabled && (
-        <SettingsSection title="Code Model" icon={Cpu}>
-          <ModelSelector
-            selectedModel={codeModel}
-            onModelChange={onCodeModelChange}
-          />
-          <p className="text-sm text-[var(--text-tertiary)] mt-2">
-            Used when you switch a chat to Code mode.
-          </p>
-        </SettingsSection>
-      )}
-
-      {/* Image Model Selection */}
-      {proxyEnabled && (
-        <SettingsSection title="Image Model" icon={Cpu}>
-          <ModelSelector
-            selectedModel={imageModel}
-            onModelChange={onImageModelChange}
-          />
-          <p className="text-sm text-[var(--text-tertiary)] mt-2">
-            Used for image understanding and image tool calls.
-          </p>
-        </SettingsSection>
-      )}
-
-
-
-      {/* API Keys - show for power users or when not authenticated */}
-      {(!proxyEnabled || useLocalKeys) && (
-        <SettingsSection title="API Keys" icon={Key}>
-          <p className="text-sm text-[var(--text-tertiary)] mb-4">
-            Add your own API keys to use AI models directly. Or sign in to use Nova's pay-as-you-go service.
-          </p>
-          <div className="divide-y divide-[var(--glass-border-subtle)] -m-4">
-            <ApiKeyInput provider="Anthropic" description="Claude models" value={apiKeys.anthropic} onChange={v => setApiKeys(k => ({...k, anthropic: v}))} />
-            <ApiKeyInput provider="OpenAI" description="GPT-4, DALL-E" value={apiKeys.openai} onChange={v => setApiKeys(k => ({...k, openai: v}))} />
-            <ApiKeyInput provider="Google AI" description="Gemini models" value={apiKeys.google} onChange={v => setApiKeys(k => ({...k, google: v}))} />
-          </div>
-        </SettingsSection>
-      )}
         </div>
-      </div>
+      </SettingsGroup>
 
+      <SettingsGroup title="Appearance">
+        <SettingsRow 
+          label="Desktop Wallpaper" 
+          icon={Palette} 
+          description="Customize the background"
+          onClick={() => setWallpaperPickerOpen(true)}
+        >
+          <div className="flex items-center gap-2">
+            <div className="w-12 h-12 rounded-md bg-[var(--system-gray-5)] border border-[var(--border-subtle)] overflow-hidden shadow-sm">
+              {(() => {
+                const wp = getWallpaperById(wallpaperId);
+                const isPhoto = (wallpaperId === "custom" && customWallpaper) || wp?.type === "photo";
+                const css = wallpaperId === "custom" && customWallpaper
+                  ? `url(${customWallpaper})`
+                  : wp?.css || WALLPAPERS[0].css;
+                return <div className="w-full h-full" style={isPhoto ? { backgroundImage: css, backgroundSize: "cover" } : { background: css }} />;
+              })()}
+            </div>
+            <ChevronRight className="w-4 h-4 text-[var(--text-tertiary)]" />
+          </div>
+        </SettingsRow>
+      </SettingsGroup>
+
+      <SettingsGroup title="System">
+        <SettingsRow label="Gateway Status" icon={Shield} description={gatewayRunning ? "Running on localhost:19789" : "Secure sandbox stopped"}>
+          <button 
+            onClick={onGatewayToggle} 
+            disabled={isTogglingGateway}
+            className={clsx(
+              "relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+              gatewayRunning ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-4)]"
+            )}
+          >
+            <span
+              className={clsx(
+                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                gatewayRunning ? "translate-x-5" : "translate-x-0"
+              )}
+            />
+          </button>
+        </SettingsRow>
+      </SettingsGroup>
+
+
+      {proxyEnabled && (
+        <SettingsGroup title="Intelligence">
+          <SettingsRow label="Primary Model" icon={Cpu}>
+            <div className="w-80">
+              <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} />
+            </div>
+          </SettingsRow>
+          <SettingsRow label="Coding Model" icon={Cpu}>
+            <div className="w-80">
+              <ModelSelector selectedModel={codeModel} onModelChange={onCodeModelChange} />
+            </div>
+          </SettingsRow>
+          <SettingsRow label="Vision Model" icon={Image}>
+            <div className="w-80">
+              <ModelSelector selectedModel={imageModel} onModelChange={onImageModelChange} />
+            </div>
+          </SettingsRow>
+        </SettingsGroup>
+      )}
+
+      {/* Wallpaper Picker Modal */}
       {wallpaperPickerOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm"
           onClick={() => setWallpaperPickerOpen(false)}
         >
           <div
-            className="glass-card p-6 w-full max-w-4xl mx-4 max-h-[85vh] overflow-auto"
+            className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-4xl max-h-[85vh] overflow-auto border border-[var(--border-subtle)]"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-[var(--text-primary)]">Choose wallpaper</h2>
-              <button
-                onClick={() => setWallpaperPickerOpen(false)}
-                className="btn-secondary text-sm"
-              >
-                Close
-              </button>
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-lg font-semibold">Choose Wallpaper</h2>
+              <button onClick={() => setWallpaperPickerOpen(false)} className="btn-secondary">Done</button>
             </div>
 
-            <div className="mb-5">
-              <p className="text-xs font-medium mb-2 text-[var(--text-tertiary)]">Scenic</p>
-              <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2">
-                {WALLPAPERS.filter((wp) => wp.type === "photo").map((wp) => (
-                  <button
-                    key={wp.id}
-                    onClick={() => handleWallpaperPick(wp.id)}
-                    className="h-16 rounded-lg transition-all hover:scale-105 overflow-hidden"
-                    style={{
-                      backgroundImage: wp.thumbnail ? `url(${wp.thumbnail})` : wp.css,
-                      backgroundSize: "cover",
-                      backgroundPosition: "center",
-                      border:
-                        wallpaperId === wp.id
-                          ? "2px solid var(--purple-accent)"
-                          : "2px solid var(--glass-border-subtle)",
-                      boxShadow: wallpaperId === wp.id ? "0 0 0 2px var(--purple-accent)" : "none",
-                    }}
-                    title={wp.label}
-                  />
-                ))}
+            <div className="space-y-8">
+              <div>
+                <h4 className="text-sm font-semibold text-[var(--text-secondary)] uppercase mb-4 tracking-wide">Scenic</h4>
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-4">
+                  {WALLPAPERS.filter((wp) => wp.type === "photo").map((wp) => (
+                    <button
+                      key={wp.id}
+                      onClick={() => handleWallpaperPick(wp.id)}
+                      className={clsx(
+                        "aspect-video rounded-xl overflow-hidden transition-all hover:opacity-90 shadow-sm hover:shadow-md",
+                        wallpaperId === wp.id ? "ring-4 ring-[var(--system-blue)] ring-offset-2" : ""
+                      )}
+                    >
+                      <div 
+                        className="w-full h-full bg-cover bg-center"
+                        style={{ backgroundImage: wp.thumbnail ? `url(${wp.thumbnail})` : wp.css }}
+                      />
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
-
-            <div className="mb-5">
-              <p className="text-xs font-medium mb-2 text-[var(--text-tertiary)]">Gradients</p>
-              <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2">
-                {WALLPAPERS.filter((wp) => wp.type === "gradient").map((wp) => (
-                  <button
-                    key={wp.id}
-                    onClick={() => handleWallpaperPick(wp.id)}
-                    className="h-16 rounded-lg transition-all hover:scale-105"
-                    style={{
-                      background: wp.css,
-                      border:
-                        wallpaperId === wp.id
-                          ? "2px solid var(--purple-accent)"
-                          : "2px solid var(--glass-border-subtle)",
-                      boxShadow: wallpaperId === wp.id ? "0 0 0 2px var(--purple-accent)" : "none",
-                    }}
-                    title={wp.label}
-                  />
-                ))}
+              
+              <div>
+                <h4 className="text-sm font-semibold text-[var(--text-secondary)] uppercase mb-4 tracking-wide">Colors</h4>
+                <div className="grid grid-cols-6 sm:grid-cols-8 gap-4">
+                  {WALLPAPERS.filter((wp) => wp.type === "gradient").map((wp) => (
+                    <button
+                      key={wp.id}
+                      onClick={() => handleWallpaperPick(wp.id)}
+                      className={clsx(
+                        "aspect-square rounded-full overflow-hidden transition-all hover:scale-105 shadow-sm",
+                        wallpaperId === wp.id ? "ring-4 ring-[var(--system-blue)] ring-offset-2" : ""
+                      )}
+                      style={{ background: wp.css }}
+                    />
+                  ))}
+                </div>
               </div>
-            </div>
 
-            <div>
-              <p className="text-xs font-medium mb-2 text-[var(--text-tertiary)]">Custom</p>
-              <div className="flex items-center gap-3">
+              <div>
                 <button
-                  onClick={() => wallpaperInputRef.current?.click()}
-                  className="h-16 w-24 rounded-lg flex items-center justify-center transition-all hover:scale-105"
-                  style={{
-                    background: customWallpaper ? `url(${customWallpaper})` : "var(--bg-tertiary)",
-                    backgroundSize: "cover",
-                    backgroundPosition: "center",
-                    border:
-                      wallpaperId === "custom"
-                        ? "2px solid var(--purple-accent)"
-                        : "2px solid var(--glass-border-subtle)",
-                    boxShadow: wallpaperId === "custom" ? "0 0 0 2px var(--purple-accent)" : "none",
-                  }}
-                  title="Custom image"
+                   onClick={() => wallpaperInputRef.current?.click()}
+                   className="flex items-center gap-2 text-[var(--system-blue)] hover:underline text-sm font-medium"
                 >
-                  {!customWallpaper && (
-                    <div className="text-center">
-                      <Image className="w-4 h-4 mx-auto" style={{ color: "var(--text-tertiary)" }} />
-                      <span className="text-[10px]" style={{ color: "var(--text-tertiary)" }}>Upload</span>
-                    </div>
-                  )}
+                  <Plus className="w-4 h-4" />
+                  Upload Custom Image...
                 </button>
-                {customWallpaper && (
-                  <button
-                    onClick={() => saveWallpaper(DEFAULT_WALLPAPER_ID, null)}
-                    className="btn-secondary text-xs"
-                  >
-                    Remove custom
-                  </button>
-                )}
+                <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleCustomWallpaperUpload} />
               </div>
             </div>
           </div>
         </div>
       )}
+
     </div>
   );
 }
 
-function ApiKeyInput({ provider, description, value, onChange }: { provider: string; description: string; value: string; onChange: (value: string) => void; }) {
-  const [isEditing, setIsEditing] = useState(false);
-  const [tempValue, setTempValue] = useState(value);
-
-  const handleSave = () => {
-    // invoke("set_api_key", { provider: provider.toLowerCase(), key: tempValue });
-    onChange(tempValue);
-    setIsEditing(false);
-  };
-
+// Icon for the upload button
+function Plus({ className }: { className?: string }) {
   return (
-    <div className="p-4 space-y-2">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="font-medium text-[var(--text-primary)]">{provider}</p>
-          <p className="text-sm text-[var(--text-tertiary)]">{description}</p>
-        </div>
-        {!isEditing && (
-          <button onClick={() => { setTempValue(value); setIsEditing(true); }} className="text-sm font-medium text-[var(--text-accent)]">
-            {value ? "Change" : "Add Key"}
-          </button>
-        )}
-      </div>
-      {isEditing && (
-        <div className="flex gap-2">
-          <input type="password" value={tempValue} onChange={e => setTempValue(e.target.value)} placeholder="sk-..." className="form-input flex-1" autoFocus />
-          <button onClick={handleSave} className="btn-primary">Save</button>
-          <button onClick={() => setIsEditing(false)} className="btn-secondary">Cancel</button>
-        </div>
-      )}
-      {!isEditing && value && <div className="text-sm font-mono text-[var(--text-tertiary)]">••••••••••••{value.slice(-4)}</div>}
-    </div>
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+    </svg>
   );
 }

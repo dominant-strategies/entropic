@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { CreditCard, TrendingUp, AlertCircle, ExternalLink, RefreshCw } from "lucide-react";
+import { CreditCard, TrendingUp, AlertCircle, ExternalLink, RefreshCw, Wallet } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { useAuth } from "../contexts/AuthContext";
 import { getUsage, createCheckout, UsageResponse } from "../lib/auth";
@@ -14,6 +14,21 @@ const BALANCE_POLL_INTERVAL_MS = 10000;
 const BALANCE_POLL_DURATION_MS = 5 * 60 * 1000;
 const USAGE_CACHE_KEY = "nova_usage_cache_v1";
 const USAGE_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function BillingGroup({ title, children }: { title?: string, children: React.ReactNode }) {
+  return (
+    <div className="mb-8">
+      {title && (
+        <h3 className="text-[13px] font-medium text-[var(--text-secondary)] uppercase tracking-wide mb-2 px-1">
+          {title}
+        </h3>
+      )}
+      <div className="bg-white border border-[var(--border-subtle)] rounded-xl overflow-hidden shadow-sm">
+        {children}
+      </div>
+    </div>
+  );
+}
 
 export function Billing() {
   const { balance, refreshBalance } = useAuth();
@@ -129,146 +144,120 @@ export function Billing() {
   const isLowBalance = balanceDollars < 1;
 
   return (
-    <div className="space-y-6">
-      {/* Current Balance */}
-      <div className="glass-card p-6">
-        <div className="flex items-start justify-between">
-          <div>
-            <div className="text-sm text-[var(--text-tertiary)] mb-1">Current Balance</div>
-            <div className="text-4xl font-bold text-[var(--text-primary)]">
-              ${balance?.balance_dollars || "0.00"}
-            </div>
-            {isLowBalance && (
-              <div className="flex items-center gap-2 mt-2 text-amber-400 text-sm">
-                <AlertCircle className="w-4 h-4" />
-                <span>Low balance - add credits to continue using Nova</span>
+    <div className="max-w-3xl mx-auto py-8 px-4">
+      <h1 className="text-2xl font-bold mb-8 px-1">Account & Billing</h1>
+
+      <BillingGroup title="Current Balance">
+        <div className="p-6">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-[var(--system-gray-6)] flex items-center justify-center text-[var(--system-blue)]">
+                <Wallet className="w-5 h-5" />
               </div>
-            )}
-          </div>
-          <button
-            onClick={refreshBalance}
-            className="p-2 rounded-lg hover:bg-[var(--bg-tertiary)] transition-colors"
-            title="Refresh balance"
-          >
-            <RefreshCw className="w-5 h-5 text-[var(--text-tertiary)]" />
-          </button>
-        </div>
-      </div>
-
-      {/* Add Credits */}
-      <div className="glass-card p-6">
-        <h3 className="text-lg font-semibold text-[var(--text-primary)] mb-4 flex items-center gap-2">
-          <CreditCard className="w-5 h-5" />
-          Add Credits
-        </h3>
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-          {CREDIT_AMOUNTS.map(({ cents, label }) => (
+              <div>
+                <div className="text-3xl font-bold text-[var(--text-primary)] tracking-tight">
+                  ${balance?.balance_dollars || "0.00"}
+                </div>
+                {isLowBalance && (
+                  <div className="flex items-center gap-1.5 mt-1 text-amber-500 text-xs font-medium">
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    <span>Low balance</span>
+                  </div>
+                )}
+              </div>
+            </div>
             <button
-              key={cents}
-              onClick={() => setSelectedAmount(cents)}
-              className={`py-3 px-4 rounded-xl font-medium transition-all
-                        ${selectedAmount === cents
-                          ? "bg-[var(--purple-accent)] text-white"
-                          : "bg-[var(--bg-tertiary)] text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]"
-                        }`}
+              onClick={refreshBalance}
+              className="p-2 rounded-full hover:bg-[var(--system-gray-6)] transition-colors text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
             >
-              {label}
+              <RefreshCw className="w-4 h-4" />
             </button>
-          ))}
+          </div>
         </div>
+      </BillingGroup>
 
-        <button
-          onClick={handleAddCredits}
-          disabled={isAddingCredits}
-          className="w-full btn-primary flex items-center justify-center gap-2"
-        >
-          {isAddingCredits ? (
-            <>
-              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              Opening checkout...
-            </>
-          ) : (
-            <>
-              <ExternalLink className="w-4 h-4" />
-              Add ${(selectedAmount / 100).toFixed(0)} Credits
-            </>
-          )}
-        </button>
+      <BillingGroup title="Add Credits">
+        <div className="p-6">
+          <div className="flex flex-wrap gap-3 mb-6">
+            {CREDIT_AMOUNTS.map(({ cents, label }) => (
+              <button
+                key={cents}
+                onClick={() => setSelectedAmount(cents)}
+                className={`flex-1 py-3 px-4 rounded-lg font-medium text-sm transition-all border
+                          ${selectedAmount === cents
+                            ? "bg-[var(--system-blue)] border-transparent text-white shadow-sm"
+                            : "bg-white border-[var(--border-default)] text-[var(--text-primary)] hover:bg-[var(--system-gray-6)]"
+                          }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
 
-        <p className="text-xs text-[var(--text-tertiary)] mt-3 text-center">
-          Secure payment via Stripe. Credits never expire.
-        </p>
-      </div>
-
-      {/* Usage Summary */}
-      <div className="glass-card p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-[var(--text-primary)] flex items-center gap-2">
-            <TrendingUp className="w-5 h-5" />
-            Usage (Last 30 Days)
-          </h3>
+          <button
+            onClick={handleAddCredits}
+            disabled={isAddingCredits}
+            className="w-full py-3 bg-black text-white rounded-lg font-medium text-sm hover:bg-gray-800 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+          >
+            {isAddingCredits ? (
+              <>
+                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                Processing...
+              </>
+            ) : (
+              <>
+                Add Funds with Stripe
+                <ExternalLink className="w-3.5 h-3.5 opacity-70" />
+              </>
+            )}
+          </button>
+          <p className="text-[11px] text-[var(--text-tertiary)] mt-3 text-center">
+            Payments are secure and encrypted. Credits do not expire.
+          </p>
         </div>
+      </BillingGroup>
 
+      <BillingGroup title="Recent Usage (30 Days)">
         {isLoadingUsage ? (
-          <div className="flex items-center justify-center py-8">
-            <div className="w-6 h-6 border-2 border-[var(--purple-accent)]/30 border-t-[var(--purple-accent)] rounded-full animate-spin" />
+          <div className="p-8 flex justify-center">
+            <div className="w-6 h-6 border-2 border-[var(--system-gray-3)] border-t-[var(--text-primary)] rounded-full animate-spin" />
           </div>
         ) : usage ? (
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-[var(--bg-tertiary)] rounded-xl p-4">
-                <div className="text-2xl font-bold text-[var(--text-primary)]">
-                  {usage.total_requests}
-                </div>
-                <div className="text-sm text-[var(--text-tertiary)]">Requests</div>
+          <div className="divide-y divide-[var(--border-subtle)]">
+            <div className="grid grid-cols-2 divide-x divide-[var(--border-subtle)]">
+              <div className="p-4 text-center">
+                <div className="text-2xl font-semibold text-[var(--text-primary)]">{usage.total_requests}</div>
+                <div className="text-xs text-[var(--text-secondary)] uppercase tracking-wide mt-1">Requests</div>
               </div>
-              <div className="bg-[var(--bg-tertiary)] rounded-xl p-4">
-                <div className="text-2xl font-bold text-[var(--text-primary)]">
-                  ${usage.total_cost_dollars}
-                </div>
-                <div className="text-sm text-[var(--text-tertiary)]">Spent</div>
+              <div className="p-4 text-center">
+                <div className="text-2xl font-semibold text-[var(--text-primary)]">${usage.total_cost_dollars}</div>
+                <div className="text-xs text-[var(--text-secondary)] uppercase tracking-wide mt-1">Total Cost</div>
               </div>
             </div>
 
             {Object.keys(usage.by_model ?? {}).length > 0 && (
-              <div>
-                <div className="text-sm font-medium text-[var(--text-secondary)] mb-2">
-                  By Model
-                </div>
-                <div className="space-y-2">
-                  {Object.entries(usage.by_model ?? {}).map(([model, data]) => {
-                    const modelName = model.split("/").pop() || model;
-                    return (
-                      <div
-                        key={model}
-                        className="flex items-center justify-between py-2 px-3
-                                 bg-[var(--bg-tertiary)] rounded-lg"
-                      >
-                        <span className="text-sm text-[var(--text-primary)]">
-                          {modelName}
-                        </span>
-                        <div className="text-right">
-                          <span className="text-sm font-medium text-[var(--text-primary)]">
-                            ${(data.cost / 100).toFixed(2)}
-                          </span>
-                          <span className="text-xs text-[var(--text-tertiary)] ml-2">
-                            ({data.requests} req)
-                          </span>
-                        </div>
+              <div className="bg-[var(--system-gray-6)]/30">
+                {Object.entries(usage.by_model ?? {}).map(([model, data]) => {
+                  const modelName = model.split("/").pop() || model;
+                  return (
+                    <div key={model} className="flex items-center justify-between py-3 px-4 border-b border-[var(--border-subtle)] last:border-0">
+                      <span className="text-sm font-medium text-[var(--text-primary)]">{modelName}</span>
+                      <div className="text-right">
+                        <span className="text-sm text-[var(--text-primary)]">${(data.cost / 100).toFixed(4)}</span>
+                        <span className="text-xs text-[var(--text-tertiary)] ml-2 w-12 inline-block text-right">{data.requests} reqs</span>
                       </div>
-                    );
-                  })}
-                </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
         ) : (
-          <div className="text-center py-8 text-[var(--text-tertiary)]">
-            No usage data available
+          <div className="p-8 text-center text-[var(--text-tertiary)] text-sm">
+            No recent usage activity.
           </div>
         )}
-      </div>
+      </BillingGroup>
     </div>
   );
 }

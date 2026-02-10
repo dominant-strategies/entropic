@@ -10,6 +10,7 @@ import {
   ToggleLeft,
   ToggleRight,
   X,
+  Smartphone,
 } from "lucide-react";
 import clsx from "clsx";
 import { invoke } from "@tauri-apps/api/core";
@@ -913,171 +914,120 @@ export function Tasks({ gatewayRunning }: Props) {
   }
 
   return (
-    <div className="p-6 h-full flex flex-col">
+    <div className="max-w-6xl mx-auto px-6 pb-12">
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
+      <div className="pt-8 mb-8 flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold" style={{ color: "var(--text-primary)" }}>
-            Tasks
+          <h1 className="text-3xl font-bold text-[var(--text-primary)] mb-2 tracking-tight">
+            Automation Tasks
           </h1>
-          <p className="text-sm" style={{ color: "var(--text-tertiary)" }}>
-            Scheduled tasks that run automatically
+          <p className="text-lg text-[var(--text-secondary)]">
+            Scheduled jobs that run automatically in the background.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={fetchJobs}
+            disabled={loading || !gatewayRunning}
+            className="p-2.5 bg-white border border-[var(--border-subtle)] rounded-xl shadow-sm hover:bg-[var(--system-gray-6)] transition-all"
+          >
+            <RefreshCw className={clsx("w-5 h-5 text-[var(--text-secondary)]", loading && "animate-spin")} />
+          </button>
           <button
             onClick={openCreate}
             disabled={!gatewayRunning}
-            className="btn-primary flex items-center gap-2 text-sm"
+            className="btn btn-primary bg-black text-white px-6 py-2.5 rounded-xl font-bold text-sm hover:bg-gray-800 shadow-lg flex items-center gap-2"
           >
             <Plus className="w-4 h-4" />
             New Task
           </button>
-          <button
-            onClick={fetchJobs}
-            disabled={loading || !gatewayRunning}
-            className="btn-secondary flex items-center gap-2 text-sm"
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-            Refresh
-          </button>
         </div>
-      </div>
-      <div
-        className="mb-4 p-3 rounded-lg text-xs flex items-center gap-2"
-        style={{
-          background: "var(--bg-secondary, #f5f5f5)",
-          color: "var(--text-tertiary)",
-          border: "1px solid var(--glass-border-subtle)",
-        }}
-      >
-        Tasks run only while your laptop is awake and connected to the internet.
-      </div>
-      <div
-        className="mb-6 p-3 rounded-lg text-xs"
-        style={{
-          background: "var(--bg-secondary, #f5f5f5)",
-          color: "var(--text-secondary)",
-          border: "1px solid var(--glass-border-subtle)",
-        }}
-      >
-        <div className="font-medium mb-2" style={{ color: "var(--text-primary)" }}>
-          Run tasks overnight
-        </div>
-        <ul className="list-disc list-inside space-y-1">
-          <li>macOS: System Settings → Displays → Advanced → Prevent automatic sleeping. Optional: allow display off but keep system awake.</li>
-          <li>Windows: Power settings → When plugged in, never sleep.</li>
-          <li>Linux: `systemd-inhibit` or your power settings UI.</li>
-          <li>This keeps tasks running but uses power and generates heat.</li>
-        </ul>
       </div>
 
-      {/* Gateway offline banner */}
       {!gatewayRunning && (
-        <div
-          className="mb-4 p-3 rounded-lg text-sm flex items-center gap-2"
-          style={{
-            background: "var(--bg-secondary, #f5f5f5)",
-            color: "var(--text-secondary)",
-            border: "1px solid var(--glass-border-subtle)",
-          }}
-        >
-          <CalendarClock className="w-4 h-4 flex-shrink-0" />
-          Gateway is offline. Start it to manage scheduled tasks.
+        <div className="mb-8 p-6 bg-amber-50 border border-amber-100 rounded-2xl flex items-center gap-4 text-amber-800">
+          <div className="w-12 h-12 rounded-xl bg-amber-100 flex items-center justify-center flex-shrink-0">
+            <CalendarClock className="w-6 h-6" />
+          </div>
+          <div>
+            <p className="font-bold">Gateway is Offline</p>
+            <p className="text-sm opacity-90 text-amber-700">Scheduled tasks won't run until the secure sandbox is started.</p>
+          </div>
         </div>
       )}
 
-      {/* Error */}
       {error && (
-        <div className="mb-4 p-3 rounded-lg text-sm bg-red-50 text-red-600 border border-red-200">
-          {error}
-          <button onClick={() => setError(null)} className="ml-2 underline">
-            dismiss
-          </button>
+        <div className="mb-6 p-4 bg-red-50 text-red-600 rounded-xl border border-red-100 text-sm font-medium flex justify-between items-center">
+          <span>{error}</span>
+          <button onClick={() => setError(null)} className="underline hover:no-underline">Dismiss</button>
         </div>
       )}
 
       {/* Task List */}
-      <div className="flex-1 overflow-auto space-y-1">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {gatewayRunning && loading && jobs.length === 0 ? (
-          <div className="text-center py-12" style={{ color: "var(--text-tertiary)" }}>
-            <RefreshCw className="w-6 h-6 mx-auto mb-2 animate-spin" />
-            Loading tasks…
+          <div className="col-span-full py-20 text-center">
+            <RefreshCw className="w-8 h-8 animate-spin mx-auto mb-4 text-[var(--text-tertiary)]" />
+            <p className="text-[var(--text-secondary)]">Loading your tasks...</p>
           </div>
         ) : gatewayRunning && jobs.length === 0 ? (
-          <div className="text-center py-12" style={{ color: "var(--text-tertiary)" }}>
-            <CalendarClock className="w-10 h-10 mx-auto mb-3 opacity-40" />
-            <p className="text-sm font-medium mb-1">No scheduled tasks</p>
-            <p className="text-xs">Create a task to run actions on a schedule</p>
+          <div className="col-span-full py-20 text-center bg-white rounded-2xl border border-[var(--border-subtle)] border-dashed">
+            <CalendarClock className="w-12 h-12 mx-auto mb-4 text-[var(--text-tertiary)] opacity-30" />
+            <h3 className="text-lg font-bold text-[var(--text-primary)]">No tasks scheduled</h3>
+            <p className="text-[var(--text-secondary)] mb-6">Create a task to start automating your workflow.</p>
+            <button onClick={openCreate} className="px-6 py-2 bg-black text-white rounded-lg font-semibold hover:bg-gray-800">Create Task</button>
           </div>
         ) : (
           jobs.map((job) => {
             const dot = statusDot(job);
             return (
-              <div key={job.id} className="glass-card flex items-center gap-3 px-4 py-3">
-                {/* Toggle */}
-                <button
-                  onClick={() => handleToggle(job)}
-                  className="flex-shrink-0"
-                  title={job.enabled ? "Disable" : "Enable"}
-                >
-                  {job.enabled ? (
-                    <ToggleRight className="w-6 h-6" style={{ color: "var(--purple-accent)" }} />
-                  ) : (
-                    <ToggleLeft className="w-6 h-6" style={{ color: "var(--text-tertiary)" }} />
-                  )}
-                </button>
-
-                {/* Info */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className="text-sm font-medium truncate"
-                      style={{ color: "var(--text-primary)" }}
+              <div key={job.id} className="group bg-white rounded-2xl p-5 shadow-sm border border-[var(--border-subtle)] hover:shadow-md transition-all flex flex-col h-full relative">
+                
+                <div className="flex justify-between items-start mb-4">
+                   <div className={clsx(
+                     "w-12 h-12 rounded-xl flex items-center justify-center border transition-colors",
+                     job.enabled ? "bg-blue-50 border-blue-100 text-blue-600" : "bg-gray-50 border-gray-100 text-gray-400"
+                   )}>
+                     <Clock className="w-6 h-6" />
+                   </div>
+                   <button
+                      onClick={() => handleToggle(job)}
+                      className={clsx(
+                        "relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+                        job.enabled ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-4)]"
+                      )}
                     >
-                      {job.name}
-                    </span>
-                    <span
-                      className="w-2 h-2 rounded-full flex-shrink-0"
-                      style={{ background: dot.color }}
-                      title={dot.title}
-                    />
-                  </div>
-                  <span className="text-xs" style={{ color: "var(--text-tertiary)" }}>
-                    {describeSchedule(job.schedule)}
-                    {job.description ? ` · ${job.description}` : ""}
-                  </span>
+                      <span className={clsx(
+                        "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                        job.enabled ? "translate-x-5" : "translate-x-0"
+                      )} />
+                    </button>
                 </div>
 
-                {/* Actions */}
-                <div className="flex items-center gap-1 flex-shrink-0">
-                  <button
-                    onClick={() => handleRun(job)}
-                    className="p-1.5 rounded hover:bg-black/10 transition-colors"
-                    title="Run now"
-                  >
-                    <Play className="w-4 h-4" style={{ color: "var(--text-tertiary)" }} />
+                <div className="mb-6 flex-1">
+                   <h3 className="font-bold text-[var(--text-primary)] text-lg mb-1 line-clamp-1">{job.name}</h3>
+                   <div className="flex items-center gap-2 mb-3">
+                      <div className="w-2 h-2 rounded-full" style={{ background: dot.color }} />
+                      <span className="text-xs font-bold uppercase tracking-wider text-[var(--text-tertiary)]">{dot.title}</span>
+                   </div>
+                   <p className="text-sm font-medium text-[var(--system-blue)] mb-2">{describeSchedule(job.schedule)}</p>
+                   {job.description && (
+                     <p className="text-sm text-[var(--text-secondary)] line-clamp-2 italic">"{job.description}"</p>
+                   )}
+                </div>
+
+                <div className="grid grid-cols-4 gap-2 pt-4 border-t border-[var(--border-subtle)]">
+                  <button onClick={() => handleRun(job)} className="p-2 rounded-lg bg-[var(--system-gray-6)] hover:bg-green-50 hover:text-green-600 transition-colors flex items-center justify-center" title="Run Now">
+                    <Play className="w-4 h-4 fill-current" />
                   </button>
-                  <button
-                    onClick={() => openEdit(job)}
-                    className="p-1.5 rounded hover:bg-black/10 transition-colors"
-                    title="Edit"
-                  >
-                    <Pencil className="w-4 h-4" style={{ color: "var(--text-tertiary)" }} />
+                  <button onClick={() => openEdit(job)} className="p-2 rounded-lg bg-[var(--system-gray-6)] hover:bg-blue-50 hover:text-blue-600 transition-colors flex items-center justify-center" title="Edit Task">
+                    <Pencil className="w-4 h-4" />
                   </button>
-                  <button
-                    onClick={() => openHistory(job)}
-                    className="p-1.5 rounded hover:bg-black/10 transition-colors"
-                    title="History"
-                  >
-                    <Clock className="w-4 h-4" style={{ color: "var(--text-tertiary)" }} />
+                  <button onClick={() => openHistory(job)} className="p-2 rounded-lg bg-[var(--system-gray-6)] hover:bg-gray-200 transition-colors flex items-center justify-center" title="History">
+                    <Clock className="w-4 h-4" />
                   </button>
-                  <button
-                    onClick={() => handleDelete(job)}
-                    className="p-1.5 rounded hover:bg-red-50 transition-colors"
-                    title="Delete"
-                  >
-                    <Trash2 className="w-4 h-4 text-red-400" />
+                  <button onClick={() => handleDelete(job)} className="p-2 rounded-lg bg-[var(--system-gray-6)] hover:bg-red-50 hover:text-red-600 transition-colors flex items-center justify-center" title="Delete">
+                    <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
               </div>
@@ -1085,6 +1035,32 @@ export function Tasks({ gatewayRunning }: Props) {
           })
         )}
       </div>
+
+      <div className="mt-12 p-6 bg-[var(--system-gray-6)]/50 rounded-2xl border border-[var(--border-subtle)]">
+         <h4 className="font-bold text-[var(--text-primary)] mb-2 flex items-center gap-2">
+           <Smartphone className="w-4 h-4" />
+           Keep Tasks Running
+         </h4>
+         <p className="text-sm text-[var(--text-secondary)] mb-4">Scheduled tasks only execute when this computer is awake and connected.</p>
+         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="bg-white p-3 rounded-xl shadow-sm border border-[var(--border-subtle)]">
+               <p className="text-xs font-bold uppercase mb-1">macOS</p>
+               <p className="text-[11px] text-[var(--text-tertiary)]">System Settings → Displays → Advanced → Prevent automatic sleeping.</p>
+            </div>
+            <div className="bg-white p-3 rounded-xl shadow-sm border border-[var(--border-subtle)]">
+               <p className="text-xs font-bold uppercase mb-1">Windows</p>
+               <p className="text-[11px] text-[var(--text-tertiary)]">Power settings → When plugged in, never sleep.</p>
+            </div>
+            <div className="bg-white p-3 rounded-xl shadow-sm border border-[var(--border-subtle)]">
+               <p className="text-xs font-bold uppercase mb-1">Linux</p>
+               <p className="text-[11px] text-[var(--text-tertiary)]">Use <code>systemd-inhibit</code> or your desktop power manager.</p>
+            </div>
+         </div>
+      </div>
+
+      {/* Modal logic remains identical but styling updated implicitly by global theme */}
+      {/* ... (Editor Modal code follows) ... */}
+
 
       {/* ── Editor Modal ────────────────────────────────────────── */}
       {editorOpen && (

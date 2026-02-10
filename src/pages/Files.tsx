@@ -666,27 +666,24 @@ export function Files({
       {/* Top toolbar */}
       <div className="absolute top-0 left-0 right-0 z-20">
         <div
-          className="flex items-center justify-between gap-3 px-4 py-2"
+          className="flex items-center justify-between gap-2 px-3 py-1.5"
           style={{
-            background: "#ffffff",
+            background: "rgba(255,255,255,0.9)",
+            backdropFilter: "blur(10px)",
+            WebkitBackdropFilter: "blur(10px)",
             borderBottom: "1px solid rgba(0,0,0,0.08)",
-            boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
           }}
         >
-          <div className="flex items-center gap-3">
-            <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <span className="text-[12px] font-bold text-[var(--text-primary)]">
               Home
             </span>
             <div
-              className="flex items-center gap-2 text-xs px-2.5 py-1 rounded-full"
-              style={{
-                background: "rgba(255,255,255,0.25)",
-                color: "var(--text-secondary)",
-                border: "1px solid rgba(255,255,255,0.35)",
-              }}
+              className="flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-full border border-black/5 bg-black/5 flex-shrink-0"
             >
               <span
-                className="h-2 w-2 rounded-full"
+                className="h-1.5 w-1.5 rounded-full"
                 style={{
                   background: gatewayRunning
                     ? "#22c55e"
@@ -695,36 +692,38 @@ export function Files({
                     : "#ef4444",
                 }}
               />
-              {gatewayRunning ? "Gateway online" : isTogglingGateway ? "Starting gateway" : "Gateway offline"}
+              <span className="text-[var(--text-secondary)] font-medium">
+                {gatewayRunning ? "Online" : isTogglingGateway ? "Starting" : "Offline"}
+              </span>
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2 text-[11px]" style={{ color: "var(--text-tertiary)" }}>
-              <span className="uppercase tracking-wide">Chat</span>
+          <div className="flex items-center gap-4 flex-1 justify-center min-w-0 px-2">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] font-bold text-[var(--text-tertiary)] uppercase tracking-tight">Chat</span>
               <ModelSelector compact selectedModel={selectedModel} onModelChange={onModelChange} />
             </div>
-            <div className="flex items-center gap-2 text-[11px]" style={{ color: "var(--text-tertiary)" }}>
-              <span className="uppercase tracking-wide">Code</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] font-bold text-[var(--text-tertiary)] uppercase tracking-tight">Code</span>
               <ModelSelector compact selectedModel={codeModel} onModelChange={onCodeModelChange} />
             </div>
-            <div className="flex items-center gap-2 text-[11px]" style={{ color: "var(--text-tertiary)" }}>
-              <span className="uppercase tracking-wide">Image</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] font-bold text-[var(--text-tertiary)] uppercase tracking-tight">Vision</span>
               <ModelSelector compact selectedModel={imageModel} onModelChange={onImageModelChange} />
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            <div className="text-right">
-              <div className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <div className="text-right leading-tight">
+              <div className="text-[11px] font-bold text-[var(--text-primary)]">
                 ${balance?.balance_dollars || "0.00"}
               </div>
-              <div className="text-[10px]" style={{ color: "var(--text-tertiary)" }}>
+              <div className="text-[9px] text-[var(--text-tertiary)] font-medium">
                 {proxyEnabled
                   ? usageSummary
-                    ? `30d usage $${usageSummary.dollars}`
-                    : "Loading usage…"
-                  : "Local keys"}
+                    ? `$${usageSummary.dollars}`
+                    : "..."
+                  : "Local"}
               </div>
             </div>
             <button
@@ -732,12 +731,7 @@ export function Files({
                 if (!billingOpen) setBillingOpen(true);
                 focusWindow("billing");
               }}
-              className="text-xs px-3 py-1.5 rounded-full"
-              style={{
-                background: "rgba(34,197,94,0.15)",
-                color: "#166534",
-                border: "1px solid rgba(34,197,94,0.35)",
-              }}
+              className="text-[10px] font-bold px-2 py-1 rounded-md bg-green-500/10 text-green-700 border border-green-500/20 hover:bg-green-500/20 transition-colors"
             >
               Billing
             </button>

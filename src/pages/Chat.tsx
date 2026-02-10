@@ -743,50 +743,51 @@ export function Chat({
 
       {/* Header */}
       <div className="flex-shrink-0" style={{
-          background: 'var(--glass-bg)',
-          borderBottom: '1px solid var(--glass-border-subtle)',
+          background: 'rgba(255,255,255,0.8)',
+          borderBottom: '1px solid var(--border-subtle)',
           backdropFilter: 'blur(12px)',
           WebkitBackdropFilter: 'blur(12px)'
         }}>
-        <div className="flex items-center justify-between px-4 py-2">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-[var(--text-primary)] truncate max-w-[200px]">
+        <div className="flex items-center justify-between px-3 py-1.5">
+          <div className="flex items-center gap-2 flex-1 min-w-0">
+            <span className="text-[12px] font-bold text-[var(--text-primary)] truncate max-w-[150px]">
               {currentSession ? sessionTitle(sessions.find(s => s.key === currentSession) || { key: currentSession }) : "New Chat"}
             </span>
             <select value={chatMode} onChange={e => setChatMode(e.target.value as "general" | "code")}
-              className="form-input text-sm !py-1 !px-3 !w-auto">
+              className="px-2 py-0.5 bg-white border border-[var(--border-subtle)] rounded-md text-[11px] font-bold text-[var(--text-primary)] focus:outline-none shadow-sm cursor-pointer hover:bg-[var(--system-gray-6)] transition-all">
               <option value="general">General</option>
               <option value="code">Code</option>
             </select>
           </div>
-        <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${
-            connected ? 'bg-green-500' : (gatewayStarting || isConnecting) ? 'bg-amber-400' : 'bg-gray-300'
-          }`} />
-          <span className="text-xs text-[var(--text-tertiary)]">
-            {connected
-              ? "Connected"
-              : gatewayStarting
-                ? (gatewayRetryIn ? `Retrying in ${gatewayRetryIn}s` : "Starting")
-                : isConnecting
-                  ? "Connecting"
-                  : "Disconnected"}
-          </span>
+        <div className="flex items-center gap-3 px-2">
+          <div className="flex items-center gap-1.5">
+            <div className={`w-1.5 h-1.5 rounded-full ${
+              connected ? 'bg-green-500' : (gatewayStarting || isConnecting) ? 'bg-amber-400' : 'bg-gray-300'
+            }`} />
+            <span className="text-[10px] font-medium text-[var(--text-tertiary)] uppercase tracking-tight">
+              {connected
+                ? "Connected"
+                : gatewayStarting
+                  ? "Starting"
+                  : "Offline"}
+            </span>
+          </div>
           {integrationsSyncing ? (
-            <span className="text-xs text-[var(--text-tertiary)] flex items-center gap-1">
-              <Loader2 className="w-3 h-3 animate-spin" />
-              Syncing integrations…
+            <span className="text-[10px] font-medium text-[var(--text-tertiary)] flex items-center gap-1 animate-pulse">
+              <Loader2 className="w-2.5 h-2.5 animate-spin" />
+              Syncing
             </span>
           ) : null}
         </div>
-        <button
-          onClick={() => setShowDiagnostics(true)}
-          className="btn-secondary !py-1 !px-3 text-xs"
-          title="Gateway diagnostics"
-        >
-          <Activity className="w-3.5 h-3.5 mr-1" />
-          Diagnostics
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowDiagnostics(true)}
+            className="px-2 py-1 rounded-md bg-[var(--system-gray-6)] hover:bg-[var(--system-gray-5)] text-[10px] font-bold text-[var(--text-secondary)] transition-colors"
+            title="Gateway diagnostics"
+          >
+            Diag
+          </button>
+        </div>
       </div>
     </div>
 
@@ -869,7 +870,7 @@ export function Chat({
             placeholder="Message your assistant..." rows={1}
             className="form-input flex-1 resize-none leading-tight"
           />
-          <button onClick={() => handleSend()} disabled={!message.trim() || isLoading} className="btn-primary !p-2.5"><Send className="w-5 h-5" /></button>
+          <button onClick={() => handleSend()} disabled={!message.trim() || isLoading} className="btn-primary !p-2.5 !bg-[var(--purple-accent)] hover:!bg-purple-700 text-white"><Send className="w-5 h-5" /></button>
         </div>
         {dragActive && (
           <div className="absolute inset-0 bg-black/10 border-2 border-dashed border-white/50 flex items-center justify-center font-medium text-white">

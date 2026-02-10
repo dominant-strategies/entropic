@@ -4,9 +4,7 @@ import {
   Radio,
   ScrollText,
   Settings,
-  Shield,
   Sparkles,
-  Search,
   FolderOpen,
   CalendarClock,
   CreditCard,
@@ -67,7 +65,6 @@ function sessionTitle(s: ChatSession): string {
 
 export function Layout({ currentPage, onNavigate, children, gatewayRunning, integrationsSyncing, chatSessions, currentChatSession, onSelectChatSession, onNewChat }: Props) {
   const [profile, setProfile] = useState<AgentProfile>({ name: "Nova" });
-  const [searchTerm, setSearchTerm] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -88,88 +85,73 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning, inte
   }, []);
 
   return (
-    <div className="h-screen w-screen flex bg-[var(--bg-primary)]">
-      {/* Sidebar */}
+    <div className="h-screen w-screen flex bg-[var(--bg-app)] text-[var(--text-primary)] font-sans overflow-hidden">
+      {/* Sidebar - Transparent blend */}
       <div
         data-tauri-drag-region
         onMouseDown={startDrag}
-        className="w-56 flex flex-col flex-shrink-0"
-        style={{
-          background: 'var(--bg-sidebar)',
-          borderRight: '1px solid var(--glass-border-subtle)'
-        }}
+        className="w-[240px] flex flex-col flex-shrink-0 bg-transparent pt-8 pb-4 pl-4 pr-2"
       >
-        {/* Logo */}
-        <div
-          data-tauri-drag-region
-          onMouseDown={startDrag}
-          className="h-14 flex items-center gap-3 px-4 flex-shrink-0"
-          style={{ borderBottom: '1px solid var(--glass-border-subtle)' }}
-        >
-          <Shield className="w-6 h-6 text-[var(--purple-accent)]" />
-          <span className="font-semibold text-lg text-[var(--text-primary)]">Nova</span>
-        </div>
-
-        {/* Search */}
-        <div className="p-2 flex-shrink-0">
-          <div className="relative">
-            <Search className="w-4 h-4 text-[var(--text-tertiary)] absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              placeholder="Search"
-              className="form-input !pl-9 w-full text-sm"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
+        {/* Profile / Brand */}
+        <div className="px-2 mb-6 flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-[var(--purple-accent)] flex items-center justify-center shadow-md">
+            <Sparkles className="w-4 h-4 text-white" />
+          </div>
+          <div className="font-semibold text-lg tracking-tight text-[var(--text-primary)]">
+            Nova
           </div>
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 p-2 space-y-1 overflow-auto">
+        <nav className="flex-1 space-y-0.5 overflow-y-auto pr-2 custom-scrollbar">
+          <div className="text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wider px-3 mb-2 mt-2">
+            Menu
+          </div>
+          
           {navItems.map((item) => {
             const Icon = item.icon;
             const isChat = item.id === "chat";
             const isActive = isChat ? currentPage === "chat" && !currentChatSession : currentPage === item.id;
+            
             return (
               <div key={item.id}>
                 <button
                   onClick={() => isChat ? onNewChat?.() : onNavigate(item.id)}
-                  className={clsx(
-                    "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
-                    isActive
-                      ? "bg-[#f3e8ff] text-[var(--purple-accent)]"
-                      : "text-[var(--text-secondary)] hover:bg-black/5"
-                  )}
-                >
-                  <Icon className={clsx("w-5 h-5", isActive ? 'text-[var(--purple-accent)]' : 'text-[var(--text-tertiary)]')} />
+                    className={clsx(
+                      "w-full flex items-center gap-3 px-3 py-2 rounded-md text-[13px] font-medium transition-all duration-200",
+                      isActive
+                      ? "bg-[rgba(0,0,0,0.06)] text-black shadow-sm"
+                      : "text-black/70 hover:bg-[rgba(0,0,0,0.03)] hover:text-black"
+                    )}
+                  >
+                  <div
+                    className={clsx(
+                      "w-8 h-8 rounded-lg flex items-center justify-center transition-colors",
+                      isActive ? "bg-white shadow-sm" : "bg-black/5"
+                    )}
+                  >
+                    <Icon
+                      className={clsx("w-5 h-5", isActive ? "text-[var(--purple-accent)]" : "text-[var(--text-tertiary)]")}
+                    />
+                  </div>
                   {item.label}
                 </button>
 
-                {/* Recent chat sessions — always visible */}
+                {/* Chat History sub-items */}
                 {isChat && chatSessions && chatSessions.length > 0 && (
-                  <div className="mt-1 space-y-0.5 max-h-[180px] overflow-y-auto">
-                    <div className="px-3 pt-1 pb-0.5 text-[10px] uppercase tracking-wider text-[var(--text-tertiary)] font-medium">
-                      Your Chats
-                    </div>
+                  <div className="mt-1 ml-2 pl-2 border-l border-[var(--border-subtle)] space-y-0.5">
                     {chatSessions.slice(0, 5).map((session) => (
                       <button
                         key={session.key}
                         onClick={() => onSelectChatSession?.(session.key)}
                         className={clsx(
-                          "w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-xs transition-colors text-left",
+                          "w-full flex items-center gap-2 px-3 py-1 rounded-md text-[12px] transition-colors text-left",
                           currentChatSession === session.key
-                            ? "bg-[#f3e8ff]/60 text-[var(--purple-accent)] font-medium"
-                            : "text-[var(--text-secondary)] hover:bg-black/5"
+                            ? "bg-[rgba(147,51,234,0.08)] text-[var(--purple-accent)] font-medium"
+                            : "text-[var(--text-secondary)] hover:bg-[rgba(0,0,0,0.03)]"
                         )}
                       >
-                        <MessageSquare className="w-3 h-3 flex-shrink-0 opacity-50" />
                         <span className="truncate flex-1">{sessionTitle(session)}</span>
-                        {session.updatedAt && (
-                          <span className="flex-shrink-0 text-[10px] text-[var(--text-tertiary)] flex items-center gap-0.5">
-                            <Clock className="w-2.5 h-2.5" />
-                            {relativeTime(session.updatedAt)}
-                          </span>
-                        )}
                       </button>
                     ))}
                   </div>
@@ -179,64 +161,47 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning, inte
           })}
         </nav>
 
-        {/* Agent Profile */}
-        <div className="p-2 flex-shrink-0">
+        {/* User / Gateway Status Footer */}
+        <div className="mt-auto px-2 pt-4">
           <button
-            onClick={() => onNavigate("settings")}
-            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-black/5"
+             onClick={() => onNavigate("settings")}
+             className="w-full flex items-center gap-3 p-2 rounded-lg hover:bg-[rgba(0,0,0,0.04)] transition-colors text-left group"
           >
-            <div className="w-9 h-9 rounded-full bg-black/5 overflow-hidden flex items-center justify-center">
+            <div className="w-8 h-8 rounded-full bg-gray-200 overflow-hidden flex-shrink-0 border border-black/5">
               {profile.avatarDataUrl ? (
-                <img
-                  src={profile.avatarDataUrl}
-                  alt="Agent avatar"
-                  className="w-full h-full object-cover"
-                />
+                <img src={profile.avatarDataUrl} alt="Avatar" className="w-full h-full object-cover" />
               ) : (
-                <span className="text-xs font-semibold text-[var(--text-accent)]">
-                  {profile.name.slice(0, 2).toUpperCase()}
-                </span>
+                <div className="w-full h-full flex items-center justify-center text-xs font-medium text-gray-500">
+                  {profile.name.slice(0, 1).toUpperCase()}
+                </div>
               )}
             </div>
-            <div className="flex-1 text-left">
-              <div className="text-sm font-medium text-[var(--text-primary)]">
+            <div className="flex-1 min-w-0">
+              <div className="text-[13px] font-medium text-[var(--text-primary)] truncate group-hover:text-black">
                 {profile.name}
               </div>
-              <div className="text-xs text-[var(--text-tertiary)]">Your Assistant</div>
-            </div>
-          </button>
-        </div>
-
-        {/* Gateway Status */}
-        <div className="p-2 flex-shrink-0" style={{ borderTop: '1px solid var(--glass-border-subtle)' }}>
-          <div className="flex items-center justify-between gap-2 px-3 py-2">
-            <div className="flex items-center gap-2">
-              <div
-                className="w-2 h-2 rounded-full"
-                style={{ background: gatewayRunning ? '#22c55e' : '#e0e0e0' }}
-              />
-              <span className="text-xs text-[var(--text-tertiary)]">
-                {gatewayRunning ? 'Connected' : 'Offline'}
-              </span>
-            </div>
-            {integrationsSyncing ? (
-              <div className="flex items-center gap-1 text-[var(--text-tertiary)] text-[10px] uppercase tracking-wide">
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Syncing integrations
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <div className={clsx("w-1.5 h-1.5 rounded-full", gatewayRunning ? "bg-green-500" : "bg-gray-300")} />
+                <span className="text-[11px] text-[var(--text-tertiary)]">
+                  {gatewayRunning ? "Online" : "Offline"}
+                </span>
               </div>
-            ) : null}
-          </div>
+            </div>
+            <Settings className="w-4 h-4 text-[var(--text-tertiary)] opacity-0 group-hover:opacity-100 transition-opacity" />
+          </button>
         </div>
       </div>
 
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col">
-        {/* Drag region for window */}
-        <div data-tauri-drag-region onMouseDown={startDrag} className="h-8 flex-shrink-0" />
-
-        {/* Page Content */}
-        <main className="flex-1 overflow-auto px-6 pb-6">
-          {children}
+      {/* Main Content Area - The "Content Card" */}
+      <div className="flex-1 h-screen p-4 pl-0 overflow-hidden flex flex-col">
+        {/* Window Drag Region */}
+        <div data-tauri-drag-region onMouseDown={startDrag} className="h-6 flex-shrink-0" />
+        
+        {/* The Card */}
+        <main className="flex-1 bg-white rounded-2xl shadow-sm border border-[var(--border-subtle)] overflow-hidden flex flex-col relative ml-2">
+          <div className="absolute inset-0 overflow-y-auto scroll-smooth">
+            {children}
+          </div>
         </main>
       </div>
     </div>
