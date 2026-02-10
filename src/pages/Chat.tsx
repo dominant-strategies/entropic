@@ -84,6 +84,7 @@ function parseToolPayloads(raw: string): {
   cleanText: string;
   events: CalendarEvent[];
   errors: ToolError[];
+  hadToolPayload: boolean;
 } {
   try {
     const direct = JSON.parse(raw);
@@ -96,7 +97,7 @@ function parseToolPayloads(raw: string): {
         ? [{ tool: (direct as any).tool, error: (direct as any).error, status: (direct as any).status }]
         : [];
       if (events.length || errors.length) {
-        return { cleanText: "", events, errors };
+        return { cleanText: "", events, errors, hadToolPayload: true };
       }
     }
   } catch {
@@ -105,7 +106,7 @@ function parseToolPayloads(raw: string): {
 
   const blocks = extractJsonBlocks(raw);
   if (blocks.length === 0) {
-    return { cleanText: raw, events: [], errors: [] };
+    return { cleanText: raw, events: [], errors: [], hadToolPayload: false };
   }
 
   const events: CalendarEvent[] = [];
@@ -137,7 +138,7 @@ function parseToolPayloads(raw: string): {
   }
 
   if (removalRanges.length === 0) {
-    return { cleanText: raw, events: [], errors: [] };
+    return { cleanText: raw, events: [], errors: [], hadToolPayload: false };
   }
 
   let clean = "";
@@ -152,7 +153,7 @@ function parseToolPayloads(raw: string): {
     clean += raw.slice(cursor);
   }
 
-  return { cleanText: clean.trim(), events, errors };
+  return { cleanText: clean.trim(), events, errors, hadToolPayload: true };
 }
 
 function formatEventRange(start?: string, end?: string): { date?: string; time?: string } {
@@ -254,12 +255,47 @@ function buildSuggestions(userName: string, hasName: boolean) {
   ];
 }
 
+function normalizeModelId(id: string | null | undefined): string | null {
+  if (!id) return null;
+  if (id.startsWith("openrouter/")) return id;
+  return `openrouter/${id}`;
+}
+
+function getRoutingDecision(messageContent: string) {
+  const length = messageContent.length;
+  const lineCount = messageContent.split("\n").length;
+  const complexHints = [
+    /step[-\s]?by[-\s]?step/i,
+    /trade-?offs?/i,
+    /compare|evaluate|analyze/i,
+    /architecture|design|system/i,
+    /prove|formal|theorem/i,
+    /edge cases?|failure modes?/i,
+    /multi[-\s]?step|plan|strategy/i,
+  ];
+  const useReasoning =
+    length > 1200 ||
+    lineCount > 10 ||
+    complexHints.some((re) => re.test(messageContent));
+  return {
+    useReasoning,
+    reason: useReasoning
+      ? length > 1200
+        ? "length"
+        : lineCount > 10
+          ? "lines"
+          : "complexity"
+      : "fast",
+  };
+}
+
 export function Chat({
   gatewayRunning,
   gatewayStarting,
   gatewayRetryIn,
   onStartGateway,
   useLocalKeys,
+  selectedModel,
   imageModel: _imageModel,
   integrationsSyncing,
   integrationsMissing,
@@ -272,6 +308,7 @@ export function Chat({
   gatewayRetryIn: number | null;
   onStartGateway?: () => void;
   useLocalKeys: boolean;
+  selectedModel: string;
   imageModel: string;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
@@ -305,6 +342,15 @@ export function Chat({
   const [lastChatEvent, setLastChatEvent] = useState<ChatEvent | null>(null);
   const [lastSendId, setLastSendId] = useState<string | null>(null);
   const [lastSendAt, setLastSendAt] = useState<number | null>(null);
+  const runTimingsRef = useRef<Record<string, {
+    startedAt: number;
+    ackAt?: number;
+    firstDeltaAt?: number;
+    finalAt?: number;
+    toolSeenAt?: number;
+  }>>({});
+  const sessionModelRef = useRef<Record<string, string | null>>({});
+  const runRevertModelRef = useRef<Record<string, string | null>>({});
   const [channelConfig, setChannelConfig] = useState<{ imessageEnabled: boolean; whatsappEnabled: boolean } | null>(null);
   const [channelModal, setChannelModal] = useState<{ isOpen: boolean; channel: "imessage" | "whatsapp" }>({
     isOpen: false,
@@ -513,6 +559,13 @@ export function Chat({
       const normalized = event.message ? normalizeGatewayMessage(event.message as GatewayMessage, event.runId) : null;
       const text = normalized?.content ?? "";
       if (!text) return;
+      if (event.runId) {
+        const timings = runTimingsRef.current[event.runId];
+        if (timings && !timings.firstDeltaAt) {
+          timings.firstDeltaAt = Date.now();
+          addDiag(`timing first_delta runId=${event.runId} t=${timings.firstDeltaAt - timings.startedAt}ms`);
+        }
+      }
       setMessages(prev => {
         const existingIdx = prev.findIndex(m => m.id === event.runId && m.role === "assistant");
         if (existingIdx >= 0) {
@@ -522,7 +575,32 @@ export function Chat({
         }
         return [...prev, { id: event.runId, role: "assistant", content: text }];
       });
+      if (normalized && normalized.kind === "toolResult" && event.runId) {
+        const timings = runTimingsRef.current[event.runId];
+        if (timings && !timings.toolSeenAt) {
+          timings.toolSeenAt = Date.now();
+          addDiag(`timing tool_result runId=${event.runId} t=${timings.toolSeenAt - timings.startedAt}ms`);
+        }
+      }
       if (event.state === "final") setIsLoading(false);
+      if (event.state === "final" && event.runId) {
+        const timings = runTimingsRef.current[event.runId];
+        if (timings && !timings.finalAt) {
+          timings.finalAt = Date.now();
+          addDiag(`timing final runId=${event.runId} t=${timings.finalAt - timings.startedAt}ms`);
+        }
+        const revertModel = runRevertModelRef.current[event.runId];
+        if (revertModel && currentSessionRef.current && clientRef.current) {
+          clientRef.current
+            .patchSession(currentSessionRef.current, { model: revertModel })
+            .then(() => {
+              sessionModelRef.current[currentSessionRef.current!] = revertModel;
+              addDiag(`routing revert model=${revertModel}`);
+            })
+            .catch((err) => addDiag(`routing revert failed: ${String(err)}`));
+        }
+        delete runRevertModelRef.current[event.runId];
+      }
     } else if (event.state === "error") {
       setError(event.errorMessage || "Chat error");
       setIsLoading(false);
@@ -576,6 +654,31 @@ export function Chat({
     setIsLoading(true);
     setError(null);
     try {
+      const routingEnabled = import.meta.env.VITE_MODEL_ROUTING === "1";
+      const fastModelOverride = normalizeModelId(import.meta.env.VITE_FAST_MODEL);
+      const reasoningOverride = normalizeModelId(import.meta.env.VITE_REASONING_MODEL);
+      const defaultModel = normalizeModelId(selectedModel);
+      const fastModel = fastModelOverride ?? defaultModel;
+      const reasoningModel = reasoningOverride ?? defaultModel;
+      const decision = getRoutingDecision(messageContent);
+      const chosenModel = routingEnabled
+        ? decision.useReasoning
+          ? reasoningModel
+          : fastModel
+        : null;
+      if (routingEnabled && chosenModel && currentSession && clientRef.current) {
+        const lastModel = sessionModelRef.current[currentSession];
+        if (lastModel !== chosenModel) {
+          try {
+            await clientRef.current.patchSession(currentSession, { model: chosenModel });
+            sessionModelRef.current[currentSession] = chosenModel;
+            addDiag(`routing model=${chosenModel} reason=${decision.reason}`);
+          } catch (err) {
+            addDiag(`routing patch failed: ${String(err)}`);
+          }
+        }
+      }
+      const sendStart = Date.now();
       const now = Date.now();
       if (gatewayRunning && (connectedProvider || proxyEnabled) && now - lastIntegrationsSyncRef.current > 60_000) {
         try {
@@ -591,7 +694,12 @@ export function Chat({
       setLastSendId(runId || null);
       setLastSendAt(Date.now());
       if (runId) {
+        runTimingsRef.current[runId] = { startedAt: sendStart, ackAt: Date.now() };
+        addDiag(`timing send_ack runId=${runId} t=${runTimingsRef.current[runId].ackAt! - sendStart}ms`);
         addDiag(`send ok runId=${runId}`);
+        if (routingEnabled && chosenModel && fastModel && reasoningModel && chosenModel !== fastModel) {
+          runRevertModelRef.current[runId] = fastModel;
+        }
         const capturedRunId = runId;
         setTimeout(() => {
           if (!lastEventByRunIdRef.current[capturedRunId]) {
@@ -671,6 +779,13 @@ export function Chat({
 
   function renderAssistantContent(message: Message) {
     const payload = parseToolPayloads(message.content);
+    if (payload.hadToolPayload && message.id) {
+      const timings = runTimingsRef.current[message.id];
+      if (timings && !timings.toolSeenAt) {
+        timings.toolSeenAt = Date.now();
+        addDiag(`timing tool_payload runId=${message.id} t=${timings.toolSeenAt - timings.startedAt}ms`);
+      }
+    }
     if (!payload.events.length && !payload.errors.length) {
       return <MarkdownContent content={message.content} />;
     }
