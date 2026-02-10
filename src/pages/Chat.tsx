@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Sparkles, X, Loader2, ExternalLink, Paperclip, MessageSquare, Calendar, Globe, Mail, Activity, TrendingUp } from "lucide-react";
+import { Send, Sparkles, X, Loader2, ExternalLink, Paperclip, MessageSquare, Calendar, Globe, Mail, Activity, TrendingUp, FolderPlus } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
-import { GatewayClient, createGatewayClient, type ChatEvent } from "../lib/gateway";
+import { GatewayClient, createGatewayClient, type ChatEvent, type GatewayMessage } from "../lib/gateway";
 import { loadOnboardingData, type OnboardingData } from "../lib/profile";
 import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
 import { ChannelSetupModal } from "../components/ChannelSetupModal";
@@ -13,7 +13,7 @@ import { syncAllIntegrationsToGateway, getCachedIntegrationProviders, getIntegra
 import type { Page } from "../components/Layout";
 
 // NOTE: Most type definitions are omitted for brevity in this example
-type Message = { id: string; role: "user" | "assistant"; content: string };
+type Message = { id: string; role: "user" | "assistant"; content: string; kind?: "toolResult"; toolName?: string };
 export type ChatSession = { key: string; label?: string; displayName?: string; derivedTitle?: string; updatedAt?: number | null };
 type Provider = { id: string; name: string; icon: string; placeholder: string; keyUrl: string };
 type PendingAttachment = { id: string; fileName: string; tempPath: string; savedPath?: string };
@@ -172,6 +172,59 @@ function formatEventRange(start?: string, end?: string): { date?: string; time?:
   return { date, time };
 }
 
+function extractMessageText(message: GatewayMessage): { text: string; hasText: boolean; hasNonText: boolean } {
+  if (!message) return { text: "", hasText: false, hasNonText: false };
+  if (typeof message.content === "string") {
+    const trimmed = message.content.trim();
+    return { text: message.content, hasText: trimmed.length > 0, hasNonText: false };
+  }
+  if (typeof message.text === "string") {
+    const trimmed = message.text.trim();
+    return { text: message.text, hasText: trimmed.length > 0, hasNonText: false };
+  }
+  if (Array.isArray(message.content)) {
+    const parts: string[] = [];
+    let hasNonText = false;
+    for (const block of message.content) {
+      if (!block || typeof block !== "object") continue;
+      const entry = block as { type?: unknown; text?: unknown };
+      if (typeof entry.text === "string") {
+        parts.push(entry.text);
+      } else if (typeof entry.type === "string") {
+        hasNonText = true;
+      }
+    }
+    const text = parts.join("");
+    return { text, hasText: text.trim().length > 0, hasNonText };
+  }
+  return { text: "", hasText: false, hasNonText: false };
+}
+
+function normalizeGatewayMessage(message: GatewayMessage, id: string): Message | null {
+  const roleRaw = typeof message?.role === "string" ? message.role.toLowerCase() : "assistant";
+  const { text, hasText, hasNonText } = extractMessageText(message);
+  if (roleRaw === "user") {
+    if (!hasText) return null;
+    return { id, role: "user", content: text };
+  }
+  if (roleRaw === "assistant") {
+    if (!hasText && !hasNonText) return null;
+    if (!hasText) return null;
+    return { id, role: "assistant", content: text };
+  }
+  if (roleRaw === "toolresult" || roleRaw === "tool_result" || roleRaw === "tool") {
+    if (!hasText) return null;
+    return {
+      id,
+      role: "assistant",
+      content: text,
+      kind: "toolResult",
+      toolName: typeof message.toolName === "string" ? message.toolName : undefined,
+    };
+  }
+  return null;
+}
+
 const PROVIDERS: Provider[] = [
   { id: "anthropic", name: "Anthropic", icon: "A", placeholder: "sk-ant-...", keyUrl: "https://console.anthropic.com/settings/keys" },
   { id: "openai", name: "OpenAI", icon: "O", placeholder: "sk-...", keyUrl: "https://platform.openai.com/api-keys" },
@@ -180,16 +233,26 @@ const PROVIDERS: Provider[] = [
 
 const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:19789";
 const GATEWAY_TOKEN = "nova-local-gateway";
+const HISTORY_LIMIT = 500;
 
-// Suggestion items for the welcome screen
-const SUGGESTIONS = [
-  { icon: MessageSquare, label: "Message me on iMessage", action: { type: "channel", channel: "imessage" } as SuggestionAction },
-  { icon: MessageSquare, label: "Message me on WhatsApp", action: { type: "channel", channel: "whatsapp" } as SuggestionAction },
-  { icon: Mail, label: "Clean up my inbox", action: { type: "agent", message: "Help me clean up and organize my email inbox", requiresIntegration: "google_email" } as SuggestionAction },
-  { icon: Calendar, label: "Check my calendar", action: { type: "agent", message: "What's on my calendar for today and tomorrow?", requiresIntegration: "google_calendar" } as SuggestionAction },
-  { icon: TrendingUp, label: "Search Trending News on X", action: { type: "agent", message: "Search trending news on X and summarize what’s popular right now.", requiresIntegration: "x" } as SuggestionAction },
-  { icon: Globe, label: "Browse the web for me", action: { type: "agent", message: "I'd like you to browse the web and research something for me." } as SuggestionAction },
-];
+function buildSuggestions(userName: string, hasName: boolean) {
+  const folderLabel = hasName
+    ? `Create a ${userName} Folder to save documents in Home`
+    : "Create a Folder to save documents in Home";
+  const folderMessage = hasName
+    ? `Create a ${userName} folder in Home to save documents.`
+    : "Create a folder in Home to save documents.";
+  return [
+    { icon: MessageSquare, label: "Message me on iMessage", action: { type: "channel", channel: "imessage" } as SuggestionAction },
+    { icon: MessageSquare, label: "Message me on WhatsApp", action: { type: "channel", channel: "whatsapp" } as SuggestionAction },
+    { icon: Mail, label: "Clean up my inbox", action: { type: "agent", message: "Help me clean up and organize my email inbox", requiresIntegration: "google_email" } as SuggestionAction },
+    { icon: Calendar, label: "Check my calendar", action: { type: "agent", message: "What's on my calendar for today and tomorrow?", requiresIntegration: "google_calendar" } as SuggestionAction },
+    { icon: TrendingUp, label: "Search Trending News on X", action: { type: "agent", message: "Search trending news on X and summarize what’s popular right now.", requiresIntegration: "x" } as SuggestionAction },
+    { icon: Globe, label: "Browse the web for me", action: { type: "agent", message: "I'd like you to browse the web and research something for me." } as SuggestionAction },
+    { icon: Activity, label: "Write a todo list for this week in Home", action: { type: "agent", message: "Write a todo list for this week and save it in Home." } as SuggestionAction },
+    { icon: FolderPlus, label: folderLabel, action: { type: "agent", message: folderMessage } as SuggestionAction },
+  ];
+}
 
 export function Chat({
   gatewayRunning,
@@ -197,7 +260,6 @@ export function Chat({
   gatewayRetryIn,
   onStartGateway,
   useLocalKeys,
-  codeModel,
   imageModel: _imageModel,
   integrationsSyncing,
   integrationsMissing,
@@ -210,7 +272,6 @@ export function Chat({
   gatewayRetryIn: number | null;
   onStartGateway?: () => void;
   useLocalKeys: boolean;
-  codeModel: string;
   imageModel: string;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
@@ -244,7 +305,6 @@ export function Chat({
   const [lastChatEvent, setLastChatEvent] = useState<ChatEvent | null>(null);
   const [lastSendId, setLastSendId] = useState<string | null>(null);
   const [lastSendAt, setLastSendAt] = useState<number | null>(null);
-  const [chatMode, setChatMode] = useState<"general" | "code">("general");
   const [channelConfig, setChannelConfig] = useState<{ imessageEnabled: boolean; whatsappEnabled: boolean } | null>(null);
   const [channelModal, setChannelModal] = useState<{ isOpen: boolean; channel: "imessage" | "whatsapp" }>({
     isOpen: false,
@@ -253,6 +313,7 @@ export function Chat({
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const clientRef = useRef<GatewayClient | null>(null);
+  const currentSessionRef = useRef<string | null>(null);
   const handlersRef = useRef<{
     connected?: () => void;
     disconnected?: () => void;
@@ -303,6 +364,10 @@ export function Chat({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
+  useEffect(() => {
+    currentSessionRef.current = currentSession;
+  }, [currentSession]);
+
   // Load onboarding data for personalized welcome
   useEffect(() => {
     loadOnboardingData().then(setOnboardingData).catch(console.error);
@@ -327,20 +392,6 @@ export function Chat({
       setConnectedProvider(null);
     }
   }, [proxyEnabled, connectedProvider]);
-
-  useEffect(() => {
-    if (!currentSession || !clientRef.current) return;
-    const modelOverride =
-      chatMode === "code"
-        ? codeModel.startsWith("openrouter/")
-          ? codeModel
-          : `openrouter/${codeModel}`
-        : null;
-    clientRef.current
-      .patchSession(currentSession, { model: modelOverride })
-      .then(() => addDiag(`session model override: ${modelOverride || "default"}`))
-      .catch((err) => addDiag(`session override failed: ${String(err)}`));
-  }, [chatMode, currentSession, codeModel]);
 
   useEffect(() => {
     addDiag(`status proxy=${proxyEnabled} gatewayRunning=${gatewayRunning}`);
@@ -455,14 +506,18 @@ export function Chat({
     if (event?.runId) {
       lastEventByRunIdRef.current[event.runId] = Date.now();
     }
+    if (event?.sessionKey && currentSessionRef.current && event.sessionKey !== currentSessionRef.current) {
+      return;
+    }
     if (event.state === "delta" || event.state === "final") {
-      const text = event.message?.content?.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('') || '';
+      const normalized = event.message ? normalizeGatewayMessage(event.message as GatewayMessage, event.runId) : null;
+      const text = normalized?.content ?? "";
       if (!text) return;
       setMessages(prev => {
         const existingIdx = prev.findIndex(m => m.id === event.runId && m.role === "assistant");
         if (existingIdx >= 0) {
           const updated = [...prev];
-          updated[existingIdx].content = text;
+          updated[existingIdx] = { ...updated[existingIdx], content: text };
           return updated;
         }
         return [...prev, { id: event.runId, role: "assistant", content: text }];
@@ -490,29 +545,13 @@ export function Chat({
 
   async function selectSession(sessionId: string) {
     setCurrentSession(sessionId);
-    const history = await clientRef.current?.getChatHistory(sessionId) || [];
+    const history = await clientRef.current?.getChatHistory(sessionId, HISTORY_LIMIT) || [];
+    if (currentSessionRef.current && currentSessionRef.current !== sessionId) {
+      return;
+    }
     const msgs: Message[] = history
-      .map((m: any, i: number) => ({
-        id: `h-${i}`,
-        role: m.role,
-        content: m.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('')
-      }))
-      .filter((m: Message) => {
-        const trimmed = m.content.trim();
-        // Drop empty messages (tool-call/tool-result with no text blocks)
-        if (!trimmed) return false;
-        // Drop assistant messages that are pure JSON tool output — these are
-        // intermediate tool results that the final assistant reply summarizes.
-        if (m.role === "assistant" && (trimmed[0] === "{" || trimmed[0] === "[")) {
-          try {
-            JSON.parse(trimmed);
-            return false;
-          } catch {
-            // not valid JSON, keep the message
-          }
-        }
-        return true;
-      });
+      .map((m: any, i: number) => normalizeGatewayMessage(m as GatewayMessage, `h-${i}`))
+      .filter((m: Message | null): m is Message => !!m && m.content.trim().length > 0);
     setMessages(msgs);
     if (msgs.length > 0) {
       setShowWelcome(false);
@@ -630,13 +669,17 @@ export function Chat({
     handleSend(`I've connected ${channelName}. Please send me a test message!`);
   }
 
-  function renderAssistantContent(content: string) {
-    const payload = parseToolPayloads(content);
+  function renderAssistantContent(message: Message) {
+    const payload = parseToolPayloads(message.content);
     if (!payload.events.length && !payload.errors.length) {
-      return <MarkdownContent content={content} />;
+      return <MarkdownContent content={message.content} />;
     }
     return (
       <div className="space-y-2">
+        <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)]">
+          <span>{message.kind === "toolResult" ? "Tool Result" : "Assistant"}</span>
+          {message.toolName ? <span className="text-[var(--text-quaternary)]">{message.toolName}</span> : null}
+        </div>
         {payload.cleanText ? <MarkdownContent content={payload.cleanText} /> : null}
         {payload.events.length > 0 && (
           <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-3 shadow-sm">
@@ -715,6 +758,9 @@ export function Chat({
   const renderWelcome = () => {
     const userName = onboardingData?.userName || "there";
     const agentName = onboardingData?.agentName || "Nova";
+    const hasName = userName !== "there";
+    const displayName = hasName ? userName : "My";
+    const suggestions = buildSuggestions(displayName, hasName);
 
     return (
       <div className="h-full flex flex-col items-center justify-center p-6 text-center">
@@ -729,7 +775,7 @@ export function Chat({
             What would you like me to help you with?
           </p>
           <div className="flex flex-wrap justify-center gap-3">
-            {SUGGESTIONS.map((suggestion, index) => (
+            {suggestions.map((suggestion, index) => (
               <SuggestionChip
                 key={index}
                 icon={suggestion.icon}
@@ -816,11 +862,6 @@ export function Chat({
             <span className="text-[12px] font-bold text-[var(--text-primary)] truncate max-w-[150px]">
               {currentSession ? sessionTitle(sessions.find(s => s.key === currentSession) || { key: currentSession }) : "New Chat"}
             </span>
-            <select value={chatMode} onChange={e => setChatMode(e.target.value as "general" | "code")}
-              className="px-2 py-0.5 bg-white border border-[var(--border-subtle)] rounded-md text-[11px] font-bold text-[var(--text-primary)] focus:outline-none shadow-sm cursor-pointer hover:bg-[var(--system-gray-6)] transition-all">
-              <option value="general">General</option>
-              <option value="code">Code</option>
-            </select>
           </div>
         <div className="flex items-center gap-3 px-2">
           <div className="flex items-center gap-1.5">
@@ -904,7 +945,7 @@ export function Chat({
             <div key={msg.id} className={clsx("flex", msg.role === "user" ? "justify-end" : "justify-start")}>
               <div className={clsx("max-w-[85%] px-4 py-2.5 rounded-2xl",
                 msg.role === "user" ? "bg-[var(--purple-accent)] text-white" : "bg-[var(--bg-tertiary)] text-[var(--text-primary)]")}>
-                {msg.role === "assistant" ? renderAssistantContent(msg.content) : <p className="whitespace-pre-wrap">{msg.content}</p>}
+              {msg.role === "assistant" ? renderAssistantContent(msg) : <p className="whitespace-pre-wrap">{msg.content}</p>}
               </div>
             </div>
           ))}

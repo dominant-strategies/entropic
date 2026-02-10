@@ -449,7 +449,6 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             gatewayRetryIn={gatewayRetryIn}
             onStartGateway={startGatewayFromChat}
             useLocalKeys={useLocalKeys}
-            codeModel={codeModel}
             imageModel={imageModel}
             integrationsSyncing={integrationsSyncing}
             integrationsMissing={integrationsMissing}

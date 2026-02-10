@@ -29,20 +29,25 @@ export type ChatEvent = {
   sessionKey: string;
   seq: number;
   state: "delta" | "final" | "aborted" | "error";
-  message?: Message;
+  message?: GatewayMessage;
   errorMessage?: string;
   usage?: unknown;
   stopReason?: string;
 };
 
-type Message = {
-  role: "user" | "assistant";
-  content: ContentBlock[];
+export type GatewayContentBlock = {
+  type?: string;
+  text?: string;
+  [key: string]: unknown;
 };
 
-type ContentBlock = {
-  type: "text";
-  text: string;
+export type GatewayMessage = {
+  role?: string;
+  content?: string | GatewayContentBlock[];
+  text?: string;
+  toolName?: string;
+  toolCallId?: string;
+  [key: string]: unknown;
 };
 
 type Session = {
@@ -213,8 +218,8 @@ export class GatewayClient {
     return result.sessions || [];
   }
 
-  async getChatHistory(sessionKey: string, limit = 50): Promise<Message[]> {
-    const result = await this.rpc<{ messages: Message[] }>("chat.history", {
+  async getChatHistory(sessionKey: string, limit = 200): Promise<GatewayMessage[]> {
+    const result = await this.rpc<{ messages: GatewayMessage[] }>("chat.history", {
       sessionKey,
       limit,
     });
