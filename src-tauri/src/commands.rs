@@ -615,7 +615,6 @@ fn start_scanner_sidecar() {
             "--volumes-from", &format!("{}:ro", OPENCLAW_CONTAINER),
             "--network", "nova-net",
             "-p", "127.0.0.1:19790:8000",
-            "--restart", "unless-stopped",
             "nova-skill-scanner:latest",
         ])
         .output();
@@ -634,6 +633,19 @@ fn stop_scanner_sidecar() {
     let _ = docker_command()
         .args(["stop", SCANNER_CONTAINER])
         .output();
+}
+
+/// Stop all Nova containers on app exit.
+/// Called from the Tauri RunEvent::Exit handler.
+pub fn cleanup_on_exit() {
+    println!("[Nova] Cleaning up containers on exit...");
+    // Stop the gateway container
+    let _ = docker_command()
+        .args(["stop", "-t", "5", OPENCLAW_CONTAINER])
+        .output();
+    // Stop the scanner sidecar
+    stop_scanner_sidecar();
+    println!("[Nova] Cleanup complete.");
 }
 
 fn docker_exec_output(args: &[&str]) -> Result<String, String> {
@@ -1518,7 +1530,6 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         "-v".to_string(), "nova-openclaw-data:/data".to_string(),
         "--network".to_string(), "nova-net".to_string(),
         "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
-        "--restart".to_string(), "unless-stopped".to_string(),
         "openclaw-runtime:latest".to_string(),
     ]);
 
@@ -1702,7 +1713,6 @@ pub async fn start_gateway_with_proxy(
         "-v".to_string(), "nova-openclaw-data:/data".to_string(),
         "--network".to_string(), "nova-net".to_string(),
         "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
-        "--restart".to_string(), "unless-stopped".to_string(),
         "openclaw-runtime:latest".to_string(),
     ]);
 

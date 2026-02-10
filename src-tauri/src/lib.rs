@@ -106,10 +106,12 @@ pub fn run() {
                 event: WindowEvent::CloseRequested { .. },
                 ..
             } => {
-                println!("[Nova] App closing; leaving gateway running.");
+                println!("[Nova] Window close requested — stopping containers...");
+                commands::cleanup_on_exit();
             }
             RunEvent::Exit => {
-                println!("[Nova] App exiting; leaving gateway running.");
+                println!("[Nova] App exiting — stopping containers...");
+                commands::cleanup_on_exit();
             }
             _ => {}
         });
