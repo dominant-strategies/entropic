@@ -14,6 +14,7 @@
     "dev:protocol": "bash ./scripts/register-dev-protocol.sh",
     "bundle:colima": "./scripts/bundle-colima.sh",
     "bundle:docker": "./scripts/bundle-docker.sh",
+    "bundle:runtime-image": "./scripts/bundle-runtime-image.sh",
     "bundle:all": "pnpm bundle:colima && pnpm bundle:docker",
     "build:cross-platform": "./scripts/build-cross-platform.sh"
   },

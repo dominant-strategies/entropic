@@ -65,8 +65,9 @@ export function SetupScreen({ onComplete }: Props) {
               First-Time Setup
             </h2>
             <p className="text-gray-500 text-sm mb-6">
-              Nova needs to set up a secure sandbox environment. This downloads
-              a small Linux VM (~300MB) and only needs to happen once.
+              Nova needs to set up a secure sandbox environment. Everything is
+              included — no Docker Desktop or other tools required. This only
+              needs to happen once.
             </p>
             <button
               onClick={startSetup}
