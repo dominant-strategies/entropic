@@ -32,12 +32,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: dominant-strategies/openclaw
+          token: ${{ secrets.NOVA_READ_PAT }}
           path: openclaw
 
       - name: Checkout Nova skills
         uses: actions/checkout@v4
         with:
           repository: dominant-strategies/nova-skills
+          token: ${{ secrets.NOVA_READ_PAT }}
           path: nova-skills
 
       - uses: actions/setup-node@v4
@@ -235,12 +237,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: dominant-strategies/openclaw
+          token: ${{ secrets.NOVA_READ_PAT }}
           path: openclaw
 
       - name: Checkout Nova skills
         uses: actions/checkout@v4
         with:
           repository: dominant-strategies/nova-skills
+          token: ${{ secrets.NOVA_READ_PAT }}
           path: nova-skills
 
       - name: Determine version
