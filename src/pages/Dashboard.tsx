@@ -11,7 +11,7 @@ import { Logs } from "./Logs";
 import { BillingPage } from "./BillingPage";
 import { Settings } from "./Settings";
 import { useAuth } from "../contexts/AuthContext";
-import { createGatewayToken, getProxyUrl } from "../lib/auth";
+import { createGatewayToken, getProxyUrl, getBalance, ApiRequestError } from "../lib/auth";
 import {
   hasPendingIntegrationImports,
   syncPendingIntegrationImports,
@@ -45,7 +45,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [gatewayRunning, setGatewayRunning] = useState(false);
   const [isTogglingGateway, setIsTogglingGateway] = useState(false);
   const [showGatewayStartup, setShowGatewayStartup] = useState(false);
-  const [startupError, setStartupError] = useState<string | null>(null);
+  const [startupError, setStartupError] = useState<{
+    message: string;
+    actions?: Array<{ label: string; onClick: () => void }>;
+  } | null>(null);
   const [gatewayRetryIn, setGatewayRetryIn] = useState<number | null>(null);
   const [integrationsSyncing, setIntegrationsSyncing] = useState(false);
   const [integrationsMissing, setIntegrationsMissing] = useState(false);
@@ -214,6 +217,17 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     return model.startsWith("openrouter/") ? model : `openrouter/${model}`;
   }
 
+  async function persistUseLocalKeys(value: boolean) {
+    setUseLocalKeys(value);
+    try {
+      const store = await TauriStore.load("nova-settings.json");
+      await store.set("useLocalKeys", value);
+      await store.save();
+    } catch (error) {
+      console.error("[Nova] Failed to save useLocalKeys:", error);
+    }
+  }
+
   async function startGatewayProxyFlow({
     model,
     image,
@@ -252,6 +266,19 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         }
       }
 
+      try {
+        const balance = await getBalance();
+        if (balance.balance_cents <= 0) {
+          setStartupError({
+            message: "You’re out of credits. Add credits to continue using Nova in proxy mode.",
+            actions: [{ label: "Add Credits", onClick: () => setCurrentPage("billing") }],
+          });
+          return false;
+        }
+      } catch (error) {
+        console.warn("[Nova] Balance check failed:", error);
+      }
+
       console.log("[Nova] Creating gateway token...");
       const { token } = await createGatewayToken();
       gatewayTokenRef.current = token;
@@ -279,10 +306,46 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       await checkGateway();
       clearGatewayRetry();
       return true;
-    } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
-      console.error("[Nova] Proxy start failed:", errMsg, error);
-      setStartupError(errMsg);
+    } catch (error: any) {
+      console.error("[Nova] Proxy start failed:", error);
+
+      const isApiError = error instanceof ApiRequestError;
+      const status = isApiError ? error.status : undefined;
+      const isNetwork =
+        (isApiError && error.kind === "network") ||
+        (typeof error?.message === "string" &&
+          /load failed|failed to fetch|network/i.test(error.message));
+
+      if (status === 402) {
+        setStartupError({
+          message: "You’re out of credits. Add credits to continue using Nova in proxy mode.",
+          actions: [{ label: "Add Credits", onClick: () => setCurrentPage("billing") }],
+        });
+        return false;
+      }
+
+      if (status === 401) {
+        setStartupError({
+          message: "Your session expired. Please sign in again.",
+          actions: [{ label: "Open Settings", onClick: () => setCurrentPage("settings") }],
+        });
+        return false;
+      }
+
+      if (isNetwork) {
+        setStartupError({
+          message: "Can’t reach the Nova backend. Check your connection or switch to Local Keys.",
+          actions: [
+            { label: "Retry", onClick: () => startGatewayProxyFlow({ model, image, stopFirst, allowRetry: false }) },
+            { label: "Use Local Keys", onClick: () => persistUseLocalKeys(true) },
+          ],
+        });
+        return false;
+      }
+
+      setStartupError({
+        message: error instanceof Error ? error.message : "Failed to start gateway",
+      });
       if (allowRetry) {
         scheduleGatewayRetry(() => {
           startGatewayProxyFlow({ model, image, stopFirst, allowRetry });
@@ -395,7 +458,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       await checkGateway();
     } catch (error) {
       console.error("[Nova] Failed to toggle gateway:", error);
-      setStartupError(error instanceof Error ? error.message : "Failed to toggle gateway");
+      setStartupError({ message: error instanceof Error ? error.message : "Failed to toggle gateway" });
     } finally {
       setIsTogglingGateway(false);
     }
@@ -610,7 +673,20 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             </div>
             {startupError && (
               <div className="mt-3 text-xs text-red-600">
-                {startupError}
+                {startupError.message}
+                {startupError.actions && startupError.actions.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {startupError.actions.map((action) => (
+                      <button
+                        key={action.label}
+                        className="rounded-full border border-[var(--border-subtle)] bg-white px-3 py-1 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-muted)]"
+                        onClick={action.onClick}
+                      >
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

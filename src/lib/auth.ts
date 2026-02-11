@@ -426,6 +426,20 @@ export interface Model {
 /**
  * Make authenticated API request
  */
+export class ApiRequestError extends Error {
+  status?: number;
+  data?: any;
+  kind?: "network" | "http";
+
+  constructor(message: string, opts?: { status?: number; data?: any; kind?: "network" | "http" }) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = opts?.status;
+    this.data = opts?.data;
+    this.kind = opts?.kind;
+  }
+}
+
 export async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -433,21 +447,38 @@ export async function apiRequest<T>(
   const token = await getAccessToken();
 
   if (!token) {
-    throw new Error("Not authenticated");
+    throw new ApiRequestError("Not authenticated", { status: 401, kind: "http" });
   }
 
-  const response = await fetch(`${API_URL}${endpoint}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      ...options.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${endpoint}`, {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        ...options.headers,
+      },
+    });
+  } catch (error: any) {
+    throw new ApiRequestError("Network request failed", { kind: "network", data: error });
+  }
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.error?.message || `API error: ${response.status}`);
+    let errorBody: any = {};
+    try {
+      errorBody = await response.json();
+    } catch {
+      try {
+        errorBody = { raw: await response.text() };
+      } catch {
+        errorBody = {};
+      }
+    }
+    throw new ApiRequestError(
+      errorBody?.error?.message || `API error: ${response.status}`,
+      { status: response.status, data: errorBody, kind: "http" }
+    );
   }
 
   return response.json();
