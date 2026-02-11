@@ -121,16 +121,29 @@ jobs:
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
           security create-keychain -p "" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "" "$KEYCHAIN_PATH"
           security import certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" \
-            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            -A -f pkcs12 -k "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+          SIGNING_SHA1="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | awk -v identity="$APPLE_SIGNING_IDENTITY" '$0 ~ "\"" identity "\"" {print $2; exit}')"
+          if [ -z "$SIGNING_SHA1" ]; then
+            echo "Could not find signing identity in imported keychain: $APPLE_SIGNING_IDENTITY"
+            exit 1
+          fi
+
+          echo "APPLE_SIGNING_IDENTITY_SHA1=$SIGNING_SHA1" >> "$GITHUB_ENV"
+          echo "APPLE_SIGNING_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
           rm certificate.p12
 
       - name: Build Tauri app
@@ -139,12 +152,12 @@ jobs:
           NOVA_GOOGLE_CLIENT_SECRET: ${{ secrets.NOVA_GOOGLE_CLIENT_SECRET }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY_SHA1 }}
         run: pnpm tauri build
 
       - name: Sign bundled binaries
         env:
-          CERT: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          CERT: ${{ env.APPLE_SIGNING_IDENTITY_SHA1 }}
         run: |
           APP_PATH="src-tauri/target/release/bundle/macos/Nova.app"
           ENTITLEMENTS="src-tauri/entitlements.plist"
@@ -164,7 +177,7 @@ jobs:
           APP_PATH="src-tauri/target/release/bundle/macos/Nova.app"
           DMG_NAME="Nova-${{ steps.version.outputs.tag }}-mac-arm64.dmg"
           hdiutil create -volname "Nova" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_NAME"
-          codesign --force --timestamp --sign "${{ secrets.APPLE_SIGNING_IDENTITY }}" "$DMG_NAME"
+          codesign --force --timestamp --sign "${{ env.APPLE_SIGNING_IDENTITY_SHA1 }}" "$DMG_NAME"
           echo "dmg_name=$DMG_NAME" >> "$GITHUB_ENV"
 
       - name: Notarize DMG
