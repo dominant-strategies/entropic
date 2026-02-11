@@ -24,14 +24,16 @@ APP_PATH="${APP_PATH:-$PROJECT_ROOT/src-tauri/target/release/bundle/macos/Nova.a
 DMG_PATH="${DMG_PATH:-$HOME/Nova.dmg}"
 ENTITLEMENTS_PATH="${ENTITLEMENTS_PATH:-$PROJECT_ROOT/src-tauri/entitlements.plist}"
 
-CERT="${CERT:-}"
+# Prefer GitHub Actions secret names, keep legacy names as fallback.
+APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-${CERT:-}}"
 APPLE_ID="${APPLE_ID:-}"
-TEAM_ID="${TEAM_ID:-}"
-APP_PASSWORD="${APP_PASSWORD:-}"
+APPLE_TEAM_ID="${APPLE_TEAM_ID:-${TEAM_ID:-}}"
+APPLE_APP_PASSWORD="${APPLE_APP_PASSWORD:-${APP_PASSWORD:-}}"
 
-if [ -z "$CERT" ] || [ -z "$APPLE_ID" ] || [ -z "$TEAM_ID" ] || [ -z "$APP_PASSWORD" ]; then
+if [ -z "$APPLE_SIGNING_IDENTITY" ] || [ -z "$APPLE_ID" ] || [ -z "$APPLE_TEAM_ID" ] || [ -z "$APPLE_APP_PASSWORD" ]; then
   echo "Missing required env vars. Set in $ENV_FILE or export them:"
-  echo "  CERT, APPLE_ID, TEAM_ID, APP_PASSWORD"
+  echo "  APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD"
+  echo "Legacy aliases also supported: CERT, TEAM_ID, APP_PASSWORD"
   exit 1
 fi
 
@@ -44,23 +46,23 @@ echo "Using:"
 echo "  APP_PATH=$APP_PATH"
 echo "  DMG_PATH=$DMG_PATH"
 echo "  ENTITLEMENTS_PATH=$ENTITLEMENTS_PATH"
-echo "  CERT=$CERT"
+echo "  APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
 echo "  APPLE_ID=$APPLE_ID"
-echo "  TEAM_ID=$TEAM_ID"
+echo "  APPLE_TEAM_ID=$APPLE_TEAM_ID"
 
 APP_DIR="$(dirname "$APP_PATH")"
 cd "$APP_DIR"
 
 echo "Signing bundled binaries..."
-codesign --force --options runtime --timestamp --sign "$CERT" \
+codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
   "$APP_PATH/Contents/Resources/resources/bin/docker"
-codesign --force --options runtime --timestamp --sign "$CERT" \
+codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
   "$APP_PATH/Contents/Resources/resources/bin/colima"
-codesign --force --options runtime --timestamp --sign "$CERT" \
+codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
   "$APP_PATH/Contents/Resources/resources/bin/limactl"
 
 echo "Signing Nova.app..."
-codesign --force --options runtime --timestamp --sign "$CERT" \
+codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
   --entitlements "$ENTITLEMENTS_PATH" \
   --deep "$APP_PATH"
 
@@ -68,13 +70,13 @@ echo "Creating DMG..."
 hdiutil create -volname Nova -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
 
 echo "Signing DMG..."
-codesign --force --timestamp --sign "$CERT" "$DMG_PATH"
+codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DMG_PATH"
 
 echo "Submitting for notarization..."
 xcrun notarytool submit "$DMG_PATH" \
   --apple-id "$APPLE_ID" \
-  --team-id "$TEAM_ID" \
-  --password "$APP_PASSWORD" \
+  --team-id "$APPLE_TEAM_ID" \
+  --password "$APPLE_APP_PASSWORD" \
   --wait
 
 echo "Stapling notarization ticket..."
