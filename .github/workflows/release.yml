@@ -1,0 +1,271 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v0.1.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  NODE_VERSION: '22'
+
+jobs:
+  # ──────────────────────────────────────────────
+  # macOS (Apple Silicon)
+  # ──────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-action/setup@v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: npm install -g pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Bundle runtime (Colima + Lima + Docker CLI)
+        run: ./scripts/bundle-runtime.sh
+
+      - name: Import Apple signing certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          security create-keychain -p "" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "" "$KEYCHAIN_PATH"
+          security import certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          rm certificate.p12
+
+      - name: Build Tauri app
+        env:
+          NOVA_GOOGLE_CLIENT_ID: ${{ secrets.NOVA_GOOGLE_CLIENT_ID }}
+          NOVA_GOOGLE_CLIENT_SECRET: ${{ secrets.NOVA_GOOGLE_CLIENT_SECRET }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: pnpm tauri build
+
+      - name: Sign bundled binaries
+        env:
+          CERT: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          APP_PATH="src-tauri/target/release/bundle/macos/Nova.app"
+          ENTITLEMENTS="src-tauri/entitlements.plist"
+
+          for bin in docker colima limactl; do
+            if [ -f "$APP_PATH/Contents/Resources/resources/bin/$bin" ]; then
+              codesign --force --options runtime --timestamp --sign "$CERT" \
+                "$APP_PATH/Contents/Resources/resources/bin/$bin"
+            fi
+          done
+
+          codesign --force --options runtime --timestamp --sign "$CERT" \
+            --entitlements "$ENTITLEMENTS" --deep "$APP_PATH"
+
+      - name: Create and sign DMG
+        run: |
+          APP_PATH="src-tauri/target/release/bundle/macos/Nova.app"
+          DMG_NAME="Nova-${{ steps.version.outputs.tag }}-mac-arm64.dmg"
+          hdiutil create -volname "Nova" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_NAME"
+          codesign --force --timestamp --sign "${{ secrets.APPLE_SIGNING_IDENTITY }}" "$DMG_NAME"
+          echo "dmg_name=$DMG_NAME" >> "$GITHUB_ENV"
+
+      - name: Notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool submit "${{ env.dmg_name }}" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APP_PASSWORD" \
+            --wait
+          xcrun stapler staple "${{ env.dmg_name }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-mac-arm64
+          path: ${{ env.dmg_name }}
+
+  # ──────────────────────────────────────────────
+  # Linux (x86_64)
+  # ──────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev
+
+      - uses: dtolnay/rust-action/setup@v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: npm install -g pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Bundle runtime (Linux)
+        run: ./scripts/bundle-runtime.sh linux x86_64
+
+      - name: Build Tauri app
+        env:
+          NOVA_GOOGLE_CLIENT_ID: ${{ secrets.NOVA_GOOGLE_CLIENT_ID }}
+          NOVA_GOOGLE_CLIENT_SECRET: ${{ secrets.NOVA_GOOGLE_CLIENT_SECRET }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build
+
+      - name: Prepare artifacts
+        id: artifacts
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          BUNDLE_DIR="src-tauri/target/release/bundle"
+
+          # Rename .deb
+          DEB_NAME="Nova-${VERSION}-linux-x86_64.deb"
+          cp "$BUNDLE_DIR/deb/"*.deb "$DEB_NAME"
+          echo "deb_name=$DEB_NAME" >> "$GITHUB_OUTPUT"
+
+          # Rename .AppImage
+          APPIMAGE_NAME="Nova-${VERSION}-linux-x86_64.AppImage"
+          cp "$BUNDLE_DIR/appimage/"*.AppImage "$APPIMAGE_NAME"
+          chmod +x "$APPIMAGE_NAME"
+          echo "appimage_name=$APPIMAGE_NAME" >> "$GITHUB_OUTPUT"
+
+          # Create tarball from the raw binary + resources
+          TAR_NAME="Nova-${VERSION}-linux-x86_64.tar.gz"
+          mkdir -p "nova-${VERSION}"
+          cp "src-tauri/target/release/nova" "nova-${VERSION}/"
+          cp -r "src-tauri/resources" "nova-${VERSION}/" 2>/dev/null || true
+          tar czf "$TAR_NAME" "nova-${VERSION}"
+          echo "tar_name=$TAR_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-linux-x86_64
+          path: |
+            ${{ steps.artifacts.outputs.deb_name }}
+            ${{ steps.artifacts.outputs.appimage_name }}
+            ${{ steps.artifacts.outputs.tar_name }}
+
+  # ──────────────────────────────────────────────
+  # Publish to dominant-strategies/nova-releases
+  # ──────────────────────────────────────────────
+  publish:
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Create release on public repo
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          REPO="dominant-strategies/nova-releases"
+
+          # Collect all release files
+          FILES=()
+          for f in artifacts/nova-mac-arm64/* artifacts/nova-linux-x86_64/*; do
+            [ -f "$f" ] && FILES+=("$f")
+          done
+
+          echo "Uploading ${#FILES[@]} files for $VERSION:"
+          printf '  %s\n' "${FILES[@]}"
+
+          if gh release view "$VERSION" --repo "$REPO" &>/dev/null; then
+            echo "Release $VERSION exists, uploading assets..."
+            gh release upload "$VERSION" "${FILES[@]}" \
+              --repo "$REPO" --clobber
+          else
+            echo "Creating release $VERSION..."
+            gh release create "$VERSION" "${FILES[@]}" \
+              --repo "$REPO" \
+              --title "Nova $VERSION" \
+              --notes "$(cat <<EOF
+          ## Nova $VERSION
+
+          ### Downloads
+
+          | Platform | File | Install |
+          |----------|------|---------|
+          | macOS (Apple Silicon) | \`Nova-${VERSION}-mac-arm64.dmg\` | Open DMG, drag to Applications |
+          | Linux (x86_64) .deb | \`Nova-${VERSION}-linux-x86_64.deb\` | \`sudo dpkg -i Nova-*.deb\` |
+          | Linux (x86_64) AppImage | \`Nova-${VERSION}-linux-x86_64.AppImage\` | \`chmod +x\` and run |
+          | Linux (x86_64) tarball | \`Nova-${VERSION}-linux-x86_64.tar.gz\` | Extract and run \`./nova\` |
+
+          ### Requirements
+          - **macOS**: macOS 12+ (Apple Silicon). App is signed and notarized.
+          - **Linux**: Docker installed (\`sudo apt install docker.io\`). GTK3 + WebKitGTK.
+          EOF
+          )"
+          fi
