@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { User, CreditCard, LogOut, ChevronDown, Settings } from "lucide-react";
+import { User, CreditCard, LogOut, ChevronDown, Settings, Camera } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 
 interface UserMenuProps {
@@ -24,11 +24,22 @@ export function UserMenu({ onOpenBilling, onOpenSettings }: UserMenuProps) {
       <button
         onClick={() => setIsOpen(!isOpen)}
         className="flex items-center gap-2 px-3 py-2 rounded-xl
-                 hover:bg-[var(--bg-tertiary)] transition-colors"
+                 hover:bg-[var(--bg-tertiary)] transition-colors group"
       >
-        <div className="w-8 h-8 rounded-full bg-[var(--purple-accent)]/20
-                      flex items-center justify-center">
-          <User className="w-4 h-4 text-[var(--purple-accent)]" />
+        <div className="relative">
+          <div className="w-8 h-8 rounded-full bg-[var(--purple-accent)]/20
+                        flex items-center justify-center overflow-hidden border border-[var(--purple-accent)]/10">
+            {user?.user_metadata?.avatar_url ? (
+              <img src={user.user_metadata.avatar_url} alt="Avatar" className="w-full h-full object-cover" />
+            ) : (
+              <User className="w-4 h-4 text-[var(--purple-accent)]" />
+            )}
+          </div>
+          {/* Change Avatar Indicator */}
+          <div className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-black border border-white
+                        flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+            <Camera className="w-2 h-2 text-white" />
+          </div>
         </div>
         <div className="text-left hidden sm:block">
           <div className="text-sm font-medium text-[var(--text-primary)] truncate max-w-[120px]">

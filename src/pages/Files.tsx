@@ -21,7 +21,7 @@ import {
   Send,
   Loader2,
   Image,
-  Sparkles,
+  Puzzle,
   Radio,
   ScrollText,
   Settings as SettingsIcon,
@@ -44,7 +44,6 @@ const Tasks = lazy(() => import("./Tasks").then((m) => ({ default: m.Tasks })));
 const BillingPage = lazy(() => import("./BillingPage").then((m) => ({ default: m.BillingPage })));
 import { ModelSelector } from "../components/ModelSelector";
 import { useAuth } from "../contexts/AuthContext";
-import { getUsage } from "../lib/auth";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -311,9 +310,6 @@ export function Files({
   const chatSessionRef = useRef<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // Billing summary
-  const [usageSummary, setUsageSummary] = useState<{ dollars: string; requests: number } | null>(null);
-
   const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
 
   // Desktop icons
@@ -329,37 +325,6 @@ export function Files({
     moved: boolean;
   } | null>(null);
   const iconClickGuardRef = useRef(false);
-
-  useEffect(() => {
-    if (!proxyEnabled) {
-      setUsageSummary(null);
-      return;
-    }
-    const cacheKey = "nova_usage_cache_v1";
-    try {
-      const raw = sessionStorage.getItem(cacheKey);
-      if (raw) {
-        const parsed = JSON.parse(raw) as { ts: number; data: { dollars: string; requests: number } };
-        if (parsed?.data && Date.now() - parsed.ts < 5 * 60 * 1000) {
-          setUsageSummary(parsed.data);
-          return;
-        }
-      }
-    } catch {
-      // ignore cache read issues
-    }
-    getUsage(30)
-      .then((data) => {
-        const next = { dollars: data.total_cost_dollars, requests: data.total_requests };
-        setUsageSummary(next);
-        try {
-          sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data: next }));
-        } catch {
-          // ignore cache write issues
-        }
-      })
-      .catch(() => {});
-  }, [proxyEnabled]);
 
   function handleIconMouseDown(id: string, e: ReactMouseEvent<HTMLElement>) {
     e.stopPropagation();
@@ -706,44 +671,7 @@ export function Files({
             </div>
           </div>
 
-          <div className="flex items-center gap-4 flex-1 justify-center min-w-0 px-2">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] font-bold text-[var(--text-tertiary)] uppercase tracking-tight">Chat</span>
-              <ModelSelector compact selectedModel={selectedModel} onModelChange={onModelChange} />
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] font-bold text-[var(--text-tertiary)] uppercase tracking-tight">Code</span>
-              <ModelSelector compact selectedModel={codeModel} onModelChange={onCodeModelChange} />
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] font-bold text-[var(--text-tertiary)] uppercase tracking-tight">Vision</span>
-              <ModelSelector compact selectedModel={imageModel} onModelChange={onImageModelChange} />
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <div className="text-right leading-tight">
-              <div className="text-[11px] font-bold text-[var(--text-primary)]">
-                ${balance?.balance_dollars || "0.00"}
-              </div>
-              <div className="text-[9px] text-[var(--text-tertiary)] font-medium">
-                {proxyEnabled
-                  ? usageSummary
-                    ? `$${usageSummary.dollars}`
-                    : "..."
-                  : "Local"}
-              </div>
-            </div>
-            <button
-              onClick={() => {
-                if (!billingOpen) setBillingOpen(true);
-                focusWindow("billing");
-              }}
-              className="text-[10px] font-bold px-2 py-1 rounded-md bg-green-500/10 text-green-700 border border-green-500/20 hover:bg-green-500/20 transition-colors"
-            >
-              Billing
-            </button>
-          </div>
+          <div className="flex-1" />
         </div>
       </div>
 
@@ -1125,7 +1053,7 @@ export function Files({
           {pluginsOpen && (
             <AppWindow
               title="Plugins"
-              icon={Sparkles}
+              icon={Puzzle}
               position={pluginsPos}
               size={pluginsSize}
               zIndex={windowZ.plugins ?? 62}
@@ -1320,7 +1248,7 @@ export function Files({
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
                 style={{ background: "linear-gradient(180deg, #c084fc 0%, #7c3aed 100%)", boxShadow: "0 3px 10px rgba(124,58,237,0.4)" }}
               >
-                <Sparkles className="w-6 h-6 text-white" />
+                <Puzzle className="w-6 h-6 text-white" />
               </div>
               <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${pluginsOpen ? "bg-white/80" : "opacity-0"}`} />
             </button>
