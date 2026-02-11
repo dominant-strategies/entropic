@@ -4,7 +4,6 @@ import {
   Radio,
   ScrollText,
   Settings,
-  Sparkles,
   FolderOpen,
   CalendarClock,
   CreditCard,
@@ -12,6 +11,7 @@ import {
   Plus,
   Clock,
 } from "lucide-react";
+import novaLogo from "../assets/nova-logo.png";
 import type { ChatSession } from "../pages/Chat";
 import clsx from "clsx";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -38,10 +38,12 @@ type Props = {
   onNewChat?: () => void;
 };
 
-const navItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
+type NavIcon = typeof MessageSquare | "nova";
+
+const navItems: { id: Page; label: string; icon: NavIcon }[] = [
   { id: "files", label: "Home", icon: FolderOpen },
   { id: "chat", label: "New Chat", icon: Plus },
-  { id: "store", label: "Plugins", icon: Sparkles },
+  { id: "store", label: "Plugins", icon: "nova" },
   { id: "channels", label: "Channels", icon: Radio },
   { id: "tasks", label: "Tasks", icon: CalendarClock },
   { id: "logs", label: "Logs", icon: ScrollText },
@@ -94,9 +96,7 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning, inte
       >
         {/* Profile / Brand */}
         <div className="px-2 mb-6 flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-[var(--purple-accent)] flex items-center justify-center shadow-md">
-            <Sparkles className="w-4 h-4 text-white" />
-          </div>
+          <img src={novaLogo} alt="Nova" className="w-8 h-8 rounded-lg shadow-md" />
           <div className="font-semibold text-lg tracking-tight text-[var(--text-primary)]">
             Nova
           </div>
@@ -109,7 +109,7 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning, inte
           </div>
           
           {navItems.map((item) => {
-            const Icon = item.icon;
+            const Icon = item.icon !== "nova" ? item.icon : null;
             const isChat = item.id === "chat";
             const isActive = isChat ? currentPage === "chat" && !currentChatSession : currentPage === item.id;
             
@@ -130,9 +130,17 @@ export function Layout({ currentPage, onNavigate, children, gatewayRunning, inte
                       isActive ? "bg-white shadow-sm" : "bg-black/5"
                     )}
                   >
-                    <Icon
-                      className={clsx("w-5 h-5", isActive ? "text-[var(--purple-accent)]" : "text-[var(--text-tertiary)]")}
-                    />
+                    {Icon ? (
+                      <Icon
+                        className={clsx("w-5 h-5", isActive ? "text-[var(--purple-accent)]" : "text-[var(--text-tertiary)]")}
+                      />
+                    ) : (
+                      <img
+                        src={novaLogo}
+                        alt="Nova"
+                        className={clsx("w-5 h-5", isActive ? "opacity-100" : "opacity-70")}
+                      />
+                    )}
                   </div>
                   {item.label}
                 </button>

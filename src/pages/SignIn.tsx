@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Sparkles, Mail, Eye, EyeOff, ChevronLeft, ArrowRight } from "lucide-react";
+import { Mail, Eye, EyeOff, ChevronLeft, ArrowRight } from "lucide-react";
+import novaLogo from "../assets/nova-logo.png";
 import {
   signInWithGoogle,
   signInWithApple,
@@ -121,8 +122,8 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
       <div className={containerClasses}>
         <div className={cardClasses}>
           <div className="text-center mb-8">
-            <div className="w-16 h-16 rounded-2xl bg-[var(--purple-accent)] mx-auto flex items-center justify-center mb-6 shadow-lg">
-              <Sparkles className="w-8 h-8 text-white" />
+            <div className="w-16 h-16 rounded-2xl bg-transparent mx-auto flex items-center justify-center mb-6">
+              <img src={novaLogo} alt="Nova" className="w-16 h-16 rounded-2xl shadow-lg" />
             </div>
             <h1 className="text-2xl font-bold text-gray-900 mb-2">
               Developer Mode
@@ -257,11 +258,11 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
         <div className="text-center mb-10">
           <button
             onClick={handleLogoClick}
-            className="w-20 h-20 rounded-[2rem] bg-[var(--purple-accent)] mx-auto flex items-center justify-center mb-8 shadow-2xl shadow-purple-900/20
+            className="w-20 h-20 rounded-[2rem] bg-transparent mx-auto flex items-center justify-center mb-8
                      cursor-default focus:outline-none transition-transform hover:scale-105 active:scale-95 duration-300"
             aria-label="Nova logo"
           >
-            <Sparkles className="w-10 h-10 text-white" />
+            <img src={novaLogo} alt="Nova" className="w-20 h-20 rounded-[2rem] shadow-xl" />
           </button>
           <h1 className="text-3xl font-bold text-gray-900 mb-3 tracking-tight">
             Nova
@@ -344,4 +345,3 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
     </div>
   );
 }
-
