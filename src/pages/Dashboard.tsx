@@ -280,8 +280,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       clearGatewayRetry();
       return true;
     } catch (error) {
-      console.error("[Nova] Proxy start failed:", error);
-      setStartupError(error instanceof Error ? error.message : "Failed to start gateway");
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error("[Nova] Proxy start failed:", errMsg, error);
+      setStartupError(errMsg);
       if (allowRetry) {
         scheduleGatewayRetry(() => {
           startGatewayProxyFlow({ model, image, stopFirst, allowRetry });

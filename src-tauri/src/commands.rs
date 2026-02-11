@@ -85,6 +85,7 @@ fn find_docker_binary() -> String {
     if let Ok(exe) = std::env::current_exe() {
         // exe  = .../Contents/MacOS/Nova  → macos_dir = .../Contents/MacOS
         if let Some(macos_dir) = exe.parent() {
+            // Release bundle: .../Contents/MacOS/Nova → .../Contents/Resources/resources/bin/docker
             let bundled = macos_dir
                 .parent() // .../Contents
                 .map(|c| c.join("Resources").join("resources").join("bin").join("docker"));
@@ -92,6 +93,11 @@ fn find_docker_binary() -> String {
                 if p.exists() {
                     return p.display().to_string();
                 }
+            }
+            // Dev mode: .../target/debug/nova → .../target/debug/resources/bin/docker
+            let dev_bundled = macos_dir.join("resources").join("bin").join("docker");
+            if dev_bundled.exists() {
+                return dev_bundled.display().to_string();
             }
         }
     }
@@ -161,18 +167,21 @@ fn ensure_runtime_image() -> Result<(), String> {
     // 2. Try bundled tar in the app resources (next to our binary)
     let tar_loaded = (|| -> Result<bool, String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let contents_dir = exe
-            .parent() // MacOS/
-            .and_then(|p| p.parent()) // Contents/
-            .ok_or("Cannot resolve Contents dir")?;
-        let resources = contents_dir.join("Resources");
+        let exe_dir = exe.parent().ok_or("Cannot resolve exe dir")?;
 
-        // Search both top-level Resources/ and the nested resources/ subdir
-        // (Tauri bundles "resources/*" entries into Contents/Resources/resources/)
-        let search_dirs = vec![
-            resources.clone(),
-            resources.join("resources"),
-        ];
+        let mut search_dirs = Vec::new();
+
+        // Release bundle: .../Contents/MacOS/Nova → .../Contents/Resources/
+        if let Some(contents_dir) = exe_dir.parent() {
+            let resources = contents_dir.join("Resources");
+            search_dirs.push(resources.clone());
+            search_dirs.push(resources.join("resources"));
+        }
+
+        // Dev mode: .../target/debug/nova → .../target/debug/resources/
+        search_dirs.push(exe_dir.join("resources"));
+        // Also check src-tauri/resources/ (when running from project root)
+        search_dirs.push(exe_dir.join("..").join("..").join("resources"));
 
         for dir in &search_dirs {
             for name in &["openclaw-runtime.tar.gz", "openclaw-runtime.tar"] {
