@@ -49,6 +49,7 @@ mkdir -p /home/node/.openclaw/workspace
 mkdir -p /home/node/.openclaw/canvas
 mkdir -p /home/node/.openclaw/cron
 mkdir -p /home/node/.openclaw/logs
+mkdir -p /data/qmd-models
 
 # Write a minimal config to select the primary model when provided
 MEMORY_SLOT="${OPENCLAW_MEMORY_SLOT:-}"
@@ -56,10 +57,10 @@ MEMORY_CONFIG=""
 PLUGIN_ENTRIES=""
 
 if [ -z "$MEMORY_SLOT" ]; then
-    if [ -d "/app/extensions/memory-lancedb" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
-        MEMORY_SLOT="memory-lancedb"
-    elif [ -d "/app/extensions/memory-core" ]; then
+    if [ -d "/app/extensions/memory-core" ]; then
         MEMORY_SLOT="memory-core"
+    elif [ -d "/app/extensions/memory-lancedb" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
+        MEMORY_SLOT="memory-lancedb"
     else
         MEMORY_SLOT="none"
     fi
@@ -72,6 +73,34 @@ if [ "$MEMORY_SLOT" = "memory-lancedb" ]; then
     else
         MEMORY_SLOT="memory-core"
     fi
+fi
+
+MEMORY_BACKEND_BLOCK=""
+if [ "$MEMORY_SLOT" = "memory-core" ] && command -v qmd >/dev/null 2>&1; then
+    MEMORY_BACKEND_BLOCK=',
+  "memory": {
+    "backend": "qmd",
+    "citations": "auto",
+    "qmd": {
+      "command": "qmd",
+      "includeDefaultMemory": true,
+      "sessions": {
+        "enabled": true,
+        "retentionDays": 30
+      },
+      "update": {
+        "interval": "5m",
+        "debounceMs": 15000,
+        "onBoot": true,
+        "waitForBootSync": false,
+        "embedInterval": "60m"
+      },
+      "limits": {
+        "maxResults": 8,
+        "timeoutMs": 5000
+      }
+    }
+  }'
 fi
 
 PLUGIN_ENTRIES="\"nova-integrations\": { \"enabled\": true }"
@@ -169,7 +198,7 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
     "entries": {
       ${PLUGIN_ENTRIES}
     }
-  }${MODELS_BLOCK}${TOOLS_BLOCK}
+  }${MEMORY_BACKEND_BLOCK}${MODELS_BLOCK}${TOOLS_BLOCK}
 }
 EOF
 fi

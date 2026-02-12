@@ -76,39 +76,50 @@ fn get_docker_host() -> Option<String> {
     }
 }
 
-/// Find the docker binary – try bundled location first, then common install
-/// paths, then fall back to bare "docker" (relies on PATH).
+fn docker_binary_usable(candidate: &str) -> bool {
+    Command::new(candidate)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Find the docker binary.
+/// On macOS, prefer bundled docker but only if it can execute.
+/// On Linux/Windows, prefer system docker to avoid packaged binaries from other platforms.
 fn find_docker_binary() -> String {
-    // 1. Check the bundled binary next to our own executable
-    //    In a Tauri macOS bundle: Nova.app/Contents/MacOS/Nova
-    //    Resources live at:       Nova.app/Contents/Resources/resources/bin/docker
-    if let Ok(exe) = std::env::current_exe() {
-        // exe  = .../Contents/MacOS/Nova  → macos_dir = .../Contents/MacOS
-        if let Some(macos_dir) = exe.parent() {
-            // Release bundle: .../Contents/MacOS/Nova → .../Contents/Resources/resources/bin/docker
-            let bundled = macos_dir
-                .parent() // .../Contents
-                .map(|c| c.join("Resources").join("resources").join("bin").join("docker"));
-            if let Some(ref p) = bundled {
-                if p.exists() {
-                    return p.display().to_string();
+    // 1. macOS bundled docker candidates (release + dev)
+    if matches!(Platform::detect(), Platform::MacOS) {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                let bundled_release = exe_dir
+                    .parent()
+                    .map(|c| c.join("Resources").join("resources").join("bin").join("docker"));
+                if let Some(ref p) = bundled_release {
+                    let candidate = p.display().to_string();
+                    if p.exists() && docker_binary_usable(&candidate) {
+                        return candidate;
+                    }
                 }
-            }
-            // Dev mode: .../target/debug/nova → .../target/debug/resources/bin/docker
-            let dev_bundled = macos_dir.join("resources").join("bin").join("docker");
-            if dev_bundled.exists() {
-                return dev_bundled.display().to_string();
+
+                let bundled_dev = exe_dir.join("resources").join("bin").join("docker");
+                let candidate = bundled_dev.display().to_string();
+                if bundled_dev.exists() && docker_binary_usable(&candidate) {
+                    return candidate;
+                }
             }
         }
     }
 
-    // 2. Well-known install locations (macOS / Linux)
+    // 2. Well-known system locations
     for candidate in &[
         "/usr/local/bin/docker",
         "/opt/homebrew/bin/docker",
         "/usr/bin/docker",
     ] {
-        if std::path::Path::new(candidate).exists() {
+        if std::path::Path::new(candidate).exists() && docker_binary_usable(candidate) {
             return candidate.to_string();
         }
     }
@@ -251,6 +262,7 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
     let result = timeout(Duration::from_secs(3), async {
         let mut sent_connect = false;
         let mut sent_health = false;
+        let mut connect_ok = false;
         loop {
             let msg = ws
                 .next()
@@ -280,7 +292,7 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
                                     "mode": "probe"
                                 },
                                 "role": "operator",
-                                "scopes": ["operator.read"],
+                                "scopes": ["operator.read", "operator.write", "operator.admin"],
                                 "auth": { "token": token }
                             }
                         });
@@ -300,6 +312,7 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
                                 .unwrap_or("gateway connect rejected");
                             return Err(msg.to_string());
                         }
+                        connect_ok = true;
                         if !sent_health {
                             sent_health = true;
                             let health = serde_json::json!({
@@ -312,6 +325,18 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
                                 .map_err(|e| format!("WebSocket send failed: {}", e))?;
                         }
                     } else if id == "2" {
+                        if !ok {
+                            let msg = frame
+                                .get("error")
+                                .and_then(|v| v.get("message"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("gateway health rejected");
+                            // Some gateway builds may downgrade/strip scopes for probe clients.
+                            // If connect succeeded, treat this as alive to avoid false "gateway down" states.
+                            if connect_ok && msg.contains("missing scope") {
+                                return Ok(true);
+                            }
+                        }
                         return Ok(ok);
                     }
                 }
@@ -512,7 +537,7 @@ impl Default for StoredAgentSettings {
             heartbeat_every: "30m".to_string(),
             heartbeat_tasks: Vec::new(),
             memory_enabled: true,
-            memory_long_term: true,
+            memory_long_term: false,
             capabilities: vec![
                 CapabilityState {
                     id: "web".to_string(),
@@ -741,6 +766,40 @@ fn container_path_exists(path: &str) -> bool {
 fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
     let payload = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     write_container_file("/home/node/.openclaw/openclaw.json", &payload)
+}
+
+fn apply_default_qmd_memory_config(cfg: &mut serde_json::Value, slot: &str) {
+    if slot != "memory-core" {
+        if let Some(root) = cfg.as_object_mut() {
+            root.remove("memory");
+        }
+        return;
+    }
+
+    cfg["memory"]["backend"] = serde_json::json!("qmd");
+    cfg["memory"]["citations"] = serde_json::json!("auto");
+    cfg["memory"]["qmd"]["command"] = serde_json::json!("qmd");
+    cfg["memory"]["qmd"]["includeDefaultMemory"] = serde_json::json!(true);
+    cfg["memory"]["qmd"]["sessions"] = serde_json::json!({
+        "enabled": true,
+        "retentionDays": 30
+    });
+    cfg["memory"]["qmd"]["update"] = serde_json::json!({
+        "interval": "5m",
+        "debounceMs": 15000,
+        "onBoot": true,
+        "waitForBootSync": false,
+        "embedInterval": "60m",
+        "commandTimeoutMs": 30000,
+        "updateTimeoutMs": 120000,
+        "embedTimeoutMs": 120000
+    });
+    cfg["memory"]["qmd"]["limits"] = serde_json::json!({
+        "maxResults": 8,
+        "maxSnippetChars": 700,
+        "maxInjectedChars": 4000,
+        "timeoutMs": 5000
+    });
 }
 
 fn append_nova_skills_mount(docker_args: &mut Vec<String>) {
@@ -1169,6 +1228,13 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
     } else if let Some(entries) = cfg["plugins"]["entries"].as_object_mut() {
         entries.remove("memory-lancedb");
     }
+
+    let effective_slot = cfg
+        .pointer("/plugins/slots/memory")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none")
+        .to_string();
+    apply_default_qmd_memory_config(&mut cfg, &effective_slot);
 
     cfg["channels"]["discord"]["enabled"] = serde_json::json!(settings.discord_enabled);
     cfg["channels"]["discord"]["token"] = serde_json::json!(settings.discord_token.clone());
@@ -2072,6 +2138,8 @@ pub async fn set_memory(
     } else if let Some(entries) = cfg["plugins"]["entries"].as_object_mut() {
         entries.remove("memory-lancedb");
     }
+
+    apply_default_qmd_memory_config(&mut cfg, slot);
 
     write_openclaw_config(&cfg)?;
     let mut settings = load_agent_settings(&app);
