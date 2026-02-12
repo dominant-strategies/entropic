@@ -49,7 +49,38 @@ mkdir -p /home/node/.openclaw/workspace
 mkdir -p /home/node/.openclaw/canvas
 mkdir -p /home/node/.openclaw/cron
 mkdir -p /home/node/.openclaw/logs
+mkdir -p /home/node/.openclaw/.cache/qmd
 mkdir -p /data/qmd-models
+ln -sfn /data/qmd-models /home/node/.openclaw/.cache/qmd/models
+
+# qmd wrapper:
+# - Forces writable HOME/XDG paths in hardened container mode.
+# - Starts in "light mode" by translating `qmd query` -> `qmd search`
+#   until model downloads are present.
+cat > /data/qmd-wrapper << 'EOF'
+#!/bin/sh
+set -e
+
+QMD_BIN="/home/node/.bun/bin/qmd"
+export HOME=/home/node/.openclaw
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/home/node/.openclaw/agents/main/qmd/xdg-config}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/home/node/.openclaw/agents/main/qmd/xdg-cache}"
+
+if [ "${QMD_LIGHT_MODE:-1}" = "1" ] && [ "${1:-}" = "query" ]; then
+    MODELS_DIR="/data/qmd-models"
+    MODEL_COUNT=0
+    if [ -d "$MODELS_DIR" ]; then
+        MODEL_COUNT="$(find "$MODELS_DIR" -maxdepth 1 -type f -name '*.gguf' | wc -l | tr -d ' ')"
+    fi
+    if [ "$MODEL_COUNT" -lt 3 ]; then
+        shift
+        exec "$QMD_BIN" search "$@"
+    fi
+fi
+
+exec "$QMD_BIN" "$@"
+EOF
+chmod +x /data/qmd-wrapper
 
 # Write a minimal config to select the primary model when provided
 MEMORY_SLOT="${OPENCLAW_MEMORY_SLOT:-}"
@@ -82,7 +113,7 @@ if [ "$MEMORY_SLOT" = "memory-core" ] && command -v qmd >/dev/null 2>&1; then
     "backend": "qmd",
     "citations": "auto",
     "qmd": {
-      "command": "qmd",
+      "command": "/data/qmd-wrapper",
       "includeDefaultMemory": true,
       "sessions": {
         "enabled": true,

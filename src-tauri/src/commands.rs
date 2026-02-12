@@ -778,7 +778,9 @@ fn apply_default_qmd_memory_config(cfg: &mut serde_json::Value, slot: &str) {
 
     cfg["memory"]["backend"] = serde_json::json!("qmd");
     cfg["memory"]["citations"] = serde_json::json!("auto");
-    cfg["memory"]["qmd"]["command"] = serde_json::json!("qmd");
+    // Use the runtime wrapper so qmd always has writable HOME/XDG paths and
+    // can start in lightweight BM25 mode before large local models are present.
+    cfg["memory"]["qmd"]["command"] = serde_json::json!("/data/qmd-wrapper");
     cfg["memory"]["qmd"]["includeDefaultMemory"] = serde_json::json!(true);
     cfg["memory"]["qmd"]["sessions"] = serde_json::json!({
         "enabled": true,
