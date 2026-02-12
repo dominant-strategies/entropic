@@ -19,7 +19,7 @@ jobs:
   # Linux (x86_64)
   # ──────────────────────────────────────────────
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-m
     timeout-minutes: 60
 
     steps:
