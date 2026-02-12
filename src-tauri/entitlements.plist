@@ -5,5 +5,11 @@
     <!-- Allow app to use Apple's Virtualization.framework (VZ) for Colima VMs -->
     <key>com.apple.security.virtualization</key>
     <true/>
+    <!-- Allow localhost TCP listener for OAuth callback (port 27100) -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+    <!-- Allow outgoing network connections (API calls, Docker, etc.) -->
+    <key>com.apple.security.network.client</key>
+    <true/>
 </dict>
 </plist>
