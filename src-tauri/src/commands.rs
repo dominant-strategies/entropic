@@ -280,6 +280,7 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
                                     "mode": "probe"
                                 },
                                 "role": "operator",
+                                "scopes": ["operator.read"],
                                 "auth": { "token": token }
                             }
                         });
