@@ -19,7 +19,7 @@ jobs:
   # Build OpenClaw runtime image for macOS (linux/arm64)
   # ──────────────────────────────────────────────
   build-runtime-arm64:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-m
     timeout-minutes: 60
 
     steps:
