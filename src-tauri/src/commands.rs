@@ -2991,6 +2991,174 @@ fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
+fn oauth_callback_html(page_title: &str, title: &str, message: &str, success: bool) -> String {
+    let (badge_text, badge_bg, badge_fg) = if success {
+        ("Connected", "rgba(22, 163, 74, 0.12)", "#166534")
+    } else {
+        ("Action needed", "rgba(239, 68, 68, 0.12)", "#991b1b")
+    };
+
+    let template = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{PAGE_TITLE}}</title>
+  <style>
+    :root {
+      --background: #fafafa;
+      --card: #ffffff;
+      --text: #111827;
+      --muted: #4b5563;
+      --border: rgba(0, 0, 0, 0.08);
+      --purple: #7c3aed;
+      --blue: #3b82f6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--background);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      overflow: hidden;
+    }
+    .bg { position: fixed; inset: 0; pointer-events: none; }
+    .blob {
+      position: absolute;
+      border-radius: 9999px;
+      filter: blur(90px);
+      opacity: 0.45;
+      animation: float 7s ease-in-out infinite;
+    }
+    .blob.one {
+      width: 380px;
+      height: 380px;
+      background: #d8b4fe;
+      top: -110px;
+      left: -70px;
+    }
+    .blob.two {
+      width: 340px;
+      height: 340px;
+      background: #bfdbfe;
+      right: -90px;
+      bottom: -100px;
+      animation-delay: 1.5s;
+    }
+    .card {
+      position: relative;
+      z-index: 1;
+      width: min(520px, 100%);
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      box-shadow: 0 24px 44px rgba(17, 24, 39, 0.12);
+      padding: 34px 28px 28px;
+      text-align: center;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 18px;
+      font-weight: 700;
+      font-size: 20px;
+      letter-spacing: -0.02em;
+      color: #111827;
+    }
+    .logo {
+      width: 36px;
+      height: 36px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--purple), var(--blue));
+      color: white;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      box-shadow: 0 12px 24px rgba(124, 58, 237, 0.28);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 14px;
+      padding: 6px 12px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      background: {{BADGE_BG}};
+      color: {{BADGE_FG}};
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(26px, 4.8vw, 38px);
+      line-height: 1.12;
+      letter-spacing: -0.03em;
+      color: #111827;
+    }
+    p {
+      margin: 14px auto 0;
+      max-width: 36ch;
+      font-size: 16px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+    .hint {
+      margin-top: 16px;
+      font-size: 14px;
+      color: #6b7280;
+    }
+    @keyframes float {
+      0% { transform: translateY(0px); }
+      50% { transform: translateY(-10px); }
+      100% { transform: translateY(0px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="bg">
+    <div class="blob one"></div>
+    <div class="blob two"></div>
+  </div>
+  <main class="card">
+    <div class="brand"><span class="logo">N</span><span>Nova</span></div>
+    <span class="badge">{{BADGE_TEXT}}</span>
+    <h1>{{TITLE}}</h1>
+    <p>{{MESSAGE}}</p>
+    <p class="hint">You can return to Nova now. This tab will close automatically.</p>
+  </main>
+  <script>
+    setTimeout(function () {
+      window.close();
+    }, 1400);
+  </script>
+</body>
+</html>"#;
+
+    template
+        .replace("{{PAGE_TITLE}}", page_title)
+        .replace("{{BADGE_TEXT}}", badge_text)
+        .replace("{{BADGE_BG}}", badge_bg)
+        .replace("{{BADGE_FG}}", badge_fg)
+        .replace("{{TITLE}}", title)
+        .replace("{{MESSAGE}}", message)
+}
+
+fn oauth_html_response(html: String) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        html.as_bytes().len(),
+        html
+    )
+}
+
 async fn wait_for_oauth_callback(
     listener: TcpListener,
     expected_state: &str,
@@ -3011,33 +3179,60 @@ async fn wait_for_oauth_callback(
     let url = Url::parse(&format!("http://127.0.0.1{}", path))
         .map_err(|_| "Invalid OAuth callback URL".to_string())?;
 
-    let code = url
+    if let Some(error) = url
+        .query_pairs()
+        .find(|(k, _)| k == "error")
+        .map(|(_, v)| v.to_string())
+    {
+        let html = oauth_callback_html(
+            "Nova OAuth",
+            "Connection failed",
+            "Google returned an OAuth error. Close this tab and try again from Nova.",
+            false,
+        );
+        let _ = socket.write_all(oauth_html_response(html).as_bytes()).await;
+        return Err(format!("OAuth callback returned error: {}", error));
+    }
+
+    let code = if let Some(code) = url
         .query_pairs()
         .find(|(k, _)| k == "code")
         .map(|(_, v)| v.to_string())
-        .ok_or_else(|| "OAuth callback missing code".to_string())?;
+    {
+        code
+    } else {
+        let html = oauth_callback_html(
+            "Nova OAuth",
+            "Missing authorization code",
+            "Google did not provide an authorization code. Close this tab and retry.",
+            false,
+        );
+        let _ = socket.write_all(oauth_html_response(html).as_bytes()).await;
+        return Err("OAuth callback missing code".to_string());
+    };
     let state = url
         .query_pairs()
         .find(|(k, _)| k == "state")
         .map(|(_, v)| v.to_string())
         .unwrap_or_default();
     if state != expected_state {
+        let html = oauth_callback_html(
+            "Nova OAuth",
+            "Security check failed",
+            "The OAuth state did not match. Please close this tab and retry from Nova.",
+            false,
+        );
+        let _ = socket.write_all(oauth_html_response(html).as_bytes()).await;
         return Err("OAuth state mismatch".to_string());
     }
 
-    let response = [
-        "HTTP/1.1 200 OK",
-        "Content-Type: text/html; charset=utf-8",
-        "Connection: close",
-        "",
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"/>",
-        "<title>Nova OAuth</title></head><body>",
-        "<h1>Authentication complete</h1>",
-        "<p>You can return to the app.</p>",
-        "</body></html>",
-    ]
-    .join("\r\n");
-    let _ = socket.write_all(response.as_bytes()).await;
+    let html = oauth_callback_html(
+        "Nova OAuth",
+        "Google connected",
+        "Authentication is complete and your integration is now connected.",
+        true,
+    );
+    let _ = socket.write_all(oauth_html_response(html).as_bytes()).await;
 
     Ok(code)
 }
@@ -3063,31 +3258,51 @@ async fn wait_for_localhost_auth_callback(
     let url = Url::parse(&format!("http://127.0.0.1:{}{}", port, path))
         .map_err(|_| "Invalid localhost OAuth callback URL".to_string())?;
 
-    let has_code = url
+    let oauth_error = url
         .query_pairs()
-        .any(|(k, _)| k == "code");
+        .find(|(k, _)| k == "error")
+        .map(|(_, v)| v.to_string());
+    let has_code = url.query_pairs().any(|(k, _)| k == "code");
 
-    let response = [
-        "HTTP/1.1 200 OK",
-        "Content-Type: text/html; charset=utf-8",
-        "Connection: close",
-        "",
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"/>",
-        "<title>Nova Sign-in</title></head><body>",
-        "<h1>Authentication complete</h1>",
-        "<p>You can return to the app.</p>",
-        "</body></html>",
-    ]
-    .join("\r\n");
-    let _ = socket.write_all(response.as_bytes()).await;
-
-    if has_code {
-        let _ = app.emit("auth-localhost-callback", url.to_string());
+    let (html, result) = if oauth_error.is_some() {
+        (
+            oauth_callback_html(
+                "Nova Sign-in",
+                "Sign-in failed",
+                "Google returned an OAuth error. Close this tab and try signing in again.",
+                false,
+            ),
+            Err("Localhost OAuth callback returned error".to_string()),
+        )
+    } else if has_code {
+        (
+            oauth_callback_html(
+                "Nova Sign-in",
+                "You're signed in",
+                "Authentication completed successfully. You can jump back into Nova.",
+                true,
+            ),
+            Ok(()),
+        )
     } else {
-        return Err("Localhost OAuth callback missing code".to_string());
+        (
+            oauth_callback_html(
+                "Nova Sign-in",
+                "Missing authorization code",
+                "No authorization code was returned. Please close this tab and retry sign-in.",
+                false,
+            ),
+            Err("Localhost OAuth callback missing code".to_string()),
+        )
+    };
+
+    let _ = socket.write_all(oauth_html_response(html).as_bytes()).await;
+
+    if result.is_ok() {
+        let _ = app.emit("auth-localhost-callback", url.to_string());
     }
 
-    Ok(())
+    result
 }
 
 #[tauri::command]
