@@ -328,29 +328,41 @@ jobs:
           NOVA_GOOGLE_CLIENT_SECRET: ${{ secrets.NOVA_GOOGLE_CLIENT_SECRET }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build
+        run: pnpm tauri build --bundles deb,appimage
 
       - name: Prepare artifacts
         id: artifacts
         run: |
           VERSION="${{ steps.version.outputs.tag }}"
           BUNDLE_DIR="src-tauri/target/release/bundle"
+          shopt -s nullglob
 
           # .deb
           DEB_NAME="Nova-${VERSION}-linux-x86_64.deb"
-          cp "$BUNDLE_DIR/deb/"*.deb "$DEB_NAME"
+          DEB_FILES=("$BUNDLE_DIR/deb/"*.deb)
+          if [ "${#DEB_FILES[@]}" -eq 0 ]; then
+            echo "No .deb bundle found in $BUNDLE_DIR/deb"
+            exit 1
+          fi
+          cp "${DEB_FILES[0]}" "$DEB_NAME"
           echo "deb_name=$DEB_NAME" >> "$GITHUB_OUTPUT"
 
           # .AppImage (Tauri produces this with updater sig)
           APPIMAGE_NAME="Nova-${VERSION}-linux-x86_64.AppImage"
-          cp "$BUNDLE_DIR/appimage/"*.AppImage "$APPIMAGE_NAME"
+          APPIMAGE_FILES=("$BUNDLE_DIR/appimage/"*.AppImage)
+          if [ "${#APPIMAGE_FILES[@]}" -eq 0 ]; then
+            echo "No .AppImage bundle found in $BUNDLE_DIR/appimage"
+            exit 1
+          fi
+          cp "${APPIMAGE_FILES[0]}" "$APPIMAGE_NAME"
           chmod +x "$APPIMAGE_NAME"
           echo "appimage_name=$APPIMAGE_NAME" >> "$GITHUB_OUTPUT"
 
           # Updater: AppImage + signature
           APPIMAGE_SIG=""
-          if [ -f "$BUNDLE_DIR/appimage/"*.AppImage.sig ]; then
-            APPIMAGE_SIG="$(cat "$BUNDLE_DIR/appimage/"*.AppImage.sig)"
+          APPIMAGE_SIG_FILES=("$BUNDLE_DIR/appimage/"*.AppImage.sig)
+          if [ "${#APPIMAGE_SIG_FILES[@]}" -gt 0 ]; then
+            APPIMAGE_SIG="$(cat "${APPIMAGE_SIG_FILES[0]}")"
           fi
           echo "appimage_sig=$APPIMAGE_SIG" >> "$GITHUB_OUTPUT"
 
