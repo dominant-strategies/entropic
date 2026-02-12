@@ -1,4 +1,6 @@
-use crate::runtime::{Platform, Runtime, RuntimeStatus};
+use crate::runtime::{
+    macos_docker_socket_candidates, Platform, Runtime, RuntimeStatus,
+};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _};
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
@@ -22,23 +24,11 @@ use url::Url;
 fn get_docker_host() -> Option<String> {
     match Platform::detect() {
         Platform::MacOS => {
-            let home = dirs::home_dir()?;
-
-            // Try Colima first
-            let colima_socket = format!("{}/.colima/default/docker.sock", home.display());
-            if std::path::Path::new(&colima_socket).exists() {
-                return Some(format!("unix://{}", colima_socket));
-            }
-
-            // Fall back to Docker Desktop (user-level socket)
-            let docker_desktop_socket = format!("{}/.docker/run/docker.sock", home.display());
-            if std::path::Path::new(&docker_desktop_socket).exists() {
-                return Some(format!("unix://{}", docker_desktop_socket));
-            }
-
-            // Fall back to system-level Docker socket (Docker Desktop symlink)
-            if std::path::Path::new("/var/run/docker.sock").exists() {
-                return Some("unix:///var/run/docker.sock".to_string());
+            // Prefer Nova-managed Colima sockets, then Docker Desktop sockets.
+            for socket in macos_docker_socket_candidates() {
+                if socket.exists() {
+                    return Some(format!("unix://{}", socket.display()));
+                }
             }
 
             // Default fallback (use environment or system default)
