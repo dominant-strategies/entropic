@@ -133,13 +133,26 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
           security default-keychain -d user -s "$KEYCHAIN_PATH"
-          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          IDENTITIES_OUTPUT="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")"
+          echo "$IDENTITIES_OUTPUT"
 
-          SIGNING_SHA1="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
-            | awk -v identity="$APPLE_SIGNING_IDENTITY" '$0 ~ "\"" identity "\"" {print $2; exit}')"
-          if [ -z "$SIGNING_SHA1" ]; then
-            echo "Could not find signing identity in imported keychain: $APPLE_SIGNING_IDENTITY"
+          IDENTITY_COUNT="$(printf '%s\n' "$IDENTITIES_OUTPUT" \
+            | awk '/[0-9]+\) [0-9A-F]{40} / {count++} END {print count+0}')"
+
+          if [ "$IDENTITY_COUNT" -eq 0 ]; then
+            echo "No code signing identities were imported from APPLE_CERTIFICATE."
             exit 1
+          elif [ "$IDENTITY_COUNT" -eq 1 ]; then
+            SIGNING_SHA1="$(printf '%s\n' "$IDENTITIES_OUTPUT" \
+              | awk '/[0-9]+\) [0-9A-F]{40} / {print $2; exit}')"
+          else
+            SIGNING_SHA1="$(printf '%s\n' "$IDENTITIES_OUTPUT" \
+              | awk -v identity="$APPLE_SIGNING_IDENTITY" '$0 ~ "\"" identity "\"" {print $2; exit}')"
+            if [ -z "$SIGNING_SHA1" ]; then
+              echo "Multiple identities found; APPLE_SIGNING_IDENTITY did not match any imported identity."
+              echo "Set APPLE_SIGNING_IDENTITY to the exact certificate label shown above."
+              exit 1
+            fi
           fi
 
           echo "APPLE_SIGNING_IDENTITY_SHA1=$SIGNING_SHA1" >> "$GITHUB_ENV"
