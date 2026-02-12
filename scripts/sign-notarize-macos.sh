@@ -26,6 +26,8 @@ ENTITLEMENTS_PATH="${ENTITLEMENTS_PATH:-$PROJECT_ROOT/src-tauri/entitlements.pli
 
 # Prefer GitHub Actions secret names, keep legacy names as fallback.
 APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-${CERT:-}}"
+APPLE_SIGNING_IDENTITY_SHA1="${APPLE_SIGNING_IDENTITY_SHA1:-}"
+APPLE_SIGNING_KEYCHAIN="${APPLE_SIGNING_KEYCHAIN:-}"
 APPLE_ID="${APPLE_ID:-}"
 APPLE_TEAM_ID="${APPLE_TEAM_ID:-${TEAM_ID:-}}"
 APPLE_APP_PASSWORD="${APPLE_APP_PASSWORD:-${APP_PASSWORD:-}}"
@@ -42,11 +44,63 @@ if [ ! -d "$APP_PATH" ]; then
   exit 1
 fi
 
+if [ -n "$APPLE_SIGNING_KEYCHAIN" ] && [ ! -f "$APPLE_SIGNING_KEYCHAIN" ]; then
+  echo "APPLE_SIGNING_KEYCHAIN not found: $APPLE_SIGNING_KEYCHAIN"
+  exit 1
+fi
+
+SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY"
+if [ -n "$APPLE_SIGNING_IDENTITY_SHA1" ]; then
+  SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY_SHA1"
+fi
+
+if [ -z "$APPLE_SIGNING_IDENTITY_SHA1" ] && [ -z "$APPLE_SIGNING_KEYCHAIN" ]; then
+  MATCH_COUNT="$(security find-identity -v -p codesigning 2>/dev/null \
+    | grep -F "\"$APPLE_SIGNING_IDENTITY\"" \
+    | wc -l | tr -d '[:space:]')"
+  if [ "${MATCH_COUNT:-0}" -gt 1 ]; then
+    echo "Signing identity is ambiguous across keychains: $APPLE_SIGNING_IDENTITY"
+    echo "Set APPLE_SIGNING_KEYCHAIN (recommended) or APPLE_SIGNING_IDENTITY_SHA1."
+    exit 1
+  fi
+fi
+
+CODESIGN_KEYCHAIN_ARGS=()
+if [ -n "$APPLE_SIGNING_KEYCHAIN" ]; then
+  CODESIGN_KEYCHAIN_ARGS=(--keychain "$APPLE_SIGNING_KEYCHAIN")
+fi
+
+# Prefer SHA-1 identity to avoid ambiguous name matches across keychains.
+if [ -z "$APPLE_SIGNING_IDENTITY_SHA1" ] && [ -n "$APPLE_SIGNING_KEYCHAIN" ]; then
+  MATCHES="$(security find-identity -v -p codesigning "$APPLE_SIGNING_KEYCHAIN" 2>/dev/null \
+    | grep -F "\"$APPLE_SIGNING_IDENTITY\"" || true)"
+  MATCH_COUNT="$(printf '%s\n' "$MATCHES" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
+  if [ "${MATCH_COUNT:-0}" -eq 1 ]; then
+    SIGN_IDENTITY="$(printf '%s\n' "$MATCHES" | awk '{print $2}')"
+  elif [ "${MATCH_COUNT:-0}" -eq 0 ]; then
+    echo "No matching identity found in keychain: $APPLE_SIGNING_KEYCHAIN"
+    echo "Identity: $APPLE_SIGNING_IDENTITY"
+    exit 1
+  else
+    echo "Multiple matching identities found in keychain: $APPLE_SIGNING_KEYCHAIN"
+    echo "Set APPLE_SIGNING_IDENTITY_SHA1 to one of:"
+    printf '%s\n' "$MATCHES" | awk '{print "  " $2}'
+    exit 1
+  fi
+fi
+
 echo "Using:"
 echo "  APP_PATH=$APP_PATH"
 echo "  DMG_PATH=$DMG_PATH"
 echo "  ENTITLEMENTS_PATH=$ENTITLEMENTS_PATH"
 echo "  APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+if [ -n "$APPLE_SIGNING_IDENTITY_SHA1" ]; then
+  echo "  APPLE_SIGNING_IDENTITY_SHA1=$APPLE_SIGNING_IDENTITY_SHA1"
+fi
+if [ -n "$APPLE_SIGNING_KEYCHAIN" ]; then
+  echo "  APPLE_SIGNING_KEYCHAIN=$APPLE_SIGNING_KEYCHAIN"
+fi
+echo "  SIGN_IDENTITY=$SIGN_IDENTITY"
 echo "  APPLE_ID=$APPLE_ID"
 echo "  APPLE_TEAM_ID=$APPLE_TEAM_ID"
 
@@ -54,15 +108,19 @@ APP_DIR="$(dirname "$APP_PATH")"
 cd "$APP_DIR"
 
 echo "Signing bundled binaries..."
-codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
+codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
+  "${CODESIGN_KEYCHAIN_ARGS[@]}" \
   "$APP_PATH/Contents/Resources/resources/bin/docker"
-codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
+codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
+  "${CODESIGN_KEYCHAIN_ARGS[@]}" \
   "$APP_PATH/Contents/Resources/resources/bin/colima"
-codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
+codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
+  "${CODESIGN_KEYCHAIN_ARGS[@]}" \
   "$APP_PATH/Contents/Resources/resources/bin/limactl"
 
 echo "Signing Nova.app..."
-codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
+codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
+  "${CODESIGN_KEYCHAIN_ARGS[@]}" \
   --entitlements "$ENTITLEMENTS_PATH" \
   --deep "$APP_PATH"
 
@@ -70,7 +128,9 @@ echo "Creating DMG..."
 hdiutil create -volname Nova -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
 
 echo "Signing DMG..."
-codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DMG_PATH"
+codesign --force --timestamp --sign "$SIGN_IDENTITY" \
+  "${CODESIGN_KEYCHAIN_ARGS[@]}" \
+  "$DMG_PATH"
 
 echo "Submitting for notarization..."
 xcrun notarytool submit "$DMG_PATH" \
