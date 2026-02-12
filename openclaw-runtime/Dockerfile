@@ -3,11 +3,20 @@
 
 FROM node:22-bookworm-slim
 
-# Install curl for health checks, create directories
-RUN apt-get update && apt-get install -y --no-install-recommends curl && \
+# Install runtime deps and create directories
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    sqlite3 \
+    unzip && \
     rm -rf /var/lib/apt/lists/* && \
-    mkdir -p /data /home/node/.openclaw && \
-    chown -R node:node /data /home/node/.openclaw
+    mkdir -p /data /home/node/.openclaw /home/node/.bun /home/node/.cache/qmd && \
+    ln -sfn /data/qmd-models /home/node/.cache/qmd/models && \
+    chown -R node:node /data /home/node/.openclaw /home/node/.bun /home/node/.cache
+
+ENV BUN_INSTALL=/home/node/.bun
+ENV PATH="/home/node/.bun/bin:${PATH}"
 
 WORKDIR /app
 
@@ -26,9 +35,15 @@ RUN echo "module.exports = { read: () => '', write: () => {}, readSync: () => ''
 # Switch to non-root user
 USER node
 
+# Install qmd (native backend used by OpenClaw memory.qmd)
+RUN curl -fsSL https://bun.sh/install | bash && \
+    bun install -g https://github.com/tobi/qmd
+
 # Health check
+# /health can return 503 when control-ui assets are intentionally omitted.
+# Probe an authenticated endpoint that reflects gateway liveness instead.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s \
-    CMD sh -c 'curl -f http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/health || exit 1'
+    CMD sh -c 'if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then curl -fsS -H "Authorization: Bearer ${OPENCLAW_GATEWAY_TOKEN}" "http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/__openclaw__/canvas/" >/dev/null; else curl -fsS "http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/__openclaw__/canvas/" >/dev/null; fi || exit 1'
 
 EXPOSE 18789
 

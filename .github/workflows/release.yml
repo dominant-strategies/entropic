@@ -1,4 +1,4 @@
-name: Release
+name: Release macOS
 
 on:
   push:
@@ -156,7 +156,6 @@ jobs:
           fi
 
           echo "APPLE_SIGNING_IDENTITY_SHA1=$SIGNING_SHA1" >> "$GITHUB_ENV"
-          echo "APPLE_SIGNING_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
           rm certificate.p12
 
       - name: Build Tauri app
@@ -210,7 +209,6 @@ jobs:
         id: updater
         run: |
           BUNDLE_DIR="src-tauri/target/release/bundle/macos"
-          # Tauri produces Nova.app.tar.gz and Nova.app.tar.gz.sig when signing key is set
           UPDATER_TAR="$BUNDLE_DIR/Nova.app.tar.gz"
           UPDATER_SIG="$BUNDLE_DIR/Nova.app.tar.gz.sig"
 
@@ -250,163 +248,15 @@ jobs:
           path: updater-mac.json
 
   # ──────────────────────────────────────────────
-  # Linux (x86_64)
+  # Publish macOS assets
   # ──────────────────────────────────────────────
-  build-linux:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Checkout OpenClaw
-        uses: actions/checkout@v4
-        with:
-          repository: dominant-strategies/openclaw
-          token: ${{ secrets.NOVA_READ_PAT }}
-          path: openclaw
-
-      - name: Checkout Nova skills
-        uses: actions/checkout@v4
-        with:
-          repository: dominant-strategies/nova-skills
-          token: ${{ secrets.NOVA_READ_PAT }}
-          path: nova-skills
-
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            librsvg2-dev \
-            patchelf \
-            libgtk-3-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev
-
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - run: npm install -g pnpm
-
-      - name: Install dependencies
-        run: pnpm install
-
-      - name: Install OpenClaw dependencies
-        working-directory: openclaw
-        run: pnpm install
-
-      - name: Build OpenClaw
-        working-directory: openclaw
-        run: pnpm build
-
-      - name: Build OpenClaw runtime image (linux/amd64)
-        env:
-          OPENCLAW_SOURCE: ${{ github.workspace }}/openclaw
-          NOVA_SKILLS_SOURCE: ${{ github.workspace }}/nova-skills
-        run: ./scripts/build-openclaw-runtime.sh
-
-      - name: Bundle runtime image tar
-        run: ./scripts/bundle-runtime-image.sh
-
-      - name: Bundle runtime (Linux)
-        run: ./scripts/bundle-runtime.sh linux x86_64
-
-      - name: Build Tauri app
-        env:
-          NOVA_GOOGLE_CLIENT_ID: ${{ secrets.NOVA_GOOGLE_CLIENT_ID }}
-          NOVA_GOOGLE_CLIENT_SECRET: ${{ secrets.NOVA_GOOGLE_CLIENT_SECRET }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build --bundles deb,appimage
-
-      - name: Prepare artifacts
-        id: artifacts
-        run: |
-          VERSION="${{ steps.version.outputs.tag }}"
-          BUNDLE_DIR="src-tauri/target/release/bundle"
-          shopt -s nullglob
-
-          # .deb
-          DEB_NAME="Nova-${VERSION}-linux-x86_64.deb"
-          DEB_FILES=("$BUNDLE_DIR/deb/"*.deb)
-          if [ "${#DEB_FILES[@]}" -eq 0 ]; then
-            echo "No .deb bundle found in $BUNDLE_DIR/deb"
-            exit 1
-          fi
-          cp "${DEB_FILES[0]}" "$DEB_NAME"
-          echo "deb_name=$DEB_NAME" >> "$GITHUB_OUTPUT"
-
-          # .AppImage (Tauri produces this with updater sig)
-          APPIMAGE_NAME="Nova-${VERSION}-linux-x86_64.AppImage"
-          APPIMAGE_FILES=("$BUNDLE_DIR/appimage/"*.AppImage)
-          if [ "${#APPIMAGE_FILES[@]}" -eq 0 ]; then
-            echo "No .AppImage bundle found in $BUNDLE_DIR/appimage"
-            exit 1
-          fi
-          cp "${APPIMAGE_FILES[0]}" "$APPIMAGE_NAME"
-          chmod +x "$APPIMAGE_NAME"
-          echo "appimage_name=$APPIMAGE_NAME" >> "$GITHUB_OUTPUT"
-
-          # Updater: AppImage + signature
-          APPIMAGE_SIG=""
-          APPIMAGE_SIG_FILES=("$BUNDLE_DIR/appimage/"*.AppImage.sig)
-          if [ "${#APPIMAGE_SIG_FILES[@]}" -gt 0 ]; then
-            APPIMAGE_SIG="$(cat "${APPIMAGE_SIG_FILES[0]}")"
-          fi
-          echo "appimage_sig=$APPIMAGE_SIG" >> "$GITHUB_OUTPUT"
-
-          # tarball
-          TAR_NAME="Nova-${VERSION}-linux-x86_64.tar.gz"
-          mkdir -p "nova-${VERSION}"
-          cp "src-tauri/target/release/nova" "nova-${VERSION}/"
-          cp -r "src-tauri/resources" "nova-${VERSION}/" 2>/dev/null || true
-          tar czf "$TAR_NAME" "nova-${VERSION}"
-          echo "tar_name=$TAR_NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: nova-linux-x86_64
-          path: |
-            ${{ steps.artifacts.outputs.deb_name }}
-            ${{ steps.artifacts.outputs.appimage_name }}
-            ${{ steps.artifacts.outputs.tar_name }}
-
-      - name: Save updater metadata
-        run: |
-          VERSION="${{ steps.version.outputs.tag }}"
-          cat > updater-linux.json << METAEOF
-          {
-            "platform": "linux-x86_64",
-            "url": "https://github.com/dominant-strategies/nova-releases/releases/download/${VERSION}/Nova-${VERSION}-linux-x86_64.AppImage",
-            "signature": "${{ steps.artifacts.outputs.appimage_sig }}"
-          }
-          METAEOF
-
-      - name: Upload updater metadata
-        uses: actions/upload-artifact@v4
-        with:
-          name: updater-linux
-          path: updater-linux.json
-
-  # ──────────────────────────────────────────────
-  # Publish to dominant-strategies/nova-releases
-  # ──────────────────────────────────────────────
-  publish:
-    needs: [build-macos, build-linux]
+  publish-macos:
+    needs: [build-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: nova-release-publish-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
+      cancel-in-progress: false
 
     steps:
       - name: Determine version
@@ -418,7 +268,7 @@ jobs:
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Download all artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -426,89 +276,76 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f | sort
 
-      - name: Generate latest.json for auto-updater
+      - name: Generate merged latest.json (macOS)
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.tag }}"
-          # Strip leading 'v' for semver
           SEMVER="${VERSION#v}"
           PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          REPO_URL="https://github.com/dominant-strategies/nova-releases/releases/download/${VERSION}"
+          REPO="dominant-strategies/nova-releases"
+          REPO_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+          LATEST_PATH="artifacts/latest.json"
 
-          # Read updater metadata from each platform
           MAC_SIG=""
-          LINUX_SIG=""
           if [ -f artifacts/updater-mac/updater-mac.json ]; then
             MAC_SIG="$(python3 -c "import json; d=json.load(open('artifacts/updater-mac/updater-mac.json')); print(d.get('signature',''))")"
           fi
-          if [ -f artifacts/updater-linux/updater-linux.json ]; then
-            LINUX_SIG="$(python3 -c "import json; d=json.load(open('artifacts/updater-linux/updater-linux.json')); print(d.get('signature',''))")"
+
+          if gh release view "$VERSION" --repo "$REPO" &>/dev/null; then
+            TMP_DIR="$(mktemp -d)"
+            if gh release download "$VERSION" --repo "$REPO" --pattern latest.json --dir "$TMP_DIR" &>/dev/null; then
+              cp "$TMP_DIR/latest.json" "$LATEST_PATH"
+            fi
+            rm -rf "$TMP_DIR"
           fi
 
-          # Build latest.json (Tauri updater format)
-          cat > artifacts/latest.json << LATESTEOF
-          {
-            "version": "${SEMVER}",
-            "notes": "Nova ${VERSION}",
-            "pub_date": "${PUB_DATE}",
-            "platforms": {
-              "darwin-aarch64": {
-                "url": "${REPO_URL}/Nova-${VERSION}-mac-arm64-updater.tar.gz",
-                "signature": "${MAC_SIG}"
-              },
-              "linux-x86_64": {
-                "url": "${REPO_URL}/Nova-${VERSION}-linux-x86_64.AppImage",
-                "signature": "${LINUX_SIG}"
-              }
-            }
+          VERSION="$VERSION" SEMVER="$SEMVER" PUB_DATE="$PUB_DATE" REPO_URL="$REPO_URL" MAC_SIG="$MAC_SIG" \
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          latest_path = Path("artifacts/latest.json")
+          if latest_path.exists():
+              data = json.loads(latest_path.read_text())
+          else:
+              data = {}
+
+          data["version"] = os.environ["SEMVER"]
+          data["notes"] = f"Nova {os.environ['VERSION']}"
+          data["pub_date"] = os.environ["PUB_DATE"]
+          platforms = data.get("platforms") or {}
+          platforms["darwin-aarch64"] = {
+              "url": f"{os.environ['REPO_URL']}/Nova-{os.environ['VERSION']}-mac-arm64-updater.tar.gz",
+              "signature": os.environ.get("MAC_SIG", "")
           }
-          LATESTEOF
+          data["platforms"] = platforms
+          latest_path.write_text(json.dumps(data, indent=2) + "\n")
+          PY
 
-          echo "Generated latest.json:"
-          cat artifacts/latest.json
+          cat "$LATEST_PATH"
 
-      - name: Create release on public repo
+      - name: Create or update public release (macOS assets)
         env:
           GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.tag }}"
           REPO="dominant-strategies/nova-releases"
 
-          # Collect all release files (skip metadata JSONs used internally)
           FILES=()
-          for f in artifacts/nova-mac-arm64/* artifacts/nova-linux-x86_64/*; do
+          for f in artifacts/nova-mac-arm64/*; do
             [ -f "$f" ] && FILES+=("$f")
           done
-          # Include latest.json for auto-updater
+          [ -f artifacts/updater-mac/updater-mac.json ] && FILES+=("artifacts/updater-mac/updater-mac.json")
           FILES+=("artifacts/latest.json")
 
-          echo "Uploading ${#FILES[@]} files for $VERSION:"
-          printf '  %s\n' "${FILES[@]}"
-
           if gh release view "$VERSION" --repo "$REPO" &>/dev/null; then
-            echo "Release $VERSION exists, uploading assets..."
-            gh release upload "$VERSION" "${FILES[@]}" \
-              --repo "$REPO" --clobber
+            gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
           else
-            echo "Creating release $VERSION..."
-            gh release create "$VERSION" "${FILES[@]}" \
+            if ! gh release create "$VERSION" "${FILES[@]}" \
               --repo "$REPO" \
               --title "Nova $VERSION" \
-              --notes "$(cat <<'EOF'
-          ## Downloads
-
-          | Platform | File | Install |
-          |----------|------|---------|
-          | macOS (Apple Silicon) | `.dmg` | Open DMG, drag to Applications |
-          | Linux (x86_64) | `.deb` | `sudo dpkg -i Nova-*.deb` |
-          | Linux (x86_64) | `.AppImage` | `chmod +x` and run |
-          | Linux (x86_64) | `.tar.gz` | Extract and run `./nova` |
-
-          ### Requirements
-          - **macOS**: macOS 12+ (Apple Silicon). Signed and notarized.
-          - **Linux**: Docker installed (`sudo apt install docker.io`). GTK3 + WebKitGTK.
-
-          ### Auto-updates
-          Existing Nova installations will update automatically.
-          EOF
-          )"
+              --notes "macOS assets uploaded by Release macOS workflow."; then
+              gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
+            fi
           fi

@@ -81,8 +81,8 @@ const XLogo = ({ className }: { className?: string }) => (
 );
 
 const META: Record<string, Partial<Plugin>> = {
-  "memory-lancedb": { name: "Long-Term Memory", description: "Keeps long‑term memories and recalls them automatically.", category: "memory" },
-  "memory-core": { name: "Short-Term Memory", description: "Lightweight memory search for recent conversations.", category: "memory" },
+  "memory-lancedb": { name: "Long-Term Memory", description: "OpenAI-powered long-term recall (optional add-on).", category: "memory" },
+  "memory-core": { name: "QMD Memory (Default)", description: "Fast local hybrid memory search over notes and sessions.", category: "memory" },
   discord: { name: "Discord", description: "Connect Nova to Discord servers and DMs.", category: "integrations" },
   telegram: { name: "Telegram", description: "Run your agent as a Telegram bot.", category: "integrations" },
   slack: { name: "Slack", description: "Connect Nova to Slack workspaces.", category: "integrations" },
