@@ -93,9 +93,15 @@ type LocalhostAuthStart = { redirect_url: string };
 async function shouldUseLocalhostOAuth(): Promise<boolean> {
   if (AUTH_FORCE_DEEPLINK) return false;
   if (AUTH_USE_LOCALHOST) return true;
-  // Deep links work reliably when the app bundle is registered with macOS.
-  // Only fall back to localhost if explicitly opted in via VITE_AUTH_USE_LOCALHOST=1.
-  return false;
+  try {
+    const os = await platform();
+    // On macOS, always prefer localhost OAuth – deep-link (nova://) redirects
+    // are unreliable for OAuth callbacks and can end up re-opening the Google
+    // login page instead of handing the code back to the app.
+    return os === "macos";
+  } catch {
+    return false;
+  }
 }
 
 async function resolveOAuthRedirectUrl(): Promise<string> {
