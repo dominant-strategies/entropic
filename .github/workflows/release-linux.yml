@@ -50,13 +50,20 @@ jobs:
 
       - name: Free disk space (pre-build)
         run: |
-          echo "Disk usage before cleanup:"
-          df -h
-          docker system df || true
-          sudo apt-get clean || true
+          echo "=== Before cleanup ==="
+          df -h /
+          # Remove pre-installed bloat (frees ~12-15GB)
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /opt/hostedtoolcache
+          sudo apt-get clean
           docker system prune -af --volumes || true
-          echo "Disk usage after cleanup:"
-          df -h
+          echo "=== After cleanup ==="
+          df -h /
 
       - name: Install system dependencies
         run: |
