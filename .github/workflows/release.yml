@@ -147,7 +147,7 @@ jobs:
               | awk '/[0-9]+\) [0-9A-F]{40} / {print $2; exit}')"
           else
             SIGNING_SHA1="$(printf '%s\n' "$IDENTITIES_OUTPUT" \
-              | awk -v identity="$APPLE_SIGNING_IDENTITY" '$0 ~ "\"" identity "\"" {print $2; exit}')"
+              | awk -v identity="$APPLE_SIGNING_IDENTITY" 'index($0, "\"" identity "\"") {print $2; exit}')"
             if [ -z "$SIGNING_SHA1" ]; then
               echo "Multiple identities found; APPLE_SIGNING_IDENTITY did not match any imported identity."
               echo "Set APPLE_SIGNING_IDENTITY to the exact certificate label shown above."
