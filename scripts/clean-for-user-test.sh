@@ -7,10 +7,17 @@ NOVA_COLIMA_HOME="${NOVA_COLIMA_HOME:-$HOME/.nova/colima-dev}"
 LEGACY_COLIMA_HOME="$HOME/.nova/colima"
 NOVA_RUNTIME_HOME="${NOVA_RUNTIME_HOME:-$HOME}"
 USER_UID="$(id -u)"
+TMP_BASE="${TMPDIR:-/tmp}"
+TMP_BASE="${TMP_BASE%/}"
+if [[ -z "$TMP_BASE" ]]; then
+    TMP_BASE="/tmp"
+fi
 FALLBACK_COLIMA_HOME_SHARED="/Users/Shared/nova/colima-${USER_UID}"
-FALLBACK_COLIMA_HOME_TMP="/tmp/nova-colima-${USER_UID}"
+FALLBACK_COLIMA_HOME_TMP="${TMP_BASE}/nova-colima-${USER_UID}"
 FALLBACK_RUNTIME_HOME_SHARED="/Users/Shared/nova/home-${USER_UID}"
-FALLBACK_RUNTIME_HOME_TMP="/tmp/nova-home-${USER_UID}"
+FALLBACK_RUNTIME_HOME_TMP="${TMP_BASE}/nova-home-${USER_UID}"
+LEGACY_FALLBACK_COLIMA_HOME_TMP="/tmp/nova-colima-${USER_UID}"
+LEGACY_FALLBACK_RUNTIME_HOME_TMP="/tmp/nova-home-${USER_UID}"
 echo ""
 
 is_safe_nova_runtime_home_for_cleanup() {
@@ -22,7 +29,7 @@ is_safe_nova_runtime_home_for_cleanup() {
         "/"|"/Users"|"/tmp"|"$HOME")
             return 1
             ;;
-        "$FALLBACK_RUNTIME_HOME_SHARED"|"$FALLBACK_RUNTIME_HOME_TMP"|"$HOME/.nova/"*|"/Users/Shared/nova/"*|"/tmp/nova-home-"*|"/tmp/nova-"*)
+        "$FALLBACK_RUNTIME_HOME_SHARED"|"$FALLBACK_RUNTIME_HOME_TMP"|"$LEGACY_FALLBACK_RUNTIME_HOME_TMP"|"$HOME/.nova/"*|"/Users/Shared/nova/"*|"${TMP_BASE}/nova-home-"*|"${TMP_BASE}/nova-"*|"/tmp/nova-home-"*|"/tmp/nova-"*)
             return 0
             ;;
         *)
@@ -75,6 +82,10 @@ echo "  → Removing fallback $FALLBACK_COLIMA_HOME_SHARED..."
 rm -rf "$FALLBACK_COLIMA_HOME_SHARED"
 echo "  → Removing fallback $FALLBACK_COLIMA_HOME_TMP..."
 rm -rf "$FALLBACK_COLIMA_HOME_TMP"
+if [[ "$LEGACY_FALLBACK_COLIMA_HOME_TMP" != "$FALLBACK_COLIMA_HOME_TMP" ]]; then
+    echo "  → Removing legacy fallback $LEGACY_FALLBACK_COLIMA_HOME_TMP..."
+    rm -rf "$LEGACY_FALLBACK_COLIMA_HOME_TMP"
+fi
 
 # Cleanup fallback runtime HOME locations used by bundled Colima/Lima commands
 if [[ "$NOVA_RUNTIME_HOME" != "$HOME" ]]; then
@@ -89,6 +100,10 @@ echo "  → Removing fallback $FALLBACK_RUNTIME_HOME_SHARED..."
 rm -rf "$FALLBACK_RUNTIME_HOME_SHARED"
 echo "  → Removing fallback $FALLBACK_RUNTIME_HOME_TMP..."
 rm -rf "$FALLBACK_RUNTIME_HOME_TMP"
+if [[ "$LEGACY_FALLBACK_RUNTIME_HOME_TMP" != "$FALLBACK_RUNTIME_HOME_TMP" ]]; then
+    echo "  → Removing legacy fallback $LEGACY_FALLBACK_RUNTIME_HOME_TMP..."
+    rm -rf "$LEGACY_FALLBACK_RUNTIME_HOME_TMP"
+fi
 
 echo "✅ Nova runtime cleaned"
 

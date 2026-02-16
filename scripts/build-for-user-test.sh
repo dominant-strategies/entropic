@@ -5,10 +5,15 @@ echo "🏗️  Building Nova for end-user testing..."
 echo ""
 
 USER_UID="$(id -u)"
+TMP_BASE="${TMPDIR:-/tmp}"
+TMP_BASE="${TMP_BASE%/}"
+if [[ -z "$TMP_BASE" ]]; then
+    TMP_BASE="/tmp"
+fi
 FALLBACK_COLIMA_HOME_SHARED="/Users/Shared/nova/colima-${USER_UID}"
-FALLBACK_COLIMA_HOME_TMP="/tmp/nova-colima-${USER_UID}"
+FALLBACK_COLIMA_HOME_TMP="${TMP_BASE}/nova-colima-${USER_UID}"
 FALLBACK_RUNTIME_HOME_SHARED="/Users/Shared/nova/home-${USER_UID}"
-FALLBACK_RUNTIME_HOME_TMP="/tmp/nova-home-${USER_UID}"
+FALLBACK_RUNTIME_HOME_TMP="${TMP_BASE}/nova-home-${USER_UID}"
 
 # Change to project root (parent of scripts directory)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
