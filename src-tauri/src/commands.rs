@@ -32,6 +32,35 @@ const NOVA_PROXY_ALLOWED_HOSTS: &[&str] = &[
     "127.0.0.1",
 ];
 const MAX_BRIDGE_DEVICES: usize = 10;
+const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+fn client_log_path() -> PathBuf {
+    dirs::home_dir()
+        .map(|home| home.join("nova-runtime.log"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/nova-runtime.log"))
+}
+
+fn append_client_log_line(message: &str) -> Result<(), String> {
+    let path = client_log_path();
+    if let Ok(meta) = fs::metadata(&path) {
+        if meta.len() > CLIENT_LOG_MAX_BYTES {
+            let _ = fs::write(&path, "");
+        }
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to open client log: {}", e))?;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    use std::io::Write;
+    writeln!(file, "[{}] [client] {}", ts, message)
+        .map_err(|e| format!("Failed to write client log: {}", e))?;
+    Ok(())
+}
 
 /// Get the Docker socket path for the current platform.
 /// On macOS, uses Colima socket. On Linux/Windows, uses default.
@@ -3721,6 +3750,27 @@ pub fn init_state(app: &AppHandle) -> AppState {
 pub async fn check_runtime_status(app: AppHandle) -> Result<RuntimeStatus, String> {
     let runtime = get_runtime(&app);
     Ok(runtime.check_status())
+}
+
+#[tauri::command]
+pub async fn append_client_log(message: String) -> Result<(), String> {
+    let compact = message
+        .replace('\n', " ")
+        .replace('\r', " ")
+        .trim()
+        .to_string();
+    if compact.is_empty() {
+        return Ok(());
+    }
+
+    let max_chars = 1200usize;
+    let total_chars = compact.chars().count();
+    let mut clipped: String = compact.chars().take(max_chars).collect();
+    if total_chars > max_chars {
+        clipped.push_str("...");
+    }
+
+    append_client_log_line(&clipped)
 }
 
 #[tauri::command]

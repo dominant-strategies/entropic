@@ -19,6 +19,7 @@ import {
   BalanceResponse,
   supabase,
 } from "../lib/auth";
+import { clientLog } from "../lib/clientLog";
 
 // Dynamic import for deep-link to handle when it's not available
 let onOpenUrl: ((callback: (urls: string[]) => void) => Promise<() => void>) | null = null;
@@ -64,6 +65,26 @@ interface AuthProviderProps {
   children: ReactNode;
 }
 
+async function withTimeout<T>(
+  promise: Promise<T>,
+  label: string,
+  timeoutMs = 15000
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${Math.floor(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export function AuthProvider({ children }: AuthProviderProps) {
   const [isLoading, setIsLoading] = useState(isAuthConfigured);
   const [user, setUser] = useState<User | null>(null);
@@ -100,16 +121,24 @@ export function AuthProvider({ children }: AuthProviderProps) {
   useEffect(() => {
     if (!isAuthConfigured) {
       console.log("[Auth] Auth not configured, skipping initialization");
+      clientLog("auth.init.skipped.not_configured");
       return;
     }
 
     async function init() {
+      clientLog("auth.init.start");
       try {
-        const currentSession = await getSession();
-        const currentUser = currentSession ? await getUser() : null;
+        const currentSession = await withTimeout(getSession(), "Auth getSession");
+        const currentUser = currentSession
+          ? await withTimeout(getUser(), "Auth getUser")
+          : null;
 
         setSession(currentSession);
         setUser(currentUser);
+        clientLog("auth.init.loaded", {
+          hasSession: Boolean(currentSession),
+          hasUser: Boolean(currentUser),
+        });
 
         if (currentSession) {
           // Load balance
@@ -117,13 +146,23 @@ export function AuthProvider({ children }: AuthProviderProps) {
         }
       } catch (error) {
         console.error("Failed to load session:", error);
+        clientLog("auth.init.failed", { error: String(error) });
       } finally {
         setIsLoading(false);
+        clientLog("auth.init.complete");
       }
     }
 
     init();
   }, []);
+
+  useEffect(() => {
+    if (!isLoading) return;
+    const timer = setTimeout(() => {
+      clientLog("auth.loading.watchdog", { isAuthConfigured });
+    }, 20000);
+    return () => clearTimeout(timer);
+  }, [isLoading]);
 
   // Listen for auth state changes
   useEffect(() => {
@@ -131,14 +170,19 @@ export function AuthProvider({ children }: AuthProviderProps) {
       if ((import.meta as any).env?.VITE_AUTH_DEBUG === "1" || (import.meta as any).env?.DEV) {
         console.log("[auth] state change", { event, hasSession: Boolean(newSession) });
       }
+      clientLog("auth.state_change", { event, hasSession: Boolean(newSession) });
       setSession(newSession);
 
       if (newSession) {
-        const currentUser = await getUser();
-        setUser(currentUser);
+        try {
+          const currentUser = await withTimeout(getUser(), "Auth state change getUser");
+          setUser(currentUser);
 
-        // Load balance when user signs in
-        await loadBalance({ force: true });
+          // Load balance when user signs in
+          await loadBalance({ force: true });
+        } catch (error) {
+          clientLog("auth.state_change.failed", { error: String(error) });
+        }
       } else {
         setUser(null);
         setBalance(null);

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ArrowRight, ArrowLeft, Sparkles } from "lucide-react";
 import { saveProfile, setOnboardingComplete, saveOnboardingData } from "../lib/profile";
+import { clientLog } from "../lib/clientLog";
 
 type OnboardingData = {
   userName: string;
@@ -24,6 +25,28 @@ export function Onboarding({ onComplete }: Props) {
     agentName: "Nova",
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitStage, setSubmitStage] = useState("");
+  const [submitError, setSubmitError] = useState("");
+
+  async function withTimeout<T>(
+    promise: Promise<T>,
+    label: string,
+    timeoutMs = 15000
+  ): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(`${label} timed out after ${Math.floor(timeoutMs / 1000)}s`));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
 
   const canProceed = () => {
     switch (currentStep) {
@@ -63,36 +86,66 @@ Be friendly, knowledgeable, and ready to help.
 
   const handleComplete = async () => {
     setIsSubmitting(true);
+    setSubmitError("");
+    clientLog("onboarding.complete.start");
     try {
       // Generate the SOUL.md content
       const soul = generateSoul();
 
       // Save onboarding data locally
-      await saveOnboardingData({
-        userName: data.userName,
-        agentName: data.agentName,
-        soul,
-      });
+      setSubmitStage("Saving profile...");
+      clientLog("onboarding.stage.save_profile");
+      await withTimeout(
+        saveOnboardingData({
+          userName: data.userName,
+          agentName: data.agentName,
+          soul,
+        }),
+        "Saving onboarding data"
+      );
 
-      // Sync to Rust store
-      await invoke("sync_onboarding_to_settings", {
-        soul,
-        agentName: data.agentName,
-      });
+      // Sync to Rust store (best effort)
+      setSubmitStage("Syncing settings...");
+      clientLog("onboarding.stage.sync_settings");
+      try {
+        await withTimeout(
+          invoke("sync_onboarding_to_settings", {
+            soul,
+            agentName: data.agentName,
+          }),
+          "Syncing onboarding settings"
+        );
+      } catch (error) {
+        console.warn("Onboarding sync warning:", error);
+      }
 
-      // Save the agent profile
-      await saveProfile({ name: data.agentName });
+      // Save the agent profile (best effort)
+      setSubmitStage("Finalizing...");
+      clientLog("onboarding.stage.finalize");
+      try {
+        await withTimeout(saveProfile({ name: data.agentName }), "Saving agent profile");
+      } catch (error) {
+        console.warn("Profile save warning:", error);
+      }
 
-      // Mark onboarding as complete
-      await setOnboardingComplete(true);
+      // Mark onboarding as complete (required)
+      await withTimeout(
+        setOnboardingComplete(true),
+        "Marking onboarding as complete"
+      );
 
       // Notify that profile was updated
       window.dispatchEvent(new Event("nova-profile-updated"));
 
+      clientLog("onboarding.complete.success");
       onComplete();
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       console.error("Failed to complete onboarding:", error);
+      clientLog("onboarding.complete.failed", { error: message });
+      setSubmitError(message);
     } finally {
+      setSubmitStage("");
       setIsSubmitting(false);
     }
   };
@@ -154,7 +207,7 @@ Be friendly, knowledgeable, and ready to help.
           >
             {isSubmitting ? (
               <span className="flex items-center gap-2">
-                Setup...
+                {submitStage || "Setup..."}
               </span>
             ) : (
               <span className="flex items-center gap-2">
@@ -163,6 +216,12 @@ Be friendly, knowledgeable, and ready to help.
               </span>
             )}
           </button>
+
+          {submitError && (
+            <div className="max-w-md text-center text-xs text-red-500">
+              {submitError}
+            </div>
+          )}
 
           <button
             onClick={handleBack}
@@ -177,4 +236,3 @@ Be friendly, knowledgeable, and ready to help.
     </div>
   );
 }
-

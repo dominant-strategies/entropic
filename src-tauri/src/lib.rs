@@ -118,6 +118,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::check_runtime_status,
+            commands::append_client_log,
             commands::start_runtime,
             commands::stop_runtime,
             commands::ensure_runtime,

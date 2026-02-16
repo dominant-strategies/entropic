@@ -9,6 +9,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { Onboarding } from "./pages/Onboarding";
 import { SignIn } from "./pages/SignIn";
 import { isOnboardingComplete } from "./lib/profile";
+import { clientLog } from "./lib/clientLog";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 
 type RuntimeStatus = {
@@ -41,6 +42,7 @@ function AppContent() {
         }
       } catch (error) {
         console.warn("Updater check failed:", error);
+        clientLog("app.updater.failed", { error: String(error) });
       }
     };
     runUpdate();
@@ -51,15 +53,37 @@ function AppContent() {
 
   useEffect(() => {
     // Wait for auth to finish loading before determining app state
+    clientLog("app.auth.state", {
+      authLoading,
+      isAuthenticated,
+      isAuthConfigured,
+    });
     if (!authLoading) {
       init();
     }
   }, [authLoading, isAuthenticated, isAuthConfigured]);
 
+  useEffect(() => {
+    if (!(authLoading || appState === "loading")) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      clientLog("app.loading.watchdog", {
+        authLoading,
+        appState,
+        isAuthenticated,
+        isAuthConfigured,
+      });
+    }, 20000);
+    return () => clearTimeout(timer);
+  }, [authLoading, appState, isAuthenticated, isAuthConfigured]);
+
   async function init() {
+    clientLog("app.init.start", { isAuthenticated, isAuthConfigured });
     // If auth is configured but not authenticated, show sign in
     if (isAuthConfigured && !isAuthenticated) {
       setAppState("signin");
+      clientLog("app.state.signin");
       return;
     }
 
@@ -69,11 +93,13 @@ function AppContent() {
       console.log("Onboarding complete:", onboarded);
       if (!onboarded) {
         setAppState("onboarding");
+        clientLog("app.state.onboarding");
         return;
       }
     } catch (error) {
       console.error("Failed to check onboarding:", error);
       setAppState("onboarding");
+      clientLog("app.onboarding.check.failed", { error: String(error) });
       return;
     }
 
@@ -87,16 +113,21 @@ function AppContent() {
 
       if (result.docker_ready) {
         setAppState("ready");
+        clientLog("app.state.ready");
       } else if (currentPlatform === "linux" && !result.docker_ready) {
         setAppState("docker-install");
+        clientLog("app.state.docker_install");
       } else if (currentPlatform === "macos") {
         setAppState("setup");
+        clientLog("app.state.setup", { platform: currentPlatform });
       } else {
         setAppState("setup");
+        clientLog("app.state.setup", { platform: currentPlatform });
       }
     } catch (error) {
       console.error("Failed to check runtime:", error);
       setAppState("setup");
+      clientLog("app.runtime.check.failed", { error: String(error) });
     }
   }
 
