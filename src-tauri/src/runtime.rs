@@ -84,6 +84,10 @@ fn fallback_colima_home_path() -> PathBuf {
     }
 }
 
+fn path_contains_whitespace(path: &std::path::Path) -> bool {
+    path.to_string_lossy().chars().any(char::is_whitespace)
+}
+
 pub(crate) fn nova_colima_home_path() -> PathBuf {
     if let Ok(home) = std::env::var("NOVA_COLIMA_HOME") {
         if !home.trim().is_empty() {
@@ -91,9 +95,21 @@ pub(crate) fn nova_colima_home_path() -> PathBuf {
         }
     }
 
-    dirs::home_dir()
-        .map(|h| h.join(NOVA_COLIMA_HOME_DIR))
-        .unwrap_or_else(fallback_colima_home_path)
+    if let Some(home) = dirs::home_dir() {
+        let candidate = home.join(NOVA_COLIMA_HOME_DIR);
+        if path_contains_whitespace(&candidate) {
+            let fallback = fallback_colima_home_path();
+            debug_log(&format!(
+                "NOVA_COLIMA_HOME contains whitespace ({}); using fallback {}",
+                candidate.display(),
+                fallback.display()
+            ));
+            return fallback;
+        }
+        return candidate;
+    }
+
+    fallback_colima_home_path()
 }
 
 pub(crate) fn nova_colima_socket_candidates() -> Vec<PathBuf> {
