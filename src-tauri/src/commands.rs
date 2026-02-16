@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -2585,6 +2585,8 @@ fn generate_gateway_token() -> String {
     URL_SAFE_NO_PAD.encode(token_bytes)
 }
 
+static SESSION_GATEWAY_TOKEN: OnceLock<String> = OnceLock::new();
+
 fn normalize_token(value: Option<String>) -> Option<String> {
     value.and_then(|token| {
         let trimmed = token.trim();
@@ -2600,20 +2602,14 @@ fn container_gateway_token() -> Option<String> {
     normalize_token(read_container_env("OPENCLAW_GATEWAY_TOKEN"))
 }
 
-fn expected_gateway_token(app: &AppHandle) -> Result<String, String> {
+fn expected_gateway_token(_app: &AppHandle) -> Result<String, String> {
     if let Some(from_env) = normalize_token(std::env::var("NOVA_GATEWAY_TOKEN").ok()) {
         return Ok(from_env);
     }
 
-    let mut stored = load_auth(app);
-    if let Some(existing) = normalize_token(stored.gateway_token.clone()) {
-        return Ok(existing);
-    }
-
-    let generated = generate_gateway_token();
-    stored.gateway_token = Some(generated.clone());
-    save_auth(app, &stored)?;
-    Ok(generated)
+    Ok(SESSION_GATEWAY_TOKEN
+        .get_or_init(generate_gateway_token)
+        .clone())
 }
 
 fn effective_gateway_token(app: &AppHandle) -> Result<String, String> {

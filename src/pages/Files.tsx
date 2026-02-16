@@ -79,7 +79,6 @@ const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.m
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
 const GATEWAY_URL = "ws://127.0.0.1:19789";
-const GATEWAY_TOKEN = "nova-local-gateway";
 const DEFAULT_BROWSER_URL = "https://clawhub.ai/skills";
 const PANEL_FALLBACK = (
   <div className="p-4 text-xs text-[var(--text-tertiary)]">Loading…</div>
