@@ -255,7 +255,7 @@ export function SetupScreen({ onComplete }: Props) {
 
                   <div className="text-center">
                     <p className="text-xs text-gray-500 mb-3">
-                      Automatic cleanup resets only Nova&apos;s isolated Colima setup files. It does not delete chats, Nova settings, or Docker Desktop data.
+                      Automatic cleanup resets Nova&apos;s isolated Colima runtime (VM/image/cache and container state under Nova&apos;s runtime). It does not touch your macOS home files or Docker Desktop data.
                     </p>
                     <button
                       onClick={() => startSetup(false)}
