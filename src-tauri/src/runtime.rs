@@ -100,8 +100,62 @@ fn fallback_colima_home_path() -> PathBuf {
     }
 }
 
+fn fallback_runtime_home_path() -> PathBuf {
+    let shared_base = PathBuf::from("/Users/Shared/nova");
+    if std::fs::create_dir_all(&shared_base).is_ok() {
+        #[cfg(unix)]
+        {
+            // SAFETY: geteuid has no preconditions and does not dereference pointers.
+            let uid = unsafe { libc::geteuid() };
+            return shared_base.join(format!("home-{}", uid));
+        }
+
+        #[cfg(not(unix))]
+        {
+            return shared_base.join("home");
+        }
+    }
+
+    let base = std::env::temp_dir();
+
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid has no preconditions and does not dereference pointers.
+        let uid = unsafe { libc::geteuid() };
+        return base.join(format!("nova-home-{}", uid));
+    }
+
+    #[cfg(not(unix))]
+    {
+        base.join("nova-home")
+    }
+}
+
 fn path_contains_whitespace(path: &std::path::Path) -> bool {
     path.to_string_lossy().chars().any(char::is_whitespace)
+}
+
+fn nova_runtime_home_path() -> PathBuf {
+    if let Ok(home) = std::env::var("NOVA_RUNTIME_HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        if path_contains_whitespace(&home) {
+            let fallback = fallback_runtime_home_path();
+            debug_log(&format!(
+                "HOME contains whitespace ({}); using runtime HOME {}",
+                home.display(),
+                fallback.display()
+            ));
+            return fallback;
+        }
+        return home;
+    }
+
+    fallback_runtime_home_path()
 }
 
 pub(crate) fn nova_colima_home_path() -> PathBuf {
@@ -226,6 +280,10 @@ impl Runtime {
 
     fn colima_home(&self) -> PathBuf {
         nova_colima_home_path()
+    }
+
+    fn runtime_home(&self) -> PathBuf {
+        nova_runtime_home_path()
     }
 
     fn colima_profiles(&self) -> [(&'static str, &'static str); 2] {
@@ -522,17 +580,56 @@ impl Runtime {
     ) -> Vec<String> {
         let colima_home = self.colima_home();
         let colima_home_str = Self::shell_escape_arg(&colima_home.to_string_lossy());
+        let runtime_home = self.runtime_home();
+        let runtime_home_str = Self::shell_escape_arg(&runtime_home.to_string_lossy());
         let colima_path_str = Self::shell_escape_arg(&colima_path.to_string_lossy());
         profiles
             .iter()
             .map(|profile| {
                 let profile_str = Self::shell_escape_arg(profile);
                 format!(
-                    "COLIMA_HOME={} {} --profile {} delete --force",
-                    colima_home_str, colima_path_str, profile_str
+                    "HOME={} COLIMA_HOME={} {} --profile {} delete --force",
+                    runtime_home_str, colima_home_str, colima_path_str, profile_str
                 )
             })
             .collect()
+    }
+
+    fn should_auto_reset_isolated_runtime(&self, message: &str) -> bool {
+        let lower = message.to_lowercase();
+        (lower.contains("cd: /users/") && lower.contains("no such file or directory"))
+            || lower.contains("error validating sha sum")
+            || lower.contains("error getting qcow image")
+    }
+
+    fn reset_isolated_colima_runtime(&self) -> Result<(), RuntimeError> {
+        debug_log("Attempting automatic reset of Nova isolated Colima runtime");
+        for (profile, _) in self.colima_profiles() {
+            let _ = self.run_colima(profile, &["stop", "--force"]);
+            let _ = self.run_colima(profile, &["delete", "--force"]);
+        }
+
+        let colima_home = self.colima_home();
+        if colima_home.exists() {
+            std::fs::remove_dir_all(&colima_home).map_err(|e| {
+                RuntimeError::ColimaStartFailed(format!(
+                    "Failed to remove isolated Colima runtime at {}: {}",
+                    colima_home.display(),
+                    e
+                ))
+            })?;
+        }
+
+        std::fs::create_dir_all(&colima_home).map_err(|e| {
+            RuntimeError::ColimaStartFailed(format!(
+                "Failed to recreate isolated Colima runtime at {}: {}",
+                colima_home.display(),
+                e
+            ))
+        })?;
+        self.secure_colima_home_permissions(&colima_home)?;
+        debug_log("Automatic isolated Colima runtime reset complete");
+        Ok(())
     }
 
     fn is_docker_ready_on_socket(&self, socket_path: &std::path::Path) -> bool {
@@ -970,12 +1067,58 @@ impl Runtime {
         Ok(())
     }
 
+    fn try_prepare_private_dir(&self, path: &std::path::Path, label: &str) {
+        if let Err(e) = std::fs::create_dir_all(path) {
+            debug_log(&format!(
+                "Failed to create runtime {} at {}: {}",
+                label,
+                path.display(),
+                e
+            ));
+            return;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            match std::fs::metadata(path) {
+                Ok(metadata) => {
+                    let mut perms = metadata.permissions();
+                    perms.set_mode(0o700);
+                    if let Err(e) = std::fs::set_permissions(path, perms) {
+                        debug_log(&format!(
+                            "Failed to set permissions for runtime {} at {}: {}",
+                            label,
+                            path.display(),
+                            e
+                        ));
+                    }
+                }
+                Err(e) => {
+                    debug_log(&format!(
+                        "Failed to read metadata for runtime {} at {}: {}",
+                        label,
+                        path.display(),
+                        e
+                    ));
+                }
+            }
+        }
+    }
+
     /// Create a command with environment set up for bundled binaries
     fn bundled_command(&self, program: &std::path::Path) -> Command {
         let mut cmd = Command::new(program);
 
         let bin_dir = self.bin_dir();
         let share_dir = self.share_dir();
+        let runtime_home = self.runtime_home();
+        let xdg_config_home = runtime_home.join(".config");
+        let xdg_cache_home = runtime_home.join(".cache");
+
+        self.try_prepare_private_dir(&runtime_home, "home");
+        self.try_prepare_private_dir(&xdg_config_home, "config dir");
+        self.try_prepare_private_dir(&xdg_cache_home, "cache dir");
 
         // Add our bin directory to PATH so colima can find limactl
         if let Ok(current_path) = std::env::var("PATH") {
@@ -983,6 +1126,9 @@ impl Runtime {
         } else {
             cmd.env("PATH", bin_dir.display().to_string());
         }
+        cmd.env("HOME", runtime_home.display().to_string());
+        cmd.env("XDG_CONFIG_HOME", xdg_config_home.display().to_string());
+        cmd.env("XDG_CACHE_HOME", xdg_cache_home.display().to_string());
 
         // Tell Lima where to find its share directory (templates, etc.)
         // Lima looks for templates at $LIMA_SHARE_DIR or relative to the binary
@@ -994,7 +1140,7 @@ impl Runtime {
         cmd
     }
 
-    pub fn start_colima(&self) -> Result<(), RuntimeError> {
+    fn start_colima_internal(&self, allow_auto_reset: bool) -> Result<(), RuntimeError> {
         debug_log("=== start_colima() called ===");
 
         let colima_path = self.colima_path();
@@ -1082,9 +1228,31 @@ impl Runtime {
             }
         }
 
-        let reason = last_error.unwrap_or_else(|| "Failed to start Colima".to_string());
+        let mut reason = last_error.unwrap_or_else(|| "Failed to start Colima".to_string());
+        let mut auto_reset_attempted = false;
+        if allow_auto_reset && self.should_auto_reset_isolated_runtime(&reason) {
+            auto_reset_attempted = true;
+            debug_log(
+                "Detected Colima state likely recoverable via isolated runtime reset; attempting one-time auto-reset",
+            );
+            match self.reset_isolated_colima_runtime() {
+                Ok(()) => {
+                    debug_log("Auto-reset succeeded; retrying Colima startup once");
+                    return self.start_colima_internal(false);
+                }
+                Err(e) => {
+                    reason = format!(
+                        "{}\n\nNova attempted an automatic isolated runtime reset, but it failed: {}",
+                        reason, e
+                    );
+                }
+            }
+        }
+
         let heading = if fell_back_from_vz && last_failed_profile == Some(NOVA_QEMU_PROFILE) {
             "VZ was unavailable and qemu startup failed. To reset Nova's isolated runtime:"
+        } else if auto_reset_attempted {
+            "Nova attempted an automatic isolated runtime reset. If this keeps happening, run a manual reset for Nova's isolated runtime:"
         } else {
             "If this keeps happening, run a manual reset for Nova's isolated runtime:"
         };
@@ -1097,6 +1265,10 @@ impl Runtime {
             "{}\n\n{}\n{}",
             reason, heading, reset_commands
         )))
+    }
+
+    pub fn start_colima(&self) -> Result<(), RuntimeError> {
+        self.start_colima_internal(true)
     }
 
     pub fn stop_colima(&self) -> Result<(), RuntimeError> {
