@@ -150,12 +150,13 @@ resolve_working_docker_host() {
     return 0
   fi
 
+  ACTIVE_DOCKER_HOST=""
   return 1
 }
 
 run_docker() {
   if ! resolve_working_docker_host; then
-    echo "[dev] Docker socket unavailable; tried host ${ACTIVE_DOCKER_HOST:-<unset>}" >&2
+    echo "[dev] Docker socket unavailable; using default Docker context" >&2
   fi
   local docker_host="${ACTIVE_DOCKER_HOST:-}"
   DOCKER_HOST="$docker_host" "$DOCKER_BIN" "$@"

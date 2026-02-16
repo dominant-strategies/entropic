@@ -92,8 +92,54 @@ export class GatewayClient {
   private token: string;
   private authenticated = false;
   private requestId = 0;
-  private pendingRequests = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private pendingRequests = new Map<
+    string,
+    {
+      method: string;
+      resolve: (v: unknown) => void;
+      reject: (e: Error) => void;
+      startedAt: number;
+      timeoutHandle?: ReturnType<typeof setTimeout>;
+    }
+  >();
   private listeners: Partial<{ [K in keyof GatewayEvents]: GatewayEvents[K][] }> = {};
+
+  private shouldLog() {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    if (window.localStorage?.getItem("NOVA_GATEWAY_DEBUG") === "1") {
+      return true;
+    }
+    if (import.meta.env.DEV) {
+      return true;
+    }
+    return new URLSearchParams(window.location.search).has("debugGateway");
+  }
+
+  private log(...parts: unknown[]) {
+    if (this.shouldLog()) {
+      console.log("[Gateway]", ...parts);
+    }
+  }
+
+  private logError(...parts: unknown[]) {
+    if (this.shouldLog()) {
+      console.error("[Gateway]", ...parts);
+    }
+  }
+
+  private failPendingRequests(code: string, event: string, details?: string) {
+    for (const [id, pending] of this.pendingRequests) {
+      if (pending.timeoutHandle) clearTimeout(pending.timeoutHandle);
+      const message = details
+        ? `Gateway socket ${event} before response for ${pending.method} (id=${id}): ${details}`
+        : `Gateway socket ${event} before response for ${pending.method} (id=${id})`;
+      pending.reject(new GatewayError(message, code));
+    }
+    this.pendingRequests.clear();
+  }
+
   constructor(url: string, token: string) {
     this.url = url;
     this.token = token;
@@ -125,12 +171,12 @@ export class GatewayClient {
 
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      console.log("[Gateway] Connecting to", this.url);
+      this.log("Connecting to", this.url);
       this.ws = new WebSocket(this.url);
       this.authenticated = false;
 
       this.ws.onopen = () => {
-        console.log("[Gateway] WebSocket opened, waiting for challenge...");
+        this.log("WebSocket opened, waiting for challenge...");
       };
 
       this.ws.onmessage = async (event) => {
@@ -138,18 +184,19 @@ export class GatewayClient {
           const frame: Frame = JSON.parse(event.data);
           await this.handleFrame(frame, resolve, reject);
         } catch (e) {
-          console.error("[Gateway] Failed to parse frame:", e);
+          this.logError("Failed to parse frame:", e);
         }
       };
 
       this.ws.onerror = (e) => {
-        console.error("[Gateway] WebSocket error:", e);
+        this.logError("WebSocket error:", e);
         this.emit("error", "WebSocket error");
         reject(new Error("WebSocket error"));
       };
 
-      this.ws.onclose = () => {
-        console.log("[Gateway] WebSocket closed");
+      this.ws.onclose = (event) => {
+        this.log("WebSocket closed", `code=${event.code}`, `reason=${event.reason || "(none)"}`);
+        this.failPendingRequests("ws.closed", "closed", `code=${event.code} reason=${event.reason || "(none)"}`);
         this.authenticated = false;
         this.emit("disconnected");
         this.ws = null;
@@ -165,28 +212,28 @@ export class GatewayClient {
     if (frame.type === "event") {
       if (frame.event === "connect.challenge") {
         // Respond with connect RPC
-        console.log("[Gateway] Received challenge, authenticating...");
+        this.log("Received challenge, authenticating...");
         try {
           await this.rpc("connect", {
             minProtocol: 3,
             maxProtocol: 3,
             client: {
-              id: "webchat-ui",  // Must be a known client ID
+              id: "webchat-ui", // Must be a known client ID
               displayName: "Nova Desktop",
               version: "0.1.0",
               platform: "desktop",
-              mode: "ui",  // Must be: webchat, cli, ui, backend, node, probe, test
+              mode: "ui", // Must be: webchat, cli, ui, backend, node, probe, test
             },
             role: "operator",
             scopes: ["operator.admin"],
             auth: { token: this.token },
           });
-          console.log("[Gateway] Connected successfully");
+          this.log("Connected successfully");
           this.authenticated = true;
           this.emit("connected");
           connectResolve?.();
         } catch (e) {
-          console.error("[Gateway] Auth failed:", e);
+          this.logError("Auth failed:", e);
           connectReject?.(e as Error);
         }
       } else if (frame.event === "chat") {
@@ -198,16 +245,39 @@ export class GatewayClient {
       const pending = this.pendingRequests.get(frame.id);
       if (pending) {
         this.pendingRequests.delete(frame.id);
+        if (pending.timeoutHandle) {
+          clearTimeout(pending.timeoutHandle);
+        }
+        const status = frame.ok ? "ok" : "error";
+        const method = pending.method;
+        const elapsedMs = Date.now() - pending.startedAt;
+        if (frame.ok) {
+          this.log("res", status, `id=${frame.id}`, `method=${method}`, `ms=${elapsedMs}`);
+        } else {
+          this.logError(
+            "res",
+            status,
+            `id=${frame.id}`,
+            `method=${method}`,
+            `ms=${elapsedMs}`,
+            frame.error,
+          );
+        }
         if (frame.ok) {
           pending.resolve(frame.payload);
         } else {
           pending.reject(new GatewayError(frame.error?.message || "RPC failed", frame.error?.code));
         }
+      } else {
+        this.log("res", "unmatched", `id=${frame.id}`);
       }
     }
   }
 
   rpc<T = unknown>(method: string, params?: unknown): Promise<T> {
+    const id = String(++this.requestId);
+    const startedAt = Date.now();
+
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         reject(new Error("Not connected"));
@@ -218,15 +288,37 @@ export class GatewayClient {
         return;
       }
 
-      const id = String(++this.requestId);
       const frame: RequestFrame = { type: "req", id, method, params };
+      const timeoutMs = 20_000;
+      const timeoutHandle = setTimeout(() => {
+        const pending = this.pendingRequests.get(id);
+        if (pending) {
+          this.pendingRequests.delete(id);
+          pending.reject(
+            new GatewayError(
+              `Request timeout after ${timeoutMs}ms for ${method} (id=${id})`,
+              "timeout",
+            ),
+          );
+        }
+      }, timeoutMs);
 
       this.pendingRequests.set(id, {
+        method,
         resolve: resolve as (v: unknown) => void,
         reject,
+        startedAt,
+        timeoutHandle,
       });
 
-      this.ws.send(JSON.stringify(frame));
+      this.log(
+        "send",
+        `id=${id}`,
+        `method=${method}`,
+        `lagMs=${Date.now() - startedAt}`,
+        frame.params
+      );
+        this.ws.send(JSON.stringify(frame));
     });
   }
 

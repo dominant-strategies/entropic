@@ -386,10 +386,7 @@ export function Layout({
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                const confirmed = window.confirm("Delete this chat?");
-                                if (confirmed) {
-                                  onChatSessionAction?.({ type: "delete", key: session.key });
-                                }
+                                onChatSessionAction?.({ type: "delete", key: session.key });
                                 setOpenSessionMenuKey(null);
                               }}
                               className="w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-left text-red-600 hover:bg-red-50"
