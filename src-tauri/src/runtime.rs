@@ -940,6 +940,36 @@ impl Runtime {
         Ok(())
     }
 
+    fn secure_colima_home_permissions(&self, path: &std::path::Path) -> Result<(), RuntimeError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::metadata(path).map_err(|e| {
+                RuntimeError::ColimaStartFailed(format!(
+                    "Failed to read Colima home metadata at {}: {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o700);
+            std::fs::set_permissions(path, perms).map_err(|e| {
+                RuntimeError::ColimaStartFailed(format!(
+                    "Failed to secure Colima home permissions at {}: {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+        }
+
+        Ok(())
+    }
+
     /// Create a command with environment set up for bundled binaries
     fn bundled_command(&self, program: &std::path::Path) -> Command {
         let mut cmd = Command::new(program);
@@ -988,6 +1018,7 @@ impl Runtime {
                 e
             )));
         }
+        self.secure_colima_home_permissions(&colima_home)?;
 
         debug_log(&format!("colima_home: {:?}", colima_home));
 
