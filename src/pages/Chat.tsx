@@ -514,6 +514,26 @@ function buildAssistantPayload(raw: string) {
   };
 }
 
+function extractJsonCandidate(raw: string): string | null {
+  const text = (raw || "").trim();
+  if (!text) return null;
+  const fenced = text.match(/^```json\s*([\s\S]*?)\s*```$/i);
+  if (fenced) return fenced[1].trim();
+  return text;
+}
+
+function isPureJsonObjectOrArray(raw: string): boolean {
+  const candidate = extractJsonCandidate(raw);
+  if (!candidate) return false;
+  if (!(candidate.startsWith("{") || candidate.startsWith("["))) return false;
+  try {
+    const parsed = JSON.parse(candidate);
+    return !!parsed && typeof parsed === "object";
+  } catch {
+    return false;
+  }
+}
+
 function normalizeCachedMessage(message: Message): Message {
   if (message.role !== "assistant") return message;
   const prepared = buildAssistantPayload(message.content || "");
@@ -2370,9 +2390,19 @@ export function Chat({
                   hadToolPayload: msg.assistantPayload?.hadToolPayload ?? false,
                 }
               : null;
+            const hideRawToolJson =
+              msg.role === "assistant" &&
+              msg.kind === "toolResult" &&
+              !!assistantPayload &&
+              assistantPayload.events.length === 0 &&
+              assistantPayload.errors.length === 0 &&
+              isPureJsonObjectOrArray(assistantPayload.cleanText);
             const bodyContent = msg.role === "user" ? normalizedUser?.content ?? "" : msg.content;
             const messageTime = formatMessageTime(msg.role === "user" ? normalizedUser?.sentAt : msg.sentAt);
             if (msg.role === "user" && !bodyContent) {
+              return null;
+            }
+            if (hideRawToolJson) {
               return null;
             }
             return (
