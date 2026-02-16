@@ -13,6 +13,24 @@ FALLBACK_RUNTIME_HOME_SHARED="/Users/Shared/nova/home-${USER_UID}"
 FALLBACK_RUNTIME_HOME_TMP="/tmp/nova-home-${USER_UID}"
 echo ""
 
+is_safe_nova_runtime_home_for_cleanup() {
+    local target="$1"
+    if [[ -z "$target" ]]; then
+        return 1
+    fi
+    case "$target" in
+        "/"|"/Users"|"/tmp"|"$HOME")
+            return 1
+            ;;
+        "$FALLBACK_RUNTIME_HOME_SHARED"|"$FALLBACK_RUNTIME_HOME_TMP"|"$HOME/.nova/"*|"/Users/Shared/nova/"*|"/tmp/nova-home-"*|"/tmp/nova-"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # ============================================
 # 1. KILL RUNNING NOVA PROCESSES & UNMOUNT DMGS
 # ============================================
@@ -60,8 +78,12 @@ rm -rf "$FALLBACK_COLIMA_HOME_TMP"
 
 # Cleanup fallback runtime HOME locations used by bundled Colima/Lima commands
 if [[ "$NOVA_RUNTIME_HOME" != "$HOME" ]]; then
-    echo "  → Removing NOVA_RUNTIME_HOME override $NOVA_RUNTIME_HOME..."
-    rm -rf "$NOVA_RUNTIME_HOME"
+    if is_safe_nova_runtime_home_for_cleanup "$NOVA_RUNTIME_HOME"; then
+        echo "  → Removing NOVA_RUNTIME_HOME override $NOVA_RUNTIME_HOME..."
+        rm -rf "$NOVA_RUNTIME_HOME"
+    else
+        echo "  ⚠️  Skipping unsafe NOVA_RUNTIME_HOME cleanup target: $NOVA_RUNTIME_HOME"
+    fi
 fi
 echo "  → Removing fallback $FALLBACK_RUNTIME_HOME_SHARED..."
 rm -rf "$FALLBACK_RUNTIME_HOME_SHARED"
