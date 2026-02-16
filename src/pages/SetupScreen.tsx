@@ -108,10 +108,22 @@ export function SetupScreen({ onComplete }: Props) {
     }
   }, [isRunning, onComplete]);
 
-  async function startSetup() {
+  async function startSetup(withCleanup = false) {
+    setCopyStatus("idle");
+    setProgress({
+      stage: withCleanup ? "cleanup" : "starting",
+      message: withCleanup
+        ? "Cleaning isolated runtime and retrying setup..."
+        : "Starting setup...",
+      percent: withCleanup ? 5 : 0,
+      complete: false,
+      error: null,
+    });
     setIsRunning(true);
     try {
-      await invoke("run_first_time_setup");
+      await invoke(
+        withCleanup ? "run_first_time_setup_with_cleanup" : "run_first_time_setup",
+      );
     } catch (error) {
       console.error("Setup failed:", error);
     }
@@ -146,7 +158,7 @@ export function SetupScreen({ onComplete }: Props) {
               needs to happen once.
             </p>
             <button
-              onClick={startSetup}
+              onClick={() => startSetup(false)}
               className="w-full py-3 px-4 bg-violet-600 hover:bg-violet-700 text-white font-medium rounded-xl transition-colors"
             >
               Set Up Secure Sandbox
@@ -242,15 +254,20 @@ export function SetupScreen({ onComplete }: Props) {
                   </details>
 
                   <div className="text-center">
+                    <p className="text-xs text-gray-500 mb-3">
+                      Automatic cleanup resets only Nova&apos;s isolated Colima setup files. It does not delete chats, Nova settings, or Docker Desktop data.
+                    </p>
                     <button
-                      onClick={() => {
-                        setIsRunning(false);
-                        setProgress(null);
-                        setCopyStatus("idle");
-                      }}
-                      className="px-4 py-2 text-violet-600 hover:text-violet-700 font-medium"
+                      onClick={() => startSetup(false)}
+                      className="w-full px-4 py-2 mb-2 rounded-lg border border-violet-200 text-violet-700 hover:bg-violet-50 font-medium"
                     >
-                      Try Again
+                      Retry Setup
+                    </button>
+                    <button
+                      onClick={() => startSetup(true)}
+                      className="w-full px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-700 text-white font-medium"
+                    >
+                      Retry with Automatic Cleanup
                     </button>
                   </div>
                 </>

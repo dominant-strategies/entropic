@@ -632,6 +632,10 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn reset_isolated_runtime_state(&self) -> Result<(), RuntimeError> {
+        self.reset_isolated_colima_runtime()
+    }
+
     fn is_docker_ready_on_socket(&self, socket_path: &std::path::Path) -> bool {
         if !socket_path.exists() {
             debug_log(&format!(

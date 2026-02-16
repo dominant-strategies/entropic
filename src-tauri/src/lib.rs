@@ -130,6 +130,7 @@ pub fn run() {
             commands::get_gateway_auth,
             commands::get_setup_progress,
             commands::run_first_time_setup,
+            commands::run_first_time_setup_with_cleanup,
             commands::set_api_key,
             commands::set_active_provider,
             commands::get_auth_state,

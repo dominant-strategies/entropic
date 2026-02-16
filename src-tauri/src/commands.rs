@@ -6156,12 +6156,41 @@ pub async fn get_setup_progress(state: State<'_, AppState>) -> Result<SetupProgr
     Ok(progress.clone())
 }
 
-#[tauri::command]
-pub async fn run_first_time_setup(
+async fn run_first_time_setup_internal(
     app: AppHandle,
     state: State<'_, AppState>,
+    cleanup_before_start: bool,
 ) -> Result<(), String> {
     let runtime = get_runtime(&app);
+
+    if cleanup_before_start && matches!(Platform::detect(), Platform::MacOS) {
+        {
+            let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
+            *progress = SetupProgress {
+                stage: "cleanup".to_string(),
+                message: "Cleaning Nova isolated container runtime state...".to_string(),
+                percent: 5,
+                complete: false,
+                error: None,
+            };
+        }
+
+        if let Err(e) = runtime.reset_isolated_runtime_state() {
+            let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
+            *progress = SetupProgress {
+                stage: "error".to_string(),
+                message: "Failed to clean isolated runtime".to_string(),
+                percent: 0,
+                complete: false,
+                error: Some(format!(
+                    "Nova could not clean its isolated Colima runtime: {}",
+                    e
+                )),
+            };
+            return Err(format!("Failed to clean isolated runtime: {}", e));
+        }
+    }
+
     let mut status = runtime.check_status();
 
     // On macOS, we need to start Colima first
@@ -6332,6 +6361,22 @@ pub async fn run_first_time_setup(
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn run_first_time_setup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    run_first_time_setup_internal(app, state, false).await
+}
+
+#[tauri::command]
+pub async fn run_first_time_setup_with_cleanup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    run_first_time_setup_internal(app, state, true).await
 }
 
 // ── Workspace File Commands ──────────────────────────────────────────
