@@ -368,15 +368,6 @@ impl Runtime {
         cmd.output()
     }
 
-    fn is_vz_unavailable_error(&self, output: &str) -> bool {
-        let combined = output.to_lowercase();
-        combined.contains("virtualization.framework")
-            || combined.contains("vm type vz")
-            || combined.contains("vm-type vz")
-            || combined.contains("vz is not supported")
-            || combined.contains("failed to validate vm type")
-    }
-
     fn is_vz_guest_agent_error(&self, output: &str) -> bool {
         let combined = output.to_lowercase();
         combined.contains("guest agent does not seem to be running")
@@ -665,24 +656,53 @@ impl Runtime {
         let docker_host = format!("unix://{}", socket_path.display());
         debug_log(&format!("Trying DOCKER_HOST: {}", docker_host));
 
-        let output = Command::new(&docker)
+        let mut child = match Command::new(&docker)
             .args(["info"])
             .env("DOCKER_HOST", &docker_host)
-            .output();
-
-        match output {
-            Ok(out) if out.status.success() => {
-                debug_log("Docker info succeeded");
-                true
-            }
-            Ok(out) => {
-                debug_log(&format!("Docker info exit code: {:?}", out.status.code()));
-                debug_log(&format!("stderr: {}", String::from_utf8_lossy(&out.stderr)));
-                false
-            }
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
             Err(e) => {
-                debug_log(&format!("Docker command error: {}", e));
-                false
+                debug_log(&format!("Docker command spawn error: {}", e));
+                return false;
+            }
+        };
+
+        let timeout = std::time::Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if status.success() {
+                        debug_log("Docker info succeeded");
+                        return true;
+                    }
+                    let mut stderr = String::new();
+                    if let Some(mut err) = child.stderr.take() {
+                        use std::io::Read;
+                        let _ = err.read_to_string(&mut stderr);
+                    }
+                    debug_log(&format!("Docker info exit code: {:?}", status.code()));
+                    debug_log(&format!("stderr: {}", stderr));
+                    return false;
+                }
+                Ok(None) => {
+                    if start.elapsed() >= timeout {
+                        debug_log("Docker info timed out, killing process");
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => {
+                    debug_log(&format!("Docker try_wait error: {}", e));
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
             }
         }
     }
@@ -1241,11 +1261,13 @@ impl Runtime {
                                 }
                             }
                         }
-                        if self.is_vz_unavailable_error(&msg) {
-                            fell_back_from_vz = true;
-                            debug_log("VZ unavailable, falling back to qemu profile");
-                            continue;
-                        }
+                        // VZ failed for any reason — always try QEMU as fallback
+                        fell_back_from_vz = true;
+                        debug_log(&format!(
+                            "VZ failed ({}), falling back to qemu profile",
+                            msg.chars().take(200).collect::<String>()
+                        ));
+                        continue;
                     }
                     break;
                 }
