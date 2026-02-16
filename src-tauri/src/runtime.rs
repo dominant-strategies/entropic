@@ -286,6 +286,10 @@ impl Runtime {
         nova_runtime_home_path()
     }
 
+    fn runtime_tmp_dir(&self) -> PathBuf {
+        self.runtime_home().join(".tmp")
+    }
+
     fn colima_profiles(&self) -> [(&'static str, &'static str); 2] {
         [(NOVA_VZ_PROFILE, "vz"), (NOVA_QEMU_PROFILE, "qemu")]
     }
@@ -1117,12 +1121,18 @@ impl Runtime {
         let bin_dir = self.bin_dir();
         let share_dir = self.share_dir();
         let runtime_home = self.runtime_home();
+        let runtime_tmp = self.runtime_tmp_dir();
         let xdg_config_home = runtime_home.join(".config");
         let xdg_cache_home = runtime_home.join(".cache");
 
         self.try_prepare_private_dir(&runtime_home, "home");
+        self.try_prepare_private_dir(&runtime_tmp, "temp dir");
         self.try_prepare_private_dir(&xdg_config_home, "config dir");
         self.try_prepare_private_dir(&xdg_cache_home, "cache dir");
+
+        // Force a whitespace-safe working directory for bundled commands.
+        // Some nested shell invocations in Lima/Colima can be sensitive to cwd.
+        cmd.current_dir(&runtime_home);
 
         // Add our bin directory to PATH so colima can find limactl
         if let Ok(current_path) = std::env::var("PATH") {
@@ -1131,6 +1141,8 @@ impl Runtime {
             cmd.env("PATH", bin_dir.display().to_string());
         }
         cmd.env("HOME", runtime_home.display().to_string());
+        cmd.env("PWD", runtime_home.display().to_string());
+        cmd.env("TMPDIR", runtime_tmp.display().to_string());
         cmd.env("XDG_CONFIG_HOME", xdg_config_home.display().to_string());
         cmd.env("XDG_CACHE_HOME", xdg_cache_home.display().to_string());
 
