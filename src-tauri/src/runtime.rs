@@ -600,10 +600,18 @@ impl Runtime {
     }
 
     fn should_auto_reset_isolated_runtime(&self, message: &str) -> bool {
+        if Self::is_whitespace_path_error(message) {
+            return false;
+        }
+
         let lower = message.to_lowercase();
-        (lower.contains("cd: /users/") && lower.contains("no such file or directory"))
-            || lower.contains("error validating sha sum")
+        lower.contains("error validating sha sum")
             || lower.contains("error getting qcow image")
+    }
+
+    fn is_whitespace_path_error(message: &str) -> bool {
+        let lower = message.to_lowercase();
+        lower.contains("cd: /users/") && lower.contains("no such file or directory")
     }
 
     fn reset_isolated_colima_runtime(&self) -> Result<(), RuntimeError> {
@@ -1245,6 +1253,16 @@ impl Runtime {
         }
 
         let mut reason = last_error.unwrap_or_else(|| "Failed to start Colima".to_string());
+        if Self::is_whitespace_path_error(&reason) {
+            let home_hint = dirs::home_dir()
+                .map(|p| format!("\"{}\"", p.display()))
+                .unwrap_or_else(|| "\"(unknown)\"".to_string());
+            return Err(RuntimeError::ColimaStartFailed(format!(
+                "{}\n\nNova's container runtime (lima) does not support macOS usernames that contain spaces. Your home directory {} causes internal path handling to fail.\n\nWorkaround: create a new macOS administrator account with a username that has no spaces, then run Nova from that account.",
+                reason, home_hint
+            )));
+        }
+
         let mut auto_reset_attempted = false;
         if allow_auto_reset && self.should_auto_reset_isolated_runtime(&reason) {
             auto_reset_attempted = true;
