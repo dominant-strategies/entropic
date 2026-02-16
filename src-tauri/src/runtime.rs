@@ -69,6 +69,22 @@ pub(crate) const NOVA_QEMU_PROFILE: &str = "nova-qemu";
 const COLIMA_RETRY_DELAY_SECS: u64 = 2;
 
 fn fallback_colima_home_path() -> PathBuf {
+    let shared_base = PathBuf::from("/Users/Shared/nova");
+    if std::fs::create_dir_all(&shared_base).is_ok() {
+        #[cfg(unix)]
+        {
+            // SAFETY: geteuid has no preconditions and does not dereference pointers.
+            let uid = unsafe { libc::geteuid() };
+            return shared_base.join(format!("colima-{}", uid));
+        }
+
+        #[cfg(not(unix))]
+        {
+            return shared_base.join("colima");
+        }
+    }
+
+    // Last-resort fallback if /Users/Shared is unavailable.
     let base = std::env::temp_dir();
 
     #[cfg(unix)]
