@@ -5,6 +5,12 @@ echo "🧹 Cleaning up for fresh end-user experience test..."
 
 NOVA_COLIMA_HOME="${NOVA_COLIMA_HOME:-$HOME/.nova/colima-dev}"
 LEGACY_COLIMA_HOME="$HOME/.nova/colima"
+NOVA_RUNTIME_HOME="${NOVA_RUNTIME_HOME:-$HOME}"
+USER_UID="$(id -u)"
+FALLBACK_COLIMA_HOME_SHARED="/Users/Shared/nova/colima-${USER_UID}"
+FALLBACK_COLIMA_HOME_TMP="/tmp/nova-colima-${USER_UID}"
+FALLBACK_RUNTIME_HOME_SHARED="/Users/Shared/nova/home-${USER_UID}"
+FALLBACK_RUNTIME_HOME_TMP="/tmp/nova-home-${USER_UID}"
 echo ""
 
 # ============================================
@@ -45,6 +51,22 @@ rm -rf "$NOVA_COLIMA_HOME"
 # Backward-compatible cleanup for legacy paths
 echo "  → Removing legacy $LEGACY_COLIMA_HOME..."
 rm -rf "$LEGACY_COLIMA_HOME"
+
+# Cleanup fallback Colima homes used when user home contains whitespace
+echo "  → Removing fallback $FALLBACK_COLIMA_HOME_SHARED..."
+rm -rf "$FALLBACK_COLIMA_HOME_SHARED"
+echo "  → Removing fallback $FALLBACK_COLIMA_HOME_TMP..."
+rm -rf "$FALLBACK_COLIMA_HOME_TMP"
+
+# Cleanup fallback runtime HOME locations used by bundled Colima/Lima commands
+if [[ "$NOVA_RUNTIME_HOME" != "$HOME" ]]; then
+    echo "  → Removing NOVA_RUNTIME_HOME override $NOVA_RUNTIME_HOME..."
+    rm -rf "$NOVA_RUNTIME_HOME"
+fi
+echo "  → Removing fallback $FALLBACK_RUNTIME_HOME_SHARED..."
+rm -rf "$FALLBACK_RUNTIME_HOME_SHARED"
+echo "  → Removing fallback $FALLBACK_RUNTIME_HOME_TMP..."
+rm -rf "$FALLBACK_RUNTIME_HOME_TMP"
 
 echo "✅ Nova runtime cleaned"
 
@@ -175,6 +197,10 @@ echo ""
 echo "📊 Current state:"
 echo "  • ${NOVA_COLIMA_HOME}: $([ -d "$NOVA_COLIMA_HOME" ] && echo "EXISTS" || echo "REMOVED ✓")"
 echo "  • ${LEGACY_COLIMA_HOME}: $([ -d "$LEGACY_COLIMA_HOME" ] && echo "EXISTS" || echo "REMOVED ✓")"
+echo "  • ${FALLBACK_COLIMA_HOME_SHARED}: $([ -d "$FALLBACK_COLIMA_HOME_SHARED" ] && echo "EXISTS" || echo "REMOVED ✓")"
+echo "  • ${FALLBACK_COLIMA_HOME_TMP}: $([ -d "$FALLBACK_COLIMA_HOME_TMP" ] && echo "EXISTS" || echo "REMOVED ✓")"
+echo "  • ${FALLBACK_RUNTIME_HOME_SHARED}: $([ -d "$FALLBACK_RUNTIME_HOME_SHARED" ] && echo "EXISTS" || echo "REMOVED ✓")"
+echo "  • ${FALLBACK_RUNTIME_HOME_TMP}: $([ -d "$FALLBACK_RUNTIME_HOME_TMP" ] && echo "EXISTS" || echo "REMOVED ✓")"
 echo "  • ~/.colima: $([ -d ~/.colima ] && echo "EXISTS" || echo "REMOVED ✓")"
 echo "  • src-tauri/target: $([ -d src-tauri/target ] && echo "EXISTS" || echo "REMOVED ✓")"
 echo "  • node_modules: $([ -d node_modules ] && echo "EXISTS" || echo "REMOVED ✓")"
