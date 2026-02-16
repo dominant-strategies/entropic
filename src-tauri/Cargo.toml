@@ -35,6 +35,7 @@ sha2 = "0.10"
 url = "2"
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.23", features = ["native-tls"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.25"

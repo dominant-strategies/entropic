@@ -28,6 +28,7 @@ const NOVA_PROXY_ALLOWED_HOSTS: &[&str] = &[
     "localhost",
     "127.0.0.1",
 ];
+const MAX_BRIDGE_DEVICES: usize = 10;
 
 /// Get the Docker socket path for the current platform.
 /// On macOS, uses Colima socket. On Linux/Windows, uses default.
@@ -573,7 +574,7 @@ pub struct CapabilityState {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BridgeState {
     pub enabled: bool,
     pub tailnet_ip: String,
@@ -812,6 +813,16 @@ struct StoredAgentSettings {
     googlechat_audience: String,
     whatsapp_enabled: bool,
     whatsapp_allow_from: String,
+    bridge_enabled: bool,
+    bridge_tailnet_ip: String,
+    bridge_port: u16,
+    bridge_pairing_token: String,
+    bridge_pairing_expires_at_ms: u64,
+    bridge_device_id: String,
+    bridge_device_name: String,
+    bridge_device_public_key: String,
+    bridge_last_seen_at_ms: u64,
+    bridge_devices: Vec<BridgeDeviceRecord>,
 }
 
 impl Default for StoredAgentSettings {
@@ -860,6 +871,16 @@ impl Default for StoredAgentSettings {
             googlechat_audience: String::new(),
             whatsapp_enabled: false,
             whatsapp_allow_from: String::new(),
+            bridge_enabled: false,
+            bridge_tailnet_ip: String::new(),
+            bridge_port: 19789,
+            bridge_pairing_token: String::new(),
+            bridge_pairing_expires_at_ms: 0,
+            bridge_device_id: String::new(),
+            bridge_device_name: String::new(),
+            bridge_device_public_key: String::new(),
+            bridge_last_seen_at_ms: 0,
+            bridge_devices: Vec::new(),
         }
     }
 }
@@ -1348,7 +1369,11 @@ fn current_local_date() -> String {
     }
 
     fn days_in_year(y: i32) -> i64 {
-        if leap_year(y) { 366 } else { 365 }
+        if leap_year(y) {
+            366
+        } else {
+            365
+        }
     }
 
     while remaining_days >= days_in_year(year) {
@@ -1376,12 +1401,17 @@ fn current_local_date() -> String {
 }
 
 fn read_openclaw_config() -> serde_json::Value {
-    if let Some(raw) = read_container_file("/home/node/.openclaw/openclaw.json") {
-        if let Ok(val) = serde_json::from_str(&raw) {
-            return val;
+    let mut cfg = if let Some(raw) = read_container_file("/home/node/.openclaw/openclaw.json") {
+        match serde_json::from_str(&raw) {
+            Ok(val) => val,
+            Err(_) => serde_json::json!({}),
         }
-    }
-    serde_json::json!({})
+    } else {
+        serde_json::json!({})
+    };
+
+    normalize_openclaw_config(&mut cfg);
+    cfg
 }
 
 fn read_container_env(key: &str) -> Option<String> {
@@ -1413,113 +1443,139 @@ fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
     write_container_file("/home/node/.openclaw/openclaw.json", &payload)
 }
 
-fn apply_default_qmd_memory_config(cfg: &mut serde_json::Value, slot: &str, sessions_enabled: bool) {
+fn set_openclaw_config_value(cfg: &mut serde_json::Value, path: &[&str], value: serde_json::Value) {
+    if path.is_empty() {
+        return;
+    }
+
     if !cfg.is_object() {
         *cfg = serde_json::json!({});
     }
 
-    let memory_enabled = slot != "none";
-    if memory_enabled {
-        if !cfg.get("memory").is_some_and(|value| value.is_object()) {
-            cfg["memory"] = serde_json::json!({});
+    let mut current = cfg;
+    for (index, key) in path.iter().enumerate() {
+        let is_last = index + 1 == path.len();
+
+        if is_last {
+            if let Some(obj) = current.as_object_mut() {
+                obj.insert((*key).to_string(), value);
+            } else {
+                *current = serde_json::json!({});
+                current
+                    .as_object_mut()
+                    .expect("failed to initialize safe config path")
+                    .insert((*key).to_string(), value);
+            }
+            return;
         }
-        let memory = cfg
-            .get_mut("memory")
-            .and_then(|value| value.as_object_mut())
-            .expect("memory object must exist");
+
+        let next = {
+            let obj = current
+                .as_object_mut()
+                .expect("config root must be an object when setting nested path");
+            obj.entry((*key).to_string())
+                .or_insert_with(|| serde_json::json!({}))
+        };
+
+        if !next.is_object() {
+            *next = serde_json::json!({});
+        }
+        current = next;
+    }
+}
+
+fn remove_openclaw_config_value(cfg: &mut serde_json::Value, path: &[&str]) {
+    if path.is_empty() {
+        return;
+    }
+
+    let mut current = cfg;
+    for key in path.iter().take(path.len() - 1) {
+        let next = match current.as_object_mut() {
+            Some(obj) => obj.get_mut(*key),
+            None => None,
+        };
+        match next {
+            Some(value) => current = value,
+            None => return,
+        }
+    }
+
+    if let Some(last_parent) = current.as_object_mut() {
+        last_parent.remove(path[path.len() - 1]);
+    }
+}
+
+fn apply_default_qmd_memory_config(
+    cfg: &mut serde_json::Value,
+    slot: &str,
+    sessions_enabled: bool,
+) {
+    if !cfg.is_object() {
+        *cfg = serde_json::json!({});
+    }
+    let cfg_obj = cfg.as_object_mut().expect("config root must be an object");
+    let memory_enabled = slot != "none";
+
+    if memory_enabled {
+        let memory = ensure_object_entry(cfg_obj, "memory");
 
         if !memory.contains_key("backend") {
-            memory["backend"] = serde_json::json!("qmd");
+            memory.insert("backend".to_string(), serde_json::json!("qmd"));
         }
         if !memory.contains_key("citations") {
-            memory["citations"] = serde_json::json!("auto");
+            memory.insert("citations".to_string(), serde_json::json!("auto"));
         }
-        if !memory.get("qmd").is_some_and(|value| value.is_object()) {
-            memory["qmd"] = serde_json::json!({});
-        }
-        let qmd = memory
-            .get_mut("qmd")
-            .and_then(|value| value.as_object_mut())
-            .expect("memory.qmd object must exist");
+
+        let qmd = ensure_object_entry(memory, "qmd");
 
         if !qmd.contains_key("includeDefaultMemory") {
-            qmd["includeDefaultMemory"] = serde_json::json!(true);
+            qmd.insert("includeDefaultMemory".to_string(), serde_json::json!(true));
         }
-        if !qmd.get("sessions").is_some_and(|value| value.is_object()) {
-            qmd["sessions"] = serde_json::json!({});
-        }
-        let sessions = qmd
-            .get_mut("sessions")
-            .and_then(|value| value.as_object_mut())
-            .expect("memory.qmd.sessions object must exist");
-        sessions["enabled"] = serde_json::json!(sessions_enabled);
 
-        if !qmd.get("update").is_some_and(|value| value.is_object()) {
-            qmd["update"] = serde_json::json!({});
-        }
-        let update = qmd
-            .get_mut("update")
-            .and_then(|value| value.as_object_mut())
-            .expect("memory.qmd.update object must exist");
+        let sessions = ensure_object_entry(qmd, "sessions");
+        sessions.insert("enabled".to_string(), serde_json::json!(sessions_enabled));
+
+        let update = ensure_object_entry(qmd, "update");
         if !update.contains_key("interval") {
-            update["interval"] = serde_json::json!("5m");
+            update.insert("interval".to_string(), serde_json::json!("5m"));
         }
         if !update.contains_key("debounceMs") {
-            update["debounceMs"] = serde_json::json!(15_000);
+            update.insert("debounceMs".to_string(), serde_json::json!(15_000));
         }
         if !update.contains_key("waitForBootSync") {
-            update["waitForBootSync"] = serde_json::json!(false);
+            update.insert("waitForBootSync".to_string(), serde_json::json!(false));
         }
 
-        if !qmd.get("limits").is_some_and(|value| value.is_object()) {
-            qmd["limits"] = serde_json::json!({});
-        }
-        let limits = qmd
-            .get_mut("limits")
-            .and_then(|value| value.as_object_mut())
-            .expect("memory.qmd.limits object must exist");
+        let limits = ensure_object_entry(qmd, "limits");
         if !limits.contains_key("maxResults") {
-            limits["maxResults"] = serde_json::json!(6);
+            limits.insert("maxResults".to_string(), serde_json::json!(6));
         }
         if !limits.contains_key("maxSnippetChars") {
-            limits["maxSnippetChars"] = serde_json::json!(700);
+            limits.insert("maxSnippetChars".to_string(), serde_json::json!(700));
         }
         if !limits.contains_key("maxInjectedChars") {
-            limits["maxInjectedChars"] = serde_json::json!(700);
+            limits.insert("maxInjectedChars".to_string(), serde_json::json!(700));
         }
         if !limits.contains_key("timeoutMs") {
-            limits["timeoutMs"] = serde_json::json!(4000);
+            limits.insert("timeoutMs".to_string(), serde_json::json!(4000));
         }
     }
 
-    if !cfg.get("agents").is_some_and(|value| value.is_object()) {
-        cfg["agents"] = serde_json::json!({});
+    let agents = ensure_object_entry(cfg_obj, "agents");
+    let defaults = ensure_object_entry(agents, "defaults");
+    let memory_search = defaults
+        .entry("memorySearch".to_string())
+        .or_insert_with(|| serde_json::json!({"enabled": memory_enabled}));
+
+    if !memory_search.is_object() {
+        *memory_search = serde_json::json!({"enabled": memory_enabled});
     }
-    if !cfg["agents"]
-        .get("defaults")
-        .is_some_and(|value| value.is_object())
-    {
-        cfg["agents"]["defaults"] = serde_json::json!({});
-    }
-    let memory_search_defaults = cfg["agents"]["defaults"]
-        .as_object_mut()
-        .expect("agents.defaults object must exist");
-    let should_enable_memory_search = memory_enabled;
-    if !memory_search_defaults.contains_key("memorySearch") {
-        memory_search_defaults["memorySearch"] = serde_json::json!({
-            "enabled": should_enable_memory_search
-        });
-    } else if let Some(memory_search) = memory_search_defaults
-        .get_mut("memorySearch")
-        .and_then(|value| value.as_object_mut())
-    {
+
+    if let Some(memory_search) = memory_search.as_object_mut() {
         if !memory_search.contains_key("enabled") {
-            memory_search["enabled"] = serde_json::json!(should_enable_memory_search);
+            memory_search.insert("enabled".to_string(), serde_json::json!(memory_enabled));
         }
-    } else {
-        memory_search_defaults["memorySearch"] = serde_json::json!({
-            "enabled": should_enable_memory_search
-        });
     }
 }
 
@@ -1845,6 +1901,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
     write_container_file_if_missing(&daily_path, &daily_note)?;
 
     let mut cfg = read_openclaw_config();
+    normalize_openclaw_config(&mut cfg);
 
     let proxy_mode = read_container_env("NOVA_PROXY_MODE").is_some();
     let base_url = read_container_env("NOVA_PROXY_BASE_URL");
@@ -1852,10 +1909,18 @@ Use it for durable decisions, preferences, and facts that should persist across 
     let image_model = read_container_env("OPENCLAW_IMAGE_MODEL");
 
     if let Some(model) = &model {
-        cfg["agents"]["defaults"]["model"] = serde_json::json!({ "primary": model });
+        set_openclaw_config_value(
+            &mut cfg,
+            &["agents", "defaults", "model"],
+            serde_json::json!({ "primary": model }),
+        );
     }
     if let Some(image_model) = &image_model {
-        cfg["agents"]["defaults"]["imageModel"] = serde_json::json!({ "primary": image_model });
+        set_openclaw_config_value(
+            &mut cfg,
+            &["agents", "defaults", "imageModel"],
+            serde_json::json!({ "primary": image_model }),
+        );
     }
     if proxy_mode {
         if let Some(base_url) = &base_url {
@@ -1889,18 +1954,32 @@ Use it for durable decisions, preferences, and facts that should persist across 
             if !image_model_id.is_empty() && image_model_id != model_id {
                 models.push(serde_json::json!({ "id": image_model_id, "name": image_model_id }));
             }
-            cfg["models"]["providers"]["openrouter"] = serde_json::json!({
-                "baseUrl": base_url,
-                "api": "openai-completions",
-                "models": models
-            });
-            cfg["tools"]["web"]["search"]["provider"] = serde_json::json!("perplexity");
+            set_openclaw_config_value(
+                &mut cfg,
+                &["models", "providers", "openrouter"],
+                serde_json::json!({
+                    "baseUrl": base_url,
+                    "api": "openai-completions",
+                    "models": models
+                }),
+            );
+            set_openclaw_config_value(
+                &mut cfg,
+                &["tools", "web", "search", "provider"],
+                serde_json::json!("perplexity"),
+            );
             if let Some(web_base_url) = read_container_env("NOVA_WEB_BASE_URL") {
-                cfg["tools"]["web"]["search"]["perplexity"]["baseUrl"] =
-                    serde_json::json!(web_base_url);
+                set_openclaw_config_value(
+                    &mut cfg,
+                    &["tools", "web", "search", "perplexity", "baseUrl"],
+                    serde_json::json!(web_base_url),
+                );
             } else {
-                cfg["tools"]["web"]["search"]["perplexity"]["baseUrl"] =
-                    serde_json::json!(base_url);
+                set_openclaw_config_value(
+                    &mut cfg,
+                    &["tools", "web", "search", "perplexity", "baseUrl"],
+                    serde_json::json!(base_url),
+                );
             }
         }
     }
@@ -1913,19 +1992,43 @@ Use it for durable decisions, preferences, and facts that should persist across 
         "memory-core"
     };
     let memory_sessions_enabled = settings.memory_sessions_enabled;
-    cfg["plugins"]["slots"]["memory"] = serde_json::json!(memory_slot);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "slots", "memory"],
+        serde_json::json!(memory_slot),
+    );
     apply_default_qmd_memory_config(&mut cfg, memory_slot, memory_sessions_enabled);
-    cfg["agents"]["defaults"]["heartbeat"] = serde_json::json!({
-        "every": settings.heartbeat_every
-    });
+    set_openclaw_config_value(
+        &mut cfg,
+        &["agents", "defaults", "heartbeat"],
+        serde_json::json!({
+            "every": settings.heartbeat_every
+        }),
+    );
     // Stream assistant blocks by default for faster first-token feedback.
-    cfg["agents"]["defaults"]["blockStreamingDefault"] = serde_json::json!("on");
-    cfg["agents"]["defaults"]["blockStreamingBreak"] = serde_json::json!("text_end");
+    set_openclaw_config_value(
+        &mut cfg,
+        &["agents", "defaults", "blockStreamingDefault"],
+        serde_json::json!("on"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["agents", "defaults", "blockStreamingBreak"],
+        serde_json::json!("text_end"),
+    );
     // Persist cron jobs across container restarts.
-    cfg["cron"]["store"] = serde_json::json!("/data/cron/jobs.json");
+    set_openclaw_config_value(
+        &mut cfg,
+        &["cron", "store"],
+        serde_json::json!("/data/cron/jobs.json"),
+    );
 
     // Ensure Nova integrations plugin is enabled (OAuth bridge tools).
-    cfg["plugins"]["entries"]["nova-integrations"]["enabled"] = serde_json::json!(true);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", "nova-integrations", "enabled"],
+        serde_json::json!(true),
+    );
 
     // Ensure optional plugin tools are allowed without restricting core tools.
     const NOVA_INTEGRATION_TOOLS: [&str; 5] = [
@@ -1949,7 +2052,11 @@ Use it for durable decisions, preferences, and facts that should persist across 
         }
     }
     if has_nova_x {
-        cfg["plugins"]["entries"]["nova-x"]["enabled"] = serde_json::json!(true);
+        set_openclaw_config_value(
+            &mut cfg,
+            &["plugins", "entries", "nova-x", "enabled"],
+            serde_json::json!(true),
+        );
         if let Some(path) = nova_x_path {
             let load_paths = cfg
                 .pointer_mut("/plugins/load/paths")
@@ -1960,12 +2067,13 @@ Use it for durable decisions, preferences, and facts that should persist across 
                     list.push(serde_json::json!(path));
                 }
             } else {
-                cfg["plugins"]["load"]["paths"] = serde_json::json!([path]);
+                set_openclaw_config_value(
+                    &mut cfg,
+                    &["plugins", "load", "paths"],
+                    serde_json::json!([path]),
+                );
             }
         }
-    }
-    if cfg.get("tools").is_none() || !cfg["tools"].is_object() {
-        cfg["tools"] = serde_json::json!({});
     }
     if let Some(tools) = cfg["tools"].as_object_mut() {
         let allow_entry = tools.entry("alsoAllow").or_insert(serde_json::json!([]));
@@ -2000,16 +2108,34 @@ Use it for durable decisions, preferences, and facts that should persist across 
     if memory_slot == "memory-lancedb" {
         let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
         if let Some(openai_key) = keys.get("openai") {
-            cfg["plugins"]["entries"]["memory-lancedb"]["enabled"] = serde_json::json!(true);
-            cfg["plugins"]["entries"]["memory-lancedb"]["config"]["embedding"] = serde_json::json!({
-                "apiKey": openai_key,
-                "model": "text-embedding-3-small"
-            });
+            set_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "entries", "memory-lancedb", "enabled"],
+                serde_json::json!(true),
+            );
+            set_openclaw_config_value(
+                &mut cfg,
+                &[
+                    "plugins",
+                    "entries",
+                    "memory-lancedb",
+                    "config",
+                    "embedding",
+                ],
+                serde_json::json!({
+                    "apiKey": openai_key,
+                    "model": "text-embedding-3-small"
+                }),
+            );
         } else {
-            cfg["plugins"]["slots"]["memory"] = serde_json::json!("memory-core");
+            set_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "slots", "memory"],
+                serde_json::json!("memory-core"),
+            );
         }
-    } else if let Some(entries) = cfg["plugins"]["entries"].as_object_mut() {
-        entries.remove("memory-lancedb");
+    } else {
+        remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "memory-lancedb"]);
     }
 
     let effective_slot = cfg
@@ -2020,97 +2146,243 @@ Use it for durable decisions, preferences, and facts that should persist across 
     let memory_sessions_enabled = settings.memory_sessions_enabled;
     apply_default_qmd_memory_config(&mut cfg, &effective_slot, memory_sessions_enabled);
 
-    cfg["channels"]["discord"]["enabled"] = serde_json::json!(settings.discord_enabled);
-    cfg["channels"]["discord"]["token"] = serde_json::json!(settings.discord_token.clone());
-    cfg["channels"]["discord"]["groupPolicy"] = serde_json::json!("allowlist");
-    cfg["channels"]["discord"]["configWrites"] = serde_json::json!(false);
-    cfg["plugins"]["entries"]["discord"]["enabled"] = serde_json::json!(settings.discord_enabled);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "discord", "enabled"],
+        serde_json::json!(settings.discord_enabled),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "discord", "token"],
+        serde_json::json!(settings.discord_token.clone()),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "discord", "groupPolicy"],
+        serde_json::json!("allowlist"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "discord", "configWrites"],
+        serde_json::json!(false),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", "discord", "enabled"],
+        serde_json::json!(settings.discord_enabled),
+    );
 
-    cfg["channels"]["telegram"]["enabled"] = serde_json::json!(settings.telegram_enabled);
-    cfg["channels"]["telegram"]["botToken"] = serde_json::json!(settings.telegram_token.clone());
-    cfg["channels"]["telegram"]["dmPolicy"] = serde_json::json!("pairing");
-    cfg["channels"]["telegram"]["groupPolicy"] = serde_json::json!("allowlist");
-    cfg["channels"]["telegram"]["configWrites"] = serde_json::json!(false);
-    cfg["channels"]["telegram"]["groups"]["*"]["requireMention"] = serde_json::json!(true);
-    cfg["plugins"]["entries"]["telegram"]["enabled"] = serde_json::json!(settings.telegram_enabled);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "enabled"],
+        serde_json::json!(settings.telegram_enabled),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "botToken"],
+        serde_json::json!(settings.telegram_token.clone()),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "dmPolicy"],
+        serde_json::json!("pairing"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "groupPolicy"],
+        serde_json::json!("allowlist"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "configWrites"],
+        serde_json::json!(false),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "groups", "*", "requireMention"],
+        serde_json::json!(true),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", "telegram", "enabled"],
+        serde_json::json!(settings.telegram_enabled),
+    );
 
-    cfg["channels"]["slack"]["enabled"] = serde_json::json!(settings.slack_enabled);
-    cfg["channels"]["slack"]["botToken"] = serde_json::json!(settings.slack_bot_token.clone());
-    cfg["channels"]["slack"]["appToken"] = serde_json::json!(settings.slack_app_token.clone());
-    cfg["channels"]["slack"]["dm"]["policy"] = serde_json::json!("pairing");
-    cfg["channels"]["slack"]["groupPolicy"] = serde_json::json!("allowlist");
-    cfg["channels"]["slack"]["configWrites"] = serde_json::json!(false);
-    if let Some(obj) = cfg["channels"]["slack"].as_object_mut() {
-        // Remove legacy key removed by strict OpenClaw schema.
-        obj.remove("dmPolicy");
-    }
-    cfg["plugins"]["entries"]["slack"]["enabled"] = serde_json::json!(settings.slack_enabled);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "slack", "enabled"],
+        serde_json::json!(settings.slack_enabled),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "slack", "botToken"],
+        serde_json::json!(settings.slack_bot_token.clone()),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "slack", "appToken"],
+        serde_json::json!(settings.slack_app_token.clone()),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "slack", "dm", "policy"],
+        serde_json::json!("pairing"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "slack", "groupPolicy"],
+        serde_json::json!("allowlist"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "slack", "configWrites"],
+        serde_json::json!(false),
+    );
+    remove_openclaw_config_value(&mut cfg, &["channels", "slack", "dmPolicy"]);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", "slack", "enabled"],
+        serde_json::json!(settings.slack_enabled),
+    );
 
-    cfg["channels"]["googlechat"]["enabled"] = serde_json::json!(settings.googlechat_enabled);
-    cfg["channels"]["googlechat"]["audienceType"] =
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "googlechat", "enabled"],
+        serde_json::json!(settings.googlechat_enabled),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "googlechat", "audienceType"],
         serde_json::json!(if settings.googlechat_audience_type.trim().is_empty() {
             "app-url"
         } else {
             settings.googlechat_audience_type.trim()
-        });
-    cfg["channels"]["googlechat"]["webhookPath"] = serde_json::json!("/googlechat");
-    cfg["channels"]["googlechat"]["dm"]["policy"] = serde_json::json!("pairing");
-    cfg["channels"]["googlechat"]["groupPolicy"] = serde_json::json!("allowlist");
+        }),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "googlechat", "webhookPath"],
+        serde_json::json!("/googlechat"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "googlechat", "dm", "policy"],
+        serde_json::json!("pairing"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "googlechat", "groupPolicy"],
+        serde_json::json!("allowlist"),
+    );
     if settings.googlechat_service_account.trim().is_empty() {
-        if let Some(obj) = cfg["channels"]["googlechat"].as_object_mut() {
-            obj.remove("serviceAccount");
-        }
+        remove_openclaw_config_value(&mut cfg, &["channels", "googlechat", "serviceAccount"]);
     } else {
-        cfg["channels"]["googlechat"]["serviceAccount"] =
-            serde_json::json!(settings.googlechat_service_account.clone());
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "googlechat", "serviceAccount"],
+            serde_json::json!(settings.googlechat_service_account.clone()),
+        );
     }
     if settings.googlechat_audience.trim().is_empty() {
-        if let Some(obj) = cfg["channels"]["googlechat"].as_object_mut() {
-            obj.remove("audience");
-        }
+        remove_openclaw_config_value(&mut cfg, &["channels", "googlechat", "audience"]);
     } else {
-        cfg["channels"]["googlechat"]["audience"] =
-            serde_json::json!(settings.googlechat_audience.trim());
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "googlechat", "audience"],
+            serde_json::json!(settings.googlechat_audience.trim()),
+        );
     }
-    cfg["plugins"]["entries"]["googlechat"]["enabled"] =
-        serde_json::json!(settings.googlechat_enabled);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", "googlechat", "enabled"],
+        serde_json::json!(settings.googlechat_enabled),
+    );
 
-    cfg["channels"]["whatsapp"]["configWrites"] = serde_json::json!(false);
-    cfg["channels"]["whatsapp"]["groupPolicy"] = serde_json::json!("allowlist");
-    if let Some(obj) = cfg["channels"]["whatsapp"].as_object_mut() {
-        // Remove legacy key removed by strict OpenClaw schema.
-        obj.remove("enabled");
-    }
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "whatsapp", "configWrites"],
+        serde_json::json!(false),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "whatsapp", "groupPolicy"],
+        serde_json::json!("allowlist"),
+    );
+    remove_openclaw_config_value(&mut cfg, &["channels", "whatsapp", "enabled"]);
     if settings.whatsapp_allow_from.trim().is_empty() {
-        cfg["channels"]["whatsapp"]["dmPolicy"] = serde_json::json!("pairing");
-        // Remove allowFrom if present (cannot be null, must be array or absent)
-        if let Some(obj) = cfg["channels"]["whatsapp"].as_object_mut() {
-            obj.remove("allowFrom");
-        }
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "whatsapp", "dmPolicy"],
+            serde_json::json!("pairing"),
+        );
+        remove_openclaw_config_value(&mut cfg, &["channels", "whatsapp", "allowFrom"]);
     } else {
-        cfg["channels"]["whatsapp"]["dmPolicy"] = serde_json::json!("allowlist");
-        cfg["channels"]["whatsapp"]["allowFrom"] =
-            serde_json::json!([settings.whatsapp_allow_from.trim()]);
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "whatsapp", "dmPolicy"],
+            serde_json::json!("allowlist"),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "whatsapp", "allowFrom"],
+            serde_json::json!([settings.whatsapp_allow_from.trim()]),
+        );
     }
-    cfg["plugins"]["entries"]["whatsapp"]["enabled"] = serde_json::json!(settings.whatsapp_enabled);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", "whatsapp", "enabled"],
+        serde_json::json!(settings.whatsapp_enabled),
+    );
 
-    cfg["channels"]["imessage"]["enabled"] = serde_json::json!(settings.imessage_enabled);
-    cfg["channels"]["imessage"]["cliPath"] = serde_json::json!(settings.imessage_cli_path.clone());
-    cfg["channels"]["imessage"]["dbPath"] = serde_json::json!(settings.imessage_db_path.clone());
-    cfg["channels"]["imessage"]["includeAttachments"] =
-        serde_json::json!(settings.imessage_include_attachments);
-    cfg["channels"]["imessage"]["dmPolicy"] = serde_json::json!("pairing");
-    cfg["channels"]["imessage"]["groupPolicy"] = serde_json::json!("allowlist");
-    cfg["channels"]["imessage"]["configWrites"] = serde_json::json!(false);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "enabled"],
+        serde_json::json!(settings.imessage_enabled),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "cliPath"],
+        serde_json::json!(settings.imessage_cli_path.clone()),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "dbPath"],
+        serde_json::json!(settings.imessage_db_path.clone()),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "includeAttachments"],
+        serde_json::json!(settings.imessage_include_attachments),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "dmPolicy"],
+        serde_json::json!("pairing"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "groupPolicy"],
+        serde_json::json!("allowlist"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "configWrites"],
+        serde_json::json!(false),
+    );
     if settings.imessage_remote_host.trim().is_empty() {
-        if let Some(obj) = cfg["channels"]["imessage"].as_object_mut() {
-            obj.remove("remoteHost");
-        }
+        remove_openclaw_config_value(&mut cfg, &["channels", "imessage", "remoteHost"]);
     } else {
-        cfg["channels"]["imessage"]["remoteHost"] =
-            serde_json::json!(settings.imessage_remote_host.clone());
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "imessage", "remoteHost"],
+            serde_json::json!(settings.imessage_remote_host.clone()),
+        );
     }
-    cfg["plugins"]["entries"]["imessage"]["enabled"] = serde_json::json!(settings.imessage_enabled);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", "imessage", "enabled"],
+        serde_json::json!(settings.imessage_enabled),
+    );
 
     if settings.bridge_enabled {
         disable_legacy_messaging_config(&mut cfg);
@@ -2411,52 +2683,186 @@ fn build_bridge_pair_uri(settings: &StoredAgentSettings, token: &str) -> String 
 }
 
 fn build_bridge_qr_data_url(pair_uri: &str) -> Result<String, String> {
-    let qr = qrcode::QrCode::new(pair_uri.as_bytes()).map_err(|e| e.to_string())?;
-    let image = qr
-        .render::<image::Luma<u8>>()
+    let qr = qrcode::QrCode::new(pair_uri.as_bytes())
+        .map_err(|e: qrcode::types::QrError| e.to_string())?;
+    let svg = qr
+        .render::<qrcode::render::svg::Color>()
         .min_dimensions(512, 512)
-        .quiet_zone(true)
         .build();
-    let dynamic = image::DynamicImage::ImageLuma8(image);
-    let mut bytes = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut bytes);
-    dynamic
-        .write_to(&mut cursor, image::ImageFormat::Png)
-        .map_err(|e| format!("Failed to render QR image: {}", e))?;
-    Ok(format!("data:image/png;base64,{}", STANDARD.encode(bytes)))
+    Ok(format!(
+        "data:image/svg+xml;base64,{}",
+        STANDARD.encode(svg.as_bytes())
+    ))
+}
+
+fn ensure_object_entry<'a>(
+    parent: &'a mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> &'a mut serde_json::Map<String, serde_json::Value> {
+    let entry = parent
+        .entry(key.to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !entry.is_object() {
+        *entry = serde_json::json!({});
+    }
+    entry
+        .as_object_mut()
+        .expect("value must be an object after normalization")
+}
+
+fn ensure_config_path(cfg: &mut serde_json::Value, path: &[&str]) {
+    if path.is_empty() {
+        return;
+    }
+
+    if !cfg.is_object() {
+        *cfg = serde_json::json!({});
+    }
+
+    let mut current = cfg
+        .as_object_mut()
+        .expect("config root must be an object before path normalization");
+
+    for key in path {
+        let entry = current
+            .entry((*key).to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !entry.is_object() {
+            *entry = serde_json::json!({});
+        }
+        current = entry
+            .as_object_mut()
+            .expect("normalized config path must remain an object");
+    }
+}
+
+fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
+    let paths: &[&[&str]] = &[
+        &["agents", "defaults"],
+        &["tools", "web", "search", "perplexity"],
+        &["plugins", "slots"],
+        &["plugins", "load", "paths"],
+        &["plugins", "entries", "nova-integrations"],
+        &["plugins", "entries", "nova-x"],
+        &["plugins", "entries", "memory-lancedb"],
+        &["plugins", "entries", "discord"],
+        &["plugins", "entries", "telegram"],
+        &["plugins", "entries", "slack"],
+        &["plugins", "entries", "googlechat"],
+        &["plugins", "entries", "whatsapp"],
+        &["plugins", "entries", "imessage"],
+        &["channels", "discord"],
+        &["channels", "telegram", "groups", "*"],
+        &["channels", "slack"],
+        &["channels", "slack", "dm"],
+        &["channels", "googlechat", "dm"],
+        &["channels", "whatsapp"],
+        &["channels", "imessage"],
+        &["cron"],
+        &["models", "providers", "openrouter"],
+    ];
+
+    for path in paths {
+        ensure_config_path(cfg, path);
+    }
+
+    // `plugins.load.paths` must be an array. Some legacy or normalized state
+    // may create this key as an object, which causes startup validation failure.
+    if !cfg
+        .pointer("/plugins/load/paths")
+        .is_some_and(|v| v.is_array())
+    {
+        set_openclaw_config_value(cfg, &["plugins", "load", "paths"], serde_json::json!([]));
+    }
 }
 
 fn disable_legacy_messaging_config(cfg: &mut serde_json::Value) {
-    cfg["channels"]["discord"]["enabled"] = serde_json::json!(false);
-    cfg["channels"]["discord"]["token"] = serde_json::json!("");
-    cfg["plugins"]["entries"]["discord"]["enabled"] = serde_json::json!(false);
+    normalize_openclaw_config(cfg);
 
-    cfg["channels"]["telegram"]["enabled"] = serde_json::json!(false);
-    cfg["channels"]["telegram"]["botToken"] = serde_json::json!("");
-    cfg["plugins"]["entries"]["telegram"]["enabled"] = serde_json::json!(false);
+    set_openclaw_config_value(
+        cfg,
+        &["channels", "discord", "enabled"],
+        serde_json::json!(false),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["channels", "discord", "token"],
+        serde_json::json!(""),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["plugins", "entries", "discord", "enabled"],
+        serde_json::json!(false),
+    );
 
-    cfg["channels"]["slack"]["enabled"] = serde_json::json!(false);
-    cfg["channels"]["slack"]["botToken"] = serde_json::json!("");
-    cfg["channels"]["slack"]["appToken"] = serde_json::json!("");
-    cfg["plugins"]["entries"]["slack"]["enabled"] = serde_json::json!(false);
+    set_openclaw_config_value(
+        cfg,
+        &["channels", "telegram", "enabled"],
+        serde_json::json!(false),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["channels", "telegram", "botToken"],
+        serde_json::json!(""),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["plugins", "entries", "telegram", "enabled"],
+        serde_json::json!(false),
+    );
 
-    cfg["channels"]["googlechat"]["enabled"] = serde_json::json!(false);
-    if let Some(obj) = cfg["channels"]["googlechat"].as_object_mut() {
-        obj.remove("serviceAccount");
-        obj.remove("audience");
-    }
-    cfg["plugins"]["entries"]["googlechat"]["enabled"] = serde_json::json!(false);
+    set_openclaw_config_value(
+        cfg,
+        &["channels", "slack", "enabled"],
+        serde_json::json!(false),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["channels", "slack", "botToken"],
+        serde_json::json!(""),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["channels", "slack", "appToken"],
+        serde_json::json!(""),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["plugins", "entries", "slack", "enabled"],
+        serde_json::json!(false),
+    );
 
-    cfg["plugins"]["entries"]["whatsapp"]["enabled"] = serde_json::json!(false);
-    if let Some(obj) = cfg["channels"]["whatsapp"].as_object_mut() {
-        obj.remove("allowFrom");
-    }
+    set_openclaw_config_value(
+        cfg,
+        &["channels", "googlechat", "enabled"],
+        serde_json::json!(false),
+    );
+    remove_openclaw_config_value(cfg, &["channels", "googlechat", "serviceAccount"]);
+    remove_openclaw_config_value(cfg, &["channels", "googlechat", "audience"]);
+    set_openclaw_config_value(
+        cfg,
+        &["plugins", "entries", "googlechat", "enabled"],
+        serde_json::json!(false),
+    );
 
-    cfg["channels"]["imessage"]["enabled"] = serde_json::json!(false);
-    if let Some(obj) = cfg["channels"]["imessage"].as_object_mut() {
-        obj.remove("remoteHost");
-    }
-    cfg["plugins"]["entries"]["imessage"]["enabled"] = serde_json::json!(false);
+    set_openclaw_config_value(
+        cfg,
+        &["plugins", "entries", "whatsapp", "enabled"],
+        serde_json::json!(false),
+    );
+    remove_openclaw_config_value(cfg, &["channels", "whatsapp", "allowFrom"]);
+
+    set_openclaw_config_value(
+        cfg,
+        &["channels", "imessage", "enabled"],
+        serde_json::json!(false),
+    );
+    remove_openclaw_config_value(cfg, &["channels", "imessage", "remoteHost"]);
+    set_openclaw_config_value(
+        cfg,
+        &["plugins", "entries", "imessage", "enabled"],
+        serde_json::json!(false),
+    );
 }
 
 fn clear_legacy_messaging_settings(settings: &mut StoredAgentSettings) {
@@ -2883,6 +3289,7 @@ pub fn init_state(app: &AppHandle) -> AppState {
         api_keys: Mutex::new(stored.keys.clone()),
         active_provider: Mutex::new(stored.active_provider.clone()),
         whatsapp_login: Mutex::new(WhatsAppLoginCache::default()),
+        bridge_server_started: Mutex::new(false),
     }
 }
 
@@ -3011,6 +3418,11 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         .map_err(|e| e.to_string())?
         .clone();
     let settings = load_agent_settings(&app);
+    let gateway_bind = if settings.bridge_enabled {
+        "0.0.0.0:19789:18789"
+    } else {
+        "127.0.0.1:19789:18789"
+    };
     let mut memory_slot = if !settings.memory_enabled {
         "none"
     } else if settings.memory_long_term {
@@ -3449,7 +3861,7 @@ pub async fn start_gateway_with_proxy(
         "--network".to_string(),
         "nova-net".to_string(),
         "-p".to_string(),
-        "127.0.0.1:19789:18789".to_string(),
+        gateway_bind.to_string(),
         "openclaw-runtime:latest".to_string(),
     ]);
 
@@ -3787,7 +4199,6 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
     let bridge_pairing_expires_at_ms = stored.bridge_pairing_expires_at_ms;
     let bridge_device_id = stored.bridge_device_id.clone();
     let bridge_device_name = stored.bridge_device_name.clone();
-    let bridge_last_seen_at_ms = stored.bridge_last_seen_at_ms;
     let bridge_devices = bridge_device_summaries(&stored);
     let bridge_device_count = bridge_devices.len();
     let bridge_online_count = bridge_devices
@@ -3858,6 +4269,16 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         googlechat_audience,
         whatsapp_enabled,
         whatsapp_allow_from,
+        bridge_enabled,
+        bridge_tailnet_ip,
+        bridge_port,
+        bridge_pairing_expires_at_ms,
+        bridge_device_id,
+        bridge_device_name,
+        bridge_devices: bridge_devices.clone(),
+        bridge_device_count,
+        bridge_online_count,
+        bridge_paired,
     })
 }
 
@@ -3892,8 +4313,11 @@ pub async fn set_heartbeat(
     tasks: Vec<String>,
 ) -> Result<(), String> {
     let mut cfg = read_openclaw_config();
-    let heartbeat = serde_json::json!({ "every": every });
-    cfg["agents"]["defaults"]["heartbeat"] = heartbeat;
+    set_openclaw_config_value(
+        &mut cfg,
+        &["agents", "defaults", "heartbeat"],
+        serde_json::json!({ "every": every }),
+    );
     write_openclaw_config(&cfg)?;
 
     let mut body = String::from("# HEARTBEAT.md\n\n");
@@ -3933,20 +4357,38 @@ pub async fn set_memory(
         "memory-core"
     };
 
-    cfg["plugins"]["slots"]["memory"] = serde_json::json!(slot);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "slots", "memory"],
+        serde_json::json!(slot),
+    );
 
     if slot == "memory-lancedb" {
         let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
         let openai_key = keys
             .get("openai")
             .ok_or_else(|| "OpenAI key required for long-term memory".to_string())?;
-        cfg["plugins"]["entries"]["memory-lancedb"]["enabled"] = serde_json::json!(true);
-        cfg["plugins"]["entries"]["memory-lancedb"]["config"]["embedding"] = serde_json::json!({
-            "apiKey": openai_key,
-            "model": "text-embedding-3-small"
-        });
-    } else if let Some(entries) = cfg["plugins"]["entries"].as_object_mut() {
-        entries.remove("memory-lancedb");
+        set_openclaw_config_value(
+            &mut cfg,
+            &["plugins", "entries", "memory-lancedb", "enabled"],
+            serde_json::json!(true),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &[
+                "plugins",
+                "entries",
+                "memory-lancedb",
+                "config",
+                "embedding",
+            ],
+            serde_json::json!({
+                "apiKey": openai_key,
+                "model": "text-embedding-3-small"
+            }),
+        );
+    } else {
+        remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "memory-lancedb"]);
     }
 
     let memory_sessions_enabled = settings.memory_sessions_enabled;
@@ -4035,21 +4477,55 @@ pub async fn set_imessage_config(
     let db = db_path.trim();
     let remote = remote_host.trim();
 
-    cfg["channels"]["imessage"]["enabled"] = serde_json::json!(enabled);
-    cfg["channels"]["imessage"]["cliPath"] = serde_json::json!(cli);
-    cfg["channels"]["imessage"]["dbPath"] = serde_json::json!(db);
-    cfg["channels"]["imessage"]["includeAttachments"] = serde_json::json!(include_attachments);
-    cfg["channels"]["imessage"]["dmPolicy"] = serde_json::json!("pairing");
-    cfg["channels"]["imessage"]["groupPolicy"] = serde_json::json!("allowlist");
-    cfg["channels"]["imessage"]["configWrites"] = serde_json::json!(false);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "enabled"],
+        serde_json::json!(enabled),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "cliPath"],
+        serde_json::json!(cli),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "dbPath"],
+        serde_json::json!(db),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "includeAttachments"],
+        serde_json::json!(include_attachments),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "dmPolicy"],
+        serde_json::json!("pairing"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "groupPolicy"],
+        serde_json::json!("allowlist"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "imessage", "configWrites"],
+        serde_json::json!(false),
+    );
     if remote.is_empty() {
-        if let Some(obj) = cfg["channels"]["imessage"].as_object_mut() {
-            obj.remove("remoteHost");
-        }
+        remove_openclaw_config_value(&mut cfg, &["channels", "imessage", "remoteHost"]);
     } else {
-        cfg["channels"]["imessage"]["remoteHost"] = serde_json::json!(remote);
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "imessage", "remoteHost"],
+            serde_json::json!(remote),
+        );
     }
-    cfg["plugins"]["entries"]["imessage"]["enabled"] = serde_json::json!(enabled);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", "imessage", "enabled"],
+        serde_json::json!(enabled),
+    );
 
     write_openclaw_config(&cfg)?;
 
@@ -4093,71 +4569,189 @@ pub async fn set_channels_config(
     };
     let whatsapp_allow_from = whatsapp_allow_from.trim().to_string();
 
-    cfg["channels"]["discord"]["enabled"] = serde_json::json!(discord_enabled);
-    cfg["channels"]["discord"]["token"] = serde_json::json!(discord_token);
-    cfg["channels"]["discord"]["groupPolicy"] = serde_json::json!("allowlist");
-    cfg["channels"]["discord"]["configWrites"] = serde_json::json!(false);
-    cfg["plugins"]["entries"]["discord"]["enabled"] = serde_json::json!(discord_enabled);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "discord", "enabled"],
+        serde_json::json!(discord_enabled),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "discord", "token"],
+        serde_json::json!(discord_token),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "discord", "groupPolicy"],
+        serde_json::json!("allowlist"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "discord", "configWrites"],
+        serde_json::json!(false),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", "discord", "enabled"],
+        serde_json::json!(discord_enabled),
+    );
 
-    cfg["channels"]["telegram"]["enabled"] = serde_json::json!(telegram_enabled);
-    cfg["channels"]["telegram"]["botToken"] = serde_json::json!(telegram_token);
-    cfg["channels"]["telegram"]["dmPolicy"] = serde_json::json!("pairing");
-    cfg["channels"]["telegram"]["groupPolicy"] = serde_json::json!("allowlist");
-    cfg["channels"]["telegram"]["configWrites"] = serde_json::json!(false);
-    cfg["channels"]["telegram"]["groups"]["*"]["requireMention"] = serde_json::json!(true);
-    cfg["plugins"]["entries"]["telegram"]["enabled"] = serde_json::json!(telegram_enabled);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "enabled"],
+        serde_json::json!(telegram_enabled),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "botToken"],
+        serde_json::json!(telegram_token),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "dmPolicy"],
+        serde_json::json!("pairing"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "groupPolicy"],
+        serde_json::json!("allowlist"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "configWrites"],
+        serde_json::json!(false),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "groups", "*", "requireMention"],
+        serde_json::json!(true),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", "telegram", "enabled"],
+        serde_json::json!(telegram_enabled),
+    );
 
-    cfg["channels"]["slack"]["enabled"] = serde_json::json!(slack_enabled);
-    cfg["channels"]["slack"]["botToken"] = serde_json::json!(slack_bot_token.clone());
-    cfg["channels"]["slack"]["appToken"] = serde_json::json!(slack_app_token.clone());
-    cfg["channels"]["slack"]["dm"]["policy"] = serde_json::json!("pairing");
-    cfg["channels"]["slack"]["groupPolicy"] = serde_json::json!("allowlist");
-    cfg["channels"]["slack"]["configWrites"] = serde_json::json!(false);
-    if let Some(obj) = cfg["channels"]["slack"].as_object_mut() {
-        // Remove legacy key removed by strict OpenClaw schema.
-        obj.remove("dmPolicy");
-    }
-    cfg["plugins"]["entries"]["slack"]["enabled"] = serde_json::json!(slack_enabled);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "slack", "enabled"],
+        serde_json::json!(slack_enabled),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "slack", "botToken"],
+        serde_json::json!(slack_bot_token),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "slack", "appToken"],
+        serde_json::json!(slack_app_token),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "slack", "dm", "policy"],
+        serde_json::json!("pairing"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "slack", "groupPolicy"],
+        serde_json::json!("allowlist"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "slack", "configWrites"],
+        serde_json::json!(false),
+    );
+    remove_openclaw_config_value(&mut cfg, &["channels", "slack", "dmPolicy"]);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", "slack", "enabled"],
+        serde_json::json!(slack_enabled),
+    );
 
-    cfg["channels"]["googlechat"]["enabled"] = serde_json::json!(googlechat_enabled);
-    cfg["channels"]["googlechat"]["audienceType"] = serde_json::json!(googlechat_audience_type);
-    cfg["channels"]["googlechat"]["webhookPath"] = serde_json::json!("/googlechat");
-    cfg["channels"]["googlechat"]["dm"]["policy"] = serde_json::json!("pairing");
-    cfg["channels"]["googlechat"]["groupPolicy"] = serde_json::json!("allowlist");
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "googlechat", "enabled"],
+        serde_json::json!(googlechat_enabled),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "googlechat", "audienceType"],
+        serde_json::json!(googlechat_audience_type),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "googlechat", "webhookPath"],
+        serde_json::json!("/googlechat"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "googlechat", "dm", "policy"],
+        serde_json::json!("pairing"),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "googlechat", "groupPolicy"],
+        serde_json::json!("allowlist"),
+    );
     if googlechat_service_account.is_empty() {
-        if let Some(obj) = cfg["channels"]["googlechat"].as_object_mut() {
-            obj.remove("serviceAccount");
-        }
+        remove_openclaw_config_value(&mut cfg, &["channels", "googlechat", "serviceAccount"]);
     } else {
-        cfg["channels"]["googlechat"]["serviceAccount"] =
-            serde_json::json!(googlechat_service_account.clone());
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "googlechat", "serviceAccount"],
+            serde_json::json!(googlechat_service_account),
+        );
     }
     if googlechat_audience.is_empty() {
-        if let Some(obj) = cfg["channels"]["googlechat"].as_object_mut() {
-            obj.remove("audience");
-        }
+        remove_openclaw_config_value(&mut cfg, &["channels", "googlechat", "audience"]);
     } else {
-        cfg["channels"]["googlechat"]["audience"] = serde_json::json!(googlechat_audience.trim());
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "googlechat", "audience"],
+            serde_json::json!(googlechat_audience),
+        );
     }
-    cfg["plugins"]["entries"]["googlechat"]["enabled"] = serde_json::json!(googlechat_enabled);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", "googlechat", "enabled"],
+        serde_json::json!(googlechat_enabled),
+    );
 
-    cfg["channels"]["whatsapp"]["configWrites"] = serde_json::json!(false);
-    cfg["channels"]["whatsapp"]["groupPolicy"] = serde_json::json!("allowlist");
-    if let Some(obj) = cfg["channels"]["whatsapp"].as_object_mut() {
-        // Remove legacy key removed by strict OpenClaw schema.
-        obj.remove("enabled");
-    }
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "whatsapp", "configWrites"],
+        serde_json::json!(false),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "whatsapp", "groupPolicy"],
+        serde_json::json!("allowlist"),
+    );
+    remove_openclaw_config_value(&mut cfg, &["channels", "whatsapp", "enabled"]);
     if whatsapp_allow_from.is_empty() {
-        cfg["channels"]["whatsapp"]["dmPolicy"] = serde_json::json!("pairing");
-        // Remove allowFrom if present (cannot be null, must be array or absent)
-        if let Some(obj) = cfg["channels"]["whatsapp"].as_object_mut() {
-            obj.remove("allowFrom");
-        }
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "whatsapp", "dmPolicy"],
+            serde_json::json!("pairing"),
+        );
+        remove_openclaw_config_value(&mut cfg, &["channels", "whatsapp", "allowFrom"]);
     } else {
-        cfg["channels"]["whatsapp"]["dmPolicy"] = serde_json::json!("allowlist");
-        cfg["channels"]["whatsapp"]["allowFrom"] = serde_json::json!([whatsapp_allow_from.clone()]);
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "whatsapp", "dmPolicy"],
+            serde_json::json!("allowlist"),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "whatsapp", "allowFrom"],
+            serde_json::json!([whatsapp_allow_from.clone()]),
+        );
     }
-    cfg["plugins"]["entries"]["whatsapp"]["enabled"] = serde_json::json!(whatsapp_enabled);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", "whatsapp", "enabled"],
+        serde_json::json!(whatsapp_enabled),
+    );
 
     write_openclaw_config(&cfg)?;
 
@@ -4410,7 +5004,11 @@ pub async fn set_plugin_enabled(id: String, enabled: bool) -> Result<(), String>
         return Err("Plugin is managed by Nova".to_string());
     }
     let mut cfg = read_openclaw_config();
-    cfg["plugins"]["entries"][&id]["enabled"] = serde_json::json!(enabled);
+    set_openclaw_config_value(
+        &mut cfg,
+        &["plugins", "entries", &id, "enabled"],
+        serde_json::json!(enabled),
+    );
     write_openclaw_config(&cfg)
 }
 
