@@ -20,6 +20,21 @@ RESOURCES_DIR="$PROJECT_ROOT/src-tauri/resources"
 IMAGE="${IMAGE:-openclaw-runtime:latest}"
 OUTPUT="${OUTPUT:-$RESOURCES_DIR/openclaw-runtime.tar.gz}"
 
+# Auto-detect the Colima Docker socket so this script finds images that were
+# built inside a Colima VM even when no DOCKER_HOST is set in the environment.
+if [ -z "${DOCKER_HOST:-}" ]; then
+    for _sock in \
+        "$HOME/.nova/colima-dev/nova-vz/docker.sock" \
+        "$HOME/.nova/colima-dev/nova-qemu/docker.sock" \
+        "$HOME/.nova/colima/nova-vz/docker.sock" \
+        "$HOME/.nova/colima/nova-qemu/docker.sock"; do
+        if [ -S "$_sock" ]; then
+            export DOCKER_HOST="unix://$_sock"
+            break
+        fi
+    done
+fi
+
 echo "=== Exporting Docker image for bundling ==="
 echo "Image: $IMAGE"
 echo "Output: $OUTPUT"
