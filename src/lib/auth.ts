@@ -571,10 +571,21 @@ export async function revokeGatewayToken(token: string): Promise<void> {
 }
 
 /**
- * Get the API URL for OpenClaw to use
+ * Get the absolute API URL for the Docker container (OpenClaw) to use.
+ * In dev mode, VITE_API_URL is a relative path ("/api") for Vite proxy;
+ * the container needs an absolute URL, so we resolve against VITE_API_ORIGIN.
  */
+const API_ORIGIN = (import.meta as any).env?.VITE_API_ORIGIN || "";
 export function getProxyUrl(): string {
   if (!API_URL) return API_URL;
+  // Relative path (e.g. "/api") — resolve to absolute URL for Docker
+  if (API_URL.startsWith("/")) {
+    if (API_ORIGIN) {
+      return API_ORIGIN.replace(/\/$/, "") + API_URL;
+    }
+    // No origin configured — return relative path and let Rust fallback handle it
+    return API_URL;
+  }
   try {
     const url = new URL(API_URL);
     if (url.hostname === "localhost" || url.hostname === "127.0.0.1") {
@@ -582,7 +593,7 @@ export function getProxyUrl(): string {
       return url.toString().replace(/\/$/, "");
     }
   } catch {
-    // Ignore URL parse errors, fall back to raw API_URL
+    // Not a valid URL, return as-is
   }
   return API_URL;
 }
