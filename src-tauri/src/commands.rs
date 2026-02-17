@@ -1342,7 +1342,11 @@ fn sanitize_skill_version_component(version: &str) -> String {
 }
 
 fn clawhub_latest_version(slug: &str) -> Result<Option<String>, String> {
-    let raw = clawhub_exec_output(&["inspect", slug, "--json"])?;
+    let output = clawhub_exec_with_retry(&["inspect", slug, "--json"], 2)?;
+    if !output.status.success() {
+        return Err(command_output_error(&output));
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).to_string();
     let payload: serde_json::Value = parse_clawhub_json(&raw)?;
     let version = payload
         .get("latestVersion")
@@ -1536,6 +1540,34 @@ fn clawhub_exec(args: &[&str]) -> Result<Output, String> {
     cmd.args(args);
     cmd.output()
         .map_err(|e| format!("Failed to run ClawHub command: {}", e))
+}
+
+/// Run a ClawHub command with automatic retry on rate-limit errors.
+/// Retries up to `max_retries` times with exponential backoff (2s, 4s, 8s, …).
+fn clawhub_exec_with_retry(args: &[&str], max_retries: u32) -> Result<Output, String> {
+    let mut attempts = 0u32;
+    loop {
+        let output = clawhub_exec(args)?;
+        let combined = format!(
+            "{} {}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        )
+        .to_lowercase();
+        let is_rate_limited = !output.status.success() && combined.contains("rate limit");
+        if !is_rate_limited || attempts >= max_retries {
+            return Ok(output);
+        }
+        attempts += 1;
+        let delay_secs = 2u64.pow(attempts); // 2, 4, 8 …
+        eprintln!(
+            "[Nova] ClawHub rate-limited (attempt {}/{}), retrying in {}s…",
+            attempts,
+            max_retries + 1,
+            delay_secs
+        );
+        std::thread::sleep(std::time::Duration::from_secs(delay_secs));
+    }
 }
 
 fn clawhub_exec_output(args: &[&str]) -> Result<String, String> {
@@ -7080,7 +7112,7 @@ pub async fn scan_and_install_clawhub_skill(
         let _ = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-rf", "--", root]);
     };
 
-    let fetch_result = clawhub_exec(&[
+    let fetch_result = clawhub_exec_with_retry(&[
         "install",
         &trimmed_slug,
         "--workdir",
@@ -7089,7 +7121,7 @@ pub async fn scan_and_install_clawhub_skill(
         "skills",
         "--no-input",
         "--force",
-    ])
+    ], 3)
     .map_err(|e| format!("Failed to run ClawHub install: {}", e))?;
 
     if !fetch_result.status.success() {
@@ -7136,36 +7168,34 @@ pub async fn scan_and_install_clawhub_skill(
         });
     }
 
+    // Resolve version — try the API but fall back to "latest" on rate-limit.
     let skill_version = clawhub_latest_version(&trimmed_slug)
         .ok()
         .flatten()
         .unwrap_or_else(|| "latest".to_string());
 
-    let install = match clawhub_exec(&[
-        "install",
-        &trimmed_slug,
-        "--workdir",
-        "/data",
-        "--dir",
-        &format!("skills/{}/{}", detected_skill_id, skill_version),
-        "--no-input",
-        "--force",
+    // Copy the already-downloaded skill from the temp scan dir to the final
+    // location instead of re-downloading from ClawHub (avoids a second API
+    // call and the rate-limit that comes with it).
+    let final_skill_dir = format!("{}/{}/{}", SKILLS_ROOT, detected_skill_id, skill_version);
+    let copy_script = format!(
+        "mkdir -p {} && cp -a {}/. {}",
+        sh_single_quote(&final_skill_dir),
+        sh_single_quote(downloaded_path.trim_end_matches('/')),
+        sh_single_quote(&final_skill_dir),
+    );
+    if let Err(err) = docker_exec_output(&[
+        "exec",
+        OPENCLAW_CONTAINER,
+        "sh",
+        "-c",
+        &copy_script,
     ]) {
-        Ok(output) => output,
-        Err(err) => {
-            cleanup(&temp_root);
-            return Err(format!("Failed to install skill: {}", err));
-        }
-    };
+        cleanup(&temp_root);
+        return Err(format!("Failed to install skill from scan cache: {}", err));
+    }
 
     cleanup(&temp_root);
-
-    if !install.status.success() {
-        return Err(format!(
-            "Skill install failed: {}",
-            command_output_error(&install)
-        ));
-    }
 
     let skill_family_root = format!("{}/{}", SKILLS_ROOT, detected_skill_id);
     let current_link = format!("{}/current", skill_family_root);
