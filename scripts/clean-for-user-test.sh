@@ -215,6 +215,7 @@ echo "🗑️  Removing old bundled resources..."
 rm -rf src-tauri/resources/bin/*
 rm -rf src-tauri/resources/share/*
 rm -f src-tauri/resources/openclaw-runtime.tar.gz
+rm -f src-tauri/resources/nova-skill-scanner.tar.gz
 
 # ============================================
 # 7. CLEAN APP LOGS

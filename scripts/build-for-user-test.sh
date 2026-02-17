@@ -199,7 +199,26 @@ if ! docker image inspect openclaw-runtime:latest > /dev/null 2>&1; then
 fi
 
 # ============================================
-# 4. RUN THE STANDARD BUILD SCRIPT
+# 4. BUILD SKILL SCANNER IMAGE
+# ============================================
+
+echo ""
+echo "🔍 Building Skill Scanner image..."
+"$PROJECT_ROOT/scripts/build-skill-scanner.sh"
+echo "✅ Skill scanner image built"
+
+# Check image exists
+if ! docker image inspect nova-skill-scanner:latest > /dev/null 2>&1; then
+    echo "❌ ERROR: nova-skill-scanner:latest image not found after build"
+    exit 1
+fi
+
+# NOTE: We export the scanner tar AFTER build-cross-platform.sh runs, because
+# that script wipes src-tauri/resources/ before building. The Docker image
+# itself survives; we just re-export it once the resources dir is restored.
+
+# ============================================
+# 5. RUN THE STANDARD BUILD SCRIPT
 # ============================================
 
 echo ""
@@ -220,11 +239,25 @@ echo ""
 }
 
 # ============================================
-# 5. COPY RUNTIME IMAGE INTO APP BUNDLE
+# 6. EXPORT SKILL SCANNER IMAGE
+# ============================================
+
+# build-cross-platform.sh wiped src-tauri/resources/ before building and
+# restored it (with colima/docker/openclaw). Now export the scanner tar so
+# we can copy it into the app bundle.
+echo ""
+echo "📦 Exporting Skill Scanner image..."
+IMAGE=nova-skill-scanner:latest \
+OUTPUT="$PROJECT_ROOT/src-tauri/resources/nova-skill-scanner.tar.gz" \
+    "$PROJECT_ROOT/scripts/bundle-runtime-image.sh"
+echo "✅ Skill scanner image exported"
+
+# ============================================
+# 7. COPY RUNTIME IMAGES INTO APP BUNDLE
 # ============================================
 
 echo ""
-echo "📦 Copying runtime image into app bundle..."
+echo "📦 Copying runtime images into app bundle..."
 
 APP_RESOURCES="src-tauri/target/release/bundle/macos/Nova.app/Contents/Resources"
 
@@ -233,6 +266,14 @@ if [ -f "src-tauri/resources/openclaw-runtime.tar.gz" ]; then
     echo "✅ Runtime image copied into app"
 else
     echo "❌ ERROR: Runtime image not found at src-tauri/resources/openclaw-runtime.tar.gz"
+    exit 1
+fi
+
+if [ -f "src-tauri/resources/nova-skill-scanner.tar.gz" ]; then
+    cp "src-tauri/resources/nova-skill-scanner.tar.gz" "$APP_RESOURCES/"
+    echo "✅ Skill scanner image copied into app"
+else
+    echo "❌ ERROR: Skill scanner image not found at src-tauri/resources/nova-skill-scanner.tar.gz"
     exit 1
 fi
 
@@ -260,6 +301,7 @@ echo "   Colima:  $(ls -lh src-tauri/resources/bin/colima 2>/dev/null | awk '{pr
 echo "   Lima:    $(ls -lh src-tauri/resources/bin/limactl 2>/dev/null | awk '{print $5}' || echo 'missing')"
 echo "   Docker:  $(ls -lh src-tauri/resources/bin/docker 2>/dev/null | awk '{print $5}' || echo 'missing')"
 echo "   Runtime: $(ls -lh "$APP_RESOURCES/openclaw-runtime.tar.gz" 2>/dev/null | awk '{print $5}' || echo 'missing')"
+echo "   Scanner: $(ls -lh "$APP_RESOURCES/nova-skill-scanner.tar.gz" 2>/dev/null | awk '{print $5}' || echo 'missing')"
 
 echo ""
 echo "🎯 To test as end user:"

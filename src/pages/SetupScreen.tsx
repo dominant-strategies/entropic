@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Shield, Loader2, CheckCircle2, XCircle, AlertTriangle, Copy } from "lucide-react";
+import quaiLogo from "../assets/quai-logo.svg";
 
 type SetupProgress = {
   stage: string;
@@ -291,9 +292,14 @@ export function SetupScreen({ onComplete }: Props) {
       </div>
 
       {/* Footer */}
-      <p className="mt-8 text-gray-400 text-sm">
-        Powered by OpenClaw
-      </p>
+      <div className="mt-8 flex flex-col items-center gap-1.5">
+        <p className="text-gray-400 text-sm">Powered by OpenClaw</p>
+        <img
+          src={quaiLogo}
+          alt="Quai Network"
+          className="h-5 w-auto grayscale opacity-50"
+        />
+      </div>
     </div>
   );
 }
