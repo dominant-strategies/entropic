@@ -955,38 +955,38 @@ export function Store({
           {!skillsLoading && (
             <div>
               <h2 className="text-xl font-bold text-[var(--text-primary)] mb-4">Installed Skills</h2>
-              <div className="space-y-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
                 {installedSkillCards.map((skill) => {
                   const badge = skill.managed
                     ? { label: "Nova Managed", className: "bg-blue-50 text-blue-700" }
                     : scanBadge(skillScanResults[skill.id] || null);
                   return (
-                    <div key={skill.id} className="bg-white rounded-2xl p-4 shadow-sm border border-[var(--border-subtle)]">
-                      <div className="flex flex-col lg:flex-row lg:items-center gap-4">
-                        <div className="flex items-start gap-3 flex-1 min-w-0">
-                          <div className="w-11 h-11 bg-[var(--system-gray-6)] rounded-xl flex items-center justify-center shrink-0">
-                            {skill.id === NOVA_X_SKILL_ID ? <XLogo className="w-5 h-5 text-[var(--text-primary)]" /> : <ShieldCheck className="w-5 h-5 text-[var(--text-tertiary)]" />}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <h3 className="font-bold text-[var(--text-primary)]">{skill.name}</h3>
-                              <span className={clsx("text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md", badge.className)}>
-                                {badge.label}
-                              </span>
-                            </div>
-                            <p className="text-xs text-[var(--text-tertiary)] mt-0.5">{skill.sourceLabel}</p>
-                            <p className="text-sm text-[var(--text-secondary)] mt-2 line-clamp-2">{skill.description}</p>
-                            <div className="mt-2 flex flex-wrap gap-1.5">
-                              {skill.tags.map((tag) => (
-                                <span key={tag} className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--system-gray-6)] text-[var(--text-secondary)]">
-                                  {tag}
-                                </span>
-                              ))}
-                            </div>
-                            {skill.path && <p className="mt-2 text-[11px] text-[var(--text-tertiary)] break-all">{skill.path}</p>}
-                          </div>
+                    <div key={skill.id} className="aspect-square bg-white rounded-2xl p-4 shadow-sm border border-[var(--border-subtle)] flex flex-col">
+                      <div className="flex items-start gap-3">
+                        <div className="w-11 h-11 bg-[var(--system-gray-6)] rounded-xl flex items-center justify-center shrink-0">
+                          {skill.id === NOVA_X_SKILL_ID ? <XLogo className="w-5 h-5 text-[var(--text-primary)]" /> : <ShieldCheck className="w-5 h-5 text-[var(--text-tertiary)]" />}
                         </div>
-                        <div className={clsx("grid gap-2 lg:w-[230px]", skill.managed ? "grid-cols-1" : "grid-cols-2")}>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h3 className="font-bold text-[var(--text-primary)] truncate">{skill.name}</h3>
+                            <span className={clsx("text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md", badge.className)}>
+                              {badge.label}
+                            </span>
+                          </div>
+                          <p className="text-xs text-[var(--text-tertiary)] mt-0.5 line-clamp-1">{skill.sourceLabel}</p>
+                        </div>
+                      </div>
+                      <p className="mt-3 text-sm text-[var(--text-secondary)] line-clamp-3 flex-none">{skill.description}</p>
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {skill.tags.map((tag) => (
+                          <span key={tag} className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--system-gray-6)] text-[var(--text-secondary)]">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                      {skill.path && <p className="mt-2 text-[11px] text-[var(--text-tertiary)] break-all line-clamp-2 flex-none">{skill.path}</p>}
+                      <div className="mt-auto pt-3">
+                        <div className={clsx("grid gap-2", skill.managed ? "grid-cols-1" : "grid-cols-2")}>
                           {!skill.managed && (
                             <button
                               onClick={() => handleAuditSkill(skill)}
@@ -1090,17 +1090,17 @@ export function Store({
               )}
 
               {!clawhubLoading && !clawhubLookupError && (
-                <div className="space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                   {clawhubCatalog.map((skill) => {
                     const installed = installedWorkspaceSkillIds.has(skill.slug);
                     const expanded = expandedClawhubSlug === skill.slug;
                     const details = clawhubDetails[skill.slug];
                     return (
-                      <div key={skill.slug} className="rounded-xl border border-[var(--border-subtle)] bg-[var(--system-gray-6)]/40 p-4">
-                        <div className="flex flex-col lg:flex-row lg:items-start gap-4">
+                      <div key={skill.slug} className="aspect-square rounded-xl border border-[var(--border-subtle)] bg-[var(--system-gray-6)]/40 p-4 flex flex-col">
+                        <div className="flex items-start gap-2">
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2 flex-wrap">
-                              <h3 className="font-semibold text-[var(--text-primary)]">{skill.display_name || skill.slug}</h3>
+                              <h3 className="font-semibold text-[var(--text-primary)] line-clamp-1">{skill.display_name || skill.slug}</h3>
                               {installed ? (
                                 <span className="text-[10px] font-bold uppercase tracking-wider text-green-700 bg-green-50 px-2 py-1 rounded-md">
                                   Installed
@@ -1111,39 +1111,18 @@ export function Store({
                                 </span>
                               )}
                             </div>
-                            <p className="text-xs text-[var(--text-tertiary)]">{skill.slug}</p>
-                            <p className="mt-2 text-sm text-[var(--text-secondary)] line-clamp-2">{skill.summary || "No summary provided."}</p>
-                            <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-[var(--text-tertiary)]">
-                              <span className="px-2 py-0.5 rounded-full bg-white border border-[var(--border-subtle)]">v{skill.latest_version || "latest"}</span>
-                              <span className="px-2 py-0.5 rounded-full bg-white border border-[var(--border-subtle)]">{skill.stars} stars</span>
-                              <span className="px-2 py-0.5 rounded-full bg-white border border-[var(--border-subtle)]">{skill.downloads} downloads</span>
-                              <span className="px-2 py-0.5 rounded-full bg-white border border-[var(--border-subtle)]">{skill.installs_all_time} installs</span>
-                            </div>
-                            {expanded && (
-                              <div className="mt-3 rounded-lg bg-white border border-[var(--border-subtle)] p-3 text-xs">
-                                {clawhubDetailLoading === skill.slug && (
-                                  <div className="flex items-center gap-2 text-[var(--text-secondary)]">
-                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                    Loading details...
-                                  </div>
-                                )}
-                                {clawhubDetailError && (
-                                  <p className="text-red-600">{clawhubDetailError}</p>
-                                )}
-                                {details && (
-                                  <div className="space-y-1 text-[var(--text-secondary)]">
-                                    <p><span className="font-semibold text-[var(--text-primary)]">Owner:</span> {details.owner_display_name || details.owner_handle || "Unknown"}</p>
-                                    <p><span className="font-semibold text-[var(--text-primary)]">Latest:</span> {details.latest_version || "latest"}</p>
-                                    <p><span className="font-semibold text-[var(--text-primary)]">Installs:</span> {details.installs_all_time}</p>
-                                    {details.changelog && (
-                                      <p className="whitespace-pre-wrap line-clamp-4"><span className="font-semibold text-[var(--text-primary)]">Changelog:</span> {details.changelog}</p>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            )}
+                            <p className="text-xs text-[var(--text-tertiary)] mt-0.5 line-clamp-1">{skill.slug}</p>
                           </div>
-                          <div className="grid grid-cols-2 lg:grid-cols-1 gap-2 lg:w-[170px]">
+                        </div>
+                        <p className="mt-2 text-xs text-[var(--text-secondary)] line-clamp-3">{skill.summary || "No summary provided."}</p>
+                        <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-[var(--text-tertiary)]">
+                          <span className="px-2 py-0.5 rounded-full bg-white border border-[var(--border-subtle)]">v{skill.latest_version || "latest"}</span>
+                          <span className="px-2 py-0.5 rounded-full bg-white border border-[var(--border-subtle)]">{skill.stars} stars</span>
+                          <span className="px-2 py-0.5 rounded-full bg-white border border-[var(--border-subtle)]">{skill.downloads} downloads</span>
+                          <span className="px-2 py-0.5 rounded-full bg-white border border-[var(--border-subtle)]">{skill.installs_all_time} installs</span>
+                        </div>
+                        <div className="mt-auto pt-3">
+                          <div className="grid grid-cols-2 gap-2">
                             <button
                               onClick={() => toggleClawhubDetails(skill.slug)}
                               className="py-2 rounded-lg text-xs font-semibold bg-white border border-[var(--border-subtle)] text-[var(--text-primary)]"
@@ -1168,6 +1147,29 @@ export function Store({
                             </button>
                           </div>
                         </div>
+                        {expanded && (
+                          <div className="mt-3 rounded-lg bg-white border border-[var(--border-subtle)] p-3 text-xs">
+                            {clawhubDetailLoading === skill.slug && (
+                              <div className="flex items-center gap-2 text-[var(--text-secondary)]">
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                Loading details...
+                              </div>
+                            )}
+                            {clawhubDetailError && (
+                              <p className="text-red-600">{clawhubDetailError}</p>
+                            )}
+                            {details && (
+                              <div className="space-y-1 text-[var(--text-secondary)]">
+                                <p><span className="font-semibold text-[var(--text-primary)]">Owner:</span> {details.owner_display_name || details.owner_handle || "Unknown"}</p>
+                                <p><span className="font-semibold text-[var(--text-primary)]">Latest:</span> {details.latest_version || "latest"}</p>
+                                <p><span className="font-semibold text-[var(--text-primary)]">Installs:</span> {details.installs_all_time}</p>
+                                {details.changelog && (
+                                  <p className="whitespace-pre-wrap line-clamp-4"><span className="font-semibold text-[var(--text-primary)]">Changelog:</span> {details.changelog}</p>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
