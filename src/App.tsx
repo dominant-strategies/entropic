@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { platform } from "@tauri-apps/plugin-os";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { getVersion } from "@tauri-apps/api/app";
 import { SetupScreen } from "./pages/SetupScreen";
 import { DockerInstall } from "./pages/DockerInstall";
 import { Dashboard } from "./pages/Dashboard";
@@ -47,14 +48,42 @@ function AppContent() {
     let cancelled = false;
     const runUpdate = async () => {
       try {
+        const currentVersion = await getVersion();
+        console.log(`[Updater] Current version: ${currentVersion}`);
+        clientLog("app.updater.check", { currentVersion });
+
         const update = await check();
-        if (!update || cancelled) return;
+        if (!update) {
+          console.log("[Updater] No updates available");
+          clientLog("app.updater.no_update", { currentVersion });
+          return;
+        }
+
+        if (cancelled) return;
+
+        const targetVersion = update.version;
+        console.log(`[Updater] Update available: ${currentVersion} -> ${targetVersion}`);
+        clientLog("app.updater.available", { currentVersion, targetVersion });
+
+        // Loop prevention: Ensure target version is actually different
+        if (currentVersion === targetVersion) {
+          console.warn("[Updater] Target version matches current version, skipping update to prevent loop");
+          clientLog("app.updater.loop_prevented", { currentVersion, targetVersion });
+          return;
+        }
+
+        console.log("[Updater] Downloading and installing update...");
+        clientLog("app.updater.installing", { currentVersion, targetVersion });
+
         await update.downloadAndInstall();
+
         if (!cancelled) {
+          console.log("[Updater] Update installed, relaunching...");
+          clientLog("app.updater.relaunch", { targetVersion });
           await relaunch();
         }
       } catch (error) {
-        console.warn("Updater check failed:", error);
+        console.warn("[Updater] Check failed:", error);
         clientLog("app.updater.failed", { error: String(error) });
       }
     };
