@@ -7957,6 +7957,7 @@ const AUTH_LOCALHOST_DEFAULT_PORT: u16 = 27100;
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
+const GOOGLE_TOKENINFO_URL: &str = "https://oauth2.googleapis.com/tokeninfo";
 
 // Anthropic (Claude Code) OAuth — two-phase flow: user copies code from Anthropic's page
 const ANTHROPIC_AUTH_URL: &str = "https://claude.ai/oauth/authorize";
@@ -8001,6 +8002,11 @@ struct OAuthTokenResponse {
 struct GoogleUserInfo {
     email: Option<String>,
     id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GoogleTokenInfoResponse {
+    scope: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -8054,6 +8060,34 @@ fn oauth_scopes(provider: &str) -> Result<Vec<&'static str>, String> {
         }
     };
     Ok(scopes)
+}
+
+fn required_google_api_scopes(provider: &str) -> Result<Vec<&'static str>, String> {
+    let scopes = match provider {
+        "google_calendar" => vec![
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/calendar.readonly",
+        ],
+        "google_email" => vec![
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+        ],
+        _ => {
+            return Err(format!(
+                "Unsupported provider: {} (expected google_calendar or google_email)",
+                provider
+            ))
+        }
+    };
+    Ok(scopes)
+}
+
+fn parse_scope_list(raw: &str) -> Vec<String> {
+    raw.split_whitespace()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn generate_pkce() -> (String, String) {
@@ -8457,6 +8491,53 @@ async fn fetch_google_user(access_token: &str) -> Result<GoogleUserInfo, String>
         .map_err(|e| format!("Failed to parse user info: {}", e))
 }
 
+async fn fetch_google_token_scopes(access_token: &str) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(GOOGLE_TOKENINFO_URL)
+        .query(&[("access_token", access_token)])
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch token info: {}", e))?;
+
+    if !resp.status().is_success() {
+        let text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown error".to_string());
+        return Err(format!("Failed to fetch token info: {}", text));
+    }
+
+    let info = resp
+        .json::<GoogleTokenInfoResponse>()
+        .await
+        .map_err(|e| format!("Failed to parse token info response: {}", e))?;
+    Ok(info
+        .scope
+        .as_deref()
+        .map(parse_scope_list)
+        .unwrap_or_default())
+}
+
+fn validate_granted_scopes(provider: &str, granted: &[String]) -> Result<(), String> {
+    let required = required_google_api_scopes(provider)?;
+    let missing: Vec<String> = required
+        .into_iter()
+        .filter(|required_scope| !granted.iter().any(|s| s == required_scope))
+        .map(|s| s.to_string())
+        .collect();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Google OAuth missing required scopes for {}: {}. Disconnect and reconnect this integration. If it still fails, ensure Calendar/Gmail APIs and these scopes are enabled in your Google Cloud OAuth consent screen.",
+        provider,
+        missing.join(", ")
+    ))
+}
+
 #[tauri::command]
 pub async fn start_google_oauth(
     app: AppHandle,
@@ -8491,6 +8572,7 @@ pub async fn start_google_oauth(
         .append_pair("code_challenge_method", "S256")
         .append_pair("state", &state)
         .append_pair("access_type", "offline")
+        .append_pair("include_granted_scopes", "true")
         .append_pair("prompt", "consent");
 
     app.opener()
@@ -8515,10 +8597,23 @@ pub async fn start_google_oauth(
             id: None,
         });
 
-    let scopes_list = token_response
+    let mut scopes_list = token_response
         .scope
-        .map(|s| s.split_whitespace().map(|v| v.to_string()).collect())
-        .unwrap_or_else(|| scopes.iter().map(|s| s.to_string()).collect());
+        .as_deref()
+        .map(parse_scope_list)
+        .unwrap_or_default();
+    if scopes_list.is_empty() {
+        scopes_list = fetch_google_token_scopes(&token_response.access_token)
+            .await
+            .unwrap_or_default();
+    }
+    if scopes_list.is_empty() {
+        return Err(
+            "Google OAuth succeeded but no granted scopes were returned. Disconnect and reconnect the integration."
+                .to_string(),
+        );
+    }
+    validate_granted_scopes(&provider, &scopes_list)?;
 
     Ok(OAuthTokenBundle {
         access_token: token_response.access_token,

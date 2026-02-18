@@ -645,11 +645,15 @@ export function Store({
     setConnecting(provider);
     try {
       await disconnectIntegration(provider);
-      await removeIntegrationFromGateway(provider);
-      await refreshIntegrations();
+      try {
+        await removeIntegrationFromGateway(provider);
+      } catch (err) {
+        console.warn(`Failed to remove ${provider} from gateway cache:`, err);
+      }
     } catch (err) {
       console.error("Failed to disconnect:", err);
     } finally {
+      await refreshIntegrations({ force: true });
       setConnecting(null);
     }
   }
