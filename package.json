@@ -18,10 +18,13 @@
     "tauri:build": "tauri build",
     "tauri:build:dev": "tauri build --debug --config src-tauri/tauri.conf.dev.json",
     "dev:protocol": "bash ./scripts/register-dev-protocol.sh",
+    "user-test:clean": "bash ./scripts/clean-for-user-test.sh",
+    "user-test:build": "bash ./scripts/build-for-user-test.sh",
     "bundle:colima": "./scripts/bundle-colima.sh",
     "bundle:docker": "./scripts/bundle-docker.sh",
+    "bundle:runtime": "./scripts/bundle-runtime.sh",
     "bundle:runtime-image": "./scripts/bundle-runtime-image.sh",
-    "bundle:all": "pnpm bundle:colima && pnpm bundle:docker",
+    "bundle:all": "pnpm bundle:runtime",
     "build:cross-platform": "./scripts/build-cross-platform.sh"
   },
   "dependencies": {

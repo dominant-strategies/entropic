@@ -26,9 +26,8 @@ case "$PLATFORM" in
         echo "Building for macOS with Colima runtime..."
 
         # Bundle macOS-specific runtime
-        echo "Bundling Colima + Docker CLI..."
-        pnpm bundle:colima
-        pnpm bundle:docker
+        echo "Bundling Colima + Lima + Docker CLI..."
+        pnpm bundle:runtime
 
         # Bundle the OpenClaw runtime Docker image (if available)
         if docker image inspect openclaw-runtime:latest > /dev/null 2>&1; then

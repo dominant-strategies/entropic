@@ -1,203 +1,85 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-# Build the OpenClaw core runtime container
+# Build the OpenClaw core runtime container in a mode-specific daemon:
+# - ENTROPIC_RUNTIME_MODE=dev  -> ~/.entropic/colima-dev (default)
+# - ENTROPIC_RUNTIME_MODE=prod -> ~/.entropic/colima
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+RUNTIME_COMMON="$SCRIPT_DIR/runtime-common.sh"
 RUNTIME_DIR="$PROJECT_ROOT/openclaw-runtime"
 OPENCLAW_SOURCE="${OPENCLAW_SOURCE:-$PROJECT_ROOT/../openclaw}"
 ENTROPIC_SKILLS_SOURCE="${ENTROPIC_SKILLS_SOURCE:-$PROJECT_ROOT/../entropic-skills}"
-SCRIPT_BIN_DIRS="${PROJECT_ROOT}/src-tauri/target/debug/resources/bin:${PROJECT_ROOT}/src-tauri/resources/bin"
-USER_UID="$(id -u)"
-TMP_BASE="${TMPDIR:-/tmp}"
-TMP_BASE="${TMP_BASE%/}"
-FALLBACK_COLIMA_HOME_SHARED="/Users/Shared/entropic/colima-${USER_UID}"
-FALLBACK_COLIMA_HOME_TMP="${TMP_BASE}/entropic-colima-${USER_UID}"
+
+if [ ! -f "$RUNTIME_COMMON" ]; then
+    echo "ERROR: Missing runtime helper: $RUNTIME_COMMON" >&2
+    exit 1
+fi
+
+export ENTROPIC_RUNTIME_MODE="${ENTROPIC_RUNTIME_MODE:-dev}"
+source "$RUNTIME_COMMON"
+export ENTROPIC_COLIMA_HOME="${ENTROPIC_COLIMA_HOME:-$(entropic_default_colima_home)}"
+
 ACTIVE_DOCKER_HOST=""
-ACTIVE_COLIMA_HOME=""
-COLIMA_HOME_CANDIDATES=()
-COLIMA_PROFILES=(entropic-vz entropic-qemu)
-COLIMA_VM_TYPES=(vz qemu)
-
-find_docker_binary() {
-    local candidates=()
-
-    if command -v docker >/dev/null 2>&1; then
-        candidates+=("$(command -v docker)")
-    fi
-
-    local bundled="$PROJECT_ROOT/src-tauri/resources/bin/docker"
-    if [ -x "$bundled" ]; then
-        candidates+=("$bundled")
-    fi
-
-    local target_debug="$PROJECT_ROOT/src-tauri/target/debug/resources/bin/docker"
-    if [ -x "$target_debug" ]; then
-        candidates+=("$target_debug")
-    fi
-
-    local path
-    for path in "${candidates[@]}"; do
-        if "$path" --version >/dev/null 2>&1; then
-            echo "$path"
-            return 0
-        fi
-    done
-
-    echo "docker"
-}
-
-find_colima_binary() {
-    local target_debug="$PROJECT_ROOT/src-tauri/target/debug/resources/bin/colima"
-    if [ -x "$target_debug" ]; then
-        echo "$target_debug"
-        return 0
-    fi
-
-    local bundled="$PROJECT_ROOT/src-tauri/resources/bin/colima"
-    if [ -x "$bundled" ]; then
-        echo "$bundled"
-        return 0
-    fi
-
-    if command -v colima >/dev/null 2>&1; then
-        echo "$(command -v colima)"
-        return 0
-    fi
-
-    return 1
-}
-
-add_colima_home_candidate() {
-    local candidate="$1"
-    local existing
-    [ -n "$candidate" ] || return 0
-    for existing in "${COLIMA_HOME_CANDIDATES[@]-}"; do
-        if [ "$existing" = "$candidate" ]; then
-            return 0
-        fi
-    done
-    COLIMA_HOME_CANDIDATES+=("$candidate")
-}
-
-build_colima_home_candidates() {
-    if [ -n "${ENTROPIC_COLIMA_HOME:-}" ]; then
-        add_colima_home_candidate "$ENTROPIC_COLIMA_HOME"
-    fi
-    add_colima_home_candidate "$HOME/.entropic/colima"
-    add_colima_home_candidate "$HOME/.entropic/colima-dev"
-    add_colima_home_candidate "$FALLBACK_COLIMA_HOME_SHARED"
-    add_colima_home_candidate "$FALLBACK_COLIMA_HOME_TMP"
-    add_colima_home_candidate "$HOME/.colima"
-}
-
-docker_host_is_available() {
-    local candidate="$1"
-    [ -n "$candidate" ] || return 1
-    DOCKER_HOST="$candidate" "$DOCKER_BIN" info >/dev/null 2>&1
-}
-
-resolve_working_docker_host() {
-    local profile
-    local home
-    local sock
-    local candidate
-
-    if [ -n "${DOCKER_HOST:-}" ] && docker_host_is_available "${DOCKER_HOST}"; then
-        ACTIVE_DOCKER_HOST="${DOCKER_HOST}"
-        ACTIVE_COLIMA_HOME=""
-        return 0
-    fi
-
-    # Prefer whatever Docker context is already active (e.g., Docker Desktop)
-    # before probing Colima sockets.
-    if "$DOCKER_BIN" info >/dev/null 2>&1; then
-        ACTIVE_DOCKER_HOST=""
-        ACTIVE_COLIMA_HOME=""
-        return 0
-    fi
-
-    for profile in "${COLIMA_PROFILES[@]}"; do
-        for home in "${COLIMA_HOME_CANDIDATES[@]-}"; do
-            sock="$home/$profile/docker.sock"
-            candidate="unix://$sock"
-            if [ -S "$sock" ] && docker_host_is_available "$candidate"; then
-                ACTIVE_DOCKER_HOST="$candidate"
-                ACTIVE_COLIMA_HOME="$home"
-                return 0
-            fi
-        done
-    done
-
-    ACTIVE_DOCKER_HOST=""
-    ACTIVE_COLIMA_HOME=""
-    return 1
-}
-
-run_colima_with_home() {
-    local home="$1"
-    shift
-    COLIMA_HOME="$home" \
-    LIMA_HOME="$home/_lima" \
-    PATH="${SCRIPT_BIN_DIRS}:$PATH" \
-    "$COLIMA_BIN" "$@"
-}
-
-ensure_docker_ready() {
-    if resolve_working_docker_host; then
-        return 0
-    fi
-
-    if [ -z "${COLIMA_BIN:-}" ]; then
-        return 1
-    fi
-
-    local i
-    local profile
-    local vm_type
-    local home
-    local start_output
-    local wait_attempts
-
-    for i in "${!COLIMA_PROFILES[@]}"; do
-        profile="${COLIMA_PROFILES[$i]}"
-        vm_type="${COLIMA_VM_TYPES[$i]}"
-        for home in "${COLIMA_HOME_CANDIDATES[@]-}"; do
-            mkdir -p "$home" >/dev/null 2>&1 || continue
-            echo "Starting Colima profile ${profile} (${vm_type}) with COLIMA_HOME=${home}..."
-            if start_output="$(run_colima_with_home "$home" --profile "$profile" start --vm-type "$vm_type" 2>&1)"; then
-                wait_attempts=20
-                while [ "$wait_attempts" -gt 0 ]; do
-                    if resolve_working_docker_host; then
-                        return 0
-                    fi
-                    wait_attempts=$((wait_attempts - 1))
-                    sleep 1
-                done
-            else
-                echo "Colima start failed for profile ${profile} in ${home}."
-                echo "$start_output" | tail -n 8
-            fi
-        done
-    done
-
-    return 1
-}
+DOCKER_BIN=""
+COLIMA_BIN=""
 
 run_docker() {
-    if [ -n "${ACTIVE_DOCKER_HOST}" ]; then
+    if [ -z "$DOCKER_BIN" ]; then
+        echo "ERROR: Docker CLI not found." >&2
+        return 1
+    fi
+    if [ -n "$ACTIVE_DOCKER_HOST" ]; then
         DOCKER_HOST="$ACTIVE_DOCKER_HOST" "$DOCKER_BIN" "$@"
     else
         "$DOCKER_BIN" "$@"
     fi
 }
 
-DOCKER_BIN="$(find_docker_binary)"
-COLIMA_BIN="$(find_colima_binary || true)"
-build_colima_home_candidates
+ensure_docker_ready_for_mode() {
+    DOCKER_BIN="$(entropic_find_docker_binary "$PROJECT_ROOT" || true)"
+    COLIMA_BIN="$(entropic_find_colima_binary "$PROJECT_ROOT" || true)"
+
+    if [ -z "$DOCKER_BIN" ]; then
+        echo "ERROR: Docker CLI not found (system or bundled)." >&2
+        return 1
+    fi
+
+    ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
+    if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "$COLIMA_BIN" ]; then
+        echo "Starting Colima for $(entropic_mode_label) runtime build..."
+        ACTIVE_DOCKER_HOST="$(entropic_start_colima_for_mode "$DOCKER_BIN" "$COLIMA_BIN" "$PROJECT_ROOT" || true)"
+    fi
+
+    if [ -n "$ACTIVE_DOCKER_HOST" ]; then
+        return 0
+    fi
+
+    if entropic_default_context_allowed && "$DOCKER_BIN" info >/dev/null 2>&1; then
+        echo "WARNING: Using default Docker context because ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1."
+        return 0
+    fi
+
+    echo "ERROR: No $(entropic_mode_label) Colima Docker socket is reachable."
+    echo "Mode: $(entropic_runtime_mode)"
+    echo "Colima home: $ENTROPIC_COLIMA_HOME"
+    echo ""
+    echo "Fix options:"
+    echo "  1. Start mode runtime first:"
+    if [ "$(entropic_runtime_mode)" = "dev" ]; then
+        echo "     pnpm dev:runtime:start"
+    else
+        echo "     ENTROPIC_RUNTIME_MODE=prod ./scripts/build-for-user-test.sh"
+    fi
+    echo "  2. For one-off Desktop fallback (build scripts only):"
+    echo "     ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 $0"
+    return 1
+}
 
 echo "=== Building OpenClaw Runtime Container ==="
+echo "Mode: $(entropic_runtime_mode)"
+echo "Colima home: $ENTROPIC_COLIMA_HOME"
 echo ""
 
 # Check if OpenClaw source exists
@@ -298,20 +180,10 @@ echo "Security scan passed."
 # Build container
 echo ""
 echo "Building container image..."
-if ! ensure_docker_ready; then
-    echo "ERROR: Docker is not reachable."
-    echo "Tried Docker Desktop plus Colima profiles (${COLIMA_PROFILES[*]}) in:"
-    if [ "${#COLIMA_HOME_CANDIDATES[@]}" -gt 0 ]; then
-        printf '  - %s\n' "${COLIMA_HOME_CANDIDATES[@]}"
-    fi
-    echo "Start runtime first with ./scripts/dev-runtime.sh start, then retry."
-    exit 1
-fi
+ensure_docker_ready_for_mode
 
 if [ -n "${ACTIVE_DOCKER_HOST}" ]; then
     echo "Using Docker host: ${ACTIVE_DOCKER_HOST}"
-elif [ -n "${DOCKER_HOST:-}" ]; then
-    echo "Using Docker host from environment: ${DOCKER_HOST}"
 else
     echo "Using default Docker context."
 fi

@@ -1,170 +1,114 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo "🏗️  Building Entropic for end-user testing..."
+echo "🏗️  Building Entropic for end-user testing (production mode)..."
 echo ""
 
-USER_UID="$(id -u)"
-TMP_BASE="${TMPDIR:-/tmp}"
-TMP_BASE="${TMP_BASE%/}"
-if [[ -z "$TMP_BASE" ]]; then
-    TMP_BASE="/tmp"
-fi
-FALLBACK_COLIMA_HOME_SHARED="/Users/Shared/entropic/colima-${USER_UID}"
-FALLBACK_COLIMA_HOME_TMP="${TMP_BASE}/entropic-colima-${USER_UID}"
-FALLBACK_RUNTIME_HOME_SHARED="/Users/Shared/entropic/home-${USER_UID}"
-FALLBACK_RUNTIME_HOME_TMP="${TMP_BASE}/entropic-home-${USER_UID}"
-
-# Change to project root (parent of scripts directory)
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+RUNTIME_COMMON="$SCRIPT_DIR/runtime-common.sh"
+
+if [ ! -f "$RUNTIME_COMMON" ]; then
+    echo "ERROR: Missing runtime helper: $RUNTIME_COMMON" >&2
+    exit 1
+fi
+
+export ENTROPIC_RUNTIME_MODE=prod
+source "$RUNTIME_COMMON"
+export ENTROPIC_COLIMA_HOME="${ENTROPIC_COLIMA_HOME:-$(entropic_default_colima_home)}"
+
 cd "$PROJECT_ROOT"
 
-echo "📁 Working directory: $PROJECT_ROOT"
-echo ""
-
-DOCKER_CHECK_OUT="${TMPDIR:-/tmp}/docker-check.out"
-DOCKER_CHECK_ERR="${TMPDIR:-/tmp}/docker-check.err"
-
-cleanup_docker_check() {
-    rm -f "$DOCKER_CHECK_OUT" "$DOCKER_CHECK_ERR"
-}
-
-docker_info_check() {
-    docker info >"$DOCKER_CHECK_OUT" 2>"$DOCKER_CHECK_ERR"
-}
-
-try_docker_context() {
-    local context="$1"
-    [ -n "$context" ] || return 1
-    docker context inspect "$context" >/dev/null 2>&1 || return 1
-    DOCKER_CONTEXT="$context" docker info >"$DOCKER_CHECK_OUT" 2>"$DOCKER_CHECK_ERR"
-}
-
-docker_context_host() {
-    local context="$1"
-    [ -n "$context" ] || return 1
-    docker context inspect "$context" --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null | head -n 1
-}
-
-# ============================================
-# 0. PRE-FLIGHT CHECK: DOCKER RUNNING?
-# ============================================
-
-echo "🔍 Checking if Docker is available..."
-
-# Unset DOCKER_HOST to use Docker Desktop if it's running
-# (User might have stale DOCKER_HOST from previous Colima usage)
-if [ -n "$DOCKER_HOST" ]; then
-    echo "  ℹ️  Unsetting DOCKER_HOST (was: $DOCKER_HOST)"
-    unset DOCKER_HOST
-fi
-
-echo "  Docker path: $(which docker 2>&1 || echo 'not found')"
-echo ""
-
-# Try docker info and capture both stdout and stderr
-echo "  Running: docker info..."
-if docker_info_check; then
-    echo "✅ Docker is running"
-    current_context="$(docker context show 2>/dev/null || true)"
-    if [ -n "$current_context" ]; then
-        echo "  Context: $current_context"
-    fi
-else
-    docker_exit_code=$?
-    current_context="$(docker context show 2>/dev/null || true)"
-    if [ -n "$current_context" ]; then
-        echo "  ℹ️  Current Docker context '$current_context' is unreachable; trying fallbacks..."
-    fi
-
-    selected_context=""
-    for candidate_context in desktop-linux default; do
-        if [ "$candidate_context" = "$current_context" ]; then
-            continue
-        fi
-        echo "  Trying context: $candidate_context"
-        if try_docker_context "$candidate_context"; then
-            selected_context="$candidate_context"
-            export DOCKER_CONTEXT="$candidate_context"
-            break
-        fi
-    done
-
-    if [ -n "$selected_context" ]; then
-        echo "✅ Docker is running (using context: $selected_context)"
-    else
-        echo ""
-        echo "❌ Docker is not running!"
-        echo ""
-        echo "Debug info:"
-        echo "  Exit code: $docker_exit_code"
-        if [ -n "$current_context" ]; then
-            echo "  Current context: $current_context"
-        fi
-        if [ -s "$DOCKER_CHECK_ERR" ]; then
-            echo "  Error output:"
-            head -5 "$DOCKER_CHECK_ERR" | sed 's/^/    /'
-        fi
-        echo ""
-        echo "Available Docker contexts:"
-        docker context ls 2>/dev/null || true
-        echo ""
-        echo "You need Docker running to build the OpenClaw runtime image."
-        echo "Choose one option:"
-        echo ""
-        echo "Option 1 - Use Docker Desktop (if installed):"
-        echo "   docker context use desktop-linux"
-        echo "   or: docker context use default"
-        echo ""
-        echo "Option 2 - Install Homebrew Colima temporarily:"
-        echo "   brew install colima"
-        echo "   colima start --cpu 4 --memory 8 --vm-type vz"
-        echo ""
-        echo "Then run this script again."
-        cleanup_docker_check
-        exit 1
-    fi
-fi
-
-cleanup_docker_check
-
-# Pin a single Docker host for the rest of this script so every sub-script
-# (runtime build, scanner build, bundling) talks to the same daemon.
-ACTIVE_DOCKER_CONTEXT="${DOCKER_CONTEXT:-$(docker context show 2>/dev/null || true)}"
+DOCKER_BIN=""
+COLIMA_BIN=""
 ACTIVE_DOCKER_HOST=""
-if [ -n "$ACTIVE_DOCKER_CONTEXT" ]; then
-    ACTIVE_DOCKER_HOST="$(docker_context_host "$ACTIVE_DOCKER_CONTEXT" || true)"
-fi
-if [ -n "$ACTIVE_DOCKER_HOST" ]; then
-    unset DOCKER_CONTEXT
-    export DOCKER_HOST="$ACTIVE_DOCKER_HOST"
-    echo "🐳 Pinned Docker host: $DOCKER_HOST (context: $ACTIVE_DOCKER_CONTEXT)"
-else
-    echo "⚠️  Could not resolve Docker host from context; using Docker CLI defaults."
-fi
 
-# ============================================
-# 1. INSTALL DEPENDENCIES
-# ============================================
+refresh_binaries() {
+    DOCKER_BIN="$(entropic_find_docker_binary "$PROJECT_ROOT" || true)"
+    COLIMA_BIN="$(entropic_find_colima_binary "$PROJECT_ROOT" || true)"
+}
 
+run_docker() {
+    if [ -z "$DOCKER_BIN" ]; then
+        echo "ERROR: Docker CLI not found." >&2
+        return 1
+    fi
+    if [ -n "$ACTIVE_DOCKER_HOST" ]; then
+        DOCKER_HOST="$ACTIVE_DOCKER_HOST" "$DOCKER_BIN" "$@"
+    else
+        "$DOCKER_BIN" "$@"
+    fi
+}
+
+bundled_runtime_ready() {
+    [ -x "$PROJECT_ROOT/src-tauri/resources/bin/colima" ] || return 1
+    [ -x "$PROJECT_ROOT/src-tauri/resources/bin/limactl" ] || return 1
+    [ -x "$PROJECT_ROOT/src-tauri/resources/bin/docker" ] || return 1
+    [ -d "$PROJECT_ROOT/src-tauri/resources/share/lima" ] || return 1
+    return 0
+}
+
+ensure_bundled_runtime() {
+    if bundled_runtime_ready; then
+        return 0
+    fi
+
+    echo "📦 Bundled runtime binaries missing. Running bundle-runtime.sh..."
+    "$PROJECT_ROOT/scripts/bundle-runtime.sh"
+}
+
+ensure_prod_docker_ready() {
+    refresh_binaries
+    if [ -z "$DOCKER_BIN" ]; then
+        echo "ERROR: Docker CLI not found (system or bundled)." >&2
+        return 1
+    fi
+
+    ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
+    if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "$COLIMA_BIN" ]; then
+        echo "🐳 Starting production Colima runtime..."
+        ACTIVE_DOCKER_HOST="$(entropic_start_colima_for_mode "$DOCKER_BIN" "$COLIMA_BIN" "$PROJECT_ROOT" || true)"
+    fi
+
+    if [ -n "$ACTIVE_DOCKER_HOST" ]; then
+        echo "🐳 Using production Docker host: $ACTIVE_DOCKER_HOST"
+        return 0
+    fi
+
+    if entropic_default_context_allowed && "$DOCKER_BIN" info >/dev/null 2>&1; then
+        echo "⚠️  Using default Docker context because ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1."
+        return 0
+    fi
+
+    echo "ERROR: Production Colima daemon is not reachable."
+    echo "Colima home: $ENTROPIC_COLIMA_HOME"
+    echo "Set ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 only for one-off Desktop fallback."
+    return 1
+}
+
+echo "Mode: $(entropic_runtime_mode)"
+echo "Colima home: $ENTROPIC_COLIMA_HOME"
 echo ""
-echo "📦 Installing dependencies..."
 
+# ============================================
+# 1. Ensure dependencies + runtime binaries
+# ============================================
+echo "📦 Installing dependencies..."
 if [ ! -d "node_modules" ]; then
     pnpm install
 else
     echo "✅ Dependencies already installed"
 fi
 
-# ============================================
-# 2. CHECK OPENCLAW
-# ============================================
+ensure_bundled_runtime
+refresh_binaries
 
+# ============================================
+# 2. Locate OpenClaw source
+# ============================================
 echo ""
 echo "🔍 Locating OpenClaw..."
 
-# Try to find OpenClaw in common locations
 OPENCLAW_LOCATIONS=(
     "../openclaw"
     "../../openclaw"
@@ -174,8 +118,7 @@ OPENCLAW_LOCATIONS=(
 
 OPENCLAW_SOURCE=""
 for loc in "${OPENCLAW_LOCATIONS[@]}"; do
-    # Expand ~ if present
-    expanded=$(eval echo "$loc")
+    expanded="$(eval echo "$loc")"
     if [ -d "$expanded/dist" ]; then
         OPENCLAW_SOURCE="$expanded"
         echo "✅ Found OpenClaw at: $OPENCLAW_SOURCE"
@@ -184,187 +127,113 @@ for loc in "${OPENCLAW_LOCATIONS[@]}"; do
 done
 
 if [ -z "$OPENCLAW_SOURCE" ]; then
-    echo "❌ ERROR: OpenClaw not found in any of these locations:"
-    for loc in "${OPENCLAW_LOCATIONS[@]}"; do
-        echo "   - $(eval echo "$loc")"
-    done
-    echo ""
-    echo "Clone and build OpenClaw first:"
-    echo "   cd ~/agent  # or ~/quai or any directory"
-    echo "   git clone https://github.com/dominant-strategies/openclaw"
-    echo "   cd openclaw"
-    echo "   pnpm install"
-    echo "   pnpm build"
-    echo ""
-    echo "Then make sure it's in one of the above locations."
+    echo "❌ ERROR: OpenClaw not found in expected locations."
+    printf '   - %s\n' "${OPENCLAW_LOCATIONS[@]}"
     exit 1
 fi
 
 # ============================================
-# 3. BUILD OPENCLAW RUNTIME IMAGE
+# 3. Ensure production Docker daemon
 # ============================================
+echo ""
+echo "🔍 Checking production Docker daemon..."
+ensure_prod_docker_ready
+
+# ============================================
+# 4. Build runtime images in production daemon
+# ============================================
+echo ""
+echo "🐳 Building OpenClaw runtime image (prod daemon)..."
+ENTROPIC_RUNTIME_MODE=prod \
+ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
+DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
+OPENCLAW_SOURCE="$OPENCLAW_SOURCE" \
+    "$PROJECT_ROOT/scripts/build-openclaw-runtime.sh"
 
 echo ""
-echo "🐳 Building OpenClaw runtime image..."
+echo "🔍 Building Skill Scanner image (prod daemon)..."
+ENTROPIC_RUNTIME_MODE=prod \
+ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
+DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
+    "$PROJECT_ROOT/scripts/build-skill-scanner.sh"
 
-# Pass the found location to the build script
-export OPENCLAW_SOURCE
-"$PROJECT_ROOT/scripts/build-openclaw-runtime.sh"
-
-echo "✅ OpenClaw runtime image built"
-
-# Check image exists (use the same DOCKER_HOST that build-openclaw-runtime.sh used)
-if [ -z "${DOCKER_HOST:-}" ]; then
-    DEV_SOCK="$HOME/.entropic/colima-dev/entropic-vz/docker.sock"
-    PROD_SOCK="$HOME/.entropic/colima/entropic-vz/docker.sock"
-    if [ -S "$DEV_SOCK" ]; then
-        export DOCKER_HOST="unix://$DEV_SOCK"
-    elif [ -S "$PROD_SOCK" ]; then
-        export DOCKER_HOST="unix://$PROD_SOCK"
-    fi
+if ! run_docker image inspect openclaw-runtime:latest >/dev/null 2>&1; then
+    echo "❌ ERROR: openclaw-runtime:latest image missing after build"
+    exit 1
 fi
-if ! docker image inspect openclaw-runtime:latest > /dev/null 2>&1; then
-    echo "❌ ERROR: openclaw-runtime:latest image not found after build"
+if ! run_docker image inspect entropic-skill-scanner:latest >/dev/null 2>&1; then
+    echo "❌ ERROR: entropic-skill-scanner:latest image missing after build"
     exit 1
 fi
 
 # ============================================
-# 4. BUILD SKILL SCANNER IMAGE
+# 5. Build app bundle
 # ============================================
-
 echo ""
-echo "🔍 Building Skill Scanner image..."
-"$PROJECT_ROOT/scripts/build-skill-scanner.sh"
-echo "✅ Skill scanner image built"
-
-# Check image exists (use the same DOCKER_HOST that build-skill-scanner.sh used)
-if [ -z "${DOCKER_HOST:-}" ]; then
-    DEV_SOCK="$HOME/.entropic/colima-dev/entropic-vz/docker.sock"
-    PROD_SOCK="$HOME/.entropic/colima/entropic-vz/docker.sock"
-    if [ -S "$DEV_SOCK" ]; then
-        export DOCKER_HOST="unix://$DEV_SOCK"
-    elif [ -S "$PROD_SOCK" ]; then
-        export DOCKER_HOST="unix://$PROD_SOCK"
-    fi
+echo "🚀 Running cross-platform build..."
+if [ -n "$ACTIVE_DOCKER_HOST" ]; then
+    DOCKER_HOST="$ACTIVE_DOCKER_HOST" "$PROJECT_ROOT/scripts/build-cross-platform.sh" || {
+        if [ ! -d "src-tauri/target/release/bundle/macos/Entropic.app" ]; then
+            echo "❌ Build failed: app bundle not created"
+            exit 1
+        fi
+        echo "⚠️  Build completed with signing warnings (acceptable for user testing)."
+    }
+else
+    "$PROJECT_ROOT/scripts/build-cross-platform.sh" || {
+        if [ ! -d "src-tauri/target/release/bundle/macos/Entropic.app" ]; then
+            echo "❌ Build failed: app bundle not created"
+            exit 1
+        fi
+        echo "⚠️  Build completed with signing warnings (acceptable for user testing)."
+    }
 fi
-if ! docker image inspect entropic-skill-scanner:latest > /dev/null 2>&1; then
-    echo "❌ ERROR: entropic-skill-scanner:latest image not found after build"
-    exit 1
-fi
-
-# NOTE: We export the scanner tar AFTER build-cross-platform.sh runs, because
-# that script wipes src-tauri/resources/ before building. The Docker image
-# itself survives; we just re-export it once the resources dir is restored.
 
 # ============================================
-# 5. RUN THE STANDARD BUILD SCRIPT
+# 6. Export runtime tars from production daemon
 # ============================================
-
 echo ""
-echo "🚀 Running standard cross-platform build..."
-echo "   (ignoring code signing warnings - not needed for testing)"
-echo ""
+echo "📦 Exporting production runtime images..."
 
-# Run build script, ignore signing errors (exit code 1 from signing)
-"$PROJECT_ROOT/scripts/build-cross-platform.sh" || {
-    # Check if the app was actually built despite the signing error
-    if [ ! -d "src-tauri/target/release/bundle/macos/Entropic.app" ]; then
-        echo ""
-        echo "❌ Build failed - app bundle not created"
-        exit 1
-    fi
-    echo ""
-    echo "⚠️  Build completed but code signing failed (this is OK for testing)"
-}
-
-# ============================================
-# 6. EXPORT RUNTIME + SKILL SCANNER IMAGES
-# ============================================
-
-# build-cross-platform.sh wipes src-tauri/resources/ before building.
-# Re-export both runtime tars here to guarantee they're present for app copy.
-echo ""
-echo "📦 Exporting OpenClaw runtime image..."
+ENTROPIC_RUNTIME_MODE=prod \
+ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
+DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
 OUTPUT="$PROJECT_ROOT/src-tauri/resources/openclaw-runtime.tar.gz" \
     "$PROJECT_ROOT/scripts/bundle-runtime-image.sh"
-echo "✅ Runtime image exported"
 
-echo ""
-echo "📦 Exporting Skill Scanner image..."
-IMAGE=entropic-skill-scanner:latest \
+ENTROPIC_RUNTIME_MODE=prod \
+ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
+DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
+IMAGE="entropic-skill-scanner:latest" \
 OUTPUT="$PROJECT_ROOT/src-tauri/resources/entropic-skill-scanner.tar.gz" \
     "$PROJECT_ROOT/scripts/bundle-runtime-image.sh"
-echo "✅ Skill scanner image exported"
 
 # ============================================
-# 7. COPY RUNTIME IMAGES INTO APP BUNDLE
+# 7. Copy exported tars into app bundle
 # ============================================
-
 echo ""
 echo "📦 Copying runtime images into app bundle..."
-
 APP_RESOURCES="src-tauri/target/release/bundle/macos/Entropic.app/Contents/Resources"
 
-if [ -f "src-tauri/resources/openclaw-runtime.tar.gz" ]; then
-    cp "src-tauri/resources/openclaw-runtime.tar.gz" "$APP_RESOURCES/"
-    echo "✅ Runtime image copied into app"
-else
-    echo "❌ ERROR: Runtime image not found at src-tauri/resources/openclaw-runtime.tar.gz"
+if [ ! -d "$APP_RESOURCES" ]; then
+    echo "❌ ERROR: App resources directory not found: $APP_RESOURCES"
     exit 1
 fi
 
-if [ -f "src-tauri/resources/entropic-skill-scanner.tar.gz" ]; then
-    cp "src-tauri/resources/entropic-skill-scanner.tar.gz" "$APP_RESOURCES/"
-    echo "✅ Skill scanner image copied into app"
-else
-    echo "❌ ERROR: Skill scanner image not found at src-tauri/resources/entropic-skill-scanner.tar.gz"
-    exit 1
-fi
+cp "$PROJECT_ROOT/src-tauri/resources/openclaw-runtime.tar.gz" "$APP_RESOURCES/"
+cp "$PROJECT_ROOT/src-tauri/resources/entropic-skill-scanner.tar.gz" "$APP_RESOURCES/"
 
 # ============================================
-# DONE
+# Done
 # ============================================
-
 echo ""
-echo "✅ Build complete!"
+echo "✅ Production user-test build complete."
+echo "📦 App: src-tauri/target/release/bundle/macos/Entropic.app"
+du -sh "src-tauri/target/release/bundle/macos/Entropic.app"
 echo ""
-echo "📦 Bundled app location:"
-if [ -d "src-tauri/target/release/bundle/macos/Entropic.app" ]; then
-    APP_PATH="src-tauri/target/release/bundle/macos/Entropic.app"
-    echo "   $APP_PATH"
-    du -sh "$APP_PATH"
-else
-    echo "   ❌ App not found!"
-    exit 1
-fi
-
-# Show what's bundled
-echo ""
-echo "📦 Bundled resources:"
-echo "   Colima:  $(ls -lh src-tauri/resources/bin/colima 2>/dev/null | awk '{print $5}' || echo 'missing')"
-echo "   Lima:    $(ls -lh src-tauri/resources/bin/limactl 2>/dev/null | awk '{print $5}' || echo 'missing')"
-echo "   Docker:  $(ls -lh src-tauri/resources/bin/docker 2>/dev/null | awk '{print $5}' || echo 'missing')"
-echo "   Runtime: $(ls -lh "$APP_RESOURCES/openclaw-runtime.tar.gz" 2>/dev/null | awk '{print $5}' || echo 'missing')"
-echo "   Scanner: $(ls -lh "$APP_RESOURCES/entropic-skill-scanner.tar.gz" 2>/dev/null | awk '{print $5}' || echo 'missing')"
-
-echo ""
-echo "🎯 To test as end user:"
-echo ""
-echo "   1. STOP Docker Desktop (or colima stop)"
-echo ""
-echo "   2. Clean Entropic's isolated runtime locations:"
-echo "      rm -rf ~/.entropic/colima ~/.entropic/colima-dev"
-echo "      rm -rf ${FALLBACK_COLIMA_HOME_SHARED} ${FALLBACK_COLIMA_HOME_TMP}"
-echo "      rm -rf ${FALLBACK_RUNTIME_HOME_SHARED} ${FALLBACK_RUNTIME_HOME_TMP}"
-echo ""
-echo "   3. Kill all old Colima processes:"
-echo "      pkill -f colima || true"
-echo "      pkill -f lima || true"
-echo ""
-echo "   4. Launch the app:"
-echo "      open src-tauri/target/release/bundle/macos/Entropic.app"
-echo ""
-echo "   5. Monitor startup logs (in another terminal):"
-echo "      tail -f ~/entropic-runtime.log"
-echo ""
-echo "The app will start its own isolated Colima and load the bundled runtime!"
+echo "Bundled resources:"
+echo "  Colima:  $(ls -lh src-tauri/resources/bin/colima 2>/dev/null | awk '{print $5}' || echo 'missing')"
+echo "  Lima:    $(ls -lh src-tauri/resources/bin/limactl 2>/dev/null | awk '{print $5}' || echo 'missing')"
+echo "  Docker:  $(ls -lh src-tauri/resources/bin/docker 2>/dev/null | awk '{print $5}' || echo 'missing')"
+echo "  Runtime: $(ls -lh "$APP_RESOURCES/openclaw-runtime.tar.gz" 2>/dev/null | awk '{print $5}' || echo 'missing')"
+echo "  Scanner: $(ls -lh "$APP_RESOURCES/entropic-skill-scanner.tar.gz" 2>/dev/null | awk '{print $5}' || echo 'missing')"

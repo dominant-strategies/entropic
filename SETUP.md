@@ -130,9 +130,9 @@ pnpm tauri dev
 ```bash
 pnpm dev:runtime:status   # Check Colima, Docker socket, entropic-openclaw state
 pnpm dev:runtime:start    # Ensure Colima runtime is started (if installed), verify Docker
-pnpm dev:runtime:up       # Run start and launch `pnpm tauri:dev`
+pnpm dev:runtime:up       # Run start, auto-build/bundle missing runtime assets, launch `pnpm tauri:dev`
 pnpm dev:runtime:stop     # Stop entropic-openclaw + scanner without removing volumes
-pnpm dev:runtime:prune    # Remove entropic-openclaw, entropic-skill-scanner, entropic-net
+pnpm dev:runtime:prune    # Remove dev containers/networks/volumes and reset dev Colima homes
 pnpm dev:runtime:logs     # Tail entropic-openclaw logs
 ```
 
@@ -149,6 +149,15 @@ Override this intentionally if you need a different location:
 ```bash
 ENTROPIC_COLIMA_HOME=$HOME/.entropic/colima-dev-pilot pnpm dev:runtime:up
 ```
+
+### Production User-Test Scripts
+
+```bash
+pnpm user-test:clean
+pnpm user-test:build
+```
+
+These scripts force `ENTROPIC_RUNTIME_MODE=prod` and target the production Colima home (`~/.entropic/colima`) so they do not clean or build against dev runtime state.
 
 ### Check Container Logs
 

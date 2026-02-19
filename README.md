@@ -50,10 +50,10 @@ pnpm tauri dev
 
 ```bash
 pnpm dev:runtime:start   # Ensure Docker/Colima are ready for Entropic runtime
-pnpm dev:runtime:up      # Run start and launch `pnpm tauri:dev`
+pnpm dev:runtime:up      # Run start, auto-build/bundle missing runtime assets, launch `pnpm tauri:dev`
 pnpm dev:runtime:status  # Check Colima + entropic-openclaw state
 pnpm dev:runtime:stop    # Stop entropic-openclaw + scanner (not image/volume)
-pnpm dev:runtime:prune   # Remove entropic-openclaw / entropic-skill-scanner + entropic-net
+pnpm dev:runtime:prune   # Remove dev containers/networks/volumes and reset dev Colima home
 pnpm dev:runtime:logs    # Tail entropic-openclaw logs
 ```
 
@@ -69,6 +69,16 @@ To use a custom dev path intentionally:
 ```bash
 ENTROPIC_COLIMA_HOME=$HOME/.entropic/colima-dev-pilot pnpm dev:runtime:up
 ```
+
+### User-Test Production Pipeline
+
+```bash
+pnpm user-test:clean   # clean production-mode Colima/runtime/build artifacts only
+pnpm user-test:build   # build production-mode user-test app bundle
+```
+
+Both scripts force `ENTROPIC_RUNTIME_MODE=prod` and target `~/.entropic/colima` by default.
+They do not touch dev runtime state in `~/.entropic/colima-dev`.
 
 For containerized local dev, the app now keeps runtime containers up on app exit; this makes iterative starts faster and avoids full warm-up when restarting the app frequently.
 
