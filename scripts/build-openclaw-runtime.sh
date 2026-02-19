@@ -167,6 +167,44 @@ rsync -a --delete \
     --exclude='.git' \
     "$OPENCLAW_SOURCE/node_modules/" "$STAGING_DIR/node_modules/"
 
+# Remove macOS and Windows native binaries from staged node_modules.
+# Packages like koffi ship prebuilt .node binaries for every platform.
+# These binaries are unused in the Linux container and can make Apple
+# notarization reject the bundled runtime image tar.
+echo "Stripping non-Linux native binaries from node_modules..."
+STRIPPED=0
+while IFS= read -r -d '' dir; do
+    rm -rf "$dir"
+    STRIPPED=$((STRIPPED + 1))
+done < <(
+    find "$STAGING_DIR/node_modules" -type d \
+        \( -name "darwin_*" -o -name "darwin-*" -o -name "win32_*" -o -name "win32-*" -o -name "macos-*" \) \
+        -print0
+)
+echo "Removed $STRIPPED non-Linux native binary directories."
+
+# Guardrail: fail fast if any macOS/Windows native Node addon remains.
+if command -v file >/dev/null 2>&1; then
+    NON_LINUX_NATIVE_COUNT=0
+    while IFS= read -r -d '' node_binary; do
+        file_desc="$(file -b "$node_binary" 2>/dev/null || true)"
+        if echo "$file_desc" | grep -Eq "Mach-O|PE32"; then
+            echo "ERROR: Non-Linux native Node binary remains in runtime staging:"
+            echo "  $node_binary"
+            echo "  ($file_desc)"
+            NON_LINUX_NATIVE_COUNT=$((NON_LINUX_NATIVE_COUNT + 1))
+        fi
+    done < <(find "$STAGING_DIR/node_modules" -type f -name "*.node" -print0)
+
+    if [ "$NON_LINUX_NATIVE_COUNT" -gt 0 ]; then
+        echo "ERROR: Found $NON_LINUX_NATIVE_COUNT non-Linux native Node binaries after pruning."
+        echo "Refusing to build runtime image because notarization will reject the bundle."
+        exit 1
+    fi
+else
+    echo "WARNING: 'file' command unavailable; skipping native binary type validation."
+fi
+
 # Security scan - check for actual secrets in config files only
 echo ""
 echo "Running security scan..."

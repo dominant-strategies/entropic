@@ -34,6 +34,7 @@ jobs:
           repository: dominant-strategies/openclaw
           token: ${{ secrets.ENTROPIC_READ_PAT }}
           path: openclaw
+          ref: ${{ vars.OPENCLAW_REF || 'main' }}
 
       - name: Checkout Entropic skills
         uses: actions/checkout@v4
@@ -41,6 +42,12 @@ jobs:
           repository: dominant-strategies/entropic-skills
           token: ${{ secrets.ENTROPIC_READ_PAT }}
           path: entropic-skills
+          ref: ${{ vars.ENTROPIC_SKILLS_REF || 'main' }}
+
+      - name: Print pinned dependency refs
+        run: |
+          echo "OPENCLAW_REF=${{ vars.OPENCLAW_REF || 'main' }}"
+          echo "ENTROPIC_SKILLS_REF=${{ vars.ENTROPIC_SKILLS_REF || 'main' }}"
 
       - uses: actions/setup-node@v4
         with:
@@ -241,12 +248,46 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
+          set -euo pipefail
+          echo "Submitting ${{ env.dmg_name }} for notarization..."
+          SUBMIT_JSON="$(mktemp)"
           xcrun notarytool submit "${{ env.dmg_name }}" \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APP_PASSWORD" \
-            --wait
-          xcrun stapler staple "${{ env.dmg_name }}"
+            --output-format json \
+            --wait > "$SUBMIT_JSON"
+          cat "$SUBMIT_JSON"
+
+          STATUS="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('status','unknown'))" "$SUBMIT_JSON" 2>/dev/null || echo "unknown")"
+          SUBMISSION_ID="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('id',''))" "$SUBMIT_JSON" 2>/dev/null || echo "")"
+
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "::error::Notarization status: $STATUS (expected 'Accepted')"
+            if [ -n "$SUBMISSION_ID" ]; then
+              echo "Fetching notarization log for submission $SUBMISSION_ID..."
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --team-id "$APPLE_TEAM_ID" \
+                --password "$APP_PASSWORD" || true
+            fi
+            exit 1
+          fi
+
+          echo "Notarization accepted (id: $SUBMISSION_ID). Stapling..."
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if xcrun stapler staple -v "${{ env.dmg_name }}"; then
+              echo "Stapled successfully on attempt $attempt."
+              xcrun stapler validate -v "${{ env.dmg_name }}"
+              spctl -a -vv --type open "${{ env.dmg_name }}" || true
+              exit 0
+            fi
+            echo "Staple attempt $attempt failed. Waiting 30s for CloudKit propagation..."
+            sleep 30
+          done
+
+          echo "::error::Stapling failed after 8 attempts."
+          exit 1
 
       - name: Prepare updater artifacts
         id: updater
