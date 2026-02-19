@@ -206,6 +206,15 @@ pub(crate) fn entropic_colima_socket_candidates() -> Vec<PathBuf> {
         if !homes.contains(&entropic) {
             homes.push(entropic);
         }
+        // Always check both dev and production colima homes so the dev app
+        // can discover a VM started by the build script (production profile)
+        // and vice-versa.
+        for dir in [".entropic/colima", ".entropic/colima-dev"] {
+            let candidate = home.join(dir);
+            if !homes.contains(&candidate) {
+                homes.push(candidate);
+            }
+        }
         let legacy = home.join(LEGACY_NOVA_COLIMA_HOME_DIR);
         if !homes.contains(&legacy) {
             homes.push(legacy);
@@ -362,12 +371,24 @@ impl Runtime {
     }
 
     fn preferred_colima_socket(&self) -> Option<PathBuf> {
+        // First check our own profile sockets (dev or prod depending on build)
         for (profile, socket) in self.colima_profile_socket_candidates() {
             debug_log(&format!(
                 "Checking socket for profile {} at {:?}",
                 profile, socket
             ));
             if socket.exists() {
+                return Some(socket);
+            }
+        }
+        // Fall back to all known Colima socket locations (cross-profile discovery:
+        // e.g. dev app finding a VM started by the build script in the prod profile)
+        for socket in entropic_colima_socket_candidates() {
+            if socket.exists() {
+                debug_log(&format!(
+                    "Found cross-profile Colima socket at {:?}",
+                    socket
+                ));
                 return Some(socket);
             }
         }

@@ -5359,8 +5359,110 @@ Use it for durable decisions, preferences, and facts that should persist across 
     // Write OpenAI Codex OAuth credentials to auth-profiles.json if available
     // (env vars don't work for Codex OAuth — OpenClaw needs auth-profiles.json)
     // OpenClaw reads auth-profiles.json from: $STATE_DIR/agents/main/agent/auth-profiles.json
+    //
+    // IMPORTANT: Before writing, read the container's current auth-profiles.json.
+    // OpenClaw may have refreshed tokens (Anthropic uses refresh-token rotation),
+    // in which case the container has newer tokens than our stored copy. Sync those
+    // back to the app's auth store so we don't clobber them.
     {
-        let stored = load_auth(app);
+        let mut stored = load_auth(app);
+
+        // Read current container auth-profiles.json to detect refreshed tokens
+        let container_profiles: Option<serde_json::Value> =
+            read_container_file("/home/node/.openclaw/agents/main/agent/auth-profiles.json")
+                .and_then(|raw| serde_json::from_str(&raw).ok());
+
+        // Sync refreshed tokens from container → app store, but ONLY if the
+        // container's tokens are newer (later expiry).  After a fresh re-auth the
+        // app store has the newest tokens and the container may still hold stale
+        // ones; blindly syncing the container's tokens back would clobber the
+        // fresh re-auth tokens.
+        if let Some(ref container) = container_profiles {
+            if let Some(container_cred) = container.pointer("/profiles/anthropic:entropic") {
+                let container_refresh = container_cred.get("refresh").and_then(|v| v.as_str()).unwrap_or("");
+                let container_access = container_cred.get("access").and_then(|v| v.as_str()).unwrap_or("");
+                let container_expires_ms = container_cred.get("expires").and_then(|v| v.as_u64()).unwrap_or(0);
+                if let Some(meta) = stored.oauth_metadata.get("anthropic") {
+                    if !container_refresh.is_empty()
+                        && container_refresh != meta.refresh_token
+                        && container_expires_ms > meta.expires_at
+                    {
+                        println!(
+                            "[Entropic] Syncing refreshed Anthropic tokens from container (container expiry {} > stored {})",
+                            container_expires_ms, meta.expires_at
+                        );
+                        stored.oauth_metadata.insert(
+                            "anthropic".to_string(),
+                            OAuthKeyMeta {
+                                refresh_token: container_refresh.to_string(),
+                                expires_at: container_expires_ms,
+                                source: meta.source.clone(),
+                            },
+                        );
+                        if !container_access.is_empty() {
+                            stored.keys.insert("anthropic".to_string(), container_access.to_string());
+                        }
+                        let _ = save_auth(app, &stored);
+                    }
+                }
+            }
+
+            // Sync refreshed OpenAI Codex tokens from container → app store
+            if let Some(container_cred) = container.pointer("/profiles/openai-codex:entropic") {
+                let container_refresh = container_cred.get("refresh").and_then(|v| v.as_str()).unwrap_or("");
+                let container_access = container_cred.get("access").and_then(|v| v.as_str()).unwrap_or("");
+                let container_expires_ms = container_cred.get("expires").and_then(|v| v.as_u64()).unwrap_or(0);
+                if let Some(meta) = stored.oauth_metadata.get("openai") {
+                    if !container_refresh.is_empty()
+                        && container_refresh != meta.refresh_token
+                        && container_expires_ms > meta.expires_at
+                    {
+                        println!(
+                            "[Entropic] Syncing refreshed OpenAI Codex tokens from container (container expiry {} > stored {})",
+                            container_expires_ms, meta.expires_at
+                        );
+                        stored.oauth_metadata.insert(
+                            "openai".to_string(),
+                            OAuthKeyMeta {
+                                refresh_token: container_refresh.to_string(),
+                                expires_at: container_expires_ms,
+                                source: meta.source.clone(),
+                            },
+                        );
+                        if !container_access.is_empty() {
+                            stored.keys.insert("openai".to_string(), container_access.to_string());
+                        }
+                        let _ = save_auth(app, &stored);
+                    }
+                }
+            }
+        }
+
+        let mut profiles = serde_json::Map::new();
+
+        // Anthropic OAuth (claude_code source → sk-ant-oat01-... tokens)
+        let anthropic_meta = stored.oauth_metadata.get("anthropic");
+        let anthropic_key = stored.keys.get("anthropic");
+        if let (Some(meta), Some(access_token)) = (anthropic_meta, anthropic_key) {
+            if meta.source == "claude_code" && !access_token.is_empty() {
+                println!(
+                    "[Entropic] Writing Anthropic OAuth credentials to auth-profiles.json (token len={})",
+                    access_token.len()
+                );
+                profiles.insert(
+                    "anthropic:entropic".to_string(),
+                    serde_json::json!({
+                        "type": "oauth",
+                        "provider": "anthropic",
+                        "access": access_token,
+                        "refresh": meta.refresh_token,
+                        "expires": meta.expires_at
+                    }),
+                );
+            }
+        }
+
+        // OpenAI Codex OAuth
         let openai_meta = stored.oauth_metadata.get("openai");
         let openai_key = stored.keys.get("openai");
         if let (Some(meta), Some(access_token)) = (openai_meta, openai_key) {
@@ -5369,33 +5471,30 @@ Use it for durable decisions, preferences, and facts that should persist across 
                     "[Entropic] Writing OpenAI Codex OAuth credentials to auth-profiles.json (token len={})",
                     access_token.len()
                 );
-                let auth_profiles = serde_json::json!({
-                    "version": 1,
-                    "profiles": {
-                        "openai-codex:entropic": {
-                            "type": "oauth",
-                            "provider": "openai-codex",
-                            "access": access_token,
-                            "refresh": meta.refresh_token,
-                            "expires": meta.expires_at / 1000 // Convert ms to seconds
-                        }
-                    }
-                });
-                let payload =
-                    serde_json::to_string_pretty(&auth_profiles).map_err(|e| e.to_string())?;
-                if let Err(e) = write_container_file(
-                    "/home/node/.openclaw/agents/main/agent/auth-profiles.json",
-                    &payload,
-                ) {
-                    println!("[Entropic] Failed to write auth-profiles.json: {}", e);
-                }
+                profiles.insert(
+                    "openai-codex:entropic".to_string(),
+                    serde_json::json!({
+                        "type": "oauth",
+                        "provider": "openai-codex",
+                        "access": access_token,
+                        "refresh": meta.refresh_token,
+                        "expires": meta.expires_at
+                    }),
+                );
             }
-        } else {
-            println!(
-                "[Entropic] No OpenAI Codex OAuth credentials found (meta={}, key={})",
-                stored.oauth_metadata.contains_key("openai"),
-                stored.keys.contains_key("openai"),
-            );
+        }
+
+        let auth_profiles = serde_json::json!({
+            "version": 1,
+            "profiles": serde_json::Value::Object(profiles)
+        });
+        let payload = serde_json::to_string_pretty(&auth_profiles)
+            .map_err(|e| e.to_string())?;
+        if let Err(e) = write_container_file(
+            "/home/node/.openclaw/agents/main/agent/auth-profiles.json",
+            &payload,
+        ) {
+            println!("[Entropic] Failed to write auth-profiles.json: {}", e);
         }
     }
 

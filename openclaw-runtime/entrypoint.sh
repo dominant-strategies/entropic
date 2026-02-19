@@ -57,6 +57,19 @@ mkdir -p /home/node/.openclaw/.cache
 mkdir -p /data/workspace
 mkdir -p /data/skills
 mkdir -p /data/skill-manifests
+
+# Seed bundled skills into /data/skills/ AND /data/workspace/skills/
+# so OpenClaw's workspace scanner discovers them for chat runs.
+mkdir -p /data/workspace/skills
+if [ -d /app/bundled-skills ]; then
+    for skill_dir in /app/bundled-skills/*/; do
+        skill_name="$(basename "$skill_dir")"
+        if [ -n "$skill_name" ] && [ "$skill_name" != "*" ]; then
+            cp -a "$skill_dir" "/data/skills/$skill_name"
+            cp -a "$skill_dir" "/data/workspace/skills/$skill_name"
+        fi
+    done
+fi
 mkdir -p /data/.cache/qmd
 # Python user package install target — persisted across restarts so skills
 # don't need to reinstall their pip dependencies every container start.
@@ -65,6 +78,15 @@ mkdir -p /data/.config
 mkdir -p /data/.npm
 mkdir -p /data/.bun
 mkdir -p /data/playwright
+# Symlink patchright browsers into PLAYWRIGHT_BROWSERS_PATH so chromium.launch() finds them
+if [ -d /opt/patchright-browsers ]; then
+    for browser_dir in /opt/patchright-browsers/*/; do
+        browser_name="$(basename "$browser_dir")"
+        if [ -n "$browser_name" ] && [ "$browser_name" != "*" ]; then
+            ln -sfn "$browser_dir" "/data/playwright/$browser_name"
+        fi
+    done
+fi
 mkdir -p /data/tools
 mkdir -p /data/browser/profile
 mkdir -p /data/tmp

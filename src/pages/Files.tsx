@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense, type ReactNode, type MouseEvent as ReactMouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-shell";
 import { Store } from "@tauri-apps/plugin-store";
 import {
   Folder,
@@ -91,6 +92,7 @@ const DEFAULT_WINDOW_Z: Record<string, number> = {
   logs: 68,
   billing: 69,
   settings: 70,
+  preview: 80,
 };
 
 const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md"]);
@@ -571,6 +573,16 @@ export function Files({
     setBrowserFrameNonce((prev) => prev + 1);
   }
 
+  async function openBrowserExternally(target?: string) {
+    const url = normalizeBrowserUrl(target ?? browserCurrentUrl);
+    if (!url) return;
+    try {
+      await open(url);
+    } catch (e) {
+      setBrowserLoadError(`Failed to open browser externally: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   // ── File browser logic ──────────────────────────────────────────────
 
   const fetchFiles = useCallback(async (path: string) => {
@@ -762,6 +774,9 @@ export function Files({
   const wallpaperCss = getWallpaperCss();
   const currentWp = getWallpaperById(wallpaperId);
   const isWpImage = (wallpaperId === "custom" && customWallpaper) || currentWp?.type === "photo";
+  const highestWindowZ = Math.max(...Object.values(windowZ));
+  const browserWindowZ = windowZ.browser ?? DEFAULT_WINDOW_Z.browser;
+  const browserNeedsFocusOverlay = browserWindowZ < highestWindowZ;
 
   // ═══════════════════════════════════════════════════════════════════
   // RENDER
@@ -1045,8 +1060,16 @@ export function Files({
             const lines = preview.kind === "text" ? preview.content.split("\n") : [];
             const lnw = String(lines.length || 1).length;
             return (
-              <div className="absolute inset-0 z-[50] flex items-center justify-center" style={{ background: "rgba(0,0,0,0.45)" }} onClick={() => setPreview(null)}>
-                <div className="w-full max-w-3xl mx-6 max-h-[85vh] flex flex-col rounded-xl overflow-hidden animate-fade-in" style={{ boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56)" }} onClick={(e) => e.stopPropagation()}>
+              <div
+                className="absolute inset-0 flex items-center justify-center"
+                style={{ zIndex: windowZ.preview ?? DEFAULT_WINDOW_Z.preview, background: "rgba(0,0,0,0.45)" }}
+                onMouseDownCapture={() => focusWindow("preview")}
+              >
+                <div
+                  className="w-full max-w-3xl mx-6 h-[min(85vh,720px)] flex flex-col rounded-xl overflow-hidden animate-fade-in"
+                  style={{ boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56)" }}
+                  onClick={(e) => e.stopPropagation()}
+                >
                   <div className="flex items-center px-3 py-2.5 flex-shrink-0 relative" style={{ background: "#2d2d2d", borderBottom: "1px solid #1a1a1a" }}>
                     <div className="flex items-center gap-2 z-10">
                       <button onClick={() => setPreview(null)} className="w-3 h-3 rounded-full hover:opacity-80 group relative" style={{ background: "#ff5f57" }}><X className="w-2 h-2 absolute inset-0.5 opacity-0 group-hover:opacity-100 text-black/60" /></button>
@@ -1054,7 +1077,7 @@ export function Files({
                     </div>
                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none"><div className="flex items-center gap-2"><Icon className="w-3.5 h-3.5" style={{ color: iconColor }} /><span className="text-xs font-medium" style={{ color: "#ccc" }}>{preview.name}</span></div></div>
                   </div>
-                  <div className="flex-1 overflow-auto" style={{ background: preview.kind === "text" && (isCode || isMd) ? "#1e1e1e" : "#252526" }}>
+                  <div className="flex-1 min-h-0 overflow-auto" style={{ background: preview.kind === "text" && (isCode || isMd) ? "#1e1e1e" : "#252526" }}>
                     {preview.kind === "image" && (
                       <div className="p-4 flex items-center justify-center">
                         <img
@@ -1314,6 +1337,13 @@ export function Files({
                     >
                       Go
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => openBrowserExternally(browserUrlInput)}
+                      className="h-8 px-3 rounded-lg border border-[var(--border-subtle)] bg-white text-sm font-medium text-[var(--text-primary)]"
+                    >
+                      Open
+                    </button>
                   </form>
                   {browserLoadError && (
                     <p className="mt-2 text-xs text-red-600">
@@ -1321,7 +1351,16 @@ export function Files({
                     </p>
                   )}
                 </div>
-                <div className="flex-1 bg-white">
+                <div className="relative flex-1 bg-white">
+                  {browserNeedsFocusOverlay && (
+                    <button
+                      type="button"
+                      className="absolute inset-0 z-10 flex items-center justify-center bg-white/20 text-xs font-medium text-[var(--text-primary)] backdrop-blur-[1px]"
+                      onClick={() => focusWindow("browser")}
+                    >
+                      Click to focus browser
+                    </button>
+                  )}
                   <iframe
                     key={`${browserCurrentUrl}|${browserFrameNonce}`}
                     src={browserCurrentUrl}

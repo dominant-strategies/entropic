@@ -172,6 +172,14 @@ if [ -d "$ENTROPIC_SKILLS_SOURCE" ]; then
                 --exclude='node_modules' \
                 --exclude='.git' \
                 "$plugin_dir/" "$STAGING_DIR/extensions/$plugin_name/"
+        elif [ -d "$plugin_dir" ] && [ -f "$plugin_dir/SKILL.md" ]; then
+            skill_name="$(basename "$plugin_dir")"
+            echo "Copying ${skill_name} skill..."
+            mkdir -p "$STAGING_DIR/bundled-skills/$skill_name"
+            rsync -a --delete \
+                --exclude='.git' \
+                --exclude='node_modules' \
+                "$plugin_dir/" "$STAGING_DIR/bundled-skills/$skill_name/"
         fi
     done
 else

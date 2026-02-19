@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, type ComponentType, type FormEvent } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, type ComponentType, type FormEvent } from "react";
 import {
   Send,
   Paperclip,
@@ -2626,6 +2626,10 @@ export function Chat({
           ? runSessionKeyRef.current[eventRunId] || ""
           : "";
     const isActiveRun = Boolean(eventRunId && activeRunIdRef.current === eventRunId);
+    if (isActiveRun) {
+      lastEventByRunIdRef.current[eventRunId!] = Date.now();
+      refreshActiveRunTimeout(eventRunId!);
+    }
     if (
       isActiveRun &&
       knownSessionKey &&
@@ -4645,6 +4649,49 @@ export function Chat({
     }
   }
 
+  // Memoize the message list so typing in the composer doesn't re-render
+  // every message (and re-parse markdown) on each keystroke.
+  // These hooks must be before early returns to satisfy Rules of Hooks.
+  const renderedMessages = useMemo(() => messages.map(msg => {
+    const normalizedUser = msg.role === "user" ? normalizeUserContent(msg.content, msg.sentAt) : null;
+    const bodyContent = msg.role === "user" ? normalizedUser?.content ?? "" : msg.content;
+    const messageTime = formatMessageTime(msg.role === "user" ? normalizedUser?.sentAt : msg.sentAt);
+    if (msg.role === "user" && !bodyContent) {
+      return null;
+    }
+    return (
+      <div key={msg.id} className={clsx("flex", msg.role === "user" ? "justify-end" : "justify-start")}>
+        <div className={clsx("max-w-[85%]")}>
+          <div className={clsx("px-4 py-2.5 rounded-2xl",
+            msg.role === "user" ? "bg-[var(--purple-accent)] text-white" : "bg-[var(--bg-tertiary)] text-[var(--text-primary)]")}>
+            {msg.role === "assistant" ? renderAssistantContent(msg) : <p className="whitespace-pre-wrap">{bodyContent}</p>}
+          </div>
+          {messageTime ? (
+            <div
+              className={clsx(
+                "mt-1 px-1 text-[11px] text-[var(--text-tertiary)]",
+                msg.role === "user" ? "text-right" : "text-left"
+              )}
+            >
+              {messageTime}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }), [messages]);
+
+  const loadingIndicator = useMemo(() => isLoading ? (
+    <div className="flex justify-start">
+      <div className="px-4 py-2.5 rounded-2xl bg-[var(--bg-tertiary)] flex items-center gap-2">
+        <Loader2 className="w-4 h-4 animate-spin text-[var(--text-tertiary)]" />
+        <span className="text-sm text-[var(--text-secondary)] animate-pulse">
+          {thinkingStatus || "Thinking"}
+        </span>
+      </div>
+    </div>
+  ) : null, [isLoading, thinkingStatus]);
+
   if (isConnecting) return renderConnecting();
   if (localTrialLoading) return renderConnecting();
   if (!connectedProvider && !proxyEnabled) return renderNoProvider();
@@ -4739,94 +4786,11 @@ export function Chat({
               </div>
             </div>
           ) : null}
-          {messages.map(msg => {
-            const normalizedUser = msg.role === "user" ? normalizeUserContent(msg.content, msg.sentAt) : null;
-            const assistantPayload = msg.role === "assistant"
-              ? {
-                  cleanText: msg.content,
-                  events: msg.assistantPayload?.events ?? [],
-                  errors: msg.assistantPayload?.errors ?? [],
-                  hadToolPayload: msg.assistantPayload?.hadToolPayload ?? false,
-                }
-              : null;
-            let bodyContent = msg.role === "user" ? normalizedUser?.content ?? "" : msg.content;
-            const messageTime = formatMessageTime(msg.role === "user" ? normalizedUser?.sentAt : msg.sentAt);
-            const attachmentsWithPreview = msg.role === "user" && msg.attachments
-              ? msg.attachments.filter((a) => a.previewUrl)
-              : [];
-            const hasAttachedImages = attachmentsWithPreview.length > 0;
-            // Strip "[Attached image: ...]" text when we have actual image thumbnails to show
-            if (hasAttachedImages) {
-              bodyContent = bodyContent.replace(/\n*\[Attached (?:image: [^\]]+|\d+ images)\]\s*$/, "").trim();
-            }
-            if (msg.role === "user" && !bodyContent && !hasAttachedImages) {
-              return null;
-            }
-            const isUser = msg.role === "user";
-
-            return (
-              <div key={msg.id} className={clsx("flex", isUser ? "justify-end" : "justify-start")}>
-                <div className={clsx("max-w-[85%]", !isUser && "relative")}>
-                  <div className={clsx("px-4 py-2.5 rounded-2xl",
-                    isUser ? "bg-[var(--purple-accent)] text-white" : "bg-[var(--bg-tertiary)] text-[var(--text-primary)]")}>
-                    {msg.role === "assistant" ? renderAssistantContent(msg) : (
-                      <>
-                        {hasAttachedImages && (
-                          <div className={clsx("flex flex-wrap gap-1.5", bodyContent && "mb-2")}>
-                            {attachmentsWithPreview.map((att, i) => (
-                              <img
-                                key={i}
-                                src={att.previewUrl}
-                                alt={att.fileName}
-                                className="max-w-[200px] max-h-[160px] rounded-lg object-cover"
-                              />
-                            ))}
-                          </div>
-                        )}
-                        {bodyContent && <p className="whitespace-pre-wrap">{bodyContent}</p>}
-                      </>
-                    )}
-                  </div>
-                  {!isUser && (
-                    <div
-                      className="absolute -bottom-1.5 -left-2.5 w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-semibold text-white overflow-hidden ring-2 ring-[var(--bg-primary)]"
-                      title={chatAgentName}
-                      style={chatAgentAvatarUrl ? undefined : { background: getAvatarColor(chatAgentName) }}
-                    >
-                      {chatAgentAvatarUrl ? (
-                        <img src={chatAgentAvatarUrl} alt="" className="w-full h-full object-cover" />
-                      ) : (
-                        getInitials(chatAgentName)
-                      )}
-                    </div>
-                  )}
-                  {messageTime ? (
-                    <div
-                      className={clsx(
-                        "mt-1 px-1 text-[11px] text-[var(--text-tertiary)]",
-                        isUser ? "text-right" : "text-left pl-5"
-                      )}
-                    >
-                      {messageTime}
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            );
-          })}
+          {renderedMessages}
+          {loadingIndicator}
           {renderBuilderChecklistAssistantCard()}
           {renderIntegrationSetupAssistantCard()}
           {renderQuickSuggestionAssistantCard()}
-          {isLoading && (
-            <div className="flex justify-start">
-              <div className="px-4 py-2.5 rounded-2xl bg-[var(--bg-tertiary)] flex items-center gap-2">
-                <Loader2 className="w-4 h-4 animate-spin text-[var(--text-tertiary)]" />
-                <span className="text-sm text-[var(--text-secondary)] animate-pulse">
-                  {thinkingStatus || "Thinking"}
-                </span>
-              </div>
-            </div>
-          )}
           <div ref={messagesEndRef} />
         </div>
       </div>
