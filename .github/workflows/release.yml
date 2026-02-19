@@ -74,10 +74,13 @@ jobs:
           OPENCLAW_SOURCE: ${{ github.workspace }}/openclaw
           ENTROPIC_SKILLS_SOURCE: ${{ github.workspace }}/entropic-skills
           DOCKER_DEFAULT_PLATFORM: linux/arm64
+          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
         run: ./scripts/build-openclaw-runtime.sh
 
       - name: Bundle runtime image tar
         working-directory: entropic
+        env:
+          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
         run: ./scripts/bundle-runtime-image.sh
 
       - name: Build skill scanner image (linux/arm64)

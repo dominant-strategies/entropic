@@ -97,15 +97,22 @@ jobs:
         env:
           OPENCLAW_SOURCE: ${{ github.workspace }}/openclaw
           ENTROPIC_SKILLS_SOURCE: ${{ github.workspace }}/entropic-skills
+          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
         run: ./scripts/build-openclaw-runtime.sh
 
       - name: Bundle runtime image tar
+        env:
+          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
         run: ./scripts/bundle-runtime-image.sh
 
       - name: Build skill scanner image (linux/amd64)
+        env:
+          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
         run: ./scripts/build-skill-scanner.sh
 
       - name: Bundle skill scanner image tar
+        env:
+          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
         run: IMAGE=entropic-skill-scanner:latest OUTPUT=src-tauri/resources/entropic-skill-scanner.tar.gz ./scripts/bundle-runtime-image.sh
 
       - name: Reclaim disk after runtime bundle
