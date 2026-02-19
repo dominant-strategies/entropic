@@ -298,5 +298,14 @@ entropic_remove_colima_home_if_safe() {
 }
 
 entropic_default_context_allowed() {
-    [ "${ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP:-0}" = "1" ]
+    # Allow Docker Desktop if explicitly requested
+    [ "${ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP:-0}" = "1" ] && return 0
+
+    # Auto-allow on CI environments (GitHub Actions, GitLab CI, etc.)
+    [ "${CI:-}" = "true" ] && return 0
+    [ -n "${GITHUB_ACTIONS:-}" ] && return 0
+    [ -n "${GITLAB_CI:-}" ] && return 0
+    [ -n "${CIRCLECI:-}" ] && return 0
+
+    return 1
 }
