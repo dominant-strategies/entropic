@@ -240,8 +240,8 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
   }"
     fi
 
-    # Keep gateway.controlUi defaults in Rust normalization as the single source
-    # of truth (src-tauri/src/commands.rs::normalize_openclaw_config).
+    # Seed only security-critical controlUi booleans at process boot.
+    # allowedOrigins remains Rust-owned in normalize_openclaw_config.
     cat > /home/node/.openclaw/openclaw.json << EOF
 {
   "agents": {
@@ -253,6 +253,12 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
   },
   "cron": {
     "store": "/data/cron/jobs.json"
+  },
+  "gateway": {
+    "controlUi": {
+      "allowInsecureAuth": false,
+      "dangerouslyDisableDeviceAuth": false
+    }
   },
   "plugins": {
     "slots": {
