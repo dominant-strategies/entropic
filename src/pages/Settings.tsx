@@ -162,14 +162,6 @@ export function Settings({
   }, []);
 
   useEffect(() => {
-    if (!gatewayRunning) {
-      setGatewayConfigHealth({
-        status: "offline",
-        summary: "Gateway is not running.",
-        issues: [],
-      });
-      return;
-    }
     refreshGatewayConfigHealth();
   }, [gatewayRunning]);
 
@@ -314,14 +306,6 @@ export function Settings({
   }
 
   async function refreshGatewayConfigHealth() {
-    if (!gatewayRunning) {
-      setGatewayConfigHealth({
-        status: "offline",
-        summary: "Gateway is not running.",
-        issues: [],
-      });
-      return;
-    }
     setGatewayConfigLoading(true);
     setGatewayConfigError(null);
     try {
@@ -336,10 +320,6 @@ export function Settings({
   }
 
   async function healGatewayConfig() {
-    if (!gatewayRunning) {
-      setGatewayConfigError("Gateway is not running. Start runtime first.");
-      return;
-    }
     const confirmed = await ask(
       "Run OpenClaw doctor --fix and restart the gateway now? This can briefly interrupt active gateway connections.",
       {
@@ -596,7 +576,7 @@ export function Settings({
             <button
               type="button"
               onClick={refreshGatewayConfigHealth}
-              disabled={gatewayConfigLoading || gatewayConfigActionLoading || !gatewayRunning}
+              disabled={gatewayConfigLoading || gatewayConfigActionLoading}
               className="px-3 py-1.5 text-xs font-medium rounded-md border border-[var(--border-subtle)] bg-white hover:bg-[var(--system-gray-6)] disabled:opacity-50"
             >
               {gatewayConfigLoading ? "Checking..." : "Check"}
@@ -604,7 +584,7 @@ export function Settings({
             <button
               type="button"
               onClick={healGatewayConfig}
-              disabled={gatewayConfigLoading || gatewayConfigActionLoading || !gatewayRunning}
+              disabled={gatewayConfigLoading || gatewayConfigActionLoading}
               className="px-3 py-1.5 text-xs font-semibold rounded-md bg-black text-white hover:bg-gray-800 disabled:opacity-50"
             >
               {gatewayConfigActionLoading ? "Healing..." : "Heal"}

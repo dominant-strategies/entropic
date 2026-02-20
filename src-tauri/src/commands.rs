@@ -1229,7 +1229,11 @@ fn applied_agent_settings_fingerprint() -> &'static Mutex<Option<String>> {
 
 fn named_gateway_container_exists(name: &str, running_only: bool) -> bool {
     let name_filter = format!("name={}", name);
-    let mut args = vec!["ps", "-q", "-f", name_filter.as_str()];
+    let mut args = vec!["ps"];
+    if !running_only {
+        args.push("-a");
+    }
+    args.extend(["-q", "-f", name_filter.as_str()]);
     if running_only {
         args.extend(["-f", "status=running"]);
     }
@@ -1244,6 +1248,26 @@ fn gateway_container_exists(running_only: bool) -> bool {
     [OPENCLAW_CONTAINER, LEGACY_OPENCLAW_CONTAINER]
         .into_iter()
         .any(|name| named_gateway_container_exists(name, running_only))
+}
+
+fn running_gateway_container_name() -> Option<&'static str> {
+    if named_gateway_container_exists(OPENCLAW_CONTAINER, true) {
+        Some(OPENCLAW_CONTAINER)
+    } else if named_gateway_container_exists(LEGACY_OPENCLAW_CONTAINER, true) {
+        Some(LEGACY_OPENCLAW_CONTAINER)
+    } else {
+        None
+    }
+}
+
+fn existing_gateway_container_name() -> Option<&'static str> {
+    if named_gateway_container_exists(OPENCLAW_CONTAINER, false) {
+        Some(OPENCLAW_CONTAINER)
+    } else if named_gateway_container_exists(LEGACY_OPENCLAW_CONTAINER, false) {
+        Some(LEGACY_OPENCLAW_CONTAINER)
+    } else {
+        None
+    }
 }
 
 fn cleanup_legacy_gateway_artifacts() {
@@ -1275,15 +1299,25 @@ fn docker_volume_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn openclaw_data_volume_mount() -> String {
-    let volume_name = if docker_volume_exists(OPENCLAW_DATA_VOLUME) {
-        OPENCLAW_DATA_VOLUME
+fn existing_openclaw_data_volume_name() -> Option<&'static str> {
+    if docker_volume_exists(OPENCLAW_DATA_VOLUME) {
+        Some(OPENCLAW_DATA_VOLUME)
     } else if docker_volume_exists(LEGACY_OPENCLAW_DATA_VOLUME) {
-        println!(
-            "[Entropic] Reusing legacy gateway data volume: {}",
-            LEGACY_OPENCLAW_DATA_VOLUME
-        );
-        LEGACY_OPENCLAW_DATA_VOLUME
+        Some(LEGACY_OPENCLAW_DATA_VOLUME)
+    } else {
+        None
+    }
+}
+
+fn openclaw_data_volume_mount() -> String {
+    let volume_name = if let Some(existing) = existing_openclaw_data_volume_name() {
+        if existing == LEGACY_OPENCLAW_DATA_VOLUME {
+            println!(
+                "[Entropic] Reusing legacy gateway data volume: {}",
+                LEGACY_OPENCLAW_DATA_VOLUME
+            );
+        }
+        existing
     } else {
         OPENCLAW_DATA_VOLUME
     };
@@ -3453,11 +3487,18 @@ Use it for durable decisions, preferences, and facts that should persist across 
         &["channels", "telegram", "botToken"],
         serde_json::json!(settings.telegram_token.clone()),
     );
+    let telegram_dm_policy = match settings.telegram_dm_policy.trim() {
+        "allowlist" => "allowlist",
+        "open" => "open",
+        "disabled" => "disabled",
+        _ => "pairing",
+    };
     set_openclaw_config_value(
         &mut cfg,
         &["channels", "telegram", "dmPolicy"],
-        serde_json::json!(settings.telegram_dm_policy.clone()),
+        serde_json::json!(telegram_dm_policy),
     );
+    normalize_telegram_allow_from_for_dm_policy(&mut cfg, telegram_dm_policy);
     set_openclaw_config_value(
         &mut cfg,
         &["channels", "telegram", "groupPolicy"],
@@ -7323,49 +7364,114 @@ pub async fn restart_gateway_in_place() -> Result<(), String> {
     Ok(())
 }
 
+fn run_gateway_doctor_in_container(container: &str, fix: bool) -> Result<Output, String> {
+    let mut args = vec!["exec", container, "node", "/app/dist/index.js", "doctor"];
+    if fix {
+        args.push("--fix");
+    }
+    docker_command()
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to run doctor in gateway container: {}", e))
+}
+
+fn run_gateway_doctor_with_data_volume(fix: bool) -> Result<Output, String> {
+    let volume = existing_openclaw_data_volume_name().ok_or_else(|| {
+        "Gateway data volume not found. Start gateway once before running config check/heal."
+            .to_string()
+    })?;
+
+    ensure_runtime_image()?;
+
+    let mut args = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "--user".to_string(),
+        "1000:1000".to_string(),
+        "--cap-drop=ALL".to_string(),
+        "--security-opt".to_string(),
+        "no-new-privileges".to_string(),
+        "-e".to_string(),
+        "HOME=/data".to_string(),
+        "-e".to_string(),
+        "TMPDIR=/data/tmp".to_string(),
+        "-e".to_string(),
+        "XDG_CONFIG_HOME=/data/.config".to_string(),
+        "-e".to_string(),
+        "XDG_CACHE_HOME=/data/.cache".to_string(),
+        "-e".to_string(),
+        "npm_config_cache=/data/.npm".to_string(),
+        "-v".to_string(),
+        format!("{}:/data", volume),
+        RUNTIME_IMAGE.to_string(),
+        "node".to_string(),
+        "/app/dist/index.js".to_string(),
+        "doctor".to_string(),
+    ];
+    if fix {
+        args.push("--fix".to_string());
+    }
+
+    docker_command()
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run offline doctor check: {}", e))
+}
+
+fn run_gateway_doctor_with_fallback(fix: bool) -> Result<(Output, Option<&'static str>), String> {
+    if let Some(container) = running_gateway_container_name() {
+        return run_gateway_doctor_in_container(container, fix).map(|output| (output, Some(container)));
+    }
+
+    run_gateway_doctor_with_data_volume(fix).map(|output| (output, None))
+}
+
 #[tauri::command]
 pub async fn heal_gateway_config() -> Result<GatewayHealResult, String> {
-    let container = if named_gateway_container_exists(OPENCLAW_CONTAINER, true) {
-        OPENCLAW_CONTAINER
-    } else if named_gateway_container_exists(LEGACY_OPENCLAW_CONTAINER, true) {
-        LEGACY_OPENCLAW_CONTAINER
+    let (doctor_output, container_used) = run_gateway_doctor_with_fallback(true)?;
+    if !doctor_output.status.success() {
+        return Err(format!(
+            "Doctor fix failed: {}",
+            command_output_error(&doctor_output).trim()
+        ));
+    }
+
+    let restarted = if let Some(container) = container_used {
+        let restart = docker_command()
+            .args(["restart", container])
+            .output()
+            .map_err(|e| append_colima_runtime_hint(format!("Failed to restart gateway: {}", e)))?;
+
+        if !restart.status.success() {
+            let stderr = String::from_utf8_lossy(&restart.stderr);
+            return Err(append_colima_runtime_hint(format!(
+                "Failed to restart gateway after heal: {}",
+                stderr.trim()
+            )));
+        }
+        true
     } else {
-        return Err("Gateway is not running. Start runtime first.".to_string());
+        false
     };
 
-    let doctor_output = docker_exec_output(&[
-        "exec",
-        container,
-        "node",
-        "/app/dist/index.js",
-        "doctor",
-        "--fix",
-    ])
-    .map_err(|e| format!("Doctor fix failed: {}", e.trim()))?;
-    if !doctor_output.trim().is_empty() {
-        println!(
-            "[Entropic] heal_gateway_config doctor output ({} bytes)",
-            doctor_output.len()
-        );
-    }
+    let container = if let Some(name) = container_used {
+        name.to_string()
+    } else if let Some(name) = existing_gateway_container_name() {
+        name.to_string()
+    } else {
+        "none".to_string()
+    };
 
-    let restart = docker_command()
-        .args(["restart", container])
-        .output()
-        .map_err(|e| append_colima_runtime_hint(format!("Failed to restart gateway: {}", e)))?;
-
-    if !restart.status.success() {
-        let stderr = String::from_utf8_lossy(&restart.stderr);
-        return Err(append_colima_runtime_hint(format!(
-            "Failed to restart gateway after heal: {}",
-            stderr.trim()
-        )));
-    }
+    let message = if restarted {
+        "Gateway config healed via doctor --fix and container restart.".to_string()
+    } else {
+        "Gateway config healed via doctor --fix. Start gateway to apply healed config.".to_string()
+    };
 
     Ok(GatewayHealResult {
-        container: container.to_string(),
-        restarted: true,
-        message: "Gateway config healed via doctor --fix and container restart.".to_string(),
+        container,
+        restarted,
+        message,
     })
 }
 
@@ -7418,23 +7524,18 @@ fn extract_doctor_problem_lines(output: &str) -> Vec<String> {
 
 #[tauri::command]
 pub async fn get_gateway_config_health() -> Result<GatewayConfigHealth, String> {
-    let container = if named_gateway_container_exists(OPENCLAW_CONTAINER, true) {
-        OPENCLAW_CONTAINER
-    } else if named_gateway_container_exists(LEGACY_OPENCLAW_CONTAINER, true) {
-        LEGACY_OPENCLAW_CONTAINER
-    } else {
-        return Ok(GatewayConfigHealth {
-            status: "offline".to_string(),
-            summary: "Gateway is not running.".to_string(),
-            issues: Vec::new(),
-        });
+    let (output, container_used) = match run_gateway_doctor_with_fallback(false) {
+        Ok(result) => result,
+        Err(err) => {
+            return Ok(GatewayConfigHealth {
+                status: "offline".to_string(),
+                summary: err,
+                issues: Vec::new(),
+            });
+        }
     };
 
-    let output = docker_command()
-        .args(["exec", container, "node", "/app/dist/index.js", "doctor"])
-        .output()
-        .map_err(|e| append_colima_runtime_hint(format!("Failed to run gateway config check: {}", e)))?;
-
+    let checked_offline = container_used.is_none();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let combined = format!("{}\n{}", stdout, stderr);
@@ -7444,7 +7545,16 @@ pub async fn get_gateway_config_health() -> Result<GatewayConfigHealth, String> 
     if has_invalid_config {
         let issues = extract_doctor_problem_lines(combined_trimmed);
         let summary = if issues.is_empty() {
-            "Gateway config is invalid.".to_string()
+            if checked_offline {
+                "Gateway config is invalid (offline check).".to_string()
+            } else {
+                "Gateway config is invalid.".to_string()
+            }
+        } else if checked_offline {
+            format!(
+                "Gateway config is invalid (offline check, {} issue(s)).",
+                issues.len()
+            )
         } else {
             format!("Gateway config is invalid ({} issue(s)).", issues.len())
         };
@@ -7456,13 +7566,16 @@ pub async fn get_gateway_config_health() -> Result<GatewayConfigHealth, String> 
     }
 
     if !output.status.success() {
-        let message = if !stderr.trim().is_empty() {
+        let mut message = if !stderr.trim().is_empty() {
             stderr.trim().to_string()
         } else if !stdout.trim().is_empty() {
             stdout.trim().to_string()
         } else {
             "Gateway config check failed.".to_string()
         };
+        if checked_offline {
+            message = format!("Offline config check failed: {}", message);
+        }
         return Ok(GatewayConfigHealth {
             status: "error".to_string(),
             summary: message,
@@ -7470,9 +7583,14 @@ pub async fn get_gateway_config_health() -> Result<GatewayConfigHealth, String> 
         });
     }
 
+    let summary = if checked_offline {
+        "Gateway config is valid (checked from data volume while gateway is stopped).".to_string()
+    } else {
+        "Gateway config is valid.".to_string()
+    };
     Ok(GatewayConfigHealth {
         status: "ok".to_string(),
-        summary: "Gateway config is valid.".to_string(),
+        summary,
         issues: Vec::new(),
     })
 }
