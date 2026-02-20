@@ -53,6 +53,12 @@ type GatewayHealResult = {
   message: string;
 };
 
+type RuntimeVersionInfo = {
+  entropic_version: string;
+  runtime_version: string;
+  runtime_openclaw_commit?: string | null;
+};
+
 function SettingsGroup({ title, children }: { title?: string, children: React.ReactNode }) {
   return (
     <div className="mb-8">
@@ -146,6 +152,7 @@ export function Settings({
   const [gatewayConfigActionLoading, setGatewayConfigActionLoading] = useState(false);
   const [gatewayConfigError, setGatewayConfigError] = useState<string | null>(null);
   const [gatewayConfigNotice, setGatewayConfigNotice] = useState<string | null>(null);
+  const [runtimeVersionInfo, setRuntimeVersionInfo] = useState<RuntimeVersionInfo | null>(null);
 
   // Wallpaper state
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
@@ -168,6 +175,7 @@ export function Settings({
       const cwp = (await store.get("desktopCustomWallpaper")) as string | null;
       if (cwp) setCustomWallpaper(cwp);
     }).catch(() => {});
+    invoke<RuntimeVersionInfo>("get_runtime_version_info").then(setRuntimeVersionInfo).catch(() => {});
     invoke<Record<string, string>>("get_oauth_status").then(setOauthStatus).catch(() => {});
     invoke<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>("get_auth_state").then(setAuthState).catch(() => {});
   }, []);
@@ -1192,6 +1200,16 @@ export function Settings({
           </div>
         </div>
       </SettingsGroup>
+
+      <div className="px-1 pb-2 text-xs text-[var(--text-tertiary)] space-y-1">
+        <div>Entropic v{runtimeVersionInfo?.entropic_version ?? "..."}</div>
+        <div>
+          OpenClaw Runtime {runtimeVersionInfo?.runtime_version ?? "unknown"}
+          {runtimeVersionInfo?.runtime_openclaw_commit
+            ? ` (${runtimeVersionInfo.runtime_openclaw_commit.slice(0, 7)})`
+            : ""}
+        </div>
+      </div>
 
       {/* Wallpaper Picker Modal */}
       {wallpaperPickerOpen && (

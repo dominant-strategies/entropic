@@ -6679,6 +6679,33 @@ pub fn init_state(app: &AppHandle) -> AppState {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuntimeVersionInfo {
+    pub entropic_version: String,
+    pub runtime_version: String,
+    pub runtime_openclaw_commit: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_runtime_version_info() -> Result<RuntimeVersionInfo, String> {
+    let mut runtime_version = runtime_release_tag();
+    let mut runtime_openclaw_commit = None;
+
+    if let Some(manifest) = read_cached_runtime_manifest() {
+        runtime_version = manifest.version;
+        runtime_openclaw_commit = manifest
+            .openclaw_commit
+            .map(|commit| commit.trim().to_string())
+            .filter(|commit| !commit.is_empty());
+    }
+
+    Ok(RuntimeVersionInfo {
+        entropic_version: env!("CARGO_PKG_VERSION").to_string(),
+        runtime_version,
+        runtime_openclaw_commit,
+    })
+}
+
 #[tauri::command]
 pub async fn check_runtime_status(app: AppHandle) -> Result<RuntimeStatus, String> {
     let runtime = get_runtime(&app);
