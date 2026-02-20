@@ -82,6 +82,8 @@ function normalizeTelegramReplyToMode(value: string | undefined): TelegramReplyT
   return "off";
 }
 
+type TelegramSaveTarget = "token" | "settings";
+
 export function Channels() {
   const [telegramEnabled, setTelegramEnabled] = useState(false);
   const [telegramToken, setTelegramToken] = useState("");
@@ -189,7 +191,7 @@ export function Channels() {
     }
   }
 
-  async function saveMessagingSetup() {
+  async function saveMessagingSetup(target: TelegramSaveTarget = "token") {
     console.log("[Channels] saveMessagingSetup called");
     console.log("[Channels] telegramEnabled:", telegramEnabled);
     console.log("[Channels] telegramToken length:", telegramToken.length);
@@ -224,11 +226,19 @@ export function Channels() {
       setTelegramTokenSaved(Boolean(telegramToken.trim()));
       const connected = await invoke<boolean>("get_telegram_connection_status").catch(() => false);
       setTelegramConnected(Boolean(connected));
-      setSaveMessage("Bot token saved. Check Telegram messages from your new bot for your pairing token.");
+      setSaveMessage(
+        target === "token"
+          ? "Bot token saved. Check Telegram messages from your new bot for your pairing token."
+          : "Telegram settings saved."
+      );
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       console.error("[Channels] set_channels_config failed:", detail);
-      setSaveError(`Failed to save bot token: ${detail}`);
+      setSaveError(
+        target === "token"
+          ? `Failed to save bot token: ${detail}`
+          : `Failed to save settings: ${detail}`
+      );
     } finally {
       setSavingSetup(false);
       console.log("[Channels] saveMessagingSetup completed");
@@ -307,7 +317,7 @@ export function Channels() {
                     className="flex-1 px-4 py-2 bg-[var(--system-gray-6)] border-transparent rounded-lg focus:ring-2 focus:ring-[var(--system-blue)]/20 outline-none text-sm"
                   />
                   <button
-                    onClick={saveMessagingSetup}
+                    onClick={() => saveMessagingSetup("token")}
                     disabled={savingSetup || telegramToken.trim().length === 0}
                     className="px-4 py-2 bg-black text-white rounded-lg text-sm font-semibold hover:bg-gray-800 disabled:opacity-50"
                   >
@@ -375,7 +385,7 @@ export function Channels() {
                     </summary>
                     <div className="border-t border-[var(--border-subtle)] px-4 py-3 space-y-3">
                       <p className="text-xs text-[var(--text-secondary)]">
-                        After changing advanced settings, click <span className="font-medium">Save Bot Token</span> to apply.
+                        After changing advanced settings, click <span className="font-medium">Save Settings</span> to apply.
                       </p>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <label className="text-xs text-[var(--text-secondary)]">
@@ -448,6 +458,16 @@ export function Channels() {
                         />
                         Enable link previews in replies
                       </label>
+                      <div className="flex justify-end pt-1">
+                        <button
+                          type="button"
+                          onClick={() => saveMessagingSetup("settings")}
+                          disabled={savingSetup || telegramToken.trim().length === 0}
+                          className="px-4 py-2 bg-black text-white rounded-lg text-sm font-semibold hover:bg-gray-800 disabled:opacity-50"
+                        >
+                          {savingSetup ? "Saving..." : "Save Settings"}
+                        </button>
+                      </div>
                     </div>
                   </details>
                 )}
