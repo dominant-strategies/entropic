@@ -23,10 +23,10 @@ import { loadOnboardingData, type OnboardingData } from "../lib/profile";
 import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
 import { ChannelSetupModal } from "../components/ChannelSetupModal";
 import { MarkdownContent } from "../components/MarkdownContent";
-import { ModelSelector } from "../components/ModelSelector";
 import { useAuth } from "../contexts/AuthContext";
 import { syncAllIntegrationsToGateway, getCachedIntegrationProviders, getIntegrations } from "../lib/integrations";
 import { resolveGatewayAuth } from "../lib/gateway-auth";
+import { appendDiagnosticLog } from "../lib/diagnostics";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { getLocalCreditBalance } from "../lib/localCredits";
 import { signInWithDiscord, signInWithEmail, signInWithGoogle, signUpWithEmail } from "../lib/auth";
@@ -872,7 +872,7 @@ export function Chat({
   onRecoverProxyAuth,
   useLocalKeys,
   selectedModel,
-  onModelChange,
+  onModelChange: _onModelChange,
   imageModel: _imageModel,
   integrationsSyncing,
   integrationsMissing,
@@ -930,18 +930,12 @@ export function Chat({
   const [authPassword, setAuthPassword] = useState("");
   const [showOwnProviderOptions, setShowOwnProviderOptions] = useState(false);
   const [providerStatus, setProviderStatus] = useState<AuthState["providers"]>([]);
-  const connectedProviders = providerStatus.filter(p => p.has_key).map(p => p.id);
   const [gatewayUrl, setGatewayUrl] = useState(DEFAULT_GATEWAY_URL);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [onboardingData, setOnboardingData] = useState<OnboardingData | null>(null);
   const [showWelcome, setShowWelcome] = useState(true);
-  const [showDiagnostics, setShowDiagnostics] = useState(false);
-  const [diagLogs, setDiagLogs] = useState<string[]>([]);
   const [lastGatewayError, setLastGatewayError] = useState<string | null>(null);
-  const [lastChatEvent, setLastChatEvent] = useState<ChatEvent | null>(null);
-  const [lastSendId, setLastSendId] = useState<string | null>(null);
-  const [lastSendAt, setLastSendAt] = useState<number | null>(null);
   const [componentMountedAt] = useState(Date.now());
   const runTimingsRef = useRef<Record<string, {
     startedAt: number;
@@ -981,8 +975,6 @@ export function Chat({
   const sessionMessagesRef = useRef<Record<string, Message[]>>({});
   const persistTimerRef = useRef<number | null>(null);
   const restoredFromCacheRef = useRef(false);
-  const lastChatEventRef = useRef<ChatEvent | null>(null);
-  const showDiagnosticsRef = useRef(false);
   const activeRunIdRef = useRef<string | null>(null);
   const activeRunSessionRef = useRef<string | null>(null);
   const activeRunTimeoutRef = useRef<number | null>(null);
@@ -1134,13 +1126,6 @@ export function Chat({
         proxyAuthRecoveryInFlightRef.current = false;
       });
   }
-
-  useEffect(() => {
-    showDiagnosticsRef.current = showDiagnostics;
-    if (showDiagnostics && lastChatEventRef.current) {
-      setLastChatEvent(lastChatEventRef.current);
-    }
-  }, [showDiagnostics]);
 
   useEffect(() => {
     invoke<{
@@ -1313,10 +1298,9 @@ export function Chat({
   }, []);
 
   function addDiag(message: string) {
-    const stamp = new Date().toLocaleTimeString();
-    setDiagLogs(prev => {
-      const next = [...prev, `${stamp} ${message}`];
-      return next.slice(-200);
+    appendDiagnosticLog({
+      source: "chat",
+      message,
     });
   }
 
@@ -1789,10 +1773,6 @@ export function Chat({
       ? { start: composer.selectionStart, end: composer.selectionEnd }
       : null;
 
-    lastChatEventRef.current = event;
-    if (showDiagnosticsRef.current || event?.state !== "delta") {
-      setLastChatEvent(event);
-    }
     const eventRunId = typeof event?.runId === "string" ? event.runId.trim() : "";
     if (eventRunId) {
       lastEventByRunIdRef.current[eventRunId] = Date.now();
@@ -1973,9 +1953,6 @@ export function Chat({
       addDiag("chat aborted");
     }
 
-    if (showDiagnosticsRef.current) {
-      setLastChatEvent(lastChatEventRef.current);
-    }
   }
 
   async function loadSessions() {
@@ -2357,8 +2334,6 @@ export function Chat({
       if (!runId) {
         throw new Error("Failed to start response stream");
       }
-      setLastSendId(runId || null);
-      setLastSendAt(Date.now());
       if (runId) {
         scheduleActiveRunTimeout(runId, sendSession);
         runTimingsRef.current[runId] = { startedAt: sendStart, ackAt: Date.now() };
@@ -2927,53 +2902,23 @@ export function Chat({
     <div className="h-full flex flex-col bg-transparent" onDragOver={e => { e.preventDefault(); setDragActive(true); }}
       onDragLeave={() => setDragActive(false)} onDrop={e => { e.preventDefault(); setDragActive(false); }}>
 
-      {/* Header */}
-      <div className="flex-shrink-0" style={{
-          background: 'rgba(255,255,255,0.8)',
-          borderBottom: '1px solid var(--border-subtle)',
-          backdropFilter: 'blur(12px)',
-          WebkitBackdropFilter: 'blur(12px)'
-        }}>
-        <div className="flex items-center justify-between px-3 py-1.5">
-          <div className="flex items-center gap-2 flex-1 min-w-0">
-            <span className="text-[12px] font-bold text-[var(--text-primary)] truncate max-w-[150px]">
-              {currentSession ? sessionTitle(sessions.find(s => s.key === currentSession) || { key: currentSession }) : "New Chat"}
-            </span>
+      {integrationsSyncing ? (
+        <div className="flex-shrink-0" style={{
+            background: 'rgba(255,255,255,0.8)',
+            borderBottom: '1px solid var(--border-subtle)',
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)'
+          }}>
+          <div className="flex items-center justify-end px-3 py-1.5">
+            <div className="flex items-center gap-3 px-2">
+              <span className="text-[10px] font-medium text-[var(--text-tertiary)] flex items-center gap-1 animate-pulse">
+                <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                Syncing
+              </span>
+            </div>
           </div>
-        {onModelChange && (
-          <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} compact useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
-        )}
-        <div className="flex items-center gap-3 px-2">
-          <div className="flex items-center gap-1.5">
-            <div className={`w-1.5 h-1.5 rounded-full ${
-              connected ? 'bg-green-500' : (gatewayStarting || isConnecting) ? 'bg-amber-400' : 'bg-gray-300'
-            }`} />
-            <span className="text-[10px] font-medium text-[var(--text-tertiary)] uppercase tracking-tight">
-              {connected
-                ? "Connected"
-                : gatewayStarting
-                  ? "Starting"
-                  : "Offline"}
-            </span>
-          </div>
-          {integrationsSyncing ? (
-            <span className="text-[10px] font-medium text-[var(--text-tertiary)] flex items-center gap-1 animate-pulse">
-              <Loader2 className="w-2.5 h-2.5 animate-spin" />
-              Syncing
-            </span>
-          ) : null}
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowDiagnostics(true)}
-            className="px-2 py-1 rounded-md bg-[var(--system-gray-6)] hover:bg-[var(--system-gray-5)] text-[10px] font-bold text-[var(--text-secondary)] transition-colors"
-            title="Gateway diagnostics"
-          >
-            Diag
-          </button>
-        </div>
-      </div>
-    </div>
+      ) : null}
 
       {(gatewayStarting || autoStartExpected) && (
         <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-600">
@@ -3134,54 +3079,6 @@ export function Chat({
         onClose={() => setChannelModal({ ...channelModal, isOpen: false })}
         onSetupComplete={handleChannelSetupComplete}
       />
-
-      {showDiagnostics && (
-        <div className="fixed inset-0 bg-black/20 flex items-center justify-center z-50"
-          onClick={() => setShowDiagnostics(false)}>
-          <div className="bg-white p-6 w-full max-w-2xl m-4 rounded-2xl shadow-xl border border-[var(--border-subtle)]" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-[var(--text-primary)]">Gateway Diagnostics</h3>
-              <button onClick={() => setShowDiagnostics(false)} className="p-1 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
-            </div>
-            <div className="grid grid-cols-2 gap-3 text-sm mb-4">
-              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
-                <p className="text-[var(--text-tertiary)]">Gateway URL</p>
-                <p className="text-[var(--text-primary)] break-all">{gatewayUrl}</p>
-              </div>
-              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
-                <p className="text-[var(--text-tertiary)]">Proxy Enabled</p>
-                <p className="text-[var(--text-primary)]">{proxyEnabled ? "true" : "false"}</p>
-              </div>
-              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
-                <p className="text-[var(--text-tertiary)]">Connected Provider</p>
-                <p className="text-[var(--text-primary)]">{connectedProvider || "—"}</p>
-              </div>
-              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
-                <p className="text-[var(--text-tertiary)]">Connected</p>
-                <p className="text-[var(--text-primary)]">{connected ? "true" : "false"}</p>
-              </div>
-              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
-                <p className="text-[var(--text-tertiary)]">Last Send</p>
-                <p className="text-[var(--text-primary)] break-all">{lastSendId || "—"}</p>
-                <p className="text-xs text-[var(--text-tertiary)]">
-                  {lastSendAt ? new Date(lastSendAt).toLocaleTimeString() : "—"}
-                </p>
-              </div>
-              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
-                <p className="text-[var(--text-tertiary)]">Last Gateway Error</p>
-                <p className="text-[var(--text-primary)] break-all">{lastGatewayError || "—"}</p>
-              </div>
-              <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)]">
-                <p className="text-[var(--text-tertiary)]">Last Chat Event</p>
-                <p className="text-[var(--text-primary)] break-all">{lastChatEvent?.state || "—"}</p>
-              </div>
-            </div>
-            <div className="bg-[var(--bg-tertiary)] p-3 rounded-xl border border-[var(--border-subtle)] max-h-64 overflow-auto text-xs font-mono whitespace-pre-wrap">
-              {diagLogs.length ? diagLogs.join("\n") : "No diagnostics yet."}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -10,6 +10,13 @@ import { ModelSelector } from "../components/ModelSelector";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
 import { getProxyUrl } from "../lib/auth";
 import { Logs } from "./Logs";
+import {
+  clearDiagnosticLogs,
+  diagnosticsUpdatedEventName,
+  readDiagnosticLogs,
+  type DiagnosticLogEntry,
+  type DiagnosticLogType,
+} from "../lib/diagnostics";
 
 type Props = {
   gatewayRunning: boolean;
@@ -201,6 +208,23 @@ export function Settings({
 
   const [isEditingPersonality, setIsEditingPersonality] = useState(false);
   const [logsExpanded, setLogsExpanded] = useState(false);
+  const [gatewayDiagnosticsExpanded, setGatewayDiagnosticsExpanded] = useState(false);
+  const [gatewayDiagLogs, setGatewayDiagLogs] = useState<DiagnosticLogEntry[]>([]);
+  const [diagTypeFilters, setDiagTypeFilters] = useState<Record<DiagnosticLogType, boolean>>({
+    info: true,
+    warn: true,
+    error: true,
+  });
+
+  useEffect(() => {
+    const refreshDiagnostics = () => setGatewayDiagLogs(readDiagnosticLogs());
+    refreshDiagnostics();
+    const eventName = diagnosticsUpdatedEventName();
+    window.addEventListener(eventName, refreshDiagnostics);
+    return () => {
+      window.removeEventListener(eventName, refreshDiagnostics);
+    };
+  }, []);
 
   const PERSONALITY_TEMPLATES = [
     { label: "Helpful Assistant", text: "You are a helpful, knowledgeable, and friendly AI assistant." },
@@ -349,6 +373,23 @@ export function Settings({
   }
 
   const gatewayConfigInvalid = gatewayConfigHealth?.status === "invalid";
+  const filteredGatewayDiagLogs = gatewayDiagLogs.filter((entry) => diagTypeFilters[entry.type]);
+  const gatewayDiagCounts = gatewayDiagLogs.reduce<Record<DiagnosticLogType, number>>(
+    (counts, entry) => {
+      counts[entry.type] += 1;
+      return counts;
+    },
+    { info: 0, warn: 0, error: 0 },
+  );
+
+  function toggleDiagType(type: DiagnosticLogType) {
+    setDiagTypeFilters((prev) => ({ ...prev, [type]: !prev[type] }));
+  }
+
+  function handleClearGatewayDiagnostics() {
+    clearDiagnosticLogs();
+    setGatewayDiagLogs([]);
+  }
 
   return (
     <div className="max-w-3xl mx-auto py-8 px-4">
@@ -804,6 +845,93 @@ export function Settings({
       <SettingsGroup title="Diagnostics">
         <div>
           <button
+            onClick={() => setGatewayDiagnosticsExpanded((prev) => !prev)}
+            className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-7 h-7 rounded-md bg-[var(--system-gray-6)] text-[var(--text-tertiary)] flex items-center justify-center flex-shrink-0">
+                <ScrollText className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-[14px] font-medium text-[var(--text-primary)]">Gateway Diagnostics</div>
+                <div className="text-[12px] text-[var(--text-secondary)]">Moved from Chat. Filter by log type below.</div>
+              </div>
+            </div>
+            <ChevronDown
+              className={clsx(
+                "w-4 h-4 text-[var(--text-tertiary)] transition-transform duration-200",
+                gatewayDiagnosticsExpanded ? "rotate-180" : "",
+              )}
+            />
+          </button>
+          {gatewayDiagnosticsExpanded && (
+            <div className="px-4 pb-4 space-y-4">
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setGatewayDiagLogs(readDiagnosticLogs())}
+                  className="px-2 py-1 text-xs rounded-md border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
+                >
+                  Refresh
+                </button>
+                <button
+                  onClick={handleClearGatewayDiagnostics}
+                  className="px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 hover:bg-red-50"
+                >
+                  Clear
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                {(["info", "warn", "error"] as DiagnosticLogType[]).map((type) => {
+                  const enabled = diagTypeFilters[type];
+                  const count = gatewayDiagCounts[type];
+                  return (
+                    <button
+                      key={type}
+                      onClick={() => toggleDiagType(type)}
+                      className={clsx(
+                        "px-2.5 py-1 rounded-md text-xs font-medium border transition-colors",
+                        enabled
+                          ? "border-[var(--system-blue)] bg-[var(--system-blue)]/10 text-[var(--system-blue)]"
+                          : "border-[var(--border-subtle)] text-[var(--text-tertiary)] hover:bg-[var(--system-gray-6)]",
+                      )}
+                    >
+                      {type.toUpperCase()} ({count})
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] max-h-64 overflow-auto p-3 space-y-1 font-mono text-xs">
+                {filteredGatewayDiagLogs.length === 0 ? (
+                  <div className="text-[var(--text-tertiary)]">No diagnostics for the selected log types.</div>
+                ) : (
+                  filteredGatewayDiagLogs.map((entry) => (
+                    <div key={entry.id} className="flex items-start gap-2">
+                      <span className="text-[var(--text-tertiary)] shrink-0">
+                        {new Date(entry.ts).toLocaleTimeString()}
+                      </span>
+                      <span
+                        className={clsx(
+                          "shrink-0 uppercase text-[10px] font-semibold px-1.5 py-0.5 rounded",
+                          entry.type === "info" && "bg-blue-100 text-blue-700",
+                          entry.type === "warn" && "bg-amber-100 text-amber-700",
+                          entry.type === "error" && "bg-red-100 text-red-700",
+                        )}
+                      >
+                        {entry.type}
+                      </span>
+                      <span className="text-[var(--text-secondary)] break-words">{entry.message}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div>
+          <button
             onClick={() => setLogsExpanded((prev) => !prev)}
             className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
           >
@@ -812,14 +940,14 @@ export function Settings({
                 <ScrollText className="w-4 h-4" />
               </div>
               <div>
-                <div className="text-[14px] font-medium text-[var(--text-primary)]">Local Logs</div>
-                <div className="text-[12px] text-[var(--text-secondary)]">Expand to view gateway diagnostics</div>
+                <div className="text-[14px] font-medium text-[var(--text-primary)]">Local Runtime Logs</div>
+                <div className="text-[12px] text-[var(--text-secondary)]">Expand to inspect gateway/container logs</div>
               </div>
             </div>
             <ChevronDown
               className={clsx(
                 "w-4 h-4 text-[var(--text-tertiary)] transition-transform duration-200",
-                logsExpanded ? "rotate-180" : ""
+                logsExpanded ? "rotate-180" : "",
               )}
             />
           </button>
