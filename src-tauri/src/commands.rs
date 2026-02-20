@@ -6,6 +6,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine as _,
 };
+use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use http;
 use rand::RngCore;
@@ -22,6 +23,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_stronghold::stronghold::Stronghold as TauriStronghold;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
@@ -1642,7 +1644,372 @@ fn ensure_scanner_image() -> Result<(), String> {
     ))
 }
 
-async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, String> {
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct StoredGatewayDeviceIdentity {
+    version: u8,
+    device_id: String,
+    public_key: String,
+    private_key: String,
+    created_at_ms: u64,
+}
+
+struct GatewayDeviceIdentity {
+    device_id: String,
+    public_key: [u8; 32],
+    signing_key: SigningKey,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayDeviceConnectPayload {
+    id: String,
+    public_key: String,
+    signature: String,
+    signed_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayDeviceAuthRequest {
+    client_id: String,
+    client_mode: String,
+    role: String,
+    scopes: Vec<String>,
+    token: Option<String>,
+    nonce: Option<String>,
+}
+
+fn gateway_device_identity_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Failed to resolve app data dir".to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create app data dir: {}", e))?;
+    Ok(dir.join("gateway-device-identity.hold"))
+}
+
+const GATEWAY_DEVICE_IDENTITY_CLIENT_PATH: &[u8] = b"entropic-gateway-device";
+const GATEWAY_DEVICE_IDENTITY_RECORD_KEY: &str = "gateway-device-identity-v1";
+const STRONGHOLD_SALT_FILE: &str = "stronghold.salt";
+
+fn stronghold_salt_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Failed to resolve app data dir".to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create app data dir: {}", e))?;
+    Ok(dir.join(STRONGHOLD_SALT_FILE))
+}
+
+fn read_or_create_stronghold_salt(path: &Path) -> Result<Vec<u8>, String> {
+    if let Ok(existing) = fs::read(path) {
+        if existing.len() >= 16 {
+            return Ok(existing);
+        }
+    }
+
+    let mut salt = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut salt);
+    fs::write(path, salt).map_err(|e| format!("Failed to write stronghold salt: {}", e))?;
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(path)
+            .map_err(|e| format!("Failed to read stronghold salt metadata: {}", e))?
+            .permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(path, perms)
+            .map_err(|e| format!("Failed to secure stronghold salt: {}", e))?;
+    }
+    Ok(salt.to_vec())
+}
+
+fn gateway_device_identity_password(app: &AppHandle) -> Result<Vec<u8>, String> {
+    let salt_path = stronghold_salt_path(app)?;
+    let salt = read_or_create_stronghold_salt(&salt_path)?;
+    let mut hasher = Sha256::new();
+    hasher.update("entropic-gateway-device-identity-password-v1:");
+    hasher.update(resolve_raw_device_identifier().as_bytes());
+    hasher.update(&salt);
+    Ok(hasher.finalize().to_vec())
+}
+
+fn open_gateway_device_identity_stronghold(app: &AppHandle) -> Result<TauriStronghold, String> {
+    let snapshot_path = gateway_device_identity_path(app)?;
+    let password = gateway_device_identity_password(app)?;
+    match TauriStronghold::new(&snapshot_path, password.clone()) {
+        Ok(stronghold) => Ok(stronghold),
+        Err(initial_err) => {
+            if snapshot_path.exists() {
+                let _ = fs::remove_file(&snapshot_path);
+            }
+            TauriStronghold::new(&snapshot_path, password).map_err(|retry_err| {
+                format!(
+                    "Failed to initialize gateway identity stronghold (initial={}, retry={}): {}",
+                    initial_err,
+                    retry_err,
+                    snapshot_path.display()
+                )
+            })
+        }
+    }
+}
+
+fn decode_base64url_32(label: &str, value: &str) -> Result<[u8; 32], String> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(value.trim())
+        .map_err(|e| format!("Invalid {}: {}", label, e))?;
+    if decoded.len() != 32 {
+        return Err(format!(
+            "Invalid {} length: expected 32 bytes, got {}",
+            label,
+            decoded.len()
+        ));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&decoded);
+    Ok(out)
+}
+
+fn derive_gateway_device_id(public_key: &[u8; 32]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(public_key);
+    format!("{:x}", hasher.finalize())
+}
+
+fn new_gateway_device_identity() -> GatewayDeviceIdentity {
+    let mut private_key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut private_key);
+    let signing_key = SigningKey::from_bytes(&private_key);
+    let public_key = signing_key.verifying_key().to_bytes();
+    let device_id = derive_gateway_device_id(&public_key);
+    GatewayDeviceIdentity {
+        device_id,
+        public_key,
+        signing_key,
+    }
+}
+
+fn stored_gateway_device_identity(
+    identity: &GatewayDeviceIdentity,
+    created_at_ms: u64,
+) -> StoredGatewayDeviceIdentity {
+    StoredGatewayDeviceIdentity {
+        version: 1,
+        device_id: identity.device_id.clone(),
+        public_key: URL_SAFE_NO_PAD.encode(identity.public_key),
+        private_key: URL_SAFE_NO_PAD.encode(identity.signing_key.to_bytes()),
+        created_at_ms,
+    }
+}
+
+fn persist_gateway_device_identity(
+    stronghold: &TauriStronghold,
+    identity: &StoredGatewayDeviceIdentity,
+) -> Result<(), String> {
+    let client = stronghold
+        .load_client(GATEWAY_DEVICE_IDENTITY_CLIENT_PATH)
+        .or_else(|_| stronghold.create_client(GATEWAY_DEVICE_IDENTITY_CLIENT_PATH))
+        .map_err(|e| format!("Failed to open gateway identity client: {}", e))?;
+    let payload = serde_json::to_vec(identity)
+        .map_err(|e| format!("Failed to serialize gateway device identity: {}", e))?;
+    client
+        .store()
+        .insert(
+            GATEWAY_DEVICE_IDENTITY_RECORD_KEY.as_bytes().to_vec(),
+            payload,
+            None,
+        )
+        .map_err(|e| format!("Failed to store gateway device identity: {}", e))?;
+    stronghold
+        .save()
+        .map_err(|e| format!("Failed to persist gateway identity stronghold: {}", e))
+}
+
+fn load_or_create_gateway_device_identity(
+    app: &AppHandle,
+) -> Result<GatewayDeviceIdentity, String> {
+    let stronghold = open_gateway_device_identity_stronghold(app)?;
+    let client = stronghold
+        .load_client(GATEWAY_DEVICE_IDENTITY_CLIENT_PATH)
+        .or_else(|_| stronghold.create_client(GATEWAY_DEVICE_IDENTITY_CLIENT_PATH))
+        .map_err(|e| format!("Failed to open gateway identity client: {}", e))?;
+
+    let stored = client
+        .store()
+        .get(GATEWAY_DEVICE_IDENTITY_RECORD_KEY.as_bytes())
+        .map_err(|e| format!("Failed to read gateway identity record: {}", e))?;
+
+    if let Some(raw) = stored {
+        if let Ok(parsed) = serde_json::from_slice::<StoredGatewayDeviceIdentity>(&raw) {
+            if parsed.version == 1 {
+                let private_key = decode_base64url_32("device private key", &parsed.private_key);
+                let public_key = decode_base64url_32("device public key", &parsed.public_key);
+                if let (Ok(private_key), Ok(public_key)) = (private_key, public_key) {
+                    let signing_key = SigningKey::from_bytes(&private_key);
+                    let derived_public_key = signing_key.verifying_key().to_bytes();
+                    if derived_public_key == public_key {
+                        let derived_device_id = derive_gateway_device_id(&public_key);
+                        let identity = GatewayDeviceIdentity {
+                            device_id: derived_device_id.clone(),
+                            public_key,
+                            signing_key,
+                        };
+                        if derived_device_id != parsed.device_id {
+                            let repaired =
+                                stored_gateway_device_identity(&identity, parsed.created_at_ms);
+                            persist_gateway_device_identity(&stronghold, &repaired)?;
+                        }
+                        return Ok(identity);
+                    }
+                }
+            }
+        }
+    }
+
+    let identity = new_gateway_device_identity();
+    let stored = stored_gateway_device_identity(&identity, now_ms_u64());
+    persist_gateway_device_identity(&stronghold, &stored)?;
+    Ok(identity)
+}
+
+fn build_gateway_device_auth_payload(
+    device_id: &str,
+    client_id: &str,
+    client_mode: &str,
+    role: &str,
+    scopes: &[String],
+    signed_at_ms: u64,
+    token: Option<&str>,
+    nonce: Option<&str>,
+) -> String {
+    let nonce_clean = nonce.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    let version = if nonce_clean.is_some() { "v2" } else { "v1" };
+    let token = token.unwrap_or("");
+    let mut parts = vec![
+        version.to_string(),
+        device_id.to_string(),
+        client_id.to_string(),
+        client_mode.to_string(),
+        role.to_string(),
+        scopes.join(","),
+        signed_at_ms.to_string(),
+        token.to_string(),
+    ];
+    if let Some(nonce_value) = nonce_clean {
+        parts.push(nonce_value.to_string());
+    }
+    parts.join("|")
+}
+
+fn build_gateway_device_auth_for_connect(
+    app: &AppHandle,
+    client_id: &str,
+    client_mode: &str,
+    role: &str,
+    scopes: &[String],
+    token: Option<&str>,
+    nonce: Option<&str>,
+) -> Result<GatewayDeviceConnectPayload, String> {
+    let identity = load_or_create_gateway_device_identity(app)?;
+    let signed_at = now_ms_u64();
+    let nonce_clean = nonce.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+    let payload = build_gateway_device_auth_payload(
+        &identity.device_id,
+        client_id,
+        client_mode,
+        role,
+        scopes,
+        signed_at,
+        token,
+        nonce_clean.as_deref(),
+    );
+    let signature = identity.signing_key.sign(payload.as_bytes()).to_bytes();
+    Ok(GatewayDeviceConnectPayload {
+        id: identity.device_id,
+        public_key: URL_SAFE_NO_PAD.encode(identity.public_key),
+        signature: URL_SAFE_NO_PAD.encode(signature),
+        signed_at,
+        nonce: nonce_clean,
+    })
+}
+
+#[tauri::command]
+pub async fn build_gateway_device_auth(
+    app: AppHandle,
+    request: GatewayDeviceAuthRequest,
+) -> Result<GatewayDeviceConnectPayload, String> {
+    let client_id = {
+        let trimmed = request.client_id.trim();
+        if trimmed.is_empty() {
+            "openclaw-control-ui"
+        } else {
+            trimmed
+        }
+    };
+    let client_mode = {
+        let trimmed = request.client_mode.trim();
+        if trimmed.is_empty() {
+            "ui"
+        } else {
+            trimmed
+        }
+    };
+    let role = {
+        let trimmed = request.role.trim();
+        if trimmed.is_empty() {
+            "operator"
+        } else {
+            trimmed
+        }
+    };
+    let scopes: Vec<String> = request
+        .scopes
+        .into_iter()
+        .map(|scope| scope.trim().to_string())
+        .filter(|scope| !scope.is_empty())
+        .collect();
+    let scopes = if scopes.is_empty() {
+        vec![
+            "operator.read".to_string(),
+            "operator.write".to_string(),
+            "operator.admin".to_string(),
+        ]
+    } else {
+        scopes
+    };
+
+    build_gateway_device_auth_for_connect(
+        &app,
+        client_id,
+        client_mode,
+        role,
+        &scopes,
+        request.token.as_deref(),
+        request.nonce.as_deref(),
+    )
+}
+
+async fn check_gateway_ws_health(
+    app: &AppHandle,
+    ws_url: &str,
+    token: &str,
+) -> Result<bool, String> {
     // Create WebSocket request with Origin header for gateway origin check
     let uri: http::Uri = ws_url.parse().map_err(|e| format!("Invalid URL: {}", e))?;
     let host = uri.host().unwrap_or("localhost").to_string();
@@ -1682,6 +2049,24 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
                     let event = frame.get("event").and_then(|v| v.as_str()).unwrap_or("");
                     if event == "connect.challenge" && !sent_connect {
                         sent_connect = true;
+                        let nonce = frame
+                            .get("payload")
+                            .and_then(|v| v.get("nonce"))
+                            .and_then(|v| v.as_str());
+                        let scopes = vec![
+                            "operator.read".to_string(),
+                            "operator.write".to_string(),
+                            "operator.admin".to_string(),
+                        ];
+                        let device = build_gateway_device_auth_for_connect(
+                            app,
+                            "openclaw-control-ui",
+                            "probe",
+                            "operator",
+                            &scopes,
+                            Some(token),
+                            nonce,
+                        )?;
                         let connect = serde_json::json!({
                             "type": "req",
                             "id": "1",
@@ -1698,7 +2083,8 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
                                 },
                                 "role": "operator",
                                 "scopes": ["operator.read", "operator.write", "operator.admin"],
-                                "auth": { "token": token }
+                                "auth": { "token": token },
+                                "device": device
                             }
                         });
                         ws.send(Message::Text(connect.to_string()))
@@ -5600,21 +5986,25 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         set_openclaw_config_value(cfg, &["plugins", "load", "paths"], serde_json::json!([]));
     }
 
-    // Enable control UI access from localhost without device pairing.
-    // This allows the desktop app's health checks and local connections to work
-    // with operator scopes, while still requiring device pairing for remote connections.
+    // Enforce secure Control UI auth in Entropic. Device identity is now signed
+    // by the desktop app, so insecure token-only fallback should remain disabled.
     set_openclaw_config_value(
         cfg,
         &["gateway", "controlUi", "allowInsecureAuth"],
-        serde_json::json!(true),
+        serde_json::json!(false),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["gateway", "controlUi", "dangerouslyDisableDeviceAuth"],
+        serde_json::json!(false),
     );
 
     // Allow origins for localhost control UI connections.
     // Includes:
     // - "null" for native WebSocket clients (Rust health checks)
     // - http/https localhost for direct browser access
-    // - tauri://localhost for Tauri webview (production builds)
-    // - http://localhost:5174 for Vite dev server
+    // - tauri://localhost and tauri.localhost for Tauri webview origins
+    // - http://localhost:5173/5174 for Vite dev server
     set_openclaw_config_value(
         cfg,
         &["gateway", "controlUi", "allowedOrigins"],
@@ -5625,6 +6015,9 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
             "https://localhost",
             "https://127.0.0.1",
             "tauri://localhost",
+            "http://tauri.localhost",
+            "https://tauri.localhost",
+            "http://localhost:5173",
             "http://localhost:5174"
         ]),
     );
@@ -6165,7 +6558,11 @@ fn gateway_env_file(entries: &[(&str, &str)]) -> Result<GatewayEnvFile, String> 
     Ok(GatewayEnvFile { path })
 }
 
-async fn wait_for_gateway_health_strict(token: &str, attempts: usize) -> Result<(), String> {
+async fn wait_for_gateway_health_strict(
+    app: &AppHandle,
+    token: &str,
+    attempts: usize,
+) -> Result<(), String> {
     let ws_url = gateway_ws_url();
     let mut last_error = String::new();
     for attempt in 1..=attempts {
@@ -6187,7 +6584,7 @@ async fn wait_for_gateway_health_strict(token: &str, attempts: usize) -> Result<
         }
 
         if should_probe_ws {
-            match check_gateway_ws_health(&ws_url, token).await {
+            match check_gateway_ws_health(app, &ws_url, token).await {
                 Ok(true) => return Ok(()),
                 Ok(false) => {
                     last_error = "health rpc rejected".to_string();
@@ -6551,14 +6948,14 @@ async fn recover_gateway_health(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<(), String> {
-    if let Err(initial) = wait_for_gateway_health_strict(token, 12).await {
+    if let Err(initial) = wait_for_gateway_health_strict(app, token, 12).await {
         let health_status = container_health_status();
         if matches!(health_status.as_deref(), Some("starting")) {
             println!(
                 "[Entropic] {} health check failed while health=starting; extending wait: {}",
                 label, initial
             );
-            if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
+            if let Err(e) = wait_for_gateway_health_strict(app, token, 16).await {
                 finish_health_wait_or_tolerate_starting(
                     e,
                     &format!("{} failed strict health check after extended wait", label),
@@ -6569,7 +6966,7 @@ async fn recover_gateway_health(
                 "[Entropic] {} health check failed but container health=healthy; extending wait without restart: {}",
                 label, initial
             );
-            if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
+            if let Err(e) = wait_for_gateway_health_strict(app, token, 16).await {
                 finish_health_wait_or_tolerate_starting(
                     e,
                     &format!("{} failed strict health check after extended wait", label),
@@ -6625,7 +7022,7 @@ async fn recover_gateway_health(
                 }
             }
             apply_agent_settings(app, state)?;
-            if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
+            if let Err(e) = wait_for_gateway_health_strict(app, token, 16).await {
                 finish_health_wait_or_tolerate_starting(
                     e,
                     &format!("{} failed strict health check after recovery", label),
@@ -6636,7 +7033,7 @@ async fn recover_gateway_health(
                 "[Entropic] {} health check failed with container state {:?}; extending wait without restart: {}",
                 label, health_status, initial
             );
-            if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
+            if let Err(e) = wait_for_gateway_health_strict(app, token, 16).await {
                 finish_health_wait_or_tolerate_starting(
                     e,
                     &format!("{} failed strict health check after extended wait", label),
@@ -7740,7 +8137,7 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
     println!("[Entropic] Checking gateway health via WS at: {}", ws_url);
     let mut last_error: Option<String> = None;
     for attempt in 1..=2 {
-        match check_gateway_ws_health(&ws_url, &token).await {
+        match check_gateway_ws_health(&app, &ws_url, &token).await {
             Ok(true) => {
                 println!("[Entropic] Gateway health check passed");
                 return Ok(true);

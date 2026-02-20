@@ -1,4 +1,5 @@
 // OpenClaw Gateway WebSocket Client
+import { invoke } from "@tauri-apps/api/core";
 
 type Frame = RequestFrame | ResponseFrame | EventFrame;
 
@@ -86,6 +87,28 @@ type GatewayEvents = {
   error: (error: string) => void;
 };
 
+const GATEWAY_CONNECT_CLIENT_ID = "openclaw-control-ui";
+const GATEWAY_CONNECT_CLIENT_MODE = "ui";
+const GATEWAY_CONNECT_ROLE = "operator";
+const GATEWAY_CONNECT_SCOPES = ["operator.read", "operator.write", "operator.admin"] as const;
+
+type GatewayDeviceConnectPayload = {
+  id: string;
+  publicKey: string;
+  signature: string;
+  signedAt: number;
+  nonce?: string;
+};
+
+type GatewayDeviceAuthRequest = {
+  clientId: string;
+  clientMode: string;
+  role: string;
+  scopes: string[];
+  token?: string;
+  nonce?: string;
+};
+
 export class GatewayClient {
   private ws: WebSocket | null = null;
   private url: string;
@@ -169,6 +192,32 @@ export class GatewayClient {
     }
   }
 
+  private async buildGatewayDeviceAuth(nonce?: string): Promise<GatewayDeviceConnectPayload> {
+    const request: GatewayDeviceAuthRequest = {
+      clientId: GATEWAY_CONNECT_CLIENT_ID,
+      clientMode: GATEWAY_CONNECT_CLIENT_MODE,
+      role: GATEWAY_CONNECT_ROLE,
+      scopes: [...GATEWAY_CONNECT_SCOPES],
+      token: this.token,
+      nonce,
+    };
+    try {
+      return await invoke<GatewayDeviceConnectPayload>("build_gateway_device_auth", { request });
+    } catch (error) {
+      this.logError("Failed to build signed gateway device auth payload", error);
+      const message =
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "unknown signing error";
+      throw new GatewayError(
+        `Failed to build gateway device identity signature: ${message}`,
+        "device-signing-failed",
+      );
+    }
+  }
+
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -246,19 +295,29 @@ export class GatewayClient {
         // Respond with connect RPC
         this.log("Received challenge, authenticating...");
         try {
+          const nonceValue =
+            frame.payload && typeof frame.payload === "object"
+              ? (frame.payload as { nonce?: unknown }).nonce
+              : undefined;
+          const nonce =
+            typeof nonceValue === "string" && nonceValue.trim().length > 0
+              ? nonceValue.trim()
+              : undefined;
+          const device = await this.buildGatewayDeviceAuth(nonce);
           await this.rpc("connect", {
             minProtocol: 3,
             maxProtocol: 3,
             client: {
-              id: "openclaw-control-ui",
+              id: GATEWAY_CONNECT_CLIENT_ID,
               displayName: "Entropic Desktop",
               version: "0.1.0",
               platform: "desktop",
-              mode: "ui",
+              mode: GATEWAY_CONNECT_CLIENT_MODE,
             },
-            role: "operator",
-            scopes: ["operator.read", "operator.write", "operator.admin"],
+            role: GATEWAY_CONNECT_ROLE,
+            scopes: [...GATEWAY_CONNECT_SCOPES],
             auth: { token: this.token },
+            device,
           });
           this.log("Connected successfully");
           this.authenticated = true;

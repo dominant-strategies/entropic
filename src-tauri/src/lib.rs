@@ -185,6 +185,7 @@ pub fn run() {
             commands::complete_anthropic_oauth,
             commands::start_openai_oauth,
             commands::get_device_fingerprint_hash,
+            commands::build_gateway_device_auth,
             commands::refresh_provider_token,
             commands::get_oauth_status,
             commands::list_workspace_files,
