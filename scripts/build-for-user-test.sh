@@ -150,19 +150,8 @@ DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
 OPENCLAW_SOURCE="$OPENCLAW_SOURCE" \
     "$PROJECT_ROOT/scripts/build-openclaw-runtime.sh"
 
-echo ""
-echo "🔍 Building Skill Scanner image (prod daemon)..."
-ENTROPIC_RUNTIME_MODE=prod \
-ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
-DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
-    "$PROJECT_ROOT/scripts/build-skill-scanner.sh"
-
 if ! run_docker image inspect openclaw-runtime:latest >/dev/null 2>&1; then
     echo "❌ ERROR: openclaw-runtime:latest image missing after build"
-    exit 1
-fi
-if ! run_docker image inspect entropic-skill-scanner:latest >/dev/null 2>&1; then
-    echo "❌ ERROR: entropic-skill-scanner:latest image missing after build"
     exit 1
 fi
 
@@ -190,10 +179,10 @@ else
 fi
 
 # ============================================
-# 6. Export runtime tars from production daemon
+# 6. Export runtime tar from production daemon
 # ============================================
 echo ""
-echo "📦 Exporting production runtime images..."
+echo "📦 Exporting production runtime image..."
 
 ENTROPIC_RUNTIME_MODE=prod \
 ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
@@ -201,18 +190,11 @@ DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
 OUTPUT="$PROJECT_ROOT/src-tauri/resources/openclaw-runtime.tar.gz" \
     "$PROJECT_ROOT/scripts/bundle-runtime-image.sh"
 
-ENTROPIC_RUNTIME_MODE=prod \
-ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
-DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
-IMAGE="entropic-skill-scanner:latest" \
-OUTPUT="$PROJECT_ROOT/src-tauri/resources/entropic-skill-scanner.tar.gz" \
-    "$PROJECT_ROOT/scripts/bundle-runtime-image.sh"
-
 # ============================================
-# 7. Copy exported tars into app bundle
+# 7. Copy exported tar into app bundle
 # ============================================
 echo ""
-echo "📦 Copying runtime images into app bundle..."
+echo "📦 Copying runtime image into app bundle..."
 APP_RESOURCES="src-tauri/target/release/bundle/macos/Entropic.app/Contents/Resources"
 
 if [ ! -d "$APP_RESOURCES" ]; then
@@ -221,7 +203,6 @@ if [ ! -d "$APP_RESOURCES" ]; then
 fi
 
 cp "$PROJECT_ROOT/src-tauri/resources/openclaw-runtime.tar.gz" "$APP_RESOURCES/"
-cp "$PROJECT_ROOT/src-tauri/resources/entropic-skill-scanner.tar.gz" "$APP_RESOURCES/"
 
 # ============================================
 # Done
@@ -236,4 +217,3 @@ echo "  Colima:  $(ls -lh src-tauri/resources/bin/colima 2>/dev/null | awk '{pri
 echo "  Lima:    $(ls -lh src-tauri/resources/bin/limactl 2>/dev/null | awk '{print $5}' || echo 'missing')"
 echo "  Docker:  $(ls -lh src-tauri/resources/bin/docker 2>/dev/null | awk '{print $5}' || echo 'missing')"
 echo "  Runtime: $(ls -lh "$APP_RESOURCES/openclaw-runtime.tar.gz" 2>/dev/null | awk '{print $5}' || echo 'missing')"
-echo "  Scanner: $(ls -lh "$APP_RESOURCES/entropic-skill-scanner.tar.gz" 2>/dev/null | awk '{print $5}' || echo 'missing')"

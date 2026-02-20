@@ -37,6 +37,7 @@ type Props = {
 type AgentProfileState = {
   memory_sessions_enabled?: boolean;
   memory_enabled?: boolean;
+  memory_qmd_enabled?: boolean;
   soul?: string;
 };
 
@@ -123,7 +124,9 @@ export function Settings({
   const [saving, setSaving] = useState(false);
   const [memorySessionIndexing, setMemorySessionIndexing] = useState(false);
   const [memoryEnabled, setMemoryEnabled] = useState(true);
+  const [memoryQmdEnabled, setMemoryQmdEnabled] = useState(false);
   const [memorySessionIndexingError, setMemorySessionIndexingError] = useState<string | null>(null);
+  const [memoryQmdError, setMemoryQmdError] = useState<string | null>(null);
   const [soul, setSoul] = useState("");
   
   // OAuth state
@@ -157,6 +160,7 @@ export function Settings({
       setSoul(state.soul || "");
       setMemorySessionIndexing(Boolean(state.memory_sessions_enabled));
       setMemoryEnabled(state.memory_enabled ?? true);
+      setMemoryQmdEnabled(Boolean(state.memory_qmd_enabled));
     }).catch(() => {});
     Store.load("entropic-settings.json").then(async (store) => {
       const wp = (await store.get("desktopWallpaper")) as string | null;
@@ -324,6 +328,24 @@ export function Settings({
       setMemorySessionIndexing(previous);
       console.error("[Entropic] Failed to update memory session indexing:", error);
       setMemorySessionIndexingError("Could not update conversation memory indexing. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleMemoryQmdToggle(nextEnabled: boolean) {
+    setSaving(true);
+    setMemoryQmdError(null);
+    const previous = memoryQmdEnabled;
+    setMemoryQmdEnabled(nextEnabled);
+    try {
+      await invoke("set_memory_qmd_enabled", { enabled: nextEnabled });
+    } catch (error) {
+      setMemoryQmdEnabled(previous);
+      console.error("[Entropic] Failed to update QMD memory backend:", error);
+      setMemoryQmdError(
+        "Could not update QMD memory backend. Ensure gateway is running and network access is available for first-time QMD install."
+      );
     } finally {
       setSaving(false);
     }
@@ -575,6 +597,36 @@ export function Settings({
             />
           </button>
         </SettingsRow>
+
+        <SettingsRow
+          label="Use QMD Memory Backend"
+          icon={Sparkles}
+          description={
+            memoryQmdEnabled
+              ? "QMD backend enabled for memory search"
+              : "Disabled (using builtin memory backend)"
+          }
+        >
+          <button
+            onClick={() => handleMemoryQmdToggle(!memoryQmdEnabled)}
+            disabled={saving || !memoryEnabled}
+            className={clsx(
+              "relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+              memoryQmdEnabled && !saving ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-4)]",
+              (!memoryEnabled || saving) && "opacity-50"
+            )}
+          >
+            <span
+              className={clsx(
+                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                memoryQmdEnabled && !saving ? "translate-x-5" : "translate-x-0"
+              )}
+            />
+          </button>
+        </SettingsRow>
+        {memoryQmdError && (
+          <div className="px-4 pb-4 pt-2 text-xs text-red-600">{memoryQmdError}</div>
+        )}
 
         <SettingsRow
           label="Conversation Memory Indexing"

@@ -60,6 +60,7 @@ mkdir -p /data/skill-manifests
 mkdir -p /data/.cache/qmd
 mkdir -p /data/.config
 mkdir -p /data/.npm
+mkdir -p /data/.bun
 mkdir -p /data/playwright
 mkdir -p /data/tools
 mkdir -p /data/browser/profile
@@ -108,10 +109,10 @@ ln -sfn /data/workspace /home/node/.openclaw/workspace
 mkdir -p /data/workspace/node_modules
 
 # Ensure qmd's workspace-local tsx resolver stays available even in ESM context.
-# The qmd rewrite changed the command from /data/qmd-wrapper to `qmd`,
-# but the package still uses tsx internally from workspace-relative resolution.
-# Linking only tsx (not full global node_modules) avoids read-only root writes.
-if [ -d /home/node/.bun/install/global/node_modules/tsx ]; then
+# Prefer persistent /data/.bun install path; fall back to legacy /home/node/.bun path.
+if [ -d /data/.bun/install/global/node_modules/tsx ]; then
+  ln -sfn /data/.bun/install/global/node_modules/tsx /data/workspace/node_modules/tsx
+elif [ -d /home/node/.bun/install/global/node_modules/tsx ]; then
   ln -sfn /home/node/.bun/install/global/node_modules/tsx /data/workspace/node_modules/tsx
 fi
 
@@ -121,12 +122,14 @@ export ENTROPIC_SKILLS_PATH="${ENTROPIC_SKILLS_PATH:-/data/skills}"
 export ENTROPIC_SKILL_MANIFESTS_PATH="${ENTROPIC_SKILL_MANIFESTS_PATH:-/data/skill-manifests}"
 export ENTROPIC_BROWSER_PROFILE="${ENTROPIC_BROWSER_PROFILE:-/data/browser/profile}"
 export HOME="${HOME:-/data}"
+export BUN_INSTALL="${BUN_INSTALL:-/data/.bun}"
+export PATH="/data/.bun/bin:${PATH}"
 export TMPDIR="${TMPDIR:-/data/tmp}"
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/data/.config}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/data/.cache}"
 export npm_config_cache="${npm_config_cache:-/data/.npm}"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/data/playwright}"
-export NODE_PATH="/home/node/.bun/install/global/node_modules${NODE_PATH:+:$NODE_PATH}"
+export NODE_PATH="/data/.bun/install/global/node_modules:/home/node/.bun/install/global/node_modules${NODE_PATH:+:$NODE_PATH}"
 
 # Write a minimal config to select the primary model when provided
 MEMORY_SLOT="${OPENCLAW_MEMORY_SLOT:-}"

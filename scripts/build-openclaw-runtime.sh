@@ -156,16 +156,64 @@ else
     echo "No Entropic skills directory found at $ENTROPIC_SKILLS_SOURCE (skipping)."
 fi
 
-# Copy node_modules (production only)
-echo "Copying node_modules (this may take a moment)..."
+# Materialize production-only node_modules for runtime packaging.
+# Prefer pnpm deploy for deterministic prod dependency closure. If that fails
+# (for example offline local builds), fall back to staged prune.
+echo "Materializing production node_modules..."
 mkdir -p "$STAGING_DIR/node_modules"
-rsync -a --delete \
-    --exclude='.cache' \
-    --exclude='*.map' \
-    --exclude='test' \
-    --exclude='tests' \
-    --exclude='.git' \
-    "$OPENCLAW_SOURCE/node_modules/" "$STAGING_DIR/node_modules/"
+
+PROD_DEPLOY_DIR="$PROJECT_ROOT/.build/openclaw-runtime-prod"
+rm -rf "$PROD_DEPLOY_DIR"
+
+copy_source_node_modules() {
+    rsync -a --delete \
+        --exclude='.cache' \
+        --exclude='*.map' \
+        --exclude='test' \
+        --exclude='tests' \
+        --exclude='.git' \
+        "$OPENCLAW_SOURCE/node_modules/" "$STAGING_DIR/node_modules/"
+}
+
+if command -v pnpm >/dev/null 2>&1; then
+    if pnpm --dir "$OPENCLAW_SOURCE" --filter openclaw deploy --prod --legacy "$PROD_DEPLOY_DIR"; then
+        if [ -d "$PROD_DEPLOY_DIR/node_modules" ]; then
+            echo "Using prod-only node_modules from pnpm deploy."
+            rsync -a --delete \
+                --exclude='.cache' \
+                --exclude='*.map' \
+                --exclude='test' \
+                --exclude='tests' \
+                --exclude='.git' \
+                "$PROD_DEPLOY_DIR/node_modules/" "$STAGING_DIR/node_modules/"
+        else
+            echo "WARNING: pnpm deploy succeeded but node_modules was missing. Falling back to staged prune."
+            copy_source_node_modules
+            if [ -f "$OPENCLAW_SOURCE/pnpm-lock.yaml" ]; then
+                rsync -a "$OPENCLAW_SOURCE/pnpm-lock.yaml" "$STAGING_DIR/pnpm-lock.yaml"
+            fi
+            if pnpm --dir "$STAGING_DIR" prune --prod; then
+                echo "Pruned staged node_modules to production dependencies."
+            else
+                echo "WARNING: pnpm prune --prod failed; continuing with copied node_modules."
+            fi
+        fi
+    else
+        echo "WARNING: pnpm deploy --prod failed. Falling back to staged prune."
+        copy_source_node_modules
+        if [ -f "$OPENCLAW_SOURCE/pnpm-lock.yaml" ]; then
+            rsync -a "$OPENCLAW_SOURCE/pnpm-lock.yaml" "$STAGING_DIR/pnpm-lock.yaml"
+        fi
+        if pnpm --dir "$STAGING_DIR" prune --prod; then
+            echo "Pruned staged node_modules to production dependencies."
+        else
+            echo "WARNING: pnpm prune --prod failed; continuing with copied node_modules."
+        fi
+    fi
+else
+    echo "WARNING: pnpm not found. Falling back to source node_modules copy."
+    copy_source_node_modules
+fi
 
 # Remove macOS and Windows native binaries from staged node_modules.
 # Packages like koffi ship prebuilt .node binaries for every platform.
@@ -242,7 +290,10 @@ else
 fi
 
 export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
-run_docker build --cache-from openclaw-runtime:latest -t openclaw-runtime:latest "$STAGING_DIR"
+run_docker build \
+    --cache-from openclaw-runtime:latest \
+    -t openclaw-runtime:latest \
+    "$STAGING_DIR"
 
 echo ""
 echo "=== OpenClaw runtime image built: openclaw-runtime:latest ==="

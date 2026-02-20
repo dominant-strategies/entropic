@@ -1,7 +1,6 @@
 use crate::runtime::{
-    macos_docker_socket_candidates, entropic_colima_home_path, Platform, Runtime, RuntimeStatus,
-    ENTROPIC_QEMU_PROFILE, ENTROPIC_VZ_PROFILE, LEGACY_NOVA_QEMU_PROFILE,
-    LEGACY_NOVA_VZ_PROFILE,
+    entropic_colima_home_path, macos_docker_socket_candidates, Platform, Runtime, RuntimeStatus,
+    ENTROPIC_QEMU_PROFILE, ENTROPIC_VZ_PROFILE, LEGACY_NOVA_QEMU_PROFILE, LEGACY_NOVA_VZ_PROFILE,
 };
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -140,7 +139,11 @@ fn resolve_container_proxy_base(proxy_url: &str) -> Result<String, String> {
         return Ok(if path.is_empty() {
             ENTROPIC_PROXY_DEV_ORIGIN.trim_end_matches('/').to_string()
         } else {
-            format!("{}/{}", ENTROPIC_PROXY_DEV_ORIGIN.trim_end_matches('/'), path)
+            format!(
+                "{}/{}",
+                ENTROPIC_PROXY_DEV_ORIGIN.trim_end_matches('/'),
+                path
+            )
         });
     }
 
@@ -248,6 +251,10 @@ fn docker_command() -> Command {
 
 /// The Docker image used for the gateway container.
 const RUNTIME_IMAGE: &str = "openclaw-runtime:latest";
+const SCANNER_IMAGE_REPO: &str = "entropic-skill-scanner";
+const DEFAULT_SCANNER_GIT_REPO: &str = "https://github.com/cisco-ai-defense/skill-scanner.git";
+const DEFAULT_SCANNER_GIT_COMMIT: &str = "dff88dc5fa0fff6382ddb6eff19d245745b93f7a";
+const QMD_COMMAND_PATH: &str = "/data/.bun/bin/qmd";
 
 /// Registry to pull the runtime image from when not available locally.
 /// Override at build time with ENTROPIC_RUNTIME_REGISTRY env var.
@@ -264,6 +271,200 @@ fn runtime_registry_image() -> String {
     }
     // Default: GitHub Container Registry
     "ghcr.io/nickthecook/openclaw-runtime:latest".to_string()
+}
+
+/// Registry to pull the scanner image from when not available locally.
+/// Only used as an explicit fallback when ENTROPIC_SCANNER_REGISTRY is set.
+fn scanner_registry_image() -> Option<String> {
+    // Build-time override
+    if let Some(val) = option_env!("ENTROPIC_SCANNER_REGISTRY") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    // Runtime override
+    if let Ok(val) = std::env::var("ENTROPIC_SCANNER_REGISTRY") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+/// Scanner source repo pin.
+/// Override with ENTROPIC_SCANNER_GIT_REPO.
+fn scanner_git_repo() -> String {
+    if let Some(val) = option_env!("ENTROPIC_SCANNER_GIT_REPO") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(val) = std::env::var("ENTROPIC_SCANNER_GIT_REPO") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    DEFAULT_SCANNER_GIT_REPO.to_string()
+}
+
+/// Scanner source commit pin.
+/// Override with ENTROPIC_SCANNER_GIT_COMMIT.
+fn scanner_git_commit() -> String {
+    if let Some(val) = option_env!("ENTROPIC_SCANNER_GIT_COMMIT") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(val) = std::env::var("ENTROPIC_SCANNER_GIT_COMMIT") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    DEFAULT_SCANNER_GIT_COMMIT.to_string()
+}
+
+/// Python base image used for the scanner template build.
+/// Override with ENTROPIC_SCANNER_BASE_IMAGE.
+fn scanner_base_image() -> String {
+    if let Some(val) = option_env!("ENTROPIC_SCANNER_BASE_IMAGE") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(val) = std::env::var("ENTROPIC_SCANNER_BASE_IMAGE") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "python:3.11-slim".to_string()
+}
+
+/// Pip install spec for scanner template build.
+/// Override with ENTROPIC_SCANNER_PIP_SPEC (for example:
+/// git+https://github.com/cisco-ai-defense/skill-scanner.git@<commit>).
+fn scanner_pip_spec() -> String {
+    if let Some(val) = option_env!("ENTROPIC_SCANNER_PIP_SPEC") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(val) = std::env::var("ENTROPIC_SCANNER_PIP_SPEC") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    format!("git+{}@{}", scanner_git_repo(), scanner_git_commit())
+}
+
+/// Image tag key for scanner cache invalidation.
+/// Changing the scanner source pin or base image yields a new image tag,
+/// so scanner updates happen automatically after commit-hash bumps.
+fn scanner_image_name_for(base_image: &str, pip_spec: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(base_image.as_bytes());
+    hasher.update(b"|");
+    hasher.update(pip_spec.as_bytes());
+    let digest = hasher.finalize();
+    let tag = digest[..6]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+    format!("{}:{}", SCANNER_IMAGE_REPO, tag)
+}
+
+fn scanner_image_name() -> String {
+    scanner_image_name_for(&scanner_base_image(), &scanner_pip_spec())
+}
+
+fn validate_scanner_build_arg(name: &str, value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{} is empty", name));
+    }
+    if trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err(format!("{} contains a newline, which is not allowed", name));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn build_scanner_image_from_template() -> Result<(), String> {
+    let base_image =
+        validate_scanner_build_arg("ENTROPIC_SCANNER_BASE_IMAGE", &scanner_base_image())?;
+    let pip_spec = validate_scanner_build_arg("ENTROPIC_SCANNER_PIP_SPEC", &scanner_pip_spec())?;
+    let scanner_image = scanner_image_name_for(&base_image, &pip_spec);
+
+    let build_root = std::env::temp_dir().join("entropic-skill-scanner-build");
+    fs::create_dir_all(&build_root)
+        .map_err(|e| format!("Failed to create scanner build directory: {}", e))?;
+
+    let dockerfile = build_root.join("Dockerfile");
+    let dockerfile_contents = r#"# syntax=docker/dockerfile:1
+ARG SCANNER_BASE_IMAGE=python:3.11-slim
+FROM ${SCANNER_BASE_IMAGE}
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+ARG SCANNER_PIP_SPEC=git+https://github.com/cisco-ai-defense/skill-scanner.git@dff88dc5fa0fff6382ddb6eff19d245745b93f7a
+RUN python -m pip install --no-cache-dir --upgrade pip && \
+    python -m pip install --no-cache-dir "$SCANNER_PIP_SPEC"
+
+EXPOSE 8000
+CMD ["skill-scanner-api", "--host", "0.0.0.0", "--port", "8000"]
+"#;
+    fs::write(&dockerfile, dockerfile_contents)
+        .map_err(|e| format!("Failed to write scanner Dockerfile: {}", e))?;
+
+    println!(
+        "[Entropic] Building scanner image from template (image={}, base={}, pip={})...",
+        scanner_image, base_image, pip_spec
+    );
+    let build = docker_command()
+        .args([
+            "build",
+            "--pull",
+            "--build-arg",
+            &format!("SCANNER_BASE_IMAGE={}", base_image),
+            "--build-arg",
+            &format!("SCANNER_PIP_SPEC={}", pip_spec),
+            "-t",
+            &scanner_image,
+            "-f",
+        ])
+        .arg(&dockerfile)
+        .arg(&build_root)
+        .output()
+        .map_err(|e| format!("Failed to build scanner image: {}", e))?;
+
+    if !build.status.success() {
+        let stderr = String::from_utf8_lossy(&build.stderr);
+        let stdout = String::from_utf8_lossy(&build.stdout);
+        return Err(format!(
+            "Scanner image build failed: {}{}{}",
+            stderr.trim(),
+            if stderr.trim().is_empty() || stdout.trim().is_empty() {
+                ""
+            } else {
+                " | "
+            },
+            stdout.trim()
+        ));
+    }
+
+    println!("[Entropic] Scanner image built successfully from template");
+    Ok(())
 }
 
 /// Ensure the openclaw-runtime image is available locally.
@@ -339,11 +540,13 @@ fn runtime_image_inspect_once() -> Result<RuntimeImageInspectState, String> {
         return Ok(RuntimeImageInspectState::Missing);
     }
 
-    Ok(RuntimeImageInspectState::Unavailable(if stderr.is_empty() {
-        "unknown docker inspect failure".to_string()
-    } else {
-        stderr
-    }))
+    Ok(RuntimeImageInspectState::Unavailable(
+        if stderr.is_empty() {
+            "unknown docker inspect failure".to_string()
+        } else {
+            stderr
+        },
+    ))
 }
 
 fn runtime_image_id() -> Result<Option<String>, String> {
@@ -401,8 +604,46 @@ fn find_runtime_tar() -> Option<PathBuf> {
     None
 }
 
+fn find_scanner_tar() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+
+    let mut search_dirs = Vec::new();
+
+    // Release bundle: .../Contents/MacOS/Entropic → .../Contents/Resources/
+    if let Some(contents_dir) = exe_dir.parent() {
+        let resources = contents_dir.join("Resources");
+        search_dirs.push(resources.clone());
+        search_dirs.push(resources.join("resources"));
+    }
+
+    // Dev mode: .../target/debug/entropic → .../target/debug/resources/
+    search_dirs.push(exe_dir.join("resources"));
+    // Also check src-tauri/resources/ (when running from project root)
+    search_dirs.push(exe_dir.join("..").join("..").join("resources"));
+
+    for dir in search_dirs {
+        for name in &[
+            "entropic-skill-scanner.tar.gz",
+            "entropic-skill-scanner.tar",
+            "skill-scanner.tar.gz",
+            "skill-scanner.tar",
+        ] {
+            let tar_path = dir.join(name);
+            if tar_path.exists() {
+                return Some(tar_path);
+            }
+        }
+    }
+
+    None
+}
+
 fn load_runtime_from_tar(tar_path: &Path) -> Result<bool, String> {
-    println!("[Entropic] Loading runtime image from {}", tar_path.display());
+    println!(
+        "[Entropic] Loading runtime image from {}",
+        tar_path.display()
+    );
     let load = docker_command()
         .args(["load", "-i"])
         .arg(tar_path)
@@ -414,6 +655,25 @@ fn load_runtime_from_tar(tar_path: &Path) -> Result<bool, String> {
     }
     let stderr = String::from_utf8_lossy(&load.stderr);
     println!("[Entropic] docker load failed: {}", stderr);
+    Ok(false)
+}
+
+fn load_scanner_from_tar(tar_path: &Path) -> Result<bool, String> {
+    println!(
+        "[Entropic] Loading scanner image from {}",
+        tar_path.display()
+    );
+    let load = docker_command()
+        .args(["load", "-i"])
+        .arg(tar_path)
+        .output()
+        .map_err(|e| format!("docker load failed: {}", e))?;
+    if load.status.success() {
+        println!("[Entropic] Scanner image loaded from bundled tar");
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&load.stderr);
+    println!("[Entropic] Scanner docker load failed: {}", stderr);
     Ok(false)
 }
 
@@ -472,7 +732,10 @@ fn ensure_runtime_image() -> Result<(), String> {
 
     // 3. Pull from registry
     let registry_image = runtime_registry_image();
-    println!("[Entropic] Pulling runtime image from {}...", registry_image);
+    println!(
+        "[Entropic] Pulling runtime image from {}...",
+        registry_image
+    );
     let pull = docker_command()
         .args(["pull", &registry_image])
         .output()
@@ -505,71 +768,110 @@ fn ensure_runtime_image() -> Result<(), String> {
 /// Ensure the scanner image is available locally.
 /// 1. If already present → return Ok immediately.
 /// 2. Try loading a bundled tar (resources/entropic-skill-scanner.tar.gz or .tar).
-/// 3. Return an error if the image is still missing.
+/// 3. Build from lightweight template + pip install (cached in Docker).
+/// 4. If configured, pull from registry as explicit fallback.
+/// 5. Return an error if the image is still missing.
 fn ensure_scanner_image() -> Result<(), String> {
+    let scanner_image = scanner_image_name();
     let check = docker_command()
-        .args(["image", "inspect", "entropic-skill-scanner:latest"])
+        .args(["image", "inspect", scanner_image.as_str()])
         .output()
         .map_err(|e| format!("Failed to check scanner image: {}", e))?;
     if check.status.success() {
         return Ok(());
     }
 
-    println!("[Entropic] Scanner image not found locally, attempting to load bundled tar...");
+    if let Some(tar_path) = find_scanner_tar() {
+        match load_scanner_from_tar(&tar_path) {
+            Ok(true) => {
+                let expected_present = docker_command()
+                    .args(["image", "inspect", scanner_image.as_str()])
+                    .output()
+                    .map(|out| out.status.success())
+                    .unwrap_or(false);
+                if expected_present {
+                    return Ok(());
+                }
 
-    let tar_loaded = (|| -> Result<bool, String> {
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let exe_dir = exe.parent().ok_or("Cannot resolve exe dir")?;
-
-        let mut search_dirs = Vec::new();
-
-        // Release bundle: .../Contents/MacOS/Entropic → .../Contents/Resources/
-        if let Some(contents_dir) = exe_dir.parent() {
-            let resources = contents_dir.join("Resources");
-            search_dirs.push(resources.clone());
-            search_dirs.push(resources.join("resources"));
-        }
-
-        // Dev mode: .../target/debug/entropic → .../target/debug/resources/
-        search_dirs.push(exe_dir.join("resources"));
-        // Also check src-tauri/resources/ (when running from project root)
-        search_dirs.push(exe_dir.join("..").join("..").join("resources"));
-
-        for dir in &search_dirs {
-            for name in &[
-                "entropic-skill-scanner.tar.gz",
-                "entropic-skill-scanner.tar",
-                "skill-scanner.tar.gz",
-                "skill-scanner.tar",
-            ] {
-                let tar_path = dir.join(name);
-                if tar_path.exists() {
-                    println!("[Entropic] Loading scanner image from {}", tar_path.display());
-                    let load = docker_command()
-                        .args(["load", "-i"])
-                        .arg(&tar_path)
+                // Compatibility path for legacy bundled tars tagged as :latest.
+                let legacy_latest = format!("{}:latest", SCANNER_IMAGE_REPO);
+                let legacy_present = docker_command()
+                    .args(["image", "inspect", legacy_latest.as_str()])
+                    .output()
+                    .map(|out| out.status.success())
+                    .unwrap_or(false);
+                if legacy_present {
+                    let _ = docker_command()
+                        .args(["tag", legacy_latest.as_str(), scanner_image.as_str()])
+                        .output();
+                    let retagged_present = docker_command()
+                        .args(["image", "inspect", scanner_image.as_str()])
                         .output()
-                        .map_err(|e| format!("docker load failed: {}", e))?;
-                    if load.status.success() {
-                        println!("[Entropic] Scanner image loaded from bundled tar");
-                        return Ok(true);
+                        .map(|out| out.status.success())
+                        .unwrap_or(false);
+                    if retagged_present {
+                        return Ok(());
                     }
-                    let stderr = String::from_utf8_lossy(&load.stderr);
-                    println!("[Entropic] Scanner docker load failed: {}", stderr);
                 }
             }
+            Ok(false) => {} // continue to pull
+            Err(e) => println!("[Entropic] Bundled scanner tar check failed: {}", e),
         }
-        Ok(false)
-    })();
-
-    match tar_loaded {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(
-            "Skill scanner image not available and no bundled scanner tar was found in app resources."
-                .to_string(),
-        ),
-        Err(e) => Err(format!("Failed to load scanner image from bundle: {}", e)),
     }
+
+    // Build from template (first-run only) and rely on Docker image cache afterwards.
+    let build_result = build_scanner_image_from_template();
+    if build_result.is_ok() {
+        return Ok(());
+    }
+    let build_err = match build_result {
+        Ok(_) => String::new(),
+        Err(err) => err,
+    };
+
+    // Optional registry fallback (only when explicitly configured).
+    if let Some(registry_image) = scanner_registry_image() {
+        println!(
+            "[Entropic] Scanner template build failed; pulling fallback image from {}...",
+            registry_image
+        );
+        let pull = docker_command()
+            .args(["pull", &registry_image])
+            .output()
+            .map_err(|e| format!("docker pull failed: {}", e))?;
+
+        if pull.status.success() {
+            if registry_image != scanner_image {
+                let _ = docker_command()
+                    .args(["tag", &registry_image, scanner_image.as_str()])
+                    .output();
+            }
+            println!("[Entropic] Scanner image pulled successfully");
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&pull.stderr);
+        println!("[Entropic] Scanner pull failed: {}", stderr);
+        return Err(format!(
+            "Skill scanner image not available.\n\
+             • Template build failed: {}\n\
+             • Pull failed from {}: {}\n\
+             • Scanner-based skill checks will stay unavailable until scanner dependencies are reachable.",
+            build_err,
+            registry_image,
+            stderr.trim()
+        ));
+    }
+
+    Err(format!(
+        "Skill scanner image not available.\n\
+         • Template build failed: {}\n\
+         • No bundled scanner tar or registry fallback was configured.\n\
+         • Scanner source pin: {}\n\
+         • Scanner-based skill checks will stay unavailable until scanner dependencies are reachable.",
+        build_err,
+        scanner_pip_spec()
+    ))
 }
 
 async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, String> {
@@ -583,7 +885,10 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
         .header("Connection", "Upgrade")
         .header("Upgrade", "websocket")
         .header("Sec-WebSocket-Version", "13")
-        .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
         .body(())
         .map_err(|e| format!("Failed to build request: {}", e))?;
 
@@ -758,6 +1063,7 @@ pub struct AgentProfileState {
     pub heartbeat_tasks: Vec<String>,
     pub memory_enabled: bool,
     pub memory_long_term: bool,
+    pub memory_qmd_enabled: bool,
     pub memory_sessions_enabled: bool,
     pub capabilities: Vec<CapabilityState>,
     pub imessage_enabled: bool,
@@ -1074,6 +1380,7 @@ struct StoredAgentSettings {
     heartbeat_tasks: Vec<String>,
     memory_enabled: bool,
     memory_long_term: bool,
+    memory_qmd_enabled: bool,
     memory_sessions_enabled: bool,
     capabilities: Vec<CapabilityState>,
     identity_name: String,
@@ -1122,6 +1429,7 @@ impl Default for StoredAgentSettings {
             heartbeat_tasks: Vec::new(),
             memory_enabled: true,
             memory_long_term: false,
+            memory_qmd_enabled: false,
             memory_sessions_enabled: true,
             capabilities: vec![
                 CapabilityState {
@@ -1277,7 +1585,12 @@ fn existing_gateway_container_name() -> Option<&'static str> {
 
 fn cleanup_legacy_gateway_artifacts() {
     let check = docker_command()
-        .args(["ps", "-aq", "-f", &format!("name={}", LEGACY_OPENCLAW_CONTAINER)])
+        .args([
+            "ps",
+            "-aq",
+            "-f",
+            &format!("name={}", LEGACY_OPENCLAW_CONTAINER),
+        ])
         .output();
     if let Ok(out) = check {
         if !out.stdout.is_empty() {
@@ -1616,14 +1929,44 @@ fn compute_skill_tree_hash(path: &str) -> Option<String> {
     }
 }
 
+fn scanner_container_image() -> Option<String> {
+    let output = docker_command()
+        .args([
+            "container",
+            "inspect",
+            SCANNER_CONTAINER,
+            "--format",
+            "{{.Config.Image}}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let image = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if image.is_empty() {
+        None
+    } else {
+        Some(image)
+    }
+}
+
 fn start_scanner_sidecar() {
+    let expected_image = scanner_image_name();
+
     // Check if scanner container is already running
     let check = docker_command()
         .args(["ps", "-q", "-f", &format!("name={}", SCANNER_CONTAINER)])
         .output();
     if let Ok(out) = &check {
         if !out.stdout.is_empty() {
-            return; // Already running
+            if scanner_container_image().as_deref() == Some(expected_image.as_str()) {
+                return; // Already running with the expected pinned image.
+            }
+            // Running container uses a stale scanner image pin; recreate it.
+            let _ = docker_command()
+                .args(["rm", "-f", SCANNER_CONTAINER])
+                .output();
         }
     }
 
@@ -1633,10 +1976,12 @@ fn start_scanner_sidecar() {
         .output();
     if let Ok(out) = &check_all {
         if !out.stdout.is_empty() {
-            let start = docker_command().args(["start", SCANNER_CONTAINER]).output();
-            if let Ok(s) = &start {
-                if s.status.success() {
-                    return;
+            if scanner_container_image().as_deref() == Some(expected_image.as_str()) {
+                let start = docker_command().args(["start", SCANNER_CONTAINER]).output();
+                if let Ok(s) = &start {
+                    if s.status.success() {
+                        return;
+                    }
                 }
             }
             // Start failed, remove and recreate
@@ -1646,7 +1991,7 @@ fn start_scanner_sidecar() {
         }
     }
 
-    // Ensure scanner image is available (bundled tar in releases).
+    // Ensure scanner image is available (local cache, bundled tar fallback, or registry pull).
     if let Err(err) = ensure_scanner_image() {
         eprintln!("[scanner] {}", err);
         return;
@@ -1673,7 +2018,7 @@ fn start_scanner_sidecar() {
             OPENCLAW_NETWORK,
             "-p",
             &format!("127.0.0.1:{}:8000", SCANNER_HOST_PORT),
-            "entropic-skill-scanner:latest",
+            expected_image.as_str(),
         ])
         .output();
 
@@ -1685,12 +2030,6 @@ fn start_scanner_sidecar() {
         Err(e) => eprintln!("[scanner] Failed to start scanner sidecar: {}", e),
         _ => {}
     }
-}
-
-fn start_scanner_sidecar_background() {
-    tauri::async_runtime::spawn(async {
-        let _ = tokio::task::spawn_blocking(start_scanner_sidecar).await;
-    });
 }
 
 fn stop_scanner_sidecar() {
@@ -1713,6 +2052,63 @@ fn docker_exec_output(args: &[&str]) -> Result<String, String> {
         return Err(stderr.to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn ensure_qmd_runtime_dependencies() -> Result<(), String> {
+    if !named_gateway_container_exists(OPENCLAW_CONTAINER, true) {
+        return Err(
+            "Gateway container is not running. Start gateway first, then enable QMD.".to_string(),
+        );
+    }
+
+    // Install QMD + tsx into persistent /data/.bun when missing.
+    let install_script = r#"
+set -e
+export HOME=/data
+export BUN_INSTALL=/data/.bun
+export PATH="/data/.bun/bin:$PATH"
+mkdir -p /data/.bun /data/workspace/node_modules
+
+if [ -x /data/.bun/bin/qmd ] || command -v qmd >/dev/null 2>&1; then
+  if [ -d /data/.bun/install/global/node_modules/tsx ]; then
+    ln -sfn /data/.bun/install/global/node_modules/tsx /data/workspace/node_modules/tsx
+  fi
+  exit 0
+fi
+
+if ! command -v bun >/dev/null 2>&1; then
+  curl -fsSL https://bun.sh/install | bash
+fi
+
+bun install -g https://github.com/tobi/qmd tsx
+ln -sfn /data/.bun/install/global/node_modules/tsx /data/workspace/node_modules/tsx
+
+if [ ! -x /data/.bun/bin/qmd ]; then
+  echo "qmd binary not found after install" >&2
+  exit 1
+fi
+"#;
+
+    let output = docker_command()
+        .args(["exec", OPENCLAW_CONTAINER, "sh", "-lc", install_script])
+        .output()
+        .map_err(|e| format!("Failed to run QMD bootstrap in gateway container: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "Failed to install/prepare QMD runtime dependencies: {}{}{}",
+            stderr.trim(),
+            if stderr.trim().is_empty() || stdout.trim().is_empty() {
+                ""
+            } else {
+                " | "
+            },
+            stdout.trim()
+        ));
+    }
+
+    Ok(())
 }
 
 fn command_output_error(output: &Output) -> String {
@@ -2556,27 +2952,17 @@ fn apply_default_qmd_memory_config(
     cfg: &mut serde_json::Value,
     slot: &str,
     sessions_enabled: bool,
+    qmd_enabled: bool,
 ) {
     if !cfg.is_object() {
         *cfg = serde_json::json!({});
     }
     let cfg_obj = cfg.as_object_mut().expect("config root must be an object");
     let memory_enabled = slot != "none";
-
-    // DISABLED: QMD memory config not supported by current runtime
-    // The top-level "memory" key causes validation errors in openclaw.json
-    // TODO: Re-enable when runtime supports QMD
-    /*
-    let memory_backend = cfg_obj
-        .get("memory")
-        .and_then(|memory| memory.get("backend"))
-        .and_then(|backend| backend.as_str());
-
-    let using_qmd = memory_enabled && !matches!(memory_backend, Some("builtin"));
+    let using_qmd = memory_enabled && qmd_enabled;
 
     if using_qmd {
         let memory = ensure_object_entry(cfg_obj, "memory");
-
         memory.insert("backend".to_string(), serde_json::json!("qmd"));
 
         if !memory.contains_key("citations") {
@@ -2584,14 +2970,13 @@ fn apply_default_qmd_memory_config(
         }
 
         let qmd = ensure_object_entry(memory, "qmd");
-
-        if qmd.get("command").and_then(|v| v.as_str()) == Some("/data/qmd-wrapper")
-            || !qmd.contains_key("command")
-        {
-            // `qmd` is now the native OpenClaw-backed command; this avoids
-            // the previous wrapper path, but still requires the qmd runtime deps
-            // from the container image (including the tsx resolver shim).
-            qmd.insert("command".to_string(), serde_json::json!("qmd"));
+        let command_missing = qmd
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+        if command_missing {
+            qmd.insert("command".to_string(), serde_json::json!(QMD_COMMAND_PATH));
         }
 
         if !qmd.contains_key("includeDefaultMemory") {
@@ -2625,20 +3010,9 @@ fn apply_default_qmd_memory_config(
         if !limits.contains_key("timeoutMs") {
             limits.insert("timeoutMs".to_string(), serde_json::json!(4000));
         }
-    } else if let Some(memory) = cfg_obj
-        .get_mut("memory")
-        .and_then(|memory| memory.as_object_mut())
-    {
-        if let Some(qmd) = memory.get_mut("qmd").and_then(|qmd| qmd.as_object_mut()) {
-            if qmd.get("command").and_then(|value| value.as_str()) == Some("/data/qmd-wrapper") {
-                qmd.remove("command");
-            }
-        }
+    } else {
+        cfg_obj.remove("memory");
     }
-    */
-
-    // Remove any existing "memory" key to prevent validation errors
-    cfg_obj.remove("memory");
 
     // Configure agents.defaults.memorySearch (this IS supported by current runtime)
     let agents = ensure_object_entry(cfg_obj, "agents");
@@ -2657,7 +3031,7 @@ fn apply_default_qmd_memory_config(
 
     memory_search_obj.insert("enabled".to_string(), serde_json::json!(memory_enabled));
 
-    // Set memory sources (since QMD is disabled, always use builtin memory)
+    // Keep memory search sources aligned with session-memory setting.
     if !memory_search_obj.contains_key("sources") {
         if sessions_enabled {
             memory_search_obj.insert(
@@ -3234,7 +3608,12 @@ Use it for durable decisions, preferences, and facts that should persist across 
         &["plugins", "slots", "memory"],
         serde_json::json!(memory_slot),
     );
-    apply_default_qmd_memory_config(&mut cfg, memory_slot, memory_sessions_enabled);
+    apply_default_qmd_memory_config(
+        &mut cfg,
+        memory_slot,
+        memory_sessions_enabled,
+        settings.memory_qmd_enabled,
+    );
     set_openclaw_config_value(
         &mut cfg,
         &["agents", "defaults", "heartbeat"],
@@ -3454,7 +3833,12 @@ Use it for durable decisions, preferences, and facts that should persist across 
         .unwrap_or("none")
         .to_string();
     let memory_sessions_enabled = settings.memory_sessions_enabled;
-    apply_default_qmd_memory_config(&mut cfg, &effective_slot, memory_sessions_enabled);
+    apply_default_qmd_memory_config(
+        &mut cfg,
+        &effective_slot,
+        memory_sessions_enabled,
+        settings.memory_qmd_enabled,
+    );
 
     set_openclaw_config_value(
         &mut cfg,
@@ -3741,7 +4125,9 @@ Use it for durable decisions, preferences, and facts that should persist across 
             );
         }
     } else {
-        println!("[Entropic] apply_agent_settings: ENTROPIC_THINKING_LEVEL not set in container env");
+        println!(
+            "[Entropic] apply_agent_settings: ENTROPIC_THINKING_LEVEL not set in container env"
+        );
     }
 
     println!(
@@ -3777,8 +4163,8 @@ Use it for durable decisions, preferences, and facts that should persist across 
                         }
                     }
                 });
-                let payload = serde_json::to_string_pretty(&auth_profiles)
-                    .map_err(|e| e.to_string())?;
+                let payload =
+                    serde_json::to_string_pretty(&auth_profiles).map_err(|e| e.to_string())?;
                 if let Err(e) = write_container_file(
                     "/home/node/.openclaw/agents/main/agent/auth-profiles.json",
                     &payload,
@@ -3824,8 +4210,8 @@ Use it for durable decisions, preferences, and facts that should persist across 
                     }
                 }
             });
-            let payload = serde_json::to_string_pretty(&auth_profiles)
-                .map_err(|e| e.to_string())?;
+            let payload =
+                serde_json::to_string_pretty(&auth_profiles).map_err(|e| e.to_string())?;
             if let Err(e) = write_container_file(
                 "/home/node/.openclaw/agents/main/agent/auth-profiles.json",
                 &payload,
@@ -3908,10 +4294,22 @@ fn merge_auth_with_legacy(mut current: StoredAuth, legacy: StoredAuth) -> Stored
         current.keys.entry(provider).or_insert(key);
     }
 
-    if current.active_provider.as_deref().unwrap_or("").trim().is_empty() {
+    if current
+        .active_provider
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
         current.active_provider = legacy.active_provider;
     }
-    if current.gateway_token.as_deref().unwrap_or("").trim().is_empty() {
+    if current
+        .gateway_token
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
         current.gateway_token = legacy.gateway_token;
     }
     if current.agent_settings.is_none() {
@@ -3931,8 +4329,13 @@ fn migrate_legacy_nova_store_files(app: &AppHandle) -> Result<Vec<String>, Strin
         .path()
         .app_data_dir()
         .map_err(|_| "Failed to resolve app data dir".to_string())?;
-    fs::create_dir_all(&current_dir)
-        .map_err(|e| format!("Failed to create app data dir {}: {}", current_dir.display(), e))?;
+    fs::create_dir_all(&current_dir).map_err(|e| {
+        format!(
+            "Failed to create app data dir {}: {}",
+            current_dir.display(),
+            e
+        )
+    })?;
 
     let Some(legacy_dir) = find_legacy_nova_app_data_dir(&current_dir) else {
         log.push("No legacy Nova app data directory found.".to_string());
@@ -5359,7 +5762,8 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
                         .output()
                         .and_then(|out| {
                             let containers = String::from_utf8_lossy(&out.stdout);
-                            for container_id in containers.lines().filter(|l| !l.trim().is_empty()) {
+                            for container_id in containers.lines().filter(|l| !l.trim().is_empty())
+                            {
                                 let _ = std::process::Command::new("docker")
                                     .args(&["rm", "-f", container_id])
                                     .env("DOCKER_HOST", &host)
@@ -5382,10 +5786,11 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
         // Delete Colima VMs
         cleanup_log.push("Deleting Colima VMs...".to_string());
         for colima_home in &colima_homes {
-            let prefix = if colima_home
-                .to_string_lossy()
-                .contains(&format!("{}{}", std::path::MAIN_SEPARATOR, ".nova"))
-            {
+            let prefix = if colima_home.to_string_lossy().contains(&format!(
+                "{}{}",
+                std::path::MAIN_SEPARATOR,
+                ".nova"
+            )) {
                 "Removing legacy"
             } else {
                 "Removing runtime"
@@ -5552,7 +5957,11 @@ pub async fn get_auth_state(state: State<'_, AppState>) -> Result<AuthState, Str
 }
 
 #[tauri::command]
-pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Option<String>) -> Result<(), String> {
+pub async fn start_gateway(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model: Option<String>,
+) -> Result<(), String> {
     let startup_started = Instant::now();
     let _start_guard = gateway_start_lock().lock().await;
     // Get API keys from state
@@ -5676,13 +6085,15 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
         let legacy_proxy_mode = read_container_env("NOVA_PROXY_MODE");
         // Check if the Anthropic auth type matches (OAuth token vs API key)
         let has_oauth_token = read_container_env("ANTHROPIC_OAUTH_TOKEN").is_some();
-        let wants_oauth_token = api_keys.get("anthropic").map_or(false, |k| k.starts_with("sk-ant-oat01-"));
+        let wants_oauth_token = api_keys
+            .get("anthropic")
+            .map_or(false, |k| k.starts_with("sk-ant-oat01-"));
         let auth_type_matches = has_oauth_token == wants_oauth_token;
         // Only reuse the running container if token, schema, model, and auth type all match
         // AND the container isn't a stale proxy-mode instance (start_gateway = local keys).
         // Check both new and legacy proxy mode env vars to properly detect old containers
-        let is_proxy_container = current_proxy_mode.as_deref() == Some("1")
-            || legacy_proxy_mode.as_deref() == Some("1");
+        let is_proxy_container =
+            current_proxy_mode.as_deref() == Some("1") || legacy_proxy_mode.as_deref() == Some("1");
         if !is_proxy_container
             && auth_type_matches
             && current_gateway_token.as_deref() == Some(gateway_token.as_str())
@@ -5690,7 +6101,6 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
             && current_model.as_deref() == Some(base_model)
         {
             apply_agent_settings(&app, &state)?;
-            start_scanner_sidecar_background();
             return Ok(());
         }
 
@@ -5738,7 +6148,10 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
     // Build docker run command - pass API keys as env vars
     let mut env_entries: Vec<(&str, &str)> = vec![
         ("OPENCLAW_GATEWAY_TOKEN", gateway_token.as_str()),
-        ("ENTROPIC_GATEWAY_SCHEMA_VERSION", ENTROPIC_GATEWAY_SCHEMA_VERSION),
+        (
+            "ENTROPIC_GATEWAY_SCHEMA_VERSION",
+            ENTROPIC_GATEWAY_SCHEMA_VERSION,
+        ),
         // OPENCLAW_MODEL is read by apply_agent_settings to write openclaw.json config.
         // Keep base model and pass reasoning/thinking separately.
         ("OPENCLAW_MODEL", base_model),
@@ -5840,7 +6253,10 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
     }
 
     // Create and start container with hardened settings
-    println!("[Entropic] Starting gateway container with model: {}", model_full);
+    println!(
+        "[Entropic] Starting gateway container with model: {}",
+        model_full
+    );
     println!(
         "[Entropic] Docker command: docker {}",
         docker_args_for_log(&docker_args)
@@ -5888,7 +6304,6 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
     }
     apply_agent_settings(&app, &state)?;
     println!("[Entropic] Startup timing: post_health_config applied");
-    start_scanner_sidecar_background();
     println!(
         "[Entropic] Startup timing: health={}ms total={}ms",
         health_started.elapsed().as_millis(),
@@ -5969,7 +6384,10 @@ pub async fn start_gateway_with_proxy(
     let build_proxy_docker_args = || -> Result<(Vec<String>, GatewayEnvFile), String> {
         let mut env_entries: Vec<(&str, &str)> = vec![
             ("OPENCLAW_GATEWAY_TOKEN", local_gateway_token.as_str()),
-            ("ENTROPIC_GATEWAY_SCHEMA_VERSION", ENTROPIC_GATEWAY_SCHEMA_VERSION),
+            (
+                "ENTROPIC_GATEWAY_SCHEMA_VERSION",
+                ENTROPIC_GATEWAY_SCHEMA_VERSION,
+            ),
             ("OPENCLAW_MODEL", model.as_str()),
             ("OPENCLAW_MEMORY_SLOT", "memory-core"),
             ("ENTROPIC_PROXY_MODE", "1"),
@@ -6100,7 +6518,6 @@ pub async fn start_gateway_with_proxy(
                 health_started.elapsed().as_millis(),
                 startup_started.elapsed().as_millis()
             );
-            start_scanner_sidecar_background();
             return Ok(());
         }
 
@@ -6160,7 +6577,9 @@ pub async fn start_gateway_with_proxy(
         let stderr = String::from_utf8_lossy(&run.stderr);
         println!("[Entropic] Failed to start proxy container: {}", stderr);
         if stderr.contains("Conflict. The container name") {
-            println!("[Entropic] Existing container conflict detected; attempting cleanup and retry.");
+            println!(
+                "[Entropic] Existing container conflict detected; attempting cleanup and retry."
+            );
             let cleanup = docker_command()
                 .args(["rm", "-f", OPENCLAW_CONTAINER])
                 .output()
@@ -6230,7 +6649,6 @@ pub async fn start_gateway_with_proxy(
     }
     apply_agent_settings(&app, &state)?;
     println!("[Entropic] Startup timing (proxy): post_health_config applied");
-    start_scanner_sidecar_background();
     println!(
         "[Entropic] Startup timing (proxy): health={}ms total={}ms",
         health_started.elapsed().as_millis(),
@@ -6288,7 +6706,11 @@ pub fn update_gateway_model(model: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn restart_gateway(app: AppHandle, state: State<'_, AppState>, model: Option<String>) -> Result<(), String> {
+pub async fn restart_gateway(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model: Option<String>,
+) -> Result<(), String> {
     // Stop and remove existing container (to pick up new env vars)
     for name in [OPENCLAW_CONTAINER, LEGACY_OPENCLAW_CONTAINER] {
         let _ = docker_command().args(["stop", name]).output();
@@ -6419,6 +6841,12 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         "memory-lancedb" => (true, true),
         _ => (true, false),
     };
+    let memory_qmd_enabled = cfg
+        .get("memory")
+        .and_then(|memory| memory.get("backend"))
+        .and_then(|backend| backend.as_str())
+        .map(|backend| backend == "qmd")
+        .unwrap_or(stored.memory_qmd_enabled);
     let memory_sessions_enabled = stored.memory_sessions_enabled;
 
     let imessage_cfg = cfg.get("channels").and_then(|v| v.get("imessage"));
@@ -6479,7 +6907,9 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
     let telegram_token = if use_stored_telegram {
         stored.telegram_token.clone()
     } else {
-        cfg_telegram_token.unwrap_or(stored_telegram_token).to_string()
+        cfg_telegram_token
+            .unwrap_or(stored_telegram_token)
+            .to_string()
     };
     let telegram_dm_policy = if use_stored_telegram {
         stored.telegram_dm_policy.clone()
@@ -6652,6 +7082,7 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         } else {
             memory_long_term
         },
+        memory_qmd_enabled,
         memory_sessions_enabled,
         capabilities,
         imessage_enabled,
@@ -6801,11 +7232,49 @@ pub async fn set_memory(
     }
 
     let memory_sessions_enabled = settings.memory_sessions_enabled;
-    apply_default_qmd_memory_config(&mut cfg, slot, memory_sessions_enabled);
+    apply_default_qmd_memory_config(
+        &mut cfg,
+        slot,
+        memory_sessions_enabled,
+        settings.memory_qmd_enabled,
+    );
 
     write_openclaw_config(&cfg)?;
     settings.memory_enabled = memory_enabled;
     settings.memory_long_term = long_term;
+    save_agent_settings(&app, settings)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_memory_qmd_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = load_agent_settings(&app);
+    let mut cfg = read_openclaw_config();
+    let slot = cfg
+        .get("plugins")
+        .and_then(|plugins| plugins.get("slots"))
+        .and_then(|slots| slots.get("memory"))
+        .and_then(|value| value.as_str())
+        .unwrap_or(if settings.memory_enabled {
+            if settings.memory_long_term {
+                "memory-lancedb"
+            } else {
+                "memory-core"
+            }
+        } else {
+            "none"
+        })
+        .to_string();
+
+    if enabled {
+        ensure_qmd_runtime_dependencies()?;
+    }
+
+    let memory_sessions_enabled = settings.memory_sessions_enabled;
+    apply_default_qmd_memory_config(&mut cfg, &slot, memory_sessions_enabled, enabled);
+    write_openclaw_config(&cfg)?;
+
+    settings.memory_qmd_enabled = enabled;
     save_agent_settings(&app, settings)?;
     Ok(())
 }
@@ -6829,7 +7298,7 @@ pub async fn set_memory_session_indexing(app: AppHandle, enabled: bool) -> Resul
             "none"
         })
         .to_string();
-    apply_default_qmd_memory_config(&mut cfg, &slot, enabled);
+    apply_default_qmd_memory_config(&mut cfg, &slot, enabled, settings.memory_qmd_enabled);
     write_openclaw_config(&cfg)?;
     settings.memory_sessions_enabled = enabled;
     save_agent_settings(&app, settings)?;
@@ -7248,7 +7717,11 @@ pub async fn set_channels_config(
 
 #[tauri::command]
 pub async fn approve_pairing(channel: String, code: String) -> Result<String, String> {
-    eprintln!("[approve_pairing] Called with channel='{}', code length={}", channel, code.len());
+    eprintln!(
+        "[approve_pairing] Called with channel='{}', code length={}",
+        channel,
+        code.len()
+    );
 
     let channel = channel.trim();
     let code = code.trim();
@@ -7352,14 +7825,23 @@ pub async fn validate_telegram_token(
         });
     }
 
-    let bot = payload.get("result").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let bot = payload
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
     let bot_id = bot.get("id").and_then(|value| value.as_i64());
     let username = bot
         .get("username")
         .and_then(|value| value.as_str())
         .map(ToOwned::to_owned);
-    let first_name = bot.get("first_name").and_then(|value| value.as_str()).unwrap_or("");
-    let last_name = bot.get("last_name").and_then(|value| value.as_str()).unwrap_or("");
+    let first_name = bot
+        .get("first_name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let last_name = bot
+        .get("last_name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     let display_name = format!("{} {}", first_name.trim(), last_name.trim())
         .trim()
         .to_string();
@@ -7466,7 +7948,8 @@ fn run_gateway_doctor_with_data_volume(fix: bool) -> Result<Output, String> {
 
 fn run_gateway_doctor_with_fallback(fix: bool) -> Result<(Output, Option<&'static str>), String> {
     if let Some(container) = running_gateway_container_name() {
-        return run_gateway_doctor_in_container(container, fix).map(|output| (output, Some(container)));
+        return run_gateway_doctor_in_container(container, fix)
+            .map(|output| (output, Some(container)));
     }
 
     run_gateway_doctor_with_data_volume(fix).map(|output| (output, None))
@@ -7587,7 +8070,8 @@ pub async fn get_gateway_config_health() -> Result<GatewayConfigHealth, String> 
     let combined = format!("{}\n{}", stdout, stderr);
     let combined_trimmed = combined.trim();
 
-    let has_invalid_config = combined.contains("Invalid config at") || combined.contains("Config invalid");
+    let has_invalid_config =
+        combined.contains("Invalid config at") || combined.contains("Config invalid");
     if has_invalid_config {
         let issues = extract_doctor_problem_lines(combined_trimmed);
         let summary = if issues.is_empty() {
@@ -8219,43 +8703,49 @@ pub async fn scan_plugin(id: String) -> Result<PluginScanResult, String> {
         return Ok(scanner_unavailable_result());
     }
 
-    let mut source_dir = format!("/app/extensions/{}", plugin_id);
-    let mut exists = docker_command()
-        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &source_dir])
-        .output()
-        .map_err(|e| format!("Failed to inspect plugin directory: {}", e))?
-        .status
-        .success();
+    let scan_result = async {
+        let mut source_dir = format!("/app/extensions/{}", plugin_id);
+        let mut exists = docker_command()
+            .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &source_dir])
+            .output()
+            .map_err(|e| format!("Failed to inspect plugin directory: {}", e))?
+            .status
+            .success();
 
-    if !exists {
-        if let Some(skills_root) = read_container_env("ENTROPIC_SKILLS_PATH") {
-            let base = format!("{}/{}", skills_root.trim_end_matches('/'), plugin_id);
-            let current = format!("{}/current", base);
-            let candidate = if container_path_exists(&current) {
-                current
-            } else {
-                base
-            };
-            let candidate_exists = docker_command()
-                .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &candidate])
-                .output()
-                .map_err(|e| format!("Failed to inspect plugin directory: {}", e))?
-                .status
-                .success();
-            if candidate_exists {
-                source_dir = candidate;
-                exists = true;
+        if !exists {
+            if let Some(skills_root) = read_container_env("ENTROPIC_SKILLS_PATH") {
+                let base = format!("{}/{}", skills_root.trim_end_matches('/'), plugin_id);
+                let current = format!("{}/current", base);
+                let candidate = if container_path_exists(&current) {
+                    current
+                } else {
+                    base
+                };
+                let candidate_exists = docker_command()
+                    .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &candidate])
+                    .output()
+                    .map_err(|e| format!("Failed to inspect plugin directory: {}", e))?
+                    .status
+                    .success();
+                if candidate_exists {
+                    source_dir = candidate;
+                    exists = true;
+                }
             }
         }
-    }
 
-    if !exists {
-        return Err("Plugin directory not found".to_string());
-    }
+        if !exists {
+            return Err("Plugin directory not found".to_string());
+        }
 
-    let scanner_dir = format!("/tmp/entropic-scan/plugins/{}", plugin_id);
-    clone_dir_from_openclaw_to_scanner(&source_dir, &scanner_dir)?;
-    scan_directory_with_scanner(&scanner_dir).await
+        let scanner_dir = format!("/tmp/entropic-scan/plugins/{}", plugin_id);
+        clone_dir_from_openclaw_to_scanner(&source_dir, &scanner_dir)?;
+        scan_directory_with_scanner(&scanner_dir).await
+    }
+    .await;
+
+    stop_scanner_sidecar();
+    scan_result
 }
 
 #[tauri::command]
@@ -8270,12 +8760,18 @@ pub async fn scan_workspace_skill(id: String) -> Result<PluginScanResult, String
         return Ok(scanner_unavailable_result());
     }
 
-    let source_dir = resolve_installed_skill_dir(&skill_id)?
-        .ok_or_else(|| "Skill directory not found".to_string())?;
+    let scan_result = async {
+        let source_dir = resolve_installed_skill_dir(&skill_id)?
+            .ok_or_else(|| "Skill directory not found".to_string())?;
 
-    let scanner_dir = format!("/tmp/entropic-scan/workspace-skills/{}", skill_id);
-    clone_dir_from_openclaw_to_scanner(&source_dir, &scanner_dir)?;
-    scan_directory_with_scanner(&scanner_dir).await
+        let scanner_dir = format!("/tmp/entropic-scan/workspace-skills/{}", skill_id);
+        clone_dir_from_openclaw_to_scanner(&source_dir, &scanner_dir)?;
+        scan_directory_with_scanner(&scanner_dir).await
+    }
+    .await;
+
+    stop_scanner_sidecar();
+    scan_result
 }
 
 fn resolve_downloaded_skill_path(temp_root: &str, slug: &str) -> Result<(String, String), String> {
@@ -8351,249 +8847,255 @@ pub async fn scan_and_install_clawhub_skill(
         });
     }
 
-    let temp_root = format!("/tmp/entropic-clawhub-scan-{}", unique_id());
-    docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "mkdir",
-        "-p",
-        "--",
-        &format!("{}/skills", temp_root),
-    ])?;
+    let install_result = async {
+        let temp_root = format!("/tmp/entropic-clawhub-scan-{}", unique_id());
+        docker_exec_output(&[
+            "exec",
+            OPENCLAW_CONTAINER,
+            "mkdir",
+            "-p",
+            "--",
+            &format!("{}/skills", temp_root),
+        ])?;
 
-    let cleanup = |root: &str| {
-        let _ = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-rf", "--", root]);
-    };
+        let cleanup = |root: &str| {
+            let _ = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-rf", "--", root]);
+        };
 
-    let fetch_result = clawhub_exec_with_retry(&[
-        "install",
-        &trimmed_slug,
-        "--workdir",
-        &temp_root,
-        "--dir",
-        "skills",
-        "--no-input",
-        "--force",
-    ], 3)
-    .map_err(|e| format!("Failed to run ClawHub install: {}", e))?;
+        let fetch_result = clawhub_exec_with_retry(
+            &[
+                "install",
+                &trimmed_slug,
+                "--workdir",
+                &temp_root,
+                "--dir",
+                "skills",
+                "--no-input",
+                "--force",
+            ],
+            3,
+        )
+        .map_err(|e| format!("Failed to run ClawHub install: {}", e))?;
 
-    if !fetch_result.status.success() {
-        cleanup(&temp_root);
-        return Err(format!(
-            "ClawHub install failed: {}",
-            command_output_error(&fetch_result)
-        ));
-    }
+        if !fetch_result.status.success() {
+            cleanup(&temp_root);
+            return Err(format!(
+                "ClawHub install failed: {}",
+                command_output_error(&fetch_result)
+            ));
+        }
 
-    let (downloaded_path, detected_skill_id) =
-        match resolve_downloaded_skill_path(&temp_root, &trimmed_slug) {
+        let (downloaded_path, detected_skill_id) =
+            match resolve_downloaded_skill_path(&temp_root, &trimmed_slug) {
+                Ok(value) => value,
+                Err(err) => {
+                    cleanup(&temp_root);
+                    return Err(err);
+                }
+            };
+        let scanner_dir = format!("/tmp/entropic-scan/clawhub/{}", detected_skill_id);
+        if let Err(err) = clone_dir_from_openclaw_to_scanner(&downloaded_path, &scanner_dir) {
+            cleanup(&temp_root);
+            return Err(err);
+        }
+        let scan = match scan_directory_with_scanner(&scanner_dir).await {
             Ok(value) => value,
             Err(err) => {
                 cleanup(&temp_root);
                 return Err(err);
             }
         };
-    let scanner_dir = format!("/tmp/entropic-scan/clawhub/{}", detected_skill_id);
-    if let Err(err) = clone_dir_from_openclaw_to_scanner(&downloaded_path, &scanner_dir) {
-        cleanup(&temp_root);
-        return Err(err);
-    }
-    let scan = match scan_directory_with_scanner(&scanner_dir).await {
-        Ok(value) => value,
-        Err(err) => {
+
+        if !scan.is_safe
+            && scan.scanner_available
+            && (scan.max_severity == "CRITICAL" || scan.max_severity == "HIGH")
+            && !allow_unsafe
+        {
             cleanup(&temp_root);
-            return Err(err);
+            return Ok(ClawhubInstallResult {
+                scan,
+                installed: false,
+                blocked: true,
+                message: Some("Installation blocked due to high-severity findings".to_string()),
+                installed_skill_id: Some(detected_skill_id),
+            });
         }
-    };
 
-    if !scan.is_safe
-        && scan.scanner_available
-        && (scan.max_severity == "CRITICAL" || scan.max_severity == "HIGH")
-        && !allow_unsafe
-    {
-        cleanup(&temp_root);
-        return Ok(ClawhubInstallResult {
-            scan,
-            installed: false,
-            blocked: true,
-            message: Some("Installation blocked due to high-severity findings".to_string()),
-            installed_skill_id: Some(detected_skill_id),
-        });
-    }
+        // Resolve version — try the API but fall back to "latest" on rate-limit.
+        let skill_version = clawhub_latest_version(&trimmed_slug)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "latest".to_string());
 
-    // Resolve version — try the API but fall back to "latest" on rate-limit.
-    let skill_version = clawhub_latest_version(&trimmed_slug)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "latest".to_string());
-
-    // Copy the already-downloaded skill from the temp scan dir to the final
-    // location instead of re-downloading from ClawHub (avoids a second API
-    // call and the rate-limit that comes with it).
-    let final_skill_dir = format!("{}/{}/{}", SKILLS_ROOT, detected_skill_id, skill_version);
-    let copy_script = format!(
-        "mkdir -p {} && cp -a {}/. {}",
-        sh_single_quote(&final_skill_dir),
-        sh_single_quote(downloaded_path.trim_end_matches('/')),
-        sh_single_quote(&final_skill_dir),
-    );
-    if let Err(err) = docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "sh",
-        "-c",
-        &copy_script,
-    ]) {
-        cleanup(&temp_root);
-        return Err(format!("Failed to install skill from scan cache: {}", err));
-    }
-
-    cleanup(&temp_root);
-
-    let skill_family_root = format!("{}/{}", SKILLS_ROOT, detected_skill_id);
-    let current_link = format!("{}/current", skill_family_root);
-    let _ = docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "sh",
-        "-c",
-        &format!(
-            "mkdir -p -- {} && ln -sfn {} {}",
-            sh_single_quote(&skill_family_root),
-            sh_single_quote(&skill_version),
-            sh_single_quote(&current_link)
-        ),
-    ]);
-
-    let installed_version_root = format!("{}/{}/{}", SKILLS_ROOT, detected_skill_id, skill_version);
-    let installed_skill_path = match resolve_skill_root_in_container(
-        OPENCLAW_CONTAINER,
-        &installed_version_root,
-        Some(&detected_skill_id),
-    ) {
-        Ok(Some(path)) => path,
-        Ok(None) => installed_version_root.clone(),
-        Err(err) => {
-            eprintln!(
-                "[Entropic] Failed to resolve installed skill root for {}: {}",
-                detected_skill_id, err
-            );
-            installed_version_root.clone()
-        }
-    };
-    let installed_skill_md =
-        read_container_file(&format!("{}/SKILL.md", installed_skill_path)).unwrap_or_default();
-
-    // Mirror the active skill into workspace/skills so OpenClaw's native skills
-    // loader can discover it for chat runs.
-    let workspace_skills_root = format!("{}/skills", WORKSPACE_ROOT);
-    let workspace_skill_path = format!("{}/{}", workspace_skills_root, detected_skill_id);
-    let source_contents = format!("{}/.", installed_skill_path.trim_end_matches('/'));
-    docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "mkdir",
-        "-p",
-        "--",
-        &workspace_skills_root,
-    ])
-    .map_err(|e| format!("Failed to prepare workspace skills directory: {}", e))?;
-    docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "rm",
-        "-rf",
-        "--",
-        &workspace_skill_path,
-    ])
-    .map_err(|e| format!("Failed to remove previous workspace skill copy: {}", e))?;
-    docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "mkdir",
-        "-p",
-        "--",
-        &workspace_skill_path,
-    ])
-    .map_err(|e| format!("Failed to create workspace skill directory: {}", e))?;
-    docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "cp",
-        "-a",
-        "--",
-        &source_contents,
-        &workspace_skill_path,
-    ])
-    .map_err(|e| format!("Failed to sync installed skill into workspace: {}", e))?;
-
-    let manifest_path = format!(
-        "{}/{}/{}.json",
-        SKILL_MANIFESTS_ROOT, detected_skill_id, skill_version
-    );
-    let tree_hash = compute_skill_tree_hash(&installed_skill_path);
-    let scope_flags = infer_skill_scope_flags(&installed_skill_md);
-    let manifest_skill_id = detected_skill_id.clone();
-    let manifest_source_slug = trimmed_slug.clone();
-    let manifest_version = skill_version.clone();
-    let manifest_path_value = installed_skill_path.clone();
-    let manifest = serde_json::json!({
-        "schema": "entropic-skill-manifest/v1",
-        "skill_id": manifest_skill_id,
-        "source_slug": manifest_source_slug,
-        "version": manifest_version,
-        "installed_at_ms": current_millis(),
-        "path": manifest_path_value,
-        "scan_id": scan.scan_id,
-        "integrity": {
-            "sha256_tree": tree_hash,
-            "signature": serde_json::Value::Null
-        },
-        "scopes": scope_flags,
-        "scan": {
-            "is_safe": scan.is_safe,
-            "max_severity": scan.max_severity,
-            "findings_count": scan.findings_count,
-        }
-    });
-    write_container_file(
-        &manifest_path,
-        &serde_json::to_string_pretty(&manifest)
-            .map_err(|e| format!("Failed to serialize skill manifest: {}", e))?,
-    )?;
-
-    // Hot-register the new skill in the runtime config so the chat agent
-    // can discover it immediately without a full gateway restart.
-    if let Err(e) = apply_agent_settings(&app, &state) {
-        eprintln!(
-            "[Entropic] Failed to apply agent settings after skill install: {}",
-            e
+        // Copy the already-downloaded skill from the temp scan dir to the final
+        // location instead of re-downloading from ClawHub (avoids a second API
+        // call and the rate-limit that comes with it).
+        let final_skill_dir = format!("{}/{}/{}", SKILLS_ROOT, detected_skill_id, skill_version);
+        let copy_script = format!(
+            "mkdir -p {} && cp -a {}/. {}",
+            sh_single_quote(&final_skill_dir),
+            sh_single_quote(downloaded_path.trim_end_matches('/')),
+            sh_single_quote(&final_skill_dir),
         );
-    }
-    // OpenClaw can cache plugin/tool registry at process start. If the
-    // gateway is running in local-keys mode, recreate it so newly installed
-    // skills are loaded. Proxy-mode containers cannot be restarted this way
-    // (no local keys available); apply_agent_settings above already
-    // hot-registered the skill into the workspace config.
-    let is_proxy_mode = read_container_env("ENTROPIC_PROXY_MODE").is_some();
-    if container_running() && !is_proxy_mode {
-        println!("[Entropic] Restarting gateway to load newly installed skill...");
-        let _ = app.emit("gateway-restarting", ());
-        if let Err(e) = restart_gateway(app.clone(), state, None).await {
+        if let Err(err) =
+            docker_exec_output(&["exec", OPENCLAW_CONTAINER, "sh", "-c", &copy_script])
+        {
+            cleanup(&temp_root);
+            return Err(format!("Failed to install skill from scan cache: {}", err));
+        }
+
+        cleanup(&temp_root);
+
+        let skill_family_root = format!("{}/{}", SKILLS_ROOT, detected_skill_id);
+        let current_link = format!("{}/current", skill_family_root);
+        let _ = docker_exec_output(&[
+            "exec",
+            OPENCLAW_CONTAINER,
+            "sh",
+            "-c",
+            &format!(
+                "mkdir -p -- {} && ln -sfn {} {}",
+                sh_single_quote(&skill_family_root),
+                sh_single_quote(&skill_version),
+                sh_single_quote(&current_link)
+            ),
+        ]);
+
+        let installed_version_root =
+            format!("{}/{}/{}", SKILLS_ROOT, detected_skill_id, skill_version);
+        let installed_skill_path = match resolve_skill_root_in_container(
+            OPENCLAW_CONTAINER,
+            &installed_version_root,
+            Some(&detected_skill_id),
+        ) {
+            Ok(Some(path)) => path,
+            Ok(None) => installed_version_root.clone(),
+            Err(err) => {
+                eprintln!(
+                    "[Entropic] Failed to resolve installed skill root for {}: {}",
+                    detected_skill_id, err
+                );
+                installed_version_root.clone()
+            }
+        };
+        let installed_skill_md =
+            read_container_file(&format!("{}/SKILL.md", installed_skill_path)).unwrap_or_default();
+
+        // Mirror the active skill into workspace/skills so OpenClaw's native skills
+        // loader can discover it for chat runs.
+        let workspace_skills_root = format!("{}/skills", WORKSPACE_ROOT);
+        let workspace_skill_path = format!("{}/{}", workspace_skills_root, detected_skill_id);
+        let source_contents = format!("{}/.", installed_skill_path.trim_end_matches('/'));
+        docker_exec_output(&[
+            "exec",
+            OPENCLAW_CONTAINER,
+            "mkdir",
+            "-p",
+            "--",
+            &workspace_skills_root,
+        ])
+        .map_err(|e| format!("Failed to prepare workspace skills directory: {}", e))?;
+        docker_exec_output(&[
+            "exec",
+            OPENCLAW_CONTAINER,
+            "rm",
+            "-rf",
+            "--",
+            &workspace_skill_path,
+        ])
+        .map_err(|e| format!("Failed to remove previous workspace skill copy: {}", e))?;
+        docker_exec_output(&[
+            "exec",
+            OPENCLAW_CONTAINER,
+            "mkdir",
+            "-p",
+            "--",
+            &workspace_skill_path,
+        ])
+        .map_err(|e| format!("Failed to create workspace skill directory: {}", e))?;
+        docker_exec_output(&[
+            "exec",
+            OPENCLAW_CONTAINER,
+            "cp",
+            "-a",
+            "--",
+            &source_contents,
+            &workspace_skill_path,
+        ])
+        .map_err(|e| format!("Failed to sync installed skill into workspace: {}", e))?;
+
+        let manifest_path = format!(
+            "{}/{}/{}.json",
+            SKILL_MANIFESTS_ROOT, detected_skill_id, skill_version
+        );
+        let tree_hash = compute_skill_tree_hash(&installed_skill_path);
+        let scope_flags = infer_skill_scope_flags(&installed_skill_md);
+        let manifest_skill_id = detected_skill_id.clone();
+        let manifest_source_slug = trimmed_slug.clone();
+        let manifest_version = skill_version.clone();
+        let manifest_path_value = installed_skill_path.clone();
+        let manifest = serde_json::json!({
+            "schema": "entropic-skill-manifest/v1",
+            "skill_id": manifest_skill_id,
+            "source_slug": manifest_source_slug,
+            "version": manifest_version,
+            "installed_at_ms": current_millis(),
+            "path": manifest_path_value,
+            "scan_id": scan.scan_id,
+            "integrity": {
+                "sha256_tree": tree_hash,
+                "signature": serde_json::Value::Null
+            },
+            "scopes": scope_flags,
+            "scan": {
+                "is_safe": scan.is_safe,
+                "max_severity": scan.max_severity,
+                "findings_count": scan.findings_count,
+            }
+        });
+        write_container_file(
+            &manifest_path,
+            &serde_json::to_string_pretty(&manifest)
+                .map_err(|e| format!("Failed to serialize skill manifest: {}", e))?,
+        )?;
+
+        // Hot-register the new skill in the runtime config so the chat agent
+        // can discover it immediately without a full gateway restart.
+        if let Err(e) = apply_agent_settings(&app, &state) {
             eprintln!(
-                "[Entropic] Failed to restart gateway after skill install: {}",
+                "[Entropic] Failed to apply agent settings after skill install: {}",
                 e
             );
         }
-    }
+        // OpenClaw can cache plugin/tool registry at process start. If the
+        // gateway is running in local-keys mode, recreate it so newly installed
+        // skills are loaded. Proxy-mode containers cannot be restarted this way
+        // (no local keys available); apply_agent_settings above already
+        // hot-registered the skill into the workspace config.
+        let is_proxy_mode = read_container_env("ENTROPIC_PROXY_MODE").is_some();
+        if container_running() && !is_proxy_mode {
+            println!("[Entropic] Restarting gateway to load newly installed skill...");
+            let _ = app.emit("gateway-restarting", ());
+            if let Err(e) = restart_gateway(app.clone(), state, None).await {
+                eprintln!(
+                    "[Entropic] Failed to restart gateway after skill install: {}",
+                    e
+                );
+            }
+        }
 
-    Ok(ClawhubInstallResult {
-        scan,
-        installed: true,
-        blocked: false,
-        message: None,
-        installed_skill_id: Some(detected_skill_id),
-    })
+        Ok(ClawhubInstallResult {
+            scan,
+            installed: true,
+            blocked: false,
+            message: None,
+            installed_skill_id: Some(detected_skill_id),
+        })
+    }
+    .await;
+
+    stop_scanner_sidecar();
+    install_result
 }
 
 #[tauri::command]
@@ -8660,8 +9162,7 @@ async fn run_first_time_setup_internal(
                 let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
                 *progress = SetupProgress {
                     stage: "vm".to_string(),
-                    message: "Starting container runtime..."
-                        .to_string(),
+                    message: "Starting container runtime...".to_string(),
                     percent: 10,
                     complete: false,
                     error: None,
@@ -8670,7 +9171,8 @@ async fn run_first_time_setup_internal(
 
             // Start Colima in a background thread so we can monitor download progress
             let resources_dir = app.path().resource_dir().unwrap_or_default();
-            let colima_result = std::sync::Arc::new(std::sync::Mutex::new(None::<Result<(), String>>));
+            let colima_result =
+                std::sync::Arc::new(std::sync::Mutex::new(None::<Result<(), String>>));
             let colima_result_writer = colima_result.clone();
             let colima_thread = std::thread::spawn(move || {
                 let rt = Runtime::new(resources_dir);
@@ -8699,7 +9201,11 @@ async fn run_first_time_setup_internal(
                     .map(|entries| {
                         entries
                             .filter_map(|e| e.ok())
-                            .filter(|e| e.path().extension().map_or(false, |ext| ext == "downloading"))
+                            .filter(|e| {
+                                e.path()
+                                    .extension()
+                                    .map_or(false, |ext| ext == "downloading")
+                            })
                             .filter_map(|e| e.metadata().ok().map(|m| m.len()))
                             .max()
                             .unwrap_or(0)
@@ -8708,10 +9214,8 @@ async fn run_first_time_setup_internal(
 
                 let (message, percent) = if download_size > 0 {
                     let mb = download_size / (1024 * 1024);
-                    let pct = std::cmp::min(
-                        35,
-                        10 + (download_size * 25 / EXPECTED_DOWNLOAD_SIZE) as u8,
-                    );
+                    let pct =
+                        std::cmp::min(35, 10 + (download_size * 25 / EXPECTED_DOWNLOAD_SIZE) as u8);
                     (format!("Downloading VM image... ({} MB)", mb), pct)
                 } else {
                     // No download file — either hasn't started or already finished
@@ -9794,13 +10298,16 @@ pub async fn start_anthropic_oauth(
 
     // Store verifier for the completion step
     {
-        let mut v = state.anthropic_oauth_verifier.lock().map_err(|e| e.to_string())?;
+        let mut v = state
+            .anthropic_oauth_verifier
+            .lock()
+            .map_err(|e| e.to_string())?;
         *v = Some(verifier.clone());
     }
 
     // Build authorize URL — state IS the verifier (matches Claude Code / OpenClaw convention)
-    let mut url = Url::parse(ANTHROPIC_AUTH_URL)
-        .map_err(|_| "Failed to build OAuth URL".to_string())?;
+    let mut url =
+        Url::parse(ANTHROPIC_AUTH_URL).map_err(|_| "Failed to build OAuth URL".to_string())?;
     url.query_pairs_mut()
         .append_pair("code", "true")
         .append_pair("client_id", ANTHROPIC_OAUTH_CLIENT_ID)
@@ -9824,8 +10331,14 @@ fn parse_anthropic_code_state(input: &str) -> Result<(String, String), String> {
 
     // Try as URL first (user may paste the full callback URL)
     if let Ok(url) = Url::parse(text) {
-        let code = url.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.to_string());
-        let state = url.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.to_string());
+        let code = url
+            .query_pairs()
+            .find(|(k, _)| k == "code")
+            .map(|(_, v)| v.to_string());
+        let state = url
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.to_string());
         if let (Some(c), Some(s)) = (code, state) {
             if !c.is_empty() && !s.is_empty() {
                 return Ok((c, s));
@@ -9855,13 +10368,19 @@ pub async fn complete_anthropic_oauth(
 
     // Retrieve and consume the stored verifier
     let verifier = {
-        let mut v = state.anthropic_oauth_verifier.lock().map_err(|e| e.to_string())?;
-        v.take().ok_or("No pending Anthropic OAuth flow. Please click Sign In first.")?
+        let mut v = state
+            .anthropic_oauth_verifier
+            .lock()
+            .map_err(|e| e.to_string())?;
+        v.take()
+            .ok_or("No pending Anthropic OAuth flow. Please click Sign In first.")?
     };
 
     // Validate state matches verifier (state == verifier in this flow)
     if returned_state != verifier {
-        return Err("OAuth state mismatch — the code may have expired. Please try again.".to_string());
+        return Err(
+            "OAuth state mismatch — the code may have expired. Please try again.".to_string(),
+        );
     }
 
     // Exchange code for tokens using JSON body (matching Claude Code / OpenClaw)
@@ -9884,7 +10403,10 @@ pub async fn complete_anthropic_oauth(
         .map_err(|e| format!("Token exchange failed: {}", e))?;
 
     if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_else(|_| "unknown error".to_string());
+        let text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown error".to_string());
         return Err(format!("Token exchange failed: {}", text));
     }
 
@@ -9900,7 +10422,9 @@ pub async fn complete_anthropic_oauth(
         .map_err(|_| "Clock error".to_string())?
         .as_millis() as u64;
     // Subtract 5 minutes as buffer (matches OpenClaw convention)
-    let expires_at = now_ms.saturating_add(expires_in * 1000).saturating_sub(5 * 60 * 1000);
+    let expires_at = now_ms
+        .saturating_add(expires_in * 1000)
+        .saturating_sub(5 * 60 * 1000);
 
     let provider = "anthropic".to_string();
 
@@ -9950,12 +10474,15 @@ pub async fn start_openai_oauth(
 
     // OpenAI requires the exact registered redirect URI on port 1455
     let redirect_uri = "http://localhost:1455/auth/callback".to_string();
-    let listener = TcpListener::bind("127.0.0.1:1455")
-        .await
-        .map_err(|e| format!("Failed to bind OAuth callback server on port 1455 (is another app using it?): {}", e))?;
+    let listener = TcpListener::bind("127.0.0.1:1455").await.map_err(|e| {
+        format!(
+            "Failed to bind OAuth callback server on port 1455 (is another app using it?): {}",
+            e
+        )
+    })?;
 
-    let mut url = Url::parse(OPENAI_AUTH_URL)
-        .map_err(|_| "Failed to build OAuth URL".to_string())?;
+    let mut url =
+        Url::parse(OPENAI_AUTH_URL).map_err(|_| "Failed to build OAuth URL".to_string())?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", OPENAI_OAUTH_CLIENT_ID)
@@ -9991,7 +10518,10 @@ pub async fn start_openai_oauth(
         .map_err(|e| format!("Token exchange failed: {}", e))?;
 
     if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_else(|_| "unknown error".to_string());
+        let text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown error".to_string());
         return Err(format!("Token exchange failed: {}", text));
     }
 
@@ -10073,7 +10603,11 @@ async fn wait_for_openai_oauth_callback(
         return Err(format!("OAuth callback returned error: {}", error));
     }
 
-    let code = match url.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.to_string()) {
+    let code = match url
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.to_string())
+    {
         Some(c) => c,
         None => {
             let html = oauth_callback_html(
@@ -10294,7 +10828,9 @@ pub async fn refresh_provider_token(
         .await
         .map_err(|e| format!("Failed to parse refresh response: {}", e))?;
 
-    let new_refresh = data.refresh_token.unwrap_or_else(|| meta.refresh_token.clone());
+    let new_refresh = data
+        .refresh_token
+        .unwrap_or_else(|| meta.refresh_token.clone());
     let expires_in = data.expires_in.unwrap_or(3600);
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)

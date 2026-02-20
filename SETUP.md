@@ -266,12 +266,18 @@ Set by Rust backend when starting container:
 | `OPENAI_API_KEY` | OpenAI API key (if provided) |
 | `GEMINI_API_KEY` | Google API key (if provided) |
 
+## Completed
+
+- [x] Colima first-run setup + bundled CLI — Colima v0.9.1, Lima v2.0.3, Docker CLI v27.5.1 bundled in app. `SetupScreen` handles first-run with VZ/QEMU fallback, download progress, error recovery.
+- [x] Colima security posture — Isolated Colima home (`~/.entropic/colima`, mode `0700`), dedicated profiles (`entropic-vz`/`entropic-qemu`). System Docker socket excluded by default (`ENTROPIC_RUNTIME_ALLOW_DOCKER_DESKTOP` escape hatch required). No Docker socket mounted into runtime container.
+- [x] Code signing + notarization for macOS — `release.yml` handles certificate import, binary signing (including bundled `colima`/`limactl`/`docker` with entitlements), DMG creation, `notarytool submit --wait`, stapling. Local script `scripts/sign-notarize-macos.sh` also available.
+- [x] Auto-updater — `tauri-plugin-updater` v2.10, silent check-on-launch in `App.tsx` with version loop prevention, signed `latest.json` published to GitHub Releases for macOS and Linux.
+- [x] Hardened container defaults — `--cap-drop=ALL`, `--read-only`, `--security-opt no-new-privileges`, `--user 1000:1000`, tmpfs for writable areas.
+- [x] Linux builds — AppImage via `release-linux.yml` with updater signature.
+
 ## Next Steps (TODO)
 
 - [ ] Ship with QMD (https://github.com/tobi/qmd) bundled and enabled
 - [ ] Keychain integration for persistent API key storage
-- [ ] Colima first-run setup + bundled CLI for normie install
-- [ ] Colima security posture: locked-down defaults + limited VM networking
-- [ ] Code signing + notarization for macOS
-- [ ] Auto-updater
-- [ ] Windows/Linux builds
+- [ ] Resource limits for runtime container (`--memory`, `--cpus`, `--pids-limit`)
+- [ ] Windows builds

@@ -117,19 +117,10 @@ ensure_runtime_images() {
     DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
       "$PROJECT_ROOT/scripts/build-openclaw-runtime.sh"
   fi
-
-  if ! run_docker image inspect entropic-skill-scanner:latest >/dev/null 2>&1; then
-    echo "[dev] entropic-skill-scanner:latest missing in dev daemon. Building..."
-    ENTROPIC_RUNTIME_MODE=dev \
-    ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
-    DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
-      "$PROJECT_ROOT/scripts/build-skill-scanner.sh"
-  fi
 }
 
 ensure_runtime_tars() {
   local runtime_tar="$PROJECT_ROOT/src-tauri/resources/openclaw-runtime.tar.gz"
-  local scanner_tar="$PROJECT_ROOT/src-tauri/resources/entropic-skill-scanner.tar.gz"
 
   mkdir -p "$PROJECT_ROOT/src-tauri/resources"
 
@@ -138,16 +129,6 @@ ensure_runtime_tars() {
     ENTROPIC_RUNTIME_MODE=dev \
     ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
     DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
-      "$PROJECT_ROOT/scripts/bundle-runtime-image.sh"
-  fi
-
-  if [ ! -f "$scanner_tar" ]; then
-    echo "[dev] Bundling runtime tar (entropic-skill-scanner:latest)..."
-    ENTROPIC_RUNTIME_MODE=dev \
-    ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
-    DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
-    IMAGE="entropic-skill-scanner:latest" \
-    OUTPUT="$scanner_tar" \
       "$PROJECT_ROOT/scripts/bundle-runtime-image.sh"
   fi
 }

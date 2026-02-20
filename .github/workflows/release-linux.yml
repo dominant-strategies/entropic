@@ -105,20 +105,9 @@ jobs:
           ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
         run: ./scripts/bundle-runtime-image.sh
 
-      - name: Build skill scanner image (linux/amd64)
-        env:
-          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
-        run: ./scripts/build-skill-scanner.sh
-
-      - name: Bundle skill scanner image tar
-        env:
-          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
-        run: IMAGE=entropic-skill-scanner:latest OUTPUT=src-tauri/resources/entropic-skill-scanner.tar.gz ./scripts/bundle-runtime-image.sh
-
       - name: Reclaim disk after runtime bundle
         run: |
           docker image rm openclaw-runtime:latest || true
-          docker image rm entropic-skill-scanner:latest || true
           docker builder prune -af || true
           docker system prune -af --volumes || true
           rm -rf openclaw/node_modules openclaw entropic-skills || true

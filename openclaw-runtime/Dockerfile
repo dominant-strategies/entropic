@@ -15,8 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ln -sfn /data/qmd-models /home/node/.cache/qmd/models && \
     chown -R node:node /data /home/node/.openclaw /home/node/.bun /home/node/.cache
 
-ENV BUN_INSTALL=/home/node/.bun
-ENV PATH="/home/node/.bun/bin:${PATH}"
+ENV BUN_INSTALL=/data/.bun
+ENV PATH="/data/.bun/bin:${PATH}"
 
 WORKDIR /app
 
@@ -35,11 +35,8 @@ RUN echo "module.exports = { read: () => '', write: () => {}, readSync: () => ''
 # Switch to non-root user
 USER node
 
-# Install qmd (native backend) and tsx in the image for deterministic startup.
-RUN curl -fsSL https://bun.sh/install | bash && \
-    bun install -g https://github.com/tobi/qmd tsx
-
-ENV NODE_PATH="/home/node/.bun/install/global/node_modules${NODE_PATH:+:$NODE_PATH}"
+# QMD is installed on-demand at runtime when enabled in Settings.
+ENV NODE_PATH="/data/.bun/install/global/node_modules:/home/node/.bun/install/global/node_modules${NODE_PATH:+:$NODE_PATH}"
 
 # Health check
 # /health can return 503 when control-ui assets are intentionally omitted.

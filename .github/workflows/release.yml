@@ -83,27 +83,11 @@ jobs:
           ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
         run: ./scripts/bundle-runtime-image.sh
 
-      - name: Build skill scanner image (linux/arm64)
-        working-directory: entropic
-        env:
-          DOCKER_DEFAULT_PLATFORM: linux/arm64
-        run: ./scripts/build-skill-scanner.sh
-
-      - name: Bundle skill scanner image tar
-        working-directory: entropic
-        run: IMAGE=entropic-skill-scanner:latest OUTPUT=src-tauri/resources/entropic-skill-scanner.tar.gz ./scripts/bundle-runtime-image.sh
-
       - name: Upload runtime image tar
         uses: actions/upload-artifact@v4
         with:
           name: openclaw-runtime-arm64
           path: entropic/src-tauri/resources/openclaw-runtime.tar.gz
-
-      - name: Upload skill scanner image tar
-        uses: actions/upload-artifact@v4
-        with:
-          name: skill-scanner-arm64
-          path: entropic/src-tauri/resources/entropic-skill-scanner.tar.gz
 
   # ──────────────────────────────────────────────
   # macOS (Apple Silicon)
@@ -138,12 +122,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: openclaw-runtime-arm64
-          path: src-tauri/resources
-
-      - name: Download skill scanner image tar (linux/arm64)
-        uses: actions/download-artifact@v4
-        with:
-          name: skill-scanner-arm64
           path: src-tauri/resources
 
       - name: Bundle runtime (Colima + Lima + Docker CLI)
