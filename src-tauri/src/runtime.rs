@@ -1072,7 +1072,8 @@ impl Runtime {
 
         format!(
             "unix://{}",
-            self.colima_socket_for_profile(ENTROPIC_VZ_PROFILE).display()
+            self.colima_socket_for_profile(ENTROPIC_VZ_PROFILE)
+                .display()
         )
     }
 

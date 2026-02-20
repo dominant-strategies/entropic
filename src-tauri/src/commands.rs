@@ -1331,17 +1331,12 @@ fn download_scanner_tar_from_release(scanner_image: &str) -> Result<(), String> 
     println!("[Entropic] Downloading scanner image from {}...", url);
 
     let temp_dir = std::env::temp_dir().join("entropic-scanner-download");
-    fs::create_dir_all(&temp_dir)
-        .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+    fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp directory: {}", e))?;
 
     let temp_tar = temp_dir.join("scanner.tar.gz");
 
     let download = std::process::Command::new("curl")
-        .args([
-            "-fSL",
-            "--max-time", "300",
-            "-o",
-        ])
+        .args(["-fSL", "--max-time", "300", "-o"])
         .arg(&temp_tar)
         .arg(&url)
         .output()
@@ -1349,7 +1344,10 @@ fn download_scanner_tar_from_release(scanner_image: &str) -> Result<(), String> 
 
     if !download.status.success() {
         let stderr = String::from_utf8_lossy(&download.stderr);
-        return Err(format!("Failed to download scanner tar from {}: {}", url, stderr));
+        return Err(format!(
+            "Failed to download scanner tar from {}: {}",
+            url, stderr
+        ));
     }
 
     println!("[Entropic] Loading scanner image from downloaded tar...");
@@ -1511,13 +1509,11 @@ fn ensure_runtime_image() -> Result<(), String> {
         ));
     }
 
-    Err(
-        "OpenClaw runtime image not available.\n\
+    Err("OpenClaw runtime image not available.\n\
          • No cached or bundled runtime image tar found.\n\
          • Registry pull fallback is disabled (set OPENCLAW_RUNTIME_REGISTRY to enable).\n\
          • To build locally: ./scripts/build-openclaw-runtime.sh"
-            .to_string(),
-    )
+        .to_string())
 }
 
 /// Ensure the scanner image is available locally.
@@ -1582,7 +1578,10 @@ fn ensure_scanner_image() -> Result<(), String> {
             return Ok(());
         }
         Err(e) => {
-            println!("[Entropic] Scanner download from runtime release failed: {}", e);
+            println!(
+                "[Entropic] Scanner download from runtime release failed: {}",
+                e
+            );
         }
     }
 
@@ -2306,6 +2305,23 @@ fn gateway_start_lock() -> &'static AsyncMutex<()> {
 
 fn applied_agent_settings_fingerprint() -> &'static Mutex<Option<String>> {
     APPLIED_AGENT_SETTINGS_FINGERPRINT.get_or_init(|| Mutex::new(None))
+}
+
+fn clear_applied_agent_settings_fingerprint() -> Result<(), String> {
+    let mut cache = applied_agent_settings_fingerprint()
+        .lock()
+        .map_err(|e| e.to_string())?;
+    *cache = None;
+    Ok(())
+}
+
+fn gateway_health_error_suggests_control_ui_auth(error: &str) -> bool {
+    let lowered = error.to_ascii_lowercase();
+    lowered.contains("secure context")
+        || lowered.contains("control ui requires")
+        || lowered.contains("pairing required")
+        || lowered.contains("not-paired")
+        || (lowered.contains("origin") && lowered.contains("allow"))
 }
 
 fn named_gateway_container_exists(name: &str, running_only: bool) -> bool {
@@ -4610,32 +4626,6 @@ Use it for durable decisions, preferences, and facts that should persist across 
 
     set_openclaw_config_value(
         &mut cfg,
-        &["channels", "discord", "enabled"],
-        serde_json::json!(settings.discord_enabled),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "discord", "token"],
-        serde_json::json!(settings.discord_token.clone()),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "discord", "groupPolicy"],
-        serde_json::json!("allowlist"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "discord", "configWrites"],
-        serde_json::json!(false),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["plugins", "entries", "discord", "enabled"],
-        serde_json::json!(settings.discord_enabled),
-    );
-
-    set_openclaw_config_value(
-        &mut cfg,
         &["channels", "telegram", "enabled"],
         serde_json::json!(settings.telegram_enabled),
     );
@@ -4687,185 +4677,8 @@ Use it for durable decisions, preferences, and facts that should persist across 
         serde_json::json!(settings.telegram_enabled),
     );
 
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "slack", "enabled"],
-        serde_json::json!(settings.slack_enabled),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "slack", "botToken"],
-        serde_json::json!(settings.slack_bot_token.clone()),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "slack", "appToken"],
-        serde_json::json!(settings.slack_app_token.clone()),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "slack", "dm", "policy"],
-        serde_json::json!("pairing"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "slack", "groupPolicy"],
-        serde_json::json!("allowlist"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "slack", "configWrites"],
-        serde_json::json!(false),
-    );
-    remove_openclaw_config_value(&mut cfg, &["channels", "slack", "dmPolicy"]);
-    set_openclaw_config_value(
-        &mut cfg,
-        &["plugins", "entries", "slack", "enabled"],
-        serde_json::json!(settings.slack_enabled),
-    );
-
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "googlechat", "enabled"],
-        serde_json::json!(settings.googlechat_enabled),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "googlechat", "audienceType"],
-        serde_json::json!(if settings.googlechat_audience_type.trim().is_empty() {
-            "app-url"
-        } else {
-            settings.googlechat_audience_type.trim()
-        }),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "googlechat", "webhookPath"],
-        serde_json::json!("/googlechat"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "googlechat", "dm", "policy"],
-        serde_json::json!("pairing"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "googlechat", "groupPolicy"],
-        serde_json::json!("allowlist"),
-    );
-    if settings.googlechat_service_account.trim().is_empty() {
-        remove_openclaw_config_value(&mut cfg, &["channels", "googlechat", "serviceAccount"]);
-    } else {
-        set_openclaw_config_value(
-            &mut cfg,
-            &["channels", "googlechat", "serviceAccount"],
-            serde_json::json!(settings.googlechat_service_account.clone()),
-        );
-    }
-    if settings.googlechat_audience.trim().is_empty() {
-        remove_openclaw_config_value(&mut cfg, &["channels", "googlechat", "audience"]);
-    } else {
-        set_openclaw_config_value(
-            &mut cfg,
-            &["channels", "googlechat", "audience"],
-            serde_json::json!(settings.googlechat_audience.trim()),
-        );
-    }
-    set_openclaw_config_value(
-        &mut cfg,
-        &["plugins", "entries", "googlechat", "enabled"],
-        serde_json::json!(settings.googlechat_enabled),
-    );
-
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "whatsapp", "configWrites"],
-        serde_json::json!(false),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "whatsapp", "groupPolicy"],
-        serde_json::json!("allowlist"),
-    );
-    remove_openclaw_config_value(&mut cfg, &["channels", "whatsapp", "enabled"]);
-    if settings.whatsapp_allow_from.trim().is_empty() {
-        set_openclaw_config_value(
-            &mut cfg,
-            &["channels", "whatsapp", "dmPolicy"],
-            serde_json::json!("pairing"),
-        );
-        remove_openclaw_config_value(&mut cfg, &["channels", "whatsapp", "allowFrom"]);
-    } else {
-        set_openclaw_config_value(
-            &mut cfg,
-            &["channels", "whatsapp", "dmPolicy"],
-            serde_json::json!("allowlist"),
-        );
-        set_openclaw_config_value(
-            &mut cfg,
-            &["channels", "whatsapp", "allowFrom"],
-            serde_json::json!([settings.whatsapp_allow_from.trim()]),
-        );
-    }
-    set_openclaw_config_value(
-        &mut cfg,
-        &["plugins", "entries", "whatsapp", "enabled"],
-        serde_json::json!(settings.whatsapp_enabled),
-    );
-
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "enabled"],
-        serde_json::json!(settings.imessage_enabled),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "cliPath"],
-        serde_json::json!(settings.imessage_cli_path.clone()),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "dbPath"],
-        serde_json::json!(settings.imessage_db_path.clone()),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "includeAttachments"],
-        serde_json::json!(settings.imessage_include_attachments),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "dmPolicy"],
-        serde_json::json!("pairing"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "groupPolicy"],
-        serde_json::json!("allowlist"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "configWrites"],
-        serde_json::json!(false),
-    );
-    if settings.imessage_remote_host.trim().is_empty() {
-        remove_openclaw_config_value(&mut cfg, &["channels", "imessage", "remoteHost"]);
-    } else {
-        set_openclaw_config_value(
-            &mut cfg,
-            &["channels", "imessage", "remoteHost"],
-            serde_json::json!(settings.imessage_remote_host.clone()),
-        );
-    }
-    set_openclaw_config_value(
-        &mut cfg,
-        &["plugins", "entries", "imessage", "enabled"],
-        serde_json::json!(settings.imessage_enabled),
-    );
-
-    // Only suppress legacy messaging channels once bridge has at least one
-    // paired device. A stale bridge_enabled flag alone should not disable
-    // Telegram/Discord/Slack on gateway restarts.
+    // Only suppress Telegram once bridge has at least one paired device.
+    // A stale bridge_enabled flag alone should not disable Telegram on gateway restarts.
     if settings.bridge_enabled && has_paired_bridge_devices(&settings) {
         disable_legacy_messaging_config(&mut cfg);
     }
@@ -5572,19 +5385,8 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         &["plugins", "slots"],
         &["plugins", "load", "paths"],
         &["plugins", "entries", "memory-lancedb"],
-        &["plugins", "entries", "discord"],
         &["plugins", "entries", "telegram"],
-        &["plugins", "entries", "slack"],
-        &["plugins", "entries", "googlechat"],
-        &["plugins", "entries", "whatsapp"],
-        &["plugins", "entries", "imessage"],
-        &["channels", "discord"],
         &["channels", "telegram", "groups", "*"],
-        &["channels", "slack"],
-        &["channels", "slack", "dm"],
-        &["channels", "googlechat", "dm"],
-        &["channels", "whatsapp"],
-        &["channels", "imessage"],
         &["cron"],
     ];
 
@@ -5649,22 +5451,6 @@ fn disable_legacy_messaging_config(cfg: &mut serde_json::Value) {
 
     set_openclaw_config_value(
         cfg,
-        &["channels", "discord", "enabled"],
-        serde_json::json!(false),
-    );
-    set_openclaw_config_value(
-        cfg,
-        &["channels", "discord", "token"],
-        serde_json::json!(""),
-    );
-    set_openclaw_config_value(
-        cfg,
-        &["plugins", "entries", "discord", "enabled"],
-        serde_json::json!(false),
-    );
-
-    set_openclaw_config_value(
-        cfg,
         &["channels", "telegram", "enabled"],
         serde_json::json!(false),
     );
@@ -5676,59 +5462,6 @@ fn disable_legacy_messaging_config(cfg: &mut serde_json::Value) {
     set_openclaw_config_value(
         cfg,
         &["plugins", "entries", "telegram", "enabled"],
-        serde_json::json!(false),
-    );
-
-    set_openclaw_config_value(
-        cfg,
-        &["channels", "slack", "enabled"],
-        serde_json::json!(false),
-    );
-    set_openclaw_config_value(
-        cfg,
-        &["channels", "slack", "botToken"],
-        serde_json::json!(""),
-    );
-    set_openclaw_config_value(
-        cfg,
-        &["channels", "slack", "appToken"],
-        serde_json::json!(""),
-    );
-    set_openclaw_config_value(
-        cfg,
-        &["plugins", "entries", "slack", "enabled"],
-        serde_json::json!(false),
-    );
-
-    set_openclaw_config_value(
-        cfg,
-        &["channels", "googlechat", "enabled"],
-        serde_json::json!(false),
-    );
-    remove_openclaw_config_value(cfg, &["channels", "googlechat", "serviceAccount"]);
-    remove_openclaw_config_value(cfg, &["channels", "googlechat", "audience"]);
-    set_openclaw_config_value(
-        cfg,
-        &["plugins", "entries", "googlechat", "enabled"],
-        serde_json::json!(false),
-    );
-
-    set_openclaw_config_value(
-        cfg,
-        &["plugins", "entries", "whatsapp", "enabled"],
-        serde_json::json!(false),
-    );
-    remove_openclaw_config_value(cfg, &["channels", "whatsapp", "allowFrom"]);
-
-    set_openclaw_config_value(
-        cfg,
-        &["channels", "imessage", "enabled"],
-        serde_json::json!(false),
-    );
-    remove_openclaw_config_value(cfg, &["channels", "imessage", "remoteHost"]);
-    set_openclaw_config_value(
-        cfg,
-        &["plugins", "entries", "imessage", "enabled"],
         serde_json::json!(false),
     );
 }
@@ -6557,11 +6290,51 @@ async fn recover_gateway_health(
     state: &AppState,
 ) -> Result<(), String> {
     if let Err(initial) = wait_for_gateway_health_strict(token, 12).await {
+        let mut initial_error = initial;
+
+        // If the runtime booted with an older config shape, force-write the latest
+        // control UI settings before attempting longer waits/restarts.
+        if gateway_health_error_suggests_control_ui_auth(&initial_error) {
+            println!(
+                "[Entropic] {} health check suggests control UI auth mismatch; forcing config self-heal: {}",
+                label, initial_error
+            );
+            clear_applied_agent_settings_fingerprint()?;
+            if let Err(apply_err) = apply_agent_settings(app, state) {
+                println!(
+                    "[Entropic] {} config self-heal write failed: {}",
+                    label, apply_err
+                );
+            } else {
+                match wait_for_gateway_health_strict(token, 8).await {
+                    Ok(()) => return Ok(()),
+                    Err(err) => {
+                        println!(
+                            "[Entropic] {} config self-heal retry still failing: {}",
+                            label, err
+                        );
+                        // OpenClaw may not hot-reload config updates.
+                        // Restart so it reboots with the rewritten control-ui auth settings.
+                        let restart = docker_command()
+                            .args(["restart", OPENCLAW_CONTAINER])
+                            .output();
+                        if let Err(restart_err) = restart {
+                            println!(
+                                "[Entropic] {} config self-heal restart attempt failed: {}",
+                                label, restart_err
+                            );
+                        }
+                        initial_error = err;
+                    }
+                }
+            }
+        }
+
         let health_status = container_health_status();
         if matches!(health_status.as_deref(), Some("starting")) {
             println!(
                 "[Entropic] {} health check failed while health=starting; extending wait: {}",
-                label, initial
+                label, initial_error
             );
             if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
                 finish_health_wait_or_tolerate_starting(
@@ -6572,7 +6345,7 @@ async fn recover_gateway_health(
         } else if matches!(health_status.as_deref(), Some("healthy")) {
             println!(
                 "[Entropic] {} health check failed but container health=healthy; extending wait without restart: {}",
-                label, initial
+                label, initial_error
             );
             if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
                 finish_health_wait_or_tolerate_starting(
@@ -6583,7 +6356,7 @@ async fn recover_gateway_health(
         } else if matches!(health_status.as_deref(), Some("unhealthy")) || !container_running() {
             println!(
                 "[Entropic] {} health check failed with container state {:?}; attempting restart: {}",
-                label, health_status, initial
+                label, health_status, initial_error
             );
             let restart = docker_command()
                 .args(["restart", OPENCLAW_CONTAINER])
@@ -6616,7 +6389,7 @@ async fn recover_gateway_health(
                         return Err(append_colima_runtime_hint(format!(
                             "{} failed health check ({}) and recreate failed: {}",
                             label,
-                            initial,
+                            initial_error,
                             rerun_stderr.trim()
                         )));
                     }
@@ -6624,7 +6397,7 @@ async fn recover_gateway_health(
                     return Err(append_colima_runtime_hint(format!(
                         "{} failed health check ({}) and restart failed: {}",
                         label,
-                        initial,
+                        initial_error,
                         stderr.trim()
                     )));
                 }
@@ -6639,7 +6412,7 @@ async fn recover_gateway_health(
         } else {
             println!(
                 "[Entropic] {} health check failed with container state {:?}; extending wait without restart: {}",
-                label, health_status, initial
+                label, health_status, initial_error
             );
             if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
                 finish_health_wait_or_tolerate_starting(
@@ -7137,7 +6910,15 @@ pub async fn start_gateway(
             && current_model.as_deref() == Some(base_model)
         {
             apply_agent_settings(&app, &state)?;
-            return Ok(());
+            match wait_for_gateway_health_strict(&gateway_token, 6).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    println!(
+                        "[Entropic] Matching gateway container failed health check; recreating: {}",
+                        err
+                    );
+                }
+            }
         }
 
         // Container config doesn't match — recreate it.
@@ -7332,12 +7113,7 @@ pub async fn start_gateway(
     // Re-apply settings AFTER health check passes.
     // OpenClaw's initialization may overwrite files we wrote earlier (e.g., auth-profiles.json
     // and config fields like thinkingDefault). Re-applying now ensures our settings stick.
-    {
-        let mut cache = applied_agent_settings_fingerprint()
-            .lock()
-            .map_err(|e| e.to_string())?;
-        *cache = None;
-    }
+    clear_applied_agent_settings_fingerprint()?;
     apply_agent_settings(&app, &state)?;
     println!("[Entropic] Startup timing: post_health_config applied");
     println!(
@@ -7677,12 +7453,7 @@ pub async fn start_gateway_with_proxy(
     // Re-apply settings AFTER health check passes.
     // OpenClaw initialization can overwrite files written during startup
     // (including openclaw.json provider baseUrl), so apply again once healthy.
-    {
-        let mut cache = applied_agent_settings_fingerprint()
-            .lock()
-            .map_err(|e| e.to_string())?;
-        *cache = None;
-    }
+    clear_applied_agent_settings_fingerprint()?;
     apply_agent_settings(&app, &state)?;
     println!("[Entropic] Startup timing (proxy): post_health_config applied");
     println!(
@@ -8391,63 +8162,9 @@ pub async fn set_imessage_config(
     remote_host: String,
     include_attachments: bool,
 ) -> Result<(), String> {
-    let mut cfg = read_openclaw_config();
-    normalize_openclaw_config(&mut cfg);
     let cli = cli_path.trim();
     let db = db_path.trim();
     let remote = remote_host.trim();
-
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "enabled"],
-        serde_json::json!(enabled),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "cliPath"],
-        serde_json::json!(cli),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "dbPath"],
-        serde_json::json!(db),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "includeAttachments"],
-        serde_json::json!(include_attachments),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "dmPolicy"],
-        serde_json::json!("pairing"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "groupPolicy"],
-        serde_json::json!("allowlist"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "imessage", "configWrites"],
-        serde_json::json!(false),
-    );
-    if remote.is_empty() {
-        remove_openclaw_config_value(&mut cfg, &["channels", "imessage", "remoteHost"]);
-    } else {
-        set_openclaw_config_value(
-            &mut cfg,
-            &["channels", "imessage", "remoteHost"],
-            serde_json::json!(remote),
-        );
-    }
-    set_openclaw_config_value(
-        &mut cfg,
-        &["plugins", "entries", "imessage", "enabled"],
-        serde_json::json!(enabled),
-    );
-
-    write_openclaw_config(&cfg)?;
 
     let mut settings = load_agent_settings(&app);
     settings.imessage_enabled = enabled;
@@ -8526,32 +8243,6 @@ pub async fn set_channels_config(
 
     set_openclaw_config_value(
         &mut cfg,
-        &["channels", "discord", "enabled"],
-        serde_json::json!(discord_enabled),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "discord", "token"],
-        serde_json::json!(discord_token),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "discord", "groupPolicy"],
-        serde_json::json!("allowlist"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "discord", "configWrites"],
-        serde_json::json!(false),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["plugins", "entries", "discord", "enabled"],
-        serde_json::json!(discord_enabled),
-    );
-
-    set_openclaw_config_value(
-        &mut cfg,
         &["channels", "telegram", "enabled"],
         serde_json::json!(telegram_enabled),
     );
@@ -8595,128 +8286,6 @@ pub async fn set_channels_config(
         &mut cfg,
         &["plugins", "entries", "telegram", "enabled"],
         serde_json::json!(telegram_enabled),
-    );
-
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "slack", "enabled"],
-        serde_json::json!(slack_enabled),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "slack", "botToken"],
-        serde_json::json!(slack_bot_token),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "slack", "appToken"],
-        serde_json::json!(slack_app_token),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "slack", "dm", "policy"],
-        serde_json::json!("pairing"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "slack", "groupPolicy"],
-        serde_json::json!("allowlist"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "slack", "configWrites"],
-        serde_json::json!(false),
-    );
-    remove_openclaw_config_value(&mut cfg, &["channels", "slack", "dmPolicy"]);
-    set_openclaw_config_value(
-        &mut cfg,
-        &["plugins", "entries", "slack", "enabled"],
-        serde_json::json!(slack_enabled),
-    );
-
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "googlechat", "enabled"],
-        serde_json::json!(googlechat_enabled),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "googlechat", "audienceType"],
-        serde_json::json!(googlechat_audience_type),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "googlechat", "webhookPath"],
-        serde_json::json!("/googlechat"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "googlechat", "dm", "policy"],
-        serde_json::json!("pairing"),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "googlechat", "groupPolicy"],
-        serde_json::json!("allowlist"),
-    );
-    if googlechat_service_account.is_empty() {
-        remove_openclaw_config_value(&mut cfg, &["channels", "googlechat", "serviceAccount"]);
-    } else {
-        set_openclaw_config_value(
-            &mut cfg,
-            &["channels", "googlechat", "serviceAccount"],
-            serde_json::json!(googlechat_service_account),
-        );
-    }
-    if googlechat_audience.is_empty() {
-        remove_openclaw_config_value(&mut cfg, &["channels", "googlechat", "audience"]);
-    } else {
-        set_openclaw_config_value(
-            &mut cfg,
-            &["channels", "googlechat", "audience"],
-            serde_json::json!(googlechat_audience),
-        );
-    }
-    set_openclaw_config_value(
-        &mut cfg,
-        &["plugins", "entries", "googlechat", "enabled"],
-        serde_json::json!(googlechat_enabled),
-    );
-
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "whatsapp", "configWrites"],
-        serde_json::json!(false),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "whatsapp", "groupPolicy"],
-        serde_json::json!("allowlist"),
-    );
-    remove_openclaw_config_value(&mut cfg, &["channels", "whatsapp", "enabled"]);
-    if whatsapp_allow_from.is_empty() {
-        set_openclaw_config_value(
-            &mut cfg,
-            &["channels", "whatsapp", "dmPolicy"],
-            serde_json::json!("pairing"),
-        );
-        remove_openclaw_config_value(&mut cfg, &["channels", "whatsapp", "allowFrom"]);
-    } else {
-        set_openclaw_config_value(
-            &mut cfg,
-            &["channels", "whatsapp", "dmPolicy"],
-            serde_json::json!("allowlist"),
-        );
-        set_openclaw_config_value(
-            &mut cfg,
-            &["channels", "whatsapp", "allowFrom"],
-            serde_json::json!([whatsapp_allow_from.clone()]),
-        );
-    }
-    set_openclaw_config_value(
-        &mut cfg,
-        &["plugins", "entries", "whatsapp", "enabled"],
-        serde_json::json!(whatsapp_enabled),
     );
 
     eprintln!("[set_channels_config] Writing OpenClaw config...");
