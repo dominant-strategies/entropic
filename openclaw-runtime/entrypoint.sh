@@ -252,6 +252,12 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
   "cron": {
     "store": "/data/cron/jobs.json"
   },
+  "gateway": {
+    "controlUi": {
+      "allowInsecureAuth": true,
+      "dangerouslyDisableDeviceAuth": false
+    }
+  },
   "plugins": {
     "slots": {
       "memory": "${MEMORY_SLOT}"

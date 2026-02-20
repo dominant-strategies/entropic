@@ -5568,6 +5568,7 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
     let paths: &[&[&str]] = &[
         &["agents", "defaults"],
         &["tools", "web", "search", "perplexity"],
+        &["gateway", "controlUi"],
         &["plugins", "slots"],
         &["plugins", "load", "paths"],
         &["plugins", "entries", "memory-lancedb"],
@@ -5600,9 +5601,8 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         set_openclaw_config_value(cfg, &["plugins", "load", "paths"], serde_json::json!([]));
     }
 
-    // Enable control UI access from localhost without device pairing.
-    // This allows the desktop app's health checks and local connections to work
-    // with operator scopes, while still requiring device pairing for remote connections.
+    // Docker bridge requests can present a non-loopback source IP.
+    // Allow token-authenticated Control UI access in local desktop mode.
     set_openclaw_config_value(
         cfg,
         &["gateway", "controlUi", "allowInsecureAuth"],
@@ -5627,6 +5627,11 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
             "tauri://localhost",
             "http://localhost:5174"
         ]),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["gateway", "controlUi", "dangerouslyDisableDeviceAuth"],
+        serde_json::json!(false),
     );
 
     let telegram_dm_policy = cfg
