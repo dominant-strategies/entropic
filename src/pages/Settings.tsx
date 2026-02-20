@@ -33,6 +33,18 @@ type AgentProfileState = {
   soul?: string;
 };
 
+type GatewayConfigHealth = {
+  status: string;
+  summary: string;
+  issues: string[];
+};
+
+type GatewayHealResult = {
+  container: string;
+  restarted: boolean;
+  message: string;
+};
+
 function SettingsGroup({ title, children }: { title?: string, children: React.ReactNode }) {
   return (
     <div className="mb-8">
@@ -119,6 +131,11 @@ export function Settings({
   const [cleanupLoading, setCleanupLoading] = useState(false);
   const [legacyMigrationLoading, setLegacyMigrationLoading] = useState(false);
   const [legacyUpgradeLoading, setLegacyUpgradeLoading] = useState(false);
+  const [gatewayConfigHealth, setGatewayConfigHealth] = useState<GatewayConfigHealth | null>(null);
+  const [gatewayConfigLoading, setGatewayConfigLoading] = useState(false);
+  const [gatewayConfigActionLoading, setGatewayConfigActionLoading] = useState(false);
+  const [gatewayConfigError, setGatewayConfigError] = useState<string | null>(null);
+  const [gatewayConfigNotice, setGatewayConfigNotice] = useState<string | null>(null);
 
   // Wallpaper state
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
@@ -143,6 +160,18 @@ export function Settings({
     invoke<Record<string, string>>("get_oauth_status").then(setOauthStatus).catch(() => {});
     invoke<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>("get_auth_state").then(setAuthState).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!gatewayRunning) {
+      setGatewayConfigHealth({
+        status: "offline",
+        summary: "Gateway is not running.",
+        issues: [],
+      });
+      return;
+    }
+    refreshGatewayConfigHealth();
+  }, [gatewayRunning]);
 
   useEffect(() => {
     if (!experimentalDesktop) {
@@ -284,9 +313,104 @@ export function Settings({
     }
   }
 
+  async function refreshGatewayConfigHealth() {
+    if (!gatewayRunning) {
+      setGatewayConfigHealth({
+        status: "offline",
+        summary: "Gateway is not running.",
+        issues: [],
+      });
+      return;
+    }
+    setGatewayConfigLoading(true);
+    setGatewayConfigError(null);
+    try {
+      const result = await invoke<GatewayConfigHealth>("get_gateway_config_health");
+      setGatewayConfigHealth(result);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setGatewayConfigError(`Failed to check gateway config health: ${detail}`);
+    } finally {
+      setGatewayConfigLoading(false);
+    }
+  }
+
+  async function healGatewayConfig() {
+    if (!gatewayRunning) {
+      setGatewayConfigError("Gateway is not running. Start runtime first.");
+      return;
+    }
+    const confirmed = await ask(
+      "Run OpenClaw doctor --fix and restart the gateway now? This can briefly interrupt active gateway connections.",
+      {
+        title: "Heal Gateway Config",
+        kind: "warning",
+        okLabel: "Heal and Restart",
+        cancelLabel: "Cancel",
+      }
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setGatewayConfigActionLoading(true);
+    setGatewayConfigError(null);
+    setGatewayConfigNotice(null);
+    try {
+      const result = await invoke<GatewayHealResult>("heal_gateway_config");
+      setGatewayConfigNotice(result.message || "Gateway config healed.");
+      await refreshGatewayConfigHealth();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setGatewayConfigError(`Failed to heal gateway config: ${detail}`);
+    } finally {
+      setGatewayConfigActionLoading(false);
+    }
+  }
+
+  const gatewayConfigInvalid = gatewayConfigHealth?.status === "invalid";
+
   return (
     <div className="max-w-3xl mx-auto py-8 px-4">
       <h1 className="text-2xl font-bold mb-8 px-1">Settings</h1>
+
+      {gatewayConfigInvalid && (
+        <div className="mb-6 rounded-xl border border-amber-300 bg-amber-50 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-amber-900">Gateway config warning</div>
+              <div className="text-xs text-amber-800 mt-1">
+                {gatewayConfigHealth?.summary || "Gateway config is invalid."}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={refreshGatewayConfigHealth}
+                disabled={gatewayConfigLoading || gatewayConfigActionLoading}
+                className="px-3 py-1.5 text-xs font-medium rounded-md border border-amber-300 text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+              >
+                {gatewayConfigLoading ? "Checking..." : "Recheck"}
+              </button>
+              <button
+                type="button"
+                onClick={healGatewayConfig}
+                disabled={gatewayConfigLoading || gatewayConfigActionLoading}
+                className="px-3 py-1.5 text-xs font-semibold rounded-md bg-amber-700 text-white hover:bg-amber-800 disabled:opacity-50"
+              >
+                {gatewayConfigActionLoading ? "Healing..." : "Heal Config"}
+              </button>
+            </div>
+          </div>
+          {gatewayConfigHealth?.issues?.length ? (
+            <ul className="mt-3 text-xs text-amber-900 space-y-1 list-disc list-inside">
+              {gatewayConfigHealth.issues.slice(0, 4).map((issue) => (
+                <li key={issue}>{issue}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      )}
 
       <SettingsGroup title="Profile">
         <div className="p-4 flex items-start gap-6">
@@ -461,6 +585,37 @@ export function Settings({
         </SettingsRow>
         {memorySessionIndexingError && (
           <div className="px-4 pb-4 pt-2 text-xs text-red-600">{memorySessionIndexingError}</div>
+        )}
+
+        <SettingsRow
+          label="Gateway Config Health"
+          icon={AlertTriangle}
+          description={gatewayConfigHealth?.summary || "Check gateway config validity"}
+        >
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={refreshGatewayConfigHealth}
+              disabled={gatewayConfigLoading || gatewayConfigActionLoading || !gatewayRunning}
+              className="px-3 py-1.5 text-xs font-medium rounded-md border border-[var(--border-subtle)] bg-white hover:bg-[var(--system-gray-6)] disabled:opacity-50"
+            >
+              {gatewayConfigLoading ? "Checking..." : "Check"}
+            </button>
+            <button
+              type="button"
+              onClick={healGatewayConfig}
+              disabled={gatewayConfigLoading || gatewayConfigActionLoading || !gatewayRunning}
+              className="px-3 py-1.5 text-xs font-semibold rounded-md bg-black text-white hover:bg-gray-800 disabled:opacity-50"
+            >
+              {gatewayConfigActionLoading ? "Healing..." : "Heal"}
+            </button>
+          </div>
+        </SettingsRow>
+        {gatewayConfigError && (
+          <div className="px-4 pb-4 pt-2 text-xs text-red-600">{gatewayConfigError}</div>
+        )}
+        {gatewayConfigNotice && (
+          <div className="px-4 pb-4 pt-2 text-xs text-green-700">{gatewayConfigNotice}</div>
         )}
       </SettingsGroup>
 

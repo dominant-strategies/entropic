@@ -724,6 +724,29 @@ pub struct GatewayAuthPayload {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct TelegramTokenValidationResult {
+    pub valid: bool,
+    pub bot_id: Option<i64>,
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GatewayHealResult {
+    pub container: String,
+    pub restarted: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GatewayConfigHealth {
+    pub status: String,
+    pub summary: String,
+    pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentProfileState {
     pub soul: String,
     pub heartbeat_every: String,
@@ -2438,6 +2461,55 @@ fn remove_openclaw_config_value(cfg: &mut serde_json::Value, path: &[&str]) {
 
     if let Some(last_parent) = current.as_object_mut() {
         last_parent.remove(path[path.len() - 1]);
+    }
+}
+
+fn normalize_telegram_allow_from_for_dm_policy(cfg: &mut serde_json::Value, dm_policy: &str) {
+    let existing_allow_from: Vec<String> = cfg
+        .get("channels")
+        .and_then(|v| v.get("telegram"))
+        .and_then(|v| v.get("allowFrom"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if dm_policy == "open" {
+        let mut allow_from = existing_allow_from;
+        if !allow_from.iter().any(|entry| entry == "*") {
+            allow_from.push("*".to_string());
+        }
+        allow_from.sort();
+        allow_from.dedup();
+        set_openclaw_config_value(
+            cfg,
+            &["channels", "telegram", "allowFrom"],
+            serde_json::json!(allow_from),
+        );
+        return;
+    }
+
+    let mut preserve = existing_allow_from
+        .into_iter()
+        .filter(|entry| entry != "*")
+        .collect::<Vec<String>>();
+    preserve.sort();
+    preserve.dedup();
+
+    if preserve.is_empty() {
+        remove_openclaw_config_value(cfg, &["channels", "telegram", "allowFrom"]);
+    } else {
+        set_openclaw_config_value(
+            cfg,
+            &["channels", "telegram", "allowFrom"],
+            serde_json::json!(preserve),
+        );
     }
 }
 
@@ -4339,6 +4411,15 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
             "http://localhost:5174"
         ]),
     );
+
+    let telegram_dm_policy = cfg
+        .get("channels")
+        .and_then(|v| v.get("telegram"))
+        .and_then(|v| v.get("dmPolicy"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("pairing")
+        .to_string();
+    normalize_telegram_allow_from_for_dm_policy(cfg, &telegram_dm_policy);
 }
 
 fn disable_legacy_messaging_config(cfg: &mut serde_json::Value) {
@@ -6885,6 +6966,7 @@ pub async fn set_channels_config(
         &["channels", "telegram", "dmPolicy"],
         serde_json::json!(telegram_dm_policy),
     );
+    normalize_telegram_allow_from_for_dm_policy(&mut cfg, &telegram_dm_policy);
     set_openclaw_config_value(
         &mut cfg,
         &["channels", "telegram", "groupPolicy"],
@@ -7134,6 +7216,265 @@ process.stdout.write(connected ? '1' : '0');"#;
         Ok(output) => Ok(output.trim() == "1"),
         Err(_) => Ok(false),
     }
+}
+
+#[tauri::command]
+pub async fn validate_telegram_token(
+    token: String,
+) -> Result<TelegramTokenValidationResult, String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("Bot token is required".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|e| format!("Failed to initialize Telegram validation client: {}", e))?;
+
+    let url = format!("https://api.telegram.org/bot{}/getMe", token);
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Telegram token validation request failed: {}", e))?;
+
+    let status = response.status();
+    let payload: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Invalid Telegram response: {}", e))?;
+
+    let ok = payload
+        .get("ok")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !status.is_success() || !ok {
+        let message = payload
+            .get("description")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Telegram rejected the bot token.")
+            .to_string();
+
+        return Ok(TelegramTokenValidationResult {
+            valid: false,
+            bot_id: None,
+            username: None,
+            display_name: None,
+            message,
+        });
+    }
+
+    let bot = payload.get("result").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let bot_id = bot.get("id").and_then(|value| value.as_i64());
+    let username = bot
+        .get("username")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned);
+    let first_name = bot.get("first_name").and_then(|value| value.as_str()).unwrap_or("");
+    let last_name = bot.get("last_name").and_then(|value| value.as_str()).unwrap_or("");
+    let display_name = format!("{} {}", first_name.trim(), last_name.trim())
+        .trim()
+        .to_string();
+    let display_name = if display_name.is_empty() {
+        None
+    } else {
+        Some(display_name)
+    };
+
+    let message = if let Some(name) = username.as_deref() {
+        format!("Valid token for @{}.", name)
+    } else {
+        "Valid bot token.".to_string()
+    };
+
+    Ok(TelegramTokenValidationResult {
+        valid: true,
+        bot_id,
+        username,
+        display_name,
+        message,
+    })
+}
+
+#[tauri::command]
+pub async fn restart_gateway_in_place() -> Result<(), String> {
+    let container = if named_gateway_container_exists(OPENCLAW_CONTAINER, false) {
+        OPENCLAW_CONTAINER
+    } else if named_gateway_container_exists(LEGACY_OPENCLAW_CONTAINER, false) {
+        LEGACY_OPENCLAW_CONTAINER
+    } else {
+        return Err("Gateway container is not available. Start runtime first.".to_string());
+    };
+
+    let restart = docker_command()
+        .args(["restart", container])
+        .output()
+        .map_err(|e| append_colima_runtime_hint(format!("Failed to restart gateway: {}", e)))?;
+
+    if !restart.status.success() {
+        let stderr = String::from_utf8_lossy(&restart.stderr);
+        return Err(append_colima_runtime_hint(format!(
+            "Failed to restart gateway: {}",
+            stderr.trim()
+        )));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn heal_gateway_config() -> Result<GatewayHealResult, String> {
+    let container = if named_gateway_container_exists(OPENCLAW_CONTAINER, true) {
+        OPENCLAW_CONTAINER
+    } else if named_gateway_container_exists(LEGACY_OPENCLAW_CONTAINER, true) {
+        LEGACY_OPENCLAW_CONTAINER
+    } else {
+        return Err("Gateway is not running. Start runtime first.".to_string());
+    };
+
+    let doctor_output = docker_exec_output(&[
+        "exec",
+        container,
+        "node",
+        "/app/dist/index.js",
+        "doctor",
+        "--fix",
+    ])
+    .map_err(|e| format!("Doctor fix failed: {}", e.trim()))?;
+    if !doctor_output.trim().is_empty() {
+        println!(
+            "[Entropic] heal_gateway_config doctor output ({} bytes)",
+            doctor_output.len()
+        );
+    }
+
+    let restart = docker_command()
+        .args(["restart", container])
+        .output()
+        .map_err(|e| append_colima_runtime_hint(format!("Failed to restart gateway: {}", e)))?;
+
+    if !restart.status.success() {
+        let stderr = String::from_utf8_lossy(&restart.stderr);
+        return Err(append_colima_runtime_hint(format!(
+            "Failed to restart gateway after heal: {}",
+            stderr.trim()
+        )));
+    }
+
+    Ok(GatewayHealResult {
+        container: container.to_string(),
+        restarted: true,
+        message: "Gateway config healed via doctor --fix and container restart.".to_string(),
+    })
+}
+
+fn extract_doctor_problem_lines(output: &str) -> Vec<String> {
+    let mut issues = Vec::new();
+    let mut in_problem_block = false;
+
+    for raw_line in output.lines() {
+        let trimmed = raw_line.trim();
+        let normalized = trimmed.trim_start_matches('│').trim();
+
+        if normalized.eq_ignore_ascii_case("Problem:") {
+            in_problem_block = true;
+            continue;
+        }
+
+        if in_problem_block {
+            if normalized.starts_with("Run:") {
+                break;
+            }
+            if normalized.is_empty() || normalized.starts_with("File:") {
+                continue;
+            }
+            if let Some(issue) = normalized.strip_prefix("- ") {
+                let value = issue.trim();
+                if !value.is_empty() {
+                    issues.push(value.to_string());
+                }
+            }
+        }
+    }
+
+    if issues.is_empty() {
+        for raw_line in output.lines() {
+            let trimmed = raw_line.trim();
+            let normalized = trimmed.trim_start_matches('│').trim();
+            if let Some(issue) = normalized.strip_prefix("- ") {
+                let value = issue.trim();
+                if !value.is_empty() && value.contains(':') {
+                    issues.push(value.to_string());
+                }
+            }
+        }
+    }
+
+    issues.sort();
+    issues.dedup();
+    issues
+}
+
+#[tauri::command]
+pub async fn get_gateway_config_health() -> Result<GatewayConfigHealth, String> {
+    let container = if named_gateway_container_exists(OPENCLAW_CONTAINER, true) {
+        OPENCLAW_CONTAINER
+    } else if named_gateway_container_exists(LEGACY_OPENCLAW_CONTAINER, true) {
+        LEGACY_OPENCLAW_CONTAINER
+    } else {
+        return Ok(GatewayConfigHealth {
+            status: "offline".to_string(),
+            summary: "Gateway is not running.".to_string(),
+            issues: Vec::new(),
+        });
+    };
+
+    let output = docker_command()
+        .args(["exec", container, "node", "/app/dist/index.js", "doctor"])
+        .output()
+        .map_err(|e| append_colima_runtime_hint(format!("Failed to run gateway config check: {}", e)))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}\n{}", stdout, stderr);
+    let combined_trimmed = combined.trim();
+
+    let has_invalid_config = combined.contains("Invalid config at") || combined.contains("Config invalid");
+    if has_invalid_config {
+        let issues = extract_doctor_problem_lines(combined_trimmed);
+        let summary = if issues.is_empty() {
+            "Gateway config is invalid.".to_string()
+        } else {
+            format!("Gateway config is invalid ({} issue(s)).", issues.len())
+        };
+        return Ok(GatewayConfigHealth {
+            status: "invalid".to_string(),
+            summary,
+            issues,
+        });
+    }
+
+    if !output.status.success() {
+        let message = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            "Gateway config check failed.".to_string()
+        };
+        return Ok(GatewayConfigHealth {
+            status: "error".to_string(),
+            summary: message,
+            issues: Vec::new(),
+        });
+    }
+
+    Ok(GatewayConfigHealth {
+        status: "ok".to_string(),
+        summary: "Gateway config is valid.".to_string(),
+        issues: Vec::new(),
+    })
 }
 
 #[tauri::command]

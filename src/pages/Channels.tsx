@@ -83,6 +83,13 @@ function normalizeTelegramReplyToMode(value: string | undefined): TelegramReplyT
 }
 
 type TelegramSaveTarget = "token" | "settings";
+type TelegramTokenValidationResult = {
+  valid: boolean;
+  bot_id?: number | null;
+  username?: string | null;
+  display_name?: string | null;
+  message: string;
+};
 
 export function Channels() {
   const [telegramEnabled, setTelegramEnabled] = useState(false);
@@ -98,10 +105,25 @@ export function Channels() {
   const [showAdvancedHelp, setShowAdvancedHelp] = useState(false);
   const [telegramPairingCode, setTelegramPairingCode] = useState("");
   const [telegramPairingStatus, setTelegramPairingStatus] = useState<string | null>(null);
+  const [gatewayRunning, setGatewayRunning] = useState(false);
+  const [restartPending, setRestartPending] = useState(false);
+  const [restartingGateway, setRestartingGateway] = useState(false);
 
   const [savingSetup, setSavingSetup] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  async function refreshTelegramConnectedStatus() {
+    const connected = await invoke<boolean>("get_telegram_connection_status").catch(() => false);
+    setTelegramConnected(Boolean(connected));
+    return Boolean(connected);
+  }
+
+  async function refreshGatewayRunningStatus() {
+    const running = await invoke<boolean>("get_gateway_status").catch(() => false);
+    setGatewayRunning(Boolean(running));
+    return Boolean(running);
+  }
 
   useEffect(() => {
     invoke<{
@@ -145,9 +167,8 @@ export function Channels() {
             linkPreview,
           });
         }
-        invoke<boolean>("get_telegram_connection_status")
-          .then((connected) => setTelegramConnected(Boolean(connected)))
-          .catch(() => setTelegramConnected(false));
+        refreshTelegramConnectedStatus();
+        refreshGatewayRunningStatus();
       })
       .catch(() => {});
   }, []);
@@ -200,6 +221,17 @@ export function Channels() {
     setSaveMessage(null);
     setSaveError(null);
     try {
+      let validationResult: TelegramTokenValidationResult | null = null;
+      if (target === "token") {
+        validationResult = await invoke<TelegramTokenValidationResult>("validate_telegram_token", {
+          token: telegramToken,
+        });
+        if (!validationResult.valid) {
+          setSaveError(`Invalid bot token: ${validationResult.message}`);
+          return;
+        }
+      }
+
       console.log("[Channels] Invoking set_channels_config...");
       await invoke("set_channels_config", {
         discordEnabled: false,
@@ -224,13 +256,27 @@ export function Channels() {
       });
       console.log("[Channels] set_channels_config succeeded");
       setTelegramTokenSaved(Boolean(telegramToken.trim()));
-      const connected = await invoke<boolean>("get_telegram_connection_status").catch(() => false);
+      const [connected, running] = await Promise.all([
+        refreshTelegramConnectedStatus(),
+        refreshGatewayRunningStatus(),
+      ]);
       setTelegramConnected(Boolean(connected));
-      setSaveMessage(
-        target === "token"
-          ? "Bot token saved. Check Telegram messages from your new bot for your pairing token."
-          : "Telegram settings saved."
-      );
+      setGatewayRunning(Boolean(running));
+      setRestartPending(Boolean(running));
+      if (target === "token") {
+        const botHandle = validationResult?.username?.trim() ? ` for @${validationResult.username.trim()}` : "";
+        setSaveMessage(
+          running
+            ? `Bot token saved${botHandle}. Check Telegram messages from your new bot for your pairing token. Restart gateway to apply changes.`
+            : `Bot token saved${botHandle}. Check Telegram messages from your new bot for your pairing token.`
+        );
+      } else {
+        setSaveMessage(
+          running
+            ? "Telegram settings saved. Restart gateway to apply changes."
+            : "Telegram settings saved. Changes will apply on next gateway start."
+        );
+      }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       console.error("[Channels] set_channels_config failed:", detail);
@@ -242,6 +288,32 @@ export function Channels() {
     } finally {
       setSavingSetup(false);
       console.log("[Channels] saveMessagingSetup completed");
+    }
+  }
+
+  async function applyTelegramConfigNow() {
+    setRestartingGateway(true);
+    setSaveError(null);
+    setSaveMessage(null);
+    try {
+      await invoke("restart_gateway_in_place");
+      setRestartPending(false);
+      const [connected, running] = await Promise.all([
+        refreshTelegramConnectedStatus(),
+        refreshGatewayRunningStatus(),
+      ]);
+      setTelegramConnected(Boolean(connected));
+      setGatewayRunning(Boolean(running));
+      setSaveMessage(
+        running
+          ? "Gateway restarted. Telegram configuration is now active."
+          : "Gateway restart requested. It may take a few seconds to become healthy."
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setSaveError(`Failed to restart gateway: ${detail}`);
+    } finally {
+      setRestartingGateway(false);
     }
   }
 
@@ -329,6 +401,26 @@ export function Channels() {
                   <p className="text-sm text-green-700 flex items-center gap-1">
                     <CheckCircle2 className="w-4 h-4" />
                     {saveMessage}
+                  </p>
+                )}
+                {restartPending && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 flex items-center justify-between gap-3">
+                    <p className="text-xs text-amber-800">
+                      Telegram changes are saved. Restart gateway to apply them now.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={applyTelegramConfigNow}
+                      disabled={restartingGateway}
+                      className="px-3 py-1.5 bg-amber-700 text-white rounded-md text-xs font-semibold hover:bg-amber-800 disabled:opacity-50"
+                    >
+                      {restartingGateway ? "Restarting..." : "Apply now (Restart Gateway)"}
+                    </button>
+                  </div>
+                )}
+                {!gatewayRunning && telegramTokenSaved && (
+                  <p className="text-xs text-[var(--text-secondary)]">
+                    Gateway is currently stopped. Saved changes apply automatically the next time it starts.
                   </p>
                 )}
 
