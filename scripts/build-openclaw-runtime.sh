@@ -172,19 +172,34 @@ rsync -a --delete \
 # These binaries are unused in the Linux container and can make Apple
 # notarization reject the bundled runtime image tar.
 echo "Stripping non-Linux native binaries from node_modules..."
-STRIPPED=0
+STRIPPED_DIRS=0
 while IFS= read -r -d '' dir; do
     rm -rf "$dir"
-    STRIPPED=$((STRIPPED + 1))
+    STRIPPED_DIRS=$((STRIPPED_DIRS + 1))
 done < <(
     find "$STAGING_DIR/node_modules" -type d \
-        \( -name "darwin_*" -o -name "darwin-*" -o -name "win32_*" -o -name "win32-*" -o -name "macos-*" \) \
+        \( \
+            -name "darwin_*" -o -name "darwin-*" -o -name "*-darwin-*" -o \
+            -name "win32_*" -o -name "win32-*" -o -name "*-win32-*" -o \
+            -name "macos-*" -o -name "*-mac-*" -o -name "*-windows-*" -o \
+            -name "fsevents" \
+        \) \
         -print0
 )
-echo "Removed $STRIPPED non-Linux native binary directories."
+echo "Removed $STRIPPED_DIRS non-Linux native directories."
 
-# Guardrail: fail fast if any macOS/Windows native Node addon remains.
 if command -v file >/dev/null 2>&1; then
+    STRIPPED_NODE_BINARIES=0
+    while IFS= read -r -d '' node_binary; do
+        file_desc="$(file -b "$node_binary" 2>/dev/null || true)"
+        if echo "$file_desc" | grep -Eq "Mach-O|PE32"; then
+            rm -f "$node_binary"
+            STRIPPED_NODE_BINARIES=$((STRIPPED_NODE_BINARIES + 1))
+        fi
+    done < <(find "$STAGING_DIR/node_modules" -type f -name "*.node" -print0)
+    echo "Removed $STRIPPED_NODE_BINARIES non-Linux native .node binaries."
+
+    # Guardrail: fail fast if any macOS/Windows native Node addon remains.
     NON_LINUX_NATIVE_COUNT=0
     while IFS= read -r -d '' node_binary; do
         file_desc="$(file -b "$node_binary" 2>/dev/null || true)"
