@@ -870,14 +870,14 @@ export function Store({
                 "px-4 py-1.5 rounded-full text-[11px] font-semibold transition-all uppercase tracking-wide",
                 installed
                   ? "bg-[var(--system-gray-6)] text-[var(--text-tertiary)] cursor-default"
-                  : "bg-[var(--system-blue)]/10 text-[var(--system-blue)] hover:bg-[var(--system-blue)] hover:text-white"
+                  : "bg-[var(--system-blue)] text-white shadow-md shadow-blue-100 hover:brightness-95"
               )}
             >
               {installed
                 ? "Installed"
                 : clawhubBusy && clawhubBusySlug === skill.slug
                   ? "..."
-                  : "Get"}
+                  : "Install"}
             </button>
             <div className="flex items-center gap-1.5 text-[10px] text-[var(--text-tertiary)] font-medium bg-[var(--system-gray-6)] px-2 py-0.5 rounded-full border border-[var(--border-subtle)]">
               <Download className="w-3 h-3" />
@@ -1045,7 +1045,7 @@ export function Store({
             </div>
 
             {skillsSubTab === "market" ? (
-              <>
+              <div className="rounded-2xl border border-blue-100 bg-gradient-to-b from-blue-50/60 via-white to-white p-4 md:p-6">
                 {/* Security Banner */}
                 <div className="relative overflow-hidden bg-white border border-[var(--border-subtle)] rounded-xl p-5 mb-8 shadow-sm">
                   <div className="relative z-10 flex flex-col md:flex-row md:items-center gap-6">
@@ -1113,7 +1113,7 @@ export function Store({
                     </div>
                   )}
                 </div>
-              </>
+              </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
                 {installedSkillCards.map((skill) => {
