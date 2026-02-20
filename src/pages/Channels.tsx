@@ -2,6 +2,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   CheckCircle2,
   Loader2,
+  WifiOff,
+  Wifi,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -16,39 +18,53 @@ function ChannelGroup({ title, children }: { title: string; children: ReactNode 
   );
 }
 
-function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: (next: boolean) => void }) {
-  return (
-    <label className="relative inline-flex items-center cursor-pointer">
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className="sr-only peer"
-      />
-      <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--system-blue)]" />
-    </label>
-  );
-}
+function TelegramConnectionStatus({
+  tokenSaved,
+  connected,
+  gatewayRunning,
+  checking,
+}: {
+  tokenSaved: boolean;
+  connected: boolean;
+  gatewayRunning: boolean;
+  checking: boolean;
+}) {
+  if (!tokenSaved) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+        <WifiOff className="w-4 h-4 text-gray-400" />
+        <span>Not configured</span>
+      </div>
+    );
+  }
 
-function SetupStateBadge({ enabled, ready }: { enabled: boolean; ready: boolean }) {
-  if (!enabled) {
+  if (connected) {
     return (
-      <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md bg-[var(--system-gray-6)] text-[var(--text-tertiary)]">
-        Off
-      </span>
+      <div className="flex items-center gap-2 text-xs text-green-700">
+        <Wifi className="w-4 h-4" />
+        <span className="font-medium">Connected</span>
+      </div>
     );
   }
-  if (ready) {
+
+  if (!gatewayRunning) {
     return (
-      <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md bg-green-50 text-green-700">
-        Ready
-      </span>
+      <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+        <WifiOff className="w-4 h-4 text-gray-400" />
+        <span>Gateway offline</span>
+      </div>
     );
   }
+
   return (
-    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md bg-amber-50 text-amber-700">
-      Needs Setup
-    </span>
+    <div className="flex items-center gap-2 text-xs text-amber-700">
+      {checking ? (
+        <Loader2 className="w-4 h-4 animate-spin" />
+      ) : (
+        <WifiOff className="w-4 h-4" />
+      )}
+      <span>Awaiting authorization</span>
+    </div>
   );
 }
 
@@ -110,6 +126,7 @@ export function Channels() {
   const [gatewayRunning, setGatewayRunning] = useState(false);
   const [restartPending, setRestartPending] = useState(false);
   const [restartingGateway, setRestartingGateway] = useState(false);
+  const [checkingConnection, setCheckingConnection] = useState(false);
 
   const [savingSetup, setSavingSetup] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
@@ -184,8 +201,16 @@ export function Channels() {
         if (!cancelled) {
           setInitialLoading(false);
         }
-        void refreshTelegramConnectedStatus();
+        const isConnected = await refreshTelegramConnectedStatus();
         void refreshGatewayRunningStatus();
+
+        // Send welcome message if already connected on startup
+        if (isConnected && state.telegram_enabled && state.telegram_token?.trim()) {
+          console.log("[Channels] Already connected on startup, sending welcome message...");
+          invoke("send_telegram_welcome_message").catch((err) => {
+            console.error("[Channels] Failed to send welcome message:", err);
+          });
+        }
       }
     };
 
@@ -195,6 +220,37 @@ export function Channels() {
       window.clearTimeout(loadingGuard);
     };
   }, []);
+
+  // Auto-poll connection and gateway status when awaiting authorization
+  useEffect(() => {
+    if (!telegramTokenSaved || telegramConnected) {
+      return;
+    }
+
+    let cancelled = false;
+    const pollInterval = setInterval(async () => {
+      if (cancelled) return;
+      // Always refresh gateway status so the page recovers from transient failures
+      void refreshGatewayRunningStatus();
+      setCheckingConnection(true);
+      const connected = await refreshTelegramConnectedStatus();
+      setCheckingConnection(false);
+      if (connected) {
+        // Stop polling once connected
+        clearInterval(pollInterval);
+        // Send welcome message to bot
+        console.log("[Channels] Connection established, sending welcome message...");
+        invoke("send_telegram_welcome_message").catch((err) => {
+          console.error("[Channels] Failed to send welcome message:", err);
+        });
+      }
+    }, 3000); // Poll every 3 seconds
+
+    return () => {
+      cancelled = true;
+      clearInterval(pollInterval);
+    };
+  }, [telegramTokenSaved, telegramConnected]);
 
   async function autoConfigureTelegram(params: {
     enabled: boolean;
@@ -246,20 +302,36 @@ export function Channels() {
     try {
       let validationResult: TelegramTokenValidationResult | null = null;
       if (target === "token") {
-        validationResult = await invoke<TelegramTokenValidationResult>("validate_telegram_token", {
-          token: telegramToken,
-        });
+        console.log("[Channels] Validating Telegram bot token...");
+        try {
+          validationResult = await invoke<TelegramTokenValidationResult>("validate_telegram_token", {
+            token: telegramToken,
+          });
+          console.log("[Channels] Token validation result:", validationResult);
+        } catch (validationErr) {
+          const detail = validationErr instanceof Error ? validationErr.message : String(validationErr);
+          console.error("[Channels] Token validation failed:", detail);
+          setSaveError(`Failed to validate bot token: ${detail}. Check your internet connection and try again.`);
+          return;
+        }
         if (!validationResult.valid) {
           setSaveError(`Invalid bot token: ${validationResult.message}`);
           return;
         }
       }
 
+      // Auto-enable Telegram when saving a valid token
+      const effectiveEnabled = target === "token" ? true : telegramEnabled;
+      if (target === "token" && !telegramEnabled) {
+        console.log("[Channels] Auto-enabling Telegram since valid token is being saved");
+        setTelegramEnabled(true);
+      }
+
       console.log("[Channels] Invoking set_channels_config...");
       await invoke("set_channels_config", {
         discordEnabled: false,
         discordToken: "",
-        telegramEnabled,
+        telegramEnabled: effectiveEnabled,
         telegramToken,
         telegramDmPolicy,
         telegramGroupPolicy,
@@ -285,15 +357,43 @@ export function Channels() {
       ]);
       setTelegramConnected(Boolean(connected));
       setGatewayRunning(Boolean(running));
-      setRestartPending(Boolean(running));
-      if (target === "token") {
-        const botHandle = validationResult?.username?.trim() ? ` for @${validationResult.username.trim()}` : "";
-        setSaveMessage(
-          running
-            ? `Bot token saved${botHandle}. Check Telegram messages from your new bot for your pairing token. Restart gateway to apply changes.`
-            : `Bot token saved${botHandle}. Check Telegram messages from your new bot for your pairing token.`
-        );
+
+      // Auto-restart gateway after saving token to apply changes immediately
+      if (target === "token" && running) {
+        const botHandle = validationResult?.username?.trim() ? ` @${validationResult.username.trim()}` : "";
+        setSaveMessage(`Bot token saved${botHandle}. Restarting gateway...`);
+
+        try {
+          console.log("[Channels] Auto-restarting gateway to apply Telegram configuration...");
+          await invoke("restart_gateway_in_place");
+
+          // Wait a moment for gateway to restart
+          await new Promise(resolve => setTimeout(resolve, 2000));
+
+          const [newConnected, newRunning] = await Promise.all([
+            refreshTelegramConnectedStatus(),
+            refreshGatewayRunningStatus(),
+          ]);
+          setTelegramConnected(Boolean(newConnected));
+          setGatewayRunning(Boolean(newRunning));
+
+          setSaveMessage(
+            newRunning
+              ? `Gateway restarted. Message your bot on Telegram and send /start to receive a pairing code.`
+              : `Gateway restart in progress. Message your bot on Telegram and send /start to receive a pairing code.`
+          );
+        } catch (restartErr) {
+          const detail = restartErr instanceof Error ? restartErr.message : String(restartErr);
+          console.error("[Channels] Gateway restart failed:", detail);
+          setSaveMessage(`Bot token saved${botHandle}. Gateway restart failed: ${detail}`);
+          setRestartPending(true);
+        }
+      } else if (target === "token" && !running) {
+        const botHandle = validationResult?.username?.trim() ? ` @${validationResult.username.trim()}` : "";
+        setSaveMessage(`Bot token saved${botHandle}. Start the gateway to activate your bot.`);
       } else {
+        // Settings update (not initial token save)
+        setRestartPending(Boolean(running));
         setSaveMessage(
           running
             ? "Telegram settings saved. Restart gateway to apply changes."
@@ -356,14 +456,20 @@ export function Channels() {
       const connected = await invoke<boolean>("get_telegram_connection_status").catch(() => true);
       setTelegramConnected(Boolean(connected));
       setTelegramPairingCode("");
+
+      // Send welcome message after successful pairing
+      if (connected) {
+        console.log("[Channels] Pairing approved, sending welcome message...");
+        invoke("send_telegram_welcome_message").catch((err) => {
+          console.error("[Channels] Failed to send welcome message:", err);
+        });
+      }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       console.error("[Channels] approve_pairing failed:", detail);
       setTelegramPairingStatus(`Failed to approve pairing: ${detail}`);
     }
   }
-
-  const telegramReady = telegramEnabled && telegramToken.trim().length > 0;
 
   if (initialLoading) {
     return (
@@ -394,15 +500,17 @@ export function Channels() {
               <TelegramIcon className="w-6 h-6" />
             </div>
             <div className="flex-1">
-              <div className="flex items-center justify-between mb-4">
-                <div>
+              <div className="mb-4">
+                <div className="flex items-center gap-3 mb-1">
                   <h3 className="text-lg font-bold">Telegram Bot</h3>
-                  <p className="text-sm text-[var(--text-secondary)]">Connect your Telegram bot to enable messaging with Joulie.</p>
+                  <TelegramConnectionStatus
+                    tokenSaved={telegramTokenSaved}
+                    connected={telegramConnected}
+                    gatewayRunning={gatewayRunning}
+                    checking={checkingConnection}
+                  />
                 </div>
-                <div className="flex items-center gap-3">
-                  <SetupStateBadge enabled={telegramEnabled} ready={telegramReady} />
-                  <ToggleSwitch checked={telegramEnabled} onChange={setTelegramEnabled} />
-                </div>
+                <p className="text-sm text-[var(--text-secondary)]">Connect your Telegram bot to enable messaging with Joulie.</p>
               </div>
 
               <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
@@ -410,8 +518,7 @@ export function Channels() {
                 <ol className="text-sm text-blue-800 space-y-1 list-decimal list-inside">
                   <li>Open Telegram and message <span className="font-mono bg-blue-100 px-1 rounded">@BotFather</span></li>
                   <li>Send <span className="font-mono bg-blue-100 px-1 rounded">/newbot</span> and follow prompts to create your bot</li>
-                  <li>Copy the bot token and paste it below</li>
-                  <li>Enable the toggle above and click "Save Bot Token"</li>
+                  <li>Copy the bot token and paste it below, then click "Save Bot Token"</li>
                   <li>Message your new bot and send <span className="font-mono bg-blue-100 px-1 rounded">/start</span></li>
                   <li>Check your Telegram messages for the pairing token, paste it below, then click "Approve"</li>
                 </ol>
@@ -429,9 +536,10 @@ export function Channels() {
                   <button
                     onClick={() => saveMessagingSetup("token")}
                     disabled={savingSetup || telegramToken.trim().length === 0}
-                    className="px-4 py-2 bg-black text-white rounded-lg text-sm font-semibold hover:bg-gray-800 disabled:opacity-50"
+                    className="px-4 py-2 bg-black text-white rounded-lg text-sm font-semibold hover:bg-gray-800 disabled:opacity-50 flex items-center gap-2"
                   >
-                    {savingSetup ? "Saving..." : "Save Bot Token"}
+                    {savingSetup && <Loader2 className="w-4 h-4 animate-spin" />}
+                    {savingSetup ? "Validating..." : "Save Bot Token"}
                   </button>
                 </div>
                 {saveError && <p className="text-sm text-red-600">{saveError}</p>}
@@ -456,23 +564,30 @@ export function Channels() {
                     </button>
                   </div>
                 )}
-                {!gatewayRunning && telegramTokenSaved && (
-                  <p className="text-xs text-[var(--text-secondary)]">
-                    Gateway is currently stopped. Saved changes apply automatically the next time it starts.
-                  </p>
-                )}
 
-                {telegramTokenSaved && (
+                {telegramTokenSaved && !telegramConnected && (
                   <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--system-gray-6)]/60 px-4 py-3 space-y-3">
-                    <p className="text-xs text-[var(--text-secondary)]">
-                      Check your Telegram messages with the new bot and paste the pairing token below.
-                    </p>
+                    <div className="flex items-start gap-2">
+                      <div className="flex-1">
+                        <p className="text-xs font-medium text-[var(--text-primary)] mb-1">
+                          Awaiting authorization
+                        </p>
+                        <p className="text-xs text-[var(--text-secondary)]">
+                          {gatewayRunning
+                            ? "Message your bot on Telegram and send /start to receive a pairing code. Paste it below and click Approve."
+                            : "Start the gateway, then message your bot on Telegram and send /start to receive a pairing code."}
+                        </p>
+                      </div>
+                      {checkingConnection && (
+                        <Loader2 className="w-4 h-4 animate-spin text-[var(--text-tertiary)] flex-shrink-0" />
+                      )}
+                    </div>
                     <div className="flex gap-2">
                       <input
                         type="text"
                         value={telegramPairingCode}
                         onChange={(e) => setTelegramPairingCode(e.target.value)}
-                        placeholder="Pairing code"
+                        placeholder="Pairing code from Telegram"
                         className="flex-1 px-4 py-2 bg-white border border-[var(--border-subtle)] rounded-lg focus:ring-2 focus:ring-[var(--system-blue)]/20 outline-none text-sm"
                       />
                       <button
@@ -487,10 +602,15 @@ export function Channels() {
                   </div>
                 )}
 
-                {!telegramConnected && telegramTokenSaved && (
-                  <p className="text-xs text-[var(--text-secondary)]">
-                    Advanced Telegram configuration will appear after Telegram pairing is connected.
-                  </p>
+                {telegramTokenSaved && telegramConnected && (
+                  <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-green-700" />
+                      <p className="text-xs font-medium text-green-800">
+                        Telegram bot is connected and ready to receive messages
+                      </p>
+                    </div>
+                  </div>
                 )}
 
                 {telegramConnected && (

@@ -168,6 +168,7 @@ pub fn run() {
             commands::approve_pairing,
             commands::get_telegram_connection_status,
             commands::validate_telegram_token,
+            commands::send_telegram_welcome_message,
             commands::restart_gateway_in_place,
             commands::heal_gateway_config,
             commands::get_gateway_config_health,

@@ -7996,19 +7996,24 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
         }
     }
 
-    if let Some(health_status) = container_health_status() {
-        println!("[Entropic] Container health status: {}", health_status);
-        if health_status == "healthy" || health_status == "starting" {
-            println!(
-                "[Entropic] Gateway WS probe failed after retries while container health is {}; reporting not running until WS recovers.",
-                health_status
-            );
-        }
-    }
-
     if !container_running() {
         println!("[Entropic] Container stopped while checking gateway health");
         return Ok(false);
+    }
+
+    if let Some(health_status) = container_health_status() {
+        println!("[Entropic] Container health status: {}", health_status);
+        if health_status == "healthy" {
+            println!(
+                "[Entropic] Gateway WS probe failed but container health is healthy; treating as running.",
+            );
+            return Ok(true);
+        }
+        if health_status == "starting" {
+            println!(
+                "[Entropic] Gateway WS probe failed while container health is starting; reporting not running until WS recovers.",
+            );
+        }
     }
 
     println!(
@@ -8030,7 +8035,7 @@ pub async fn get_gateway_ws_url() -> Result<String, String> {
 pub async fn get_gateway_auth(app: AppHandle) -> Result<GatewayAuthPayload, String> {
     Ok(GatewayAuthPayload {
         ws_url: gateway_ws_url(),
-        token: expected_gateway_token(&app)?,
+        token: effective_gateway_token(&app)?,
     })
 }
 
@@ -8954,7 +8959,99 @@ pub async fn validate_telegram_token(
 }
 
 #[tauri::command]
-pub async fn restart_gateway_in_place() -> Result<(), String> {
+pub async fn send_telegram_welcome_message() -> Result<(), String> {
+    let container = if named_gateway_container_exists(OPENCLAW_CONTAINER, true) {
+        OPENCLAW_CONTAINER
+    } else if named_gateway_container_exists(LEGACY_OPENCLAW_CONTAINER, true) {
+        LEGACY_OPENCLAW_CONTAINER
+    } else {
+        return Err("Gateway container not found".to_string());
+    };
+
+    // Read bot token and authorized chat IDs from gateway container
+    let script = r#"const fs=require('fs');
+const config=JSON.parse(fs.readFileSync('/data/config.json','utf8'));
+const token=config.channels?.telegram?.token || '';
+const paths=['/data/credentials/telegram-default-allowFrom.json','/data/credentials/telegram-allowFrom.json'];
+let chatIds=[];
+for (const p of paths) {
+  try {
+    const parsed=JSON.parse(fs.readFileSync(p,'utf8'));
+    if (Array.isArray(parsed.allowFrom)) {
+      chatIds=parsed.allowFrom.filter(v => String(v ?? '').trim().length > 0);
+      break;
+    }
+  } catch {}
+}
+console.log(JSON.stringify({token,chatIds}));"#;
+
+    let args = ["exec", container, "node", "-e", script];
+    let output = docker_exec_output(&args).map_err(|e| {
+        format!("Failed to read Telegram config from gateway: {}", e)
+    })?;
+
+    let data: serde_json::Value = serde_json::from_str(&output.trim()).map_err(|e| {
+        format!("Failed to parse gateway Telegram config: {}", e)
+    })?;
+
+    let token = data
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let chat_ids: Vec<i64> = data
+        .get("chatIds")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_i64())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if token.is_empty() {
+        return Err("Bot token not configured".to_string());
+    }
+
+    if chat_ids.is_empty() {
+        return Err("No authorized chats found".to_string());
+    }
+
+    // Send welcome message to each authorized chat
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let welcome_message = "✅ Bot connected! I'm ready to chat.";
+
+    for chat_id in chat_ids {
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
+        let payload = serde_json::json!({
+            "chat_id": chat_id,
+            "text": welcome_message,
+        });
+
+        match client.post(&url).json(&payload).send().await {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    eprintln!("Failed to send welcome message to chat {}: HTTP {}", chat_id, resp.status());
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to send welcome message to chat {}: {}", chat_id, e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn restart_gateway_in_place(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let container = if named_gateway_container_exists(OPENCLAW_CONTAINER, false) {
         OPENCLAW_CONTAINER
     } else if named_gateway_container_exists(LEGACY_OPENCLAW_CONTAINER, false) {
@@ -8975,6 +9072,13 @@ pub async fn restart_gateway_in_place() -> Result<(), String> {
             stderr.trim()
         )));
     }
+
+    // The config directory (/home/node/.openclaw) is a tmpfs mount that gets
+    // wiped on every container restart.  Re-apply persisted agent settings
+    // (including Telegram channel config) so the gateway starts with the
+    // correct configuration.
+    clear_applied_agent_settings_fingerprint()?;
+    apply_agent_settings(&app, &state)?;
 
     Ok(())
 }
