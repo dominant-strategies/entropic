@@ -294,6 +294,8 @@ const DEFAULT_SCANNER_GIT_REPO: &str = "https://github.com/cisco-ai-defense/skil
 const DEFAULT_SCANNER_GIT_COMMIT: &str = "dff88dc5fa0fff6382ddb6eff19d245745b93f7a";
 const DEFAULT_RUNTIME_RELEASE_REPO: &str = "dominant-strategies/entropic-releases";
 const DEFAULT_RUNTIME_RELEASE_TAG: &str = "runtime-latest";
+const DEFAULT_APP_MANIFEST_URL: &str =
+    "https://github.com/dominant-strategies/entropic-releases/releases/latest/download/latest.json";
 const QMD_COMMAND_PATH: &str = "/data/.bun/bin/qmd";
 
 /// Optional registry image to pull the runtime from when not available locally.
@@ -336,6 +338,8 @@ const DEFAULT_RUNTIME_MANIFEST_NAME: &str = "runtime-manifest.json";
 const RUNTIME_MANIFEST_MAX_AGE_SECS: u64 = 60 * 60; // 1 hour
 const RUNTIME_TAR_MAX_TIME_SECS: u16 = 600; // 10 minutes
 const RUNTIME_TAR_SETUP_MAX_TIME_SECS: u16 = 180; // 3 minutes
+const APP_MANIFEST_CACHE_NAME: &str = "entropic-app-latest.json";
+const APP_MANIFEST_MAX_AGE_SECS: u64 = 60 * 60; // 1 hour
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 struct RuntimeReleaseManifest {
@@ -346,6 +350,13 @@ struct RuntimeReleaseManifest {
     openclaw_commit: Option<String>,
     #[serde(default)]
     entropic_skills_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct AppReleaseManifest {
+    version: String,
+    #[serde(default)]
+    pub_date: Option<String>,
 }
 
 fn runtime_release_tag() -> String {
@@ -362,6 +373,36 @@ fn runtime_release_tag() -> String {
         }
     }
     DEFAULT_RUNTIME_RELEASE_TAG.to_string()
+}
+
+fn app_manifest_url() -> String {
+    if let Some(val) = option_env!("OPENCLAW_APP_MANIFEST_URL") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(val) = std::env::var("OPENCLAW_APP_MANIFEST_URL") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    DEFAULT_APP_MANIFEST_URL.to_string()
+}
+
+fn app_manifest_fetch_enabled() -> bool {
+    if let Some(val) = option_env!("OPENCLAW_APP_MANIFEST_URL") {
+        if !val.trim().is_empty() {
+            return true;
+        }
+    }
+    if let Ok(val) = std::env::var("OPENCLAW_APP_MANIFEST_URL") {
+        if !val.trim().is_empty() {
+            return true;
+        }
+    }
+    !cfg!(debug_assertions)
 }
 
 fn runtime_manifest_url() -> String {
@@ -449,6 +490,14 @@ fn runtime_cached_manifest_partial_path() -> Option<PathBuf> {
     runtime_cache_dir().map(|dir| dir.join("runtime-manifest.json.partial"))
 }
 
+fn app_cached_manifest_path() -> Option<PathBuf> {
+    runtime_cache_dir().map(|dir| dir.join(APP_MANIFEST_CACHE_NAME))
+}
+
+fn app_cached_manifest_partial_path() -> Option<PathBuf> {
+    runtime_cache_dir().map(|dir| dir.join("entropic-app-latest.json.partial"))
+}
+
 fn runtime_cached_tar_valid() -> bool {
     let Some(path) = runtime_cached_tar_path() else {
         return false;
@@ -471,6 +520,22 @@ fn runtime_manifest_cache_fresh() -> bool {
     modified
         .elapsed()
         .map(|elapsed| elapsed <= Duration::from_secs(RUNTIME_MANIFEST_MAX_AGE_SECS))
+        .unwrap_or(false)
+}
+
+fn app_manifest_cache_fresh() -> bool {
+    let Some(path) = app_cached_manifest_path() else {
+        return false;
+    };
+    let Ok(meta) = path.metadata() else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    modified
+        .elapsed()
+        .map(|elapsed| elapsed <= Duration::from_secs(APP_MANIFEST_MAX_AGE_SECS))
         .unwrap_or(false)
 }
 
@@ -654,6 +719,98 @@ fn resolve_runtime_manifest() -> Result<RuntimeReleaseManifest, String> {
             if let Some(cached_manifest) = read_cached_runtime_manifest() {
                 println!(
                     "[Entropic] Runtime manifest refresh failed; using cached manifest: {}",
+                    download_err
+                );
+                return Ok(cached_manifest);
+            }
+            Err(download_err)
+        }
+    }
+}
+
+fn parse_app_manifest(raw: &str) -> Result<AppReleaseManifest, String> {
+    let mut manifest: AppReleaseManifest =
+        serde_json::from_str(raw).map_err(|e| format!("JSON parse error: {}", e))?;
+    let version = manifest.version.trim();
+    if version.is_empty() {
+        return Err("manifest.version is empty".to_string());
+    }
+    manifest.version = version.to_string();
+    manifest.pub_date = manifest
+        .pub_date
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty());
+    Ok(manifest)
+}
+
+fn read_cached_app_manifest() -> Option<AppReleaseManifest> {
+    let path = app_cached_manifest_path()?;
+    let raw = fs::read_to_string(path).ok()?;
+    parse_app_manifest(&raw).ok()
+}
+
+fn fetch_app_manifest_to_cache() -> Result<AppReleaseManifest, String> {
+    let manifest_url = app_manifest_url();
+    let cache_dir = runtime_cache_dir()
+        .ok_or_else(|| "Could not resolve home directory for app manifest cache".to_string())?;
+    fs::create_dir_all(&cache_dir).map_err(|e| {
+        format!(
+            "Failed to create app manifest cache directory {}: {}",
+            cache_dir.display(),
+            e
+        )
+    })?;
+
+    let final_path = app_cached_manifest_path()
+        .ok_or_else(|| "Could not resolve app manifest cache path".to_string())?;
+    let partial_path = app_cached_manifest_partial_path()
+        .ok_or_else(|| "Could not resolve app manifest partial path".to_string())?;
+    let _ = fs::remove_file(&partial_path);
+
+    download_url_to_path(&manifest_url, &partial_path, 1, 3, 10).map_err(|e| {
+        format!(
+            "App manifest download failed.\n\
+             • URL: {}\n\
+             • {}",
+            manifest_url, e
+        )
+    })?;
+
+    let raw = fs::read_to_string(&partial_path).map_err(|e| {
+        format!(
+            "Failed to read downloaded app manifest ({}): {}",
+            partial_path.display(),
+            e
+        )
+    })?;
+    let manifest = parse_app_manifest(&raw)
+        .map_err(|e| format!("Invalid app manifest from {}: {}", manifest_url, e))?;
+
+    fs::rename(&partial_path, &final_path).map_err(|e| {
+        format!(
+            "Failed to store app manifest cache ({} -> {}): {}",
+            partial_path.display(),
+            final_path.display(),
+            e
+        )
+    })?;
+
+    Ok(manifest)
+}
+
+fn resolve_app_manifest() -> Result<AppReleaseManifest, String> {
+    if app_manifest_cache_fresh() {
+        if let Some(manifest) = read_cached_app_manifest() {
+            return Ok(manifest);
+        }
+    }
+
+    match fetch_app_manifest_to_cache() {
+        Ok(manifest) => Ok(manifest),
+        Err(download_err) => {
+            if let Some(cached_manifest) = read_cached_app_manifest() {
+                println!(
+                    "[Entropic] App manifest refresh failed; using cached manifest: {}",
                     download_err
                 );
                 return Ok(cached_manifest);
@@ -1209,6 +1366,37 @@ fn runtime_image_id() -> Result<Option<String>, String> {
         }
     }
     Ok(None)
+}
+
+fn normalize_runtime_image_digest(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches("sha256:")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn runtime_image_matches_tar(image_id: &str, tar_path: &Path) -> bool {
+    let Ok(signature) = bundled_runtime_signature_from_manifest(tar_path) else {
+        return false;
+    };
+    normalize_runtime_image_digest(image_id) == normalize_runtime_image_digest(&signature)
+}
+
+fn resolve_applied_runtime_from_cache(image_id: &str) -> Option<(String, Option<String>)> {
+    let cached_tar = runtime_cached_tar_path()?;
+    if !cached_tar.is_file() {
+        return None;
+    }
+    if !runtime_image_matches_tar(image_id, &cached_tar) {
+        return None;
+    }
+    let manifest = read_cached_runtime_manifest()?;
+    let commit = manifest
+        .openclaw_commit
+        .map(|raw| raw.trim().to_string())
+        .filter(|value| !value.is_empty());
+    Some((manifest.version, commit))
 }
 
 fn find_local_runtime_tar() -> Option<PathBuf> {
@@ -6457,12 +6645,50 @@ pub struct RuntimeVersionInfo {
     pub entropic_version: String,
     pub runtime_version: String,
     pub runtime_openclaw_commit: Option<String>,
+    pub applied_runtime_version: Option<String>,
+    pub applied_runtime_openclaw_commit: Option<String>,
+    pub applied_runtime_image_id: Option<String>,
+    pub app_manifest_version: Option<String>,
+    pub app_manifest_pub_date: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuntimeFetchResult {
+    pub runtime_version: String,
+    pub runtime_openclaw_commit: Option<String>,
+    pub runtime_sha256: String,
+    pub cache_path: String,
+}
+
+#[tauri::command]
+pub fn fetch_latest_openclaw_runtime() -> Result<RuntimeFetchResult, String> {
+    let manifest = fetch_runtime_manifest_to_cache()
+        .map_err(|e| format!("Failed to refresh runtime manifest: {}", e))?;
+    let tar_path = download_runtime_tar_from_manifest_to_cache(RUNTIME_TAR_MAX_TIME_SECS)?;
+    let runtime_openclaw_commit = manifest
+        .openclaw_commit
+        .as_ref()
+        .map(|commit| commit.trim().to_string())
+        .filter(|commit| !commit.is_empty());
+
+    Ok(RuntimeFetchResult {
+        runtime_version: manifest.version,
+        runtime_openclaw_commit,
+        runtime_sha256: manifest.sha256,
+        cache_path: tar_path.display().to_string(),
+    })
 }
 
 #[tauri::command]
 pub fn get_runtime_version_info() -> Result<RuntimeVersionInfo, String> {
+    let entropic_version = env!("CARGO_PKG_VERSION").to_string();
     let mut runtime_version = runtime_release_tag();
     let mut runtime_openclaw_commit = None;
+    let mut applied_runtime_version = None;
+    let mut applied_runtime_openclaw_commit = None;
+    let mut applied_runtime_image_id = None;
+    let mut app_manifest_version = Some(entropic_version.clone());
+    let mut app_manifest_pub_date = None;
 
     if let Some(manifest) = read_cached_runtime_manifest() {
         runtime_version = manifest.version;
@@ -6472,10 +6698,56 @@ pub fn get_runtime_version_info() -> Result<RuntimeVersionInfo, String> {
             .filter(|commit| !commit.is_empty());
     }
 
+    match runtime_image_id() {
+        Ok(Some(image_id)) => {
+            applied_runtime_image_id = Some(image_id.clone());
+            if let Some((version, commit)) = resolve_applied_runtime_from_cache(&image_id) {
+                applied_runtime_version = Some(version);
+                applied_runtime_openclaw_commit = commit;
+            } else if let Some(local_tar) = find_local_runtime_tar() {
+                if runtime_image_matches_tar(&image_id, &local_tar) {
+                    applied_runtime_version = Some("local".to_string());
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            println!(
+                "[Entropic] Failed to inspect runtime image for version info: {}",
+                err
+            );
+        }
+    }
+
+    if let Some(cached_manifest) = read_cached_app_manifest() {
+        app_manifest_version = Some(cached_manifest.version);
+        app_manifest_pub_date = cached_manifest.pub_date;
+    }
+
+    if app_manifest_fetch_enabled() {
+        match resolve_app_manifest() {
+            Ok(manifest) => {
+                app_manifest_version = Some(manifest.version);
+                app_manifest_pub_date = manifest.pub_date;
+            }
+            Err(err) => {
+                println!(
+                    "[Entropic] Failed to resolve app manifest version info: {}",
+                    err
+                );
+            }
+        }
+    }
+
     Ok(RuntimeVersionInfo {
-        entropic_version: env!("CARGO_PKG_VERSION").to_string(),
+        entropic_version,
         runtime_version,
         runtime_openclaw_commit,
+        applied_runtime_version,
+        applied_runtime_openclaw_commit,
+        applied_runtime_image_id,
+        app_manifest_version,
+        app_manifest_pub_date,
     })
 }
 

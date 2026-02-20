@@ -57,6 +57,18 @@ type RuntimeVersionInfo = {
   entropic_version: string;
   runtime_version: string;
   runtime_openclaw_commit?: string | null;
+  applied_runtime_version?: string | null;
+  applied_runtime_openclaw_commit?: string | null;
+  applied_runtime_image_id?: string | null;
+  app_manifest_version?: string | null;
+  app_manifest_pub_date?: string | null;
+};
+
+type RuntimeFetchResult = {
+  runtime_version: string;
+  runtime_openclaw_commit?: string | null;
+  runtime_sha256: string;
+  cache_path: string;
 };
 
 function SettingsGroup({ title, children }: { title?: string, children: React.ReactNode }) {
@@ -153,6 +165,14 @@ export function Settings({
   const [gatewayConfigError, setGatewayConfigError] = useState<string | null>(null);
   const [gatewayConfigNotice, setGatewayConfigNotice] = useState<string | null>(null);
   const [runtimeVersionInfo, setRuntimeVersionInfo] = useState<RuntimeVersionInfo | null>(null);
+  const [runtimeFetchLoading, setRuntimeFetchLoading] = useState(false);
+  const appliedRuntimeDigest =
+    runtimeVersionInfo?.applied_runtime_image_id
+      ?.replace(/^sha256:/, "")
+      .slice(0, 12) ?? null;
+  const appManifestDate = runtimeVersionInfo?.app_manifest_pub_date
+    ? runtimeVersionInfo.app_manifest_pub_date.slice(0, 10)
+    : null;
 
   // Wallpaper state
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
@@ -1022,6 +1042,45 @@ export function Settings({
       <SettingsGroup title="Data Management">
         <div className="p-4 space-y-4">
           <div className="flex items-start gap-3">
+            <div className="w-7 h-7 rounded-md bg-blue-50 text-blue-600 flex items-center justify-center flex-shrink-0">
+              <Cpu className="w-4 h-4" />
+            </div>
+            <div className="flex-1">
+              <div className="text-[14px] font-medium text-[var(--text-primary)] mb-1">Fetch Latest OpenClaw Runtime</div>
+              <div className="text-[12px] text-[var(--text-secondary)] mb-3">
+                Refresh the runtime manifest and cache the newest OpenClaw runtime tar for faster startup and updates.
+              </div>
+              <button
+                onClick={async () => {
+                  setRuntimeFetchLoading(true);
+                  try {
+                    const result = await invoke<RuntimeFetchResult>("fetch_latest_openclaw_runtime");
+                    invoke<RuntimeVersionInfo>("get_runtime_version_info").then(setRuntimeVersionInfo).catch(() => {});
+                    const shortCommit = result.runtime_openclaw_commit
+                      ? ` (${result.runtime_openclaw_commit.slice(0, 7)})`
+                      : "";
+                    alert(
+                      "Runtime cache updated.\n\n" +
+                        `Version: ${result.runtime_version}${shortCommit}\n` +
+                        `SHA256: ${result.runtime_sha256}\n` +
+                        `Path: ${result.cache_path}`
+                    );
+                  } catch (err) {
+                    alert("Failed to fetch latest runtime: " + (err instanceof Error ? err.message : String(err)));
+                  } finally {
+                    setRuntimeFetchLoading(false);
+                  }
+                }}
+                disabled={runtimeFetchLoading}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {runtimeFetchLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                {runtimeFetchLoading ? "Fetching..." : "Fetch Latest Runtime"}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-3">
             <div className="w-7 h-7 rounded-md bg-amber-50 text-amber-600 flex items-center justify-center flex-shrink-0">
               <AlertTriangle className="w-4 h-4" />
             </div>
@@ -1204,9 +1263,24 @@ export function Settings({
       <div className="px-1 pb-2 text-xs text-[var(--text-tertiary)] space-y-1">
         <div>Entropic v{runtimeVersionInfo?.entropic_version ?? "..."}</div>
         <div>
+          Entropic Manifest {runtimeVersionInfo?.app_manifest_version ?? "unavailable"}
+          {appManifestDate ? ` (${appManifestDate})` : ""}
+        </div>
+        <div>
           OpenClaw Runtime {runtimeVersionInfo?.runtime_version ?? "unknown"}
           {runtimeVersionInfo?.runtime_openclaw_commit
             ? ` (${runtimeVersionInfo.runtime_openclaw_commit.slice(0, 7)})`
+            : ""}
+        </div>
+        <div>
+          Applied Runtime{" "}
+          {runtimeVersionInfo?.applied_runtime_version
+            ? runtimeVersionInfo.applied_runtime_version
+            : appliedRuntimeDigest
+              ? `image ${appliedRuntimeDigest}`
+              : "not loaded"}
+          {runtimeVersionInfo?.applied_runtime_openclaw_commit
+            ? ` (${runtimeVersionInfo.applied_runtime_openclaw_commit.slice(0, 7)})`
             : ""}
         </div>
       </div>
