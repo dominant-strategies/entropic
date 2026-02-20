@@ -56,9 +56,44 @@ const TelegramIcon = ({ className }: { className?: string }) => (
     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.66.15-.17 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.18-.08-.04-.19-.03-.27-.01-.11.02-1.82 1.15-5.14 2.3-.49.17-.93.25-1.33.24-.44-.01-1.29-.25-1.92-.45-.77-.25-1.38-.39-1.33-.82.03-.23.34-.46.94-.7 3.68-1.6 6.13-2.66 7.35-3.17 3.5-.14 4.22.11 4.23.11.01.01.03.01.03.02z" />
   </svg>
 );
+
+type TelegramDmPolicy = "pairing" | "allowlist" | "open" | "disabled";
+type TelegramGroupPolicy = "allowlist" | "open" | "disabled";
+type TelegramReplyToMode = "off" | "first" | "all";
+
+function normalizeTelegramDmPolicy(value: string | undefined): TelegramDmPolicy {
+  if (value === "allowlist" || value === "open" || value === "disabled") {
+    return value;
+  }
+  return "pairing";
+}
+
+function normalizeTelegramGroupPolicy(value: string | undefined): TelegramGroupPolicy {
+  if (value === "open" || value === "disabled") {
+    return value;
+  }
+  return "allowlist";
+}
+
+function normalizeTelegramReplyToMode(value: string | undefined): TelegramReplyToMode {
+  if (value === "first" || value === "all") {
+    return value;
+  }
+  return "off";
+}
+
 export function Channels() {
   const [telegramEnabled, setTelegramEnabled] = useState(false);
   const [telegramToken, setTelegramToken] = useState("");
+  const [telegramDmPolicy, setTelegramDmPolicy] = useState<TelegramDmPolicy>("pairing");
+  const [telegramGroupPolicy, setTelegramGroupPolicy] = useState<TelegramGroupPolicy>("allowlist");
+  const [telegramConfigWrites, setTelegramConfigWrites] = useState(false);
+  const [telegramRequireMention, setTelegramRequireMention] = useState(true);
+  const [telegramReplyToMode, setTelegramReplyToMode] = useState<TelegramReplyToMode>("off");
+  const [telegramLinkPreview, setTelegramLinkPreview] = useState(true);
+  const [telegramTokenSaved, setTelegramTokenSaved] = useState(false);
+  const [telegramConnected, setTelegramConnected] = useState(false);
+  const [showAdvancedHelp, setShowAdvancedHelp] = useState(false);
   const [telegramPairingCode, setTelegramPairingCode] = useState("");
   const [telegramPairingStatus, setTelegramPairingStatus] = useState<string | null>(null);
 
@@ -70,28 +105,74 @@ export function Channels() {
     invoke<{
       telegram_enabled: boolean;
       telegram_token: string;
+      telegram_dm_policy?: string;
+      telegram_group_policy?: string;
+      telegram_config_writes?: boolean;
+      telegram_require_mention?: boolean;
+      telegram_reply_to_mode?: string;
+      telegram_link_preview?: boolean;
     }>("get_agent_profile_state")
       .then((state) => {
         setTelegramEnabled(state.telegram_enabled ?? false);
         setTelegramToken(state.telegram_token || "");
+        const dmPolicy = normalizeTelegramDmPolicy(state.telegram_dm_policy);
+        const groupPolicy = normalizeTelegramGroupPolicy(state.telegram_group_policy);
+        const configWrites = state.telegram_config_writes ?? false;
+        const requireMention = state.telegram_require_mention ?? true;
+        const replyToMode = normalizeTelegramReplyToMode(state.telegram_reply_to_mode);
+        const linkPreview = state.telegram_link_preview ?? true;
+        setTelegramDmPolicy(dmPolicy);
+        setTelegramGroupPolicy(groupPolicy);
+        setTelegramConfigWrites(configWrites);
+        setTelegramRequireMention(requireMention);
+        setTelegramReplyToMode(replyToMode);
+        setTelegramLinkPreview(linkPreview);
+        setTelegramTokenSaved(Boolean(state.telegram_token?.trim()));
 
         // Auto-configure runtime if Telegram is enabled with a token
         if (state.telegram_enabled && state.telegram_token?.trim()) {
           console.log("[Channels] Auto-configuring Telegram on startup");
-          autoConfigureTelegram(state.telegram_enabled, state.telegram_token);
+          autoConfigureTelegram({
+            enabled: state.telegram_enabled,
+            token: state.telegram_token,
+            dmPolicy,
+            groupPolicy,
+            configWrites,
+            requireMention,
+            replyToMode,
+            linkPreview,
+          });
         }
+        invoke<boolean>("get_telegram_connection_status")
+          .then((connected) => setTelegramConnected(Boolean(connected)))
+          .catch(() => setTelegramConnected(false));
       })
       .catch(() => {});
   }, []);
 
-  async function autoConfigureTelegram(enabled: boolean, token: string) {
+  async function autoConfigureTelegram(params: {
+    enabled: boolean;
+    token: string;
+    dmPolicy: TelegramDmPolicy;
+    groupPolicy: TelegramGroupPolicy;
+    configWrites: boolean;
+    requireMention: boolean;
+    replyToMode: TelegramReplyToMode;
+    linkPreview: boolean;
+  }) {
     try {
       console.log("[Channels] Auto-configuring Telegram...");
       await invoke("set_channels_config", {
         discordEnabled: false,
         discordToken: "",
-        telegramEnabled: enabled,
-        telegramToken: token,
+        telegramEnabled: params.enabled,
+        telegramToken: params.token,
+        telegramDmPolicy: params.dmPolicy,
+        telegramGroupPolicy: params.groupPolicy,
+        telegramConfigWrites: params.configWrites,
+        telegramRequireMention: params.requireMention,
+        telegramReplyToMode: params.replyToMode,
+        telegramLinkPreview: params.linkPreview,
         slackEnabled: false,
         slackBotToken: "",
         slackAppToken: "",
@@ -123,6 +204,12 @@ export function Channels() {
         discordToken: "",
         telegramEnabled,
         telegramToken,
+        telegramDmPolicy,
+        telegramGroupPolicy,
+        telegramConfigWrites,
+        telegramRequireMention,
+        telegramReplyToMode,
+        telegramLinkPreview,
         slackEnabled: false,
         slackBotToken: "",
         slackAppToken: "",
@@ -134,11 +221,14 @@ export function Channels() {
         whatsappAllowFrom: "",
       });
       console.log("[Channels] set_channels_config succeeded");
-      setSaveMessage("Telegram setup saved.");
+      setTelegramTokenSaved(Boolean(telegramToken.trim()));
+      const connected = await invoke<boolean>("get_telegram_connection_status").catch(() => false);
+      setTelegramConnected(Boolean(connected));
+      setSaveMessage("Bot token saved. Check Telegram messages from your new bot for your pairing token.");
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       console.error("[Channels] set_channels_config failed:", detail);
-      setSaveError(`Failed to save Telegram setup: ${detail}`);
+      setSaveError(`Failed to save bot token: ${detail}`);
     } finally {
       setSavingSetup(false);
       console.log("[Channels] saveMessagingSetup completed");
@@ -158,6 +248,9 @@ export function Channels() {
       });
       console.log("[Channels] approve_pairing succeeded:", result);
       setTelegramPairingStatus(result || "Pairing approved.");
+      const connected = await invoke<boolean>("get_telegram_connection_status").catch(() => true);
+      setTelegramConnected(Boolean(connected));
+      setTelegramPairingCode("");
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       console.error("[Channels] approve_pairing failed:", detail);
@@ -198,61 +291,203 @@ export function Channels() {
                   <li>Open Telegram and message <span className="font-mono bg-blue-100 px-1 rounded">@BotFather</span></li>
                   <li>Send <span className="font-mono bg-blue-100 px-1 rounded">/newbot</span> and follow prompts to create your bot</li>
                   <li>Copy the bot token and paste it below</li>
-                  <li>Enable the toggle above and click "Save Telegram Setup"</li>
-                  <li>Message your bot and send <span className="font-mono bg-blue-100 px-1 rounded">/start</span></li>
-                  <li>Your bot will respond with a pairing code - paste it below and click "Approve"</li>
+                  <li>Enable the toggle above and click "Save Bot Token"</li>
+                  <li>Message your new bot and send <span className="font-mono bg-blue-100 px-1 rounded">/start</span></li>
+                  <li>Check your Telegram messages for the pairing token, paste it below, then click "Approve"</li>
                 </ol>
               </div>
 
               <div className="space-y-3">
-                <input
-                  type="password"
-                  value={telegramToken}
-                  onChange={(e) => setTelegramToken(e.target.value)}
-                  placeholder="Bot token"
-                  className="w-full px-4 py-2 bg-[var(--system-gray-6)] border-transparent rounded-lg focus:ring-2 focus:ring-[var(--system-blue)]/20 outline-none text-sm"
-                />
                 <div className="flex gap-2">
                   <input
-                    type="text"
-                    value={telegramPairingCode}
-                    onChange={(e) => setTelegramPairingCode(e.target.value)}
-                    placeholder="Pairing code"
+                    type="password"
+                    value={telegramToken}
+                    onChange={(e) => setTelegramToken(e.target.value)}
+                    placeholder="Bot token"
                     className="flex-1 px-4 py-2 bg-[var(--system-gray-6)] border-transparent rounded-lg focus:ring-2 focus:ring-[var(--system-blue)]/20 outline-none text-sm"
                   />
                   <button
-                    onClick={approveTelegramPairing}
-                    disabled={telegramPairingCode.trim().length === 0}
+                    onClick={saveMessagingSetup}
+                    disabled={savingSetup || telegramToken.trim().length === 0}
                     className="px-4 py-2 bg-black text-white rounded-lg text-sm font-semibold hover:bg-gray-800 disabled:opacity-50"
                   >
-                    Approve
+                    {savingSetup ? "Saving..." : "Save Bot Token"}
                   </button>
                 </div>
-                {telegramPairingStatus && <p className="text-xs text-[var(--text-tertiary)]">{telegramPairingStatus}</p>}
+                {saveError && <p className="text-sm text-red-600">{saveError}</p>}
+                {saveMessage && (
+                  <p className="text-sm text-green-700 flex items-center gap-1">
+                    <CheckCircle2 className="w-4 h-4" />
+                    {saveMessage}
+                  </p>
+                )}
+
+                {telegramTokenSaved && (
+                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--system-gray-6)]/60 px-4 py-3 space-y-3">
+                    <p className="text-xs text-[var(--text-secondary)]">
+                      Check your Telegram messages with the new bot and paste the pairing token below.
+                    </p>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={telegramPairingCode}
+                        onChange={(e) => setTelegramPairingCode(e.target.value)}
+                        placeholder="Pairing code"
+                        className="flex-1 px-4 py-2 bg-white border border-[var(--border-subtle)] rounded-lg focus:ring-2 focus:ring-[var(--system-blue)]/20 outline-none text-sm"
+                      />
+                      <button
+                        onClick={approveTelegramPairing}
+                        disabled={telegramPairingCode.trim().length === 0}
+                        className="px-4 py-2 bg-black text-white rounded-lg text-sm font-semibold hover:bg-gray-800 disabled:opacity-50"
+                      >
+                        Approve
+                      </button>
+                    </div>
+                    {telegramPairingStatus && <p className="text-xs text-[var(--text-tertiary)]">{telegramPairingStatus}</p>}
+                  </div>
+                )}
+
+                {!telegramConnected && telegramTokenSaved && (
+                  <p className="text-xs text-[var(--text-secondary)]">
+                    Advanced Telegram configuration will appear after Telegram pairing is connected.
+                  </p>
+                )}
+
+                {telegramConnected && (
+                  <details className="rounded-lg border border-[var(--border-subtle)] bg-[var(--system-gray-6)]/60">
+                    <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold text-[var(--text-primary)]">
+                      <div className="flex items-center justify-between">
+                        <span>Advanced Telegram Configuration</span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setShowAdvancedHelp(true);
+                          }}
+                          className="w-6 h-6 rounded-full border border-[var(--border-subtle)] text-xs font-bold text-[var(--text-secondary)] hover:bg-white"
+                          aria-label="Explain advanced Telegram settings"
+                          title="Explain advanced Telegram settings"
+                        >
+                          ?
+                        </button>
+                      </div>
+                    </summary>
+                    <div className="border-t border-[var(--border-subtle)] px-4 py-3 space-y-3">
+                      <p className="text-xs text-[var(--text-secondary)]">
+                        After changing advanced settings, click <span className="font-medium">Save Bot Token</span> to apply.
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <label className="text-xs text-[var(--text-secondary)]">
+                          DM Policy
+                          <select
+                            value={telegramDmPolicy}
+                            onChange={(e) => setTelegramDmPolicy(normalizeTelegramDmPolicy(e.target.value))}
+                            className="mt-1 w-full px-3 py-2 bg-white border border-[var(--border-subtle)] rounded-md text-sm text-[var(--text-primary)]"
+                          >
+                            <option value="pairing">pairing</option>
+                            <option value="allowlist">allowlist</option>
+                            <option value="open">open</option>
+                            <option value="disabled">disabled</option>
+                          </select>
+                        </label>
+                        <label className="text-xs text-[var(--text-secondary)]">
+                          Group Policy
+                          <select
+                            value={telegramGroupPolicy}
+                            onChange={(e) => setTelegramGroupPolicy(normalizeTelegramGroupPolicy(e.target.value))}
+                            className="mt-1 w-full px-3 py-2 bg-white border border-[var(--border-subtle)] rounded-md text-sm text-[var(--text-primary)]"
+                          >
+                            <option value="allowlist">allowlist</option>
+                            <option value="open">open</option>
+                            <option value="disabled">disabled</option>
+                          </select>
+                        </label>
+                        <label className="text-xs text-[var(--text-secondary)]">
+                          Reply-To Mode
+                          <select
+                            value={telegramReplyToMode}
+                            onChange={(e) => setTelegramReplyToMode(normalizeTelegramReplyToMode(e.target.value))}
+                            className="mt-1 w-full px-3 py-2 bg-white border border-[var(--border-subtle)] rounded-md text-sm text-[var(--text-primary)]"
+                          >
+                            <option value="off">off</option>
+                            <option value="first">first</option>
+                            <option value="all">all</option>
+                          </select>
+                        </label>
+                      </div>
+
+                      {telegramGroupPolicy === "allowlist" && (
+                        <p className="text-xs text-[var(--text-secondary)]">
+                          To add allowed groups, set entries under <span className="font-mono">channels.telegram.groups.&lt;chatId&gt;</span> in config.
+                          Get <span className="font-mono">chatId</span> from Telegram logs/getUpdates.
+                        </p>
+                      )}
+
+                      <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                        <input
+                          type="checkbox"
+                          checked={telegramRequireMention}
+                          onChange={(e) => setTelegramRequireMention(e.target.checked)}
+                        />
+                        Require mentions in groups
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                        <input
+                          type="checkbox"
+                          checked={telegramConfigWrites}
+                          onChange={(e) => setTelegramConfigWrites(e.target.checked)}
+                        />
+                        Allow Telegram config writes
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                        <input
+                          type="checkbox"
+                          checked={telegramLinkPreview}
+                          onChange={(e) => setTelegramLinkPreview(e.target.checked)}
+                        />
+                        Enable link previews in replies
+                      </label>
+                    </div>
+                  </details>
+                )}
+
               </div>
             </div>
           </div>
         </ChannelGroup>
-
-        <div className="flex items-end justify-between gap-3 pt-4">
-          <div>
-            {saveError && <p className="text-sm text-red-600">{saveError}</p>}
-            {saveMessage && (
-              <p className="text-sm text-green-700 flex items-center gap-1">
-                <CheckCircle2 className="w-4 h-4" />
-                {saveMessage}
-              </p>
-            )}
-          </div>
-          <button
-            onClick={saveMessagingSetup}
-            disabled={savingSetup}
-            className="px-6 py-2.5 bg-black text-white rounded-xl font-bold text-sm hover:bg-gray-800 shadow-lg transition-all disabled:opacity-60"
-          >
-            {savingSetup ? "Saving..." : "Save Telegram Setup"}
-          </button>
-        </div>
       </div>
+
+      {showAdvancedHelp && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+          onClick={() => setShowAdvancedHelp(false)}
+        >
+          <div
+            className="w-full max-w-xl bg-white rounded-xl border border-[var(--border-subtle)] shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 border-b border-[var(--border-subtle)] flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-[var(--text-primary)]">Advanced Telegram Settings</h3>
+              <button
+                type="button"
+                onClick={() => setShowAdvancedHelp(false)}
+                className="text-xs px-2 py-1 rounded border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
+              >
+                Close
+              </button>
+            </div>
+            <div className="px-4 py-3 text-sm text-[var(--text-secondary)] space-y-2">
+              <p><span className="font-medium text-[var(--text-primary)]">DM Policy:</span> Controls who can DM the bot. `pairing` requires approval code, `allowlist` only approved IDs, `open` allows all, `disabled` blocks DMs.</p>
+              <p><span className="font-medium text-[var(--text-primary)]">Group Policy:</span> Controls sender rules inside groups. `allowlist` restricts to approved senders, `open` allows any sender, `disabled` ignores group messages.</p>
+              <p><span className="font-medium text-[var(--text-primary)]">Reply-To Mode:</span> Controls how replies attach to threaded Telegram messages. `off` disables reply linkage, `first` replies to first relevant message, `all` preserves threaded replies broadly.</p>
+              <p><span className="font-medium text-[var(--text-primary)]">Require Mentions:</span> When on, the bot responds in groups only when explicitly mentioned.</p>
+              <p><span className="font-medium text-[var(--text-primary)]">Allow Telegram Config Writes:</span> Lets Telegram-side config commands modify gateway config (for example, `/config set`). Keep off for stricter control.</p>
+              <p><span className="font-medium text-[var(--text-primary)]">Link Preview:</span> Enables or disables URL previews in bot replies.</p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

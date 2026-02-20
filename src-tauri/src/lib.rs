@@ -160,6 +160,7 @@ pub fn run() {
             commands::wait_whatsapp_login,
             commands::get_whatsapp_login,
             commands::approve_pairing,
+            commands::get_telegram_connection_status,
             commands::upload_attachment,
             commands::save_attachment,
             commands::delete_attachment,

@@ -741,6 +741,12 @@ pub struct AgentProfileState {
     pub discord_token: String,
     pub telegram_enabled: bool,
     pub telegram_token: String,
+    pub telegram_dm_policy: String,
+    pub telegram_group_policy: String,
+    pub telegram_config_writes: bool,
+    pub telegram_require_mention: bool,
+    pub telegram_reply_to_mode: String,
+    pub telegram_link_preview: bool,
     pub slack_enabled: bool,
     pub slack_bot_token: String,
     pub slack_app_token: String,
@@ -1053,6 +1059,12 @@ struct StoredAgentSettings {
     discord_token: String,
     telegram_enabled: bool,
     telegram_token: String,
+    telegram_dm_policy: String,
+    telegram_group_policy: String,
+    telegram_config_writes: bool,
+    telegram_require_mention: bool,
+    telegram_reply_to_mode: String,
+    telegram_link_preview: bool,
     slack_enabled: bool,
     slack_bot_token: String,
     slack_app_token: String,
@@ -1111,6 +1123,12 @@ impl Default for StoredAgentSettings {
             discord_token: String::new(),
             telegram_enabled: false,
             telegram_token: String::new(),
+            telegram_dm_policy: "pairing".to_string(),
+            telegram_group_policy: "allowlist".to_string(),
+            telegram_config_writes: false,
+            telegram_require_mention: true,
+            telegram_reply_to_mode: "off".to_string(),
+            telegram_link_preview: true,
             slack_enabled: false,
             slack_bot_token: String::new(),
             slack_app_token: String::new(),
@@ -3366,22 +3384,32 @@ Use it for durable decisions, preferences, and facts that should persist across 
     set_openclaw_config_value(
         &mut cfg,
         &["channels", "telegram", "dmPolicy"],
-        serde_json::json!("pairing"),
+        serde_json::json!(settings.telegram_dm_policy.clone()),
     );
     set_openclaw_config_value(
         &mut cfg,
         &["channels", "telegram", "groupPolicy"],
-        serde_json::json!("allowlist"),
+        serde_json::json!(settings.telegram_group_policy.clone()),
     );
     set_openclaw_config_value(
         &mut cfg,
         &["channels", "telegram", "configWrites"],
-        serde_json::json!(false),
+        serde_json::json!(settings.telegram_config_writes),
     );
     set_openclaw_config_value(
         &mut cfg,
         &["channels", "telegram", "groups", "*", "requireMention"],
-        serde_json::json!(true),
+        serde_json::json!(settings.telegram_require_mention),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "replyToMode"],
+        serde_json::json!(settings.telegram_reply_to_mode.clone()),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "linkPreview"],
+        serde_json::json!(settings.telegram_link_preview),
     );
     set_openclaw_config_value(
         &mut cfg,
@@ -4408,6 +4436,12 @@ fn clear_legacy_messaging_settings(settings: &mut StoredAgentSettings) {
     settings.discord_token.clear();
     settings.telegram_enabled = false;
     settings.telegram_token.clear();
+    settings.telegram_dm_policy = "pairing".to_string();
+    settings.telegram_group_policy = "allowlist".to_string();
+    settings.telegram_config_writes = false;
+    settings.telegram_require_mention = true;
+    settings.telegram_reply_to_mode = "off".to_string();
+    settings.telegram_link_preview = true;
     settings.slack_enabled = false;
     settings.slack_bot_token.clear();
     settings.slack_app_token.clear();
@@ -6306,6 +6340,44 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         .and_then(|v| v.as_str())
         .unwrap_or(&stored.telegram_token)
         .to_string();
+    let telegram_dm_policy = telegram_cfg
+        .and_then(|v| v.get("dmPolicy"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&stored.telegram_dm_policy);
+    let telegram_dm_policy = match telegram_dm_policy {
+        "pairing" | "allowlist" | "open" | "disabled" => telegram_dm_policy.to_string(),
+        _ => "pairing".to_string(),
+    };
+    let telegram_group_policy = telegram_cfg
+        .and_then(|v| v.get("groupPolicy"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&stored.telegram_group_policy);
+    let telegram_group_policy = match telegram_group_policy {
+        "allowlist" | "open" | "disabled" => telegram_group_policy.to_string(),
+        _ => "allowlist".to_string(),
+    };
+    let telegram_config_writes = telegram_cfg
+        .and_then(|v| v.get("configWrites"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(stored.telegram_config_writes);
+    let telegram_require_mention = telegram_cfg
+        .and_then(|v| v.get("groups"))
+        .and_then(|v| v.get("*"))
+        .and_then(|v| v.get("requireMention"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(stored.telegram_require_mention);
+    let telegram_reply_to_mode = telegram_cfg
+        .and_then(|v| v.get("replyToMode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&stored.telegram_reply_to_mode);
+    let telegram_reply_to_mode = match telegram_reply_to_mode {
+        "off" | "first" | "all" => telegram_reply_to_mode.to_string(),
+        _ => "off".to_string(),
+    };
+    let telegram_link_preview = telegram_cfg
+        .and_then(|v| v.get("linkPreview"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(stored.telegram_link_preview);
 
     let slack_cfg = cfg.get("channels").and_then(|v| v.get("slack"));
     let slack_enabled = slack_cfg
@@ -6423,6 +6495,12 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         discord_token,
         telegram_enabled,
         telegram_token,
+        telegram_dm_policy,
+        telegram_group_policy,
+        telegram_config_writes,
+        telegram_require_mention,
+        telegram_reply_to_mode,
+        telegram_link_preview,
         slack_enabled,
         slack_bot_token,
         slack_app_token,
@@ -6709,6 +6787,12 @@ pub async fn set_channels_config(
     discord_token: String,
     telegram_enabled: bool,
     telegram_token: String,
+    telegram_dm_policy: String,
+    telegram_group_policy: String,
+    telegram_config_writes: bool,
+    telegram_require_mention: bool,
+    telegram_reply_to_mode: String,
+    telegram_link_preview: bool,
     slack_enabled: bool,
     slack_bot_token: String,
     slack_app_token: String,
@@ -6719,13 +6803,37 @@ pub async fn set_channels_config(
     whatsapp_enabled: bool,
     whatsapp_allow_from: String,
 ) -> Result<(), String> {
-    eprintln!("[set_channels_config] Called with telegram_enabled={}, token_len={}", telegram_enabled, telegram_token.len());
+    eprintln!(
+        "[set_channels_config] Called with telegram_enabled={}, token_len={}, dm_policy={}, group_policy={}, require_mention={}, config_writes={}",
+        telegram_enabled,
+        telegram_token.len(),
+        telegram_dm_policy,
+        telegram_group_policy,
+        telegram_require_mention,
+        telegram_config_writes
+    );
 
     let mut cfg = read_openclaw_config();
     eprintln!("[set_channels_config] OpenClaw config read successfully");
 
     let discord_token = discord_token.trim().to_string();
     let telegram_token = telegram_token.trim().to_string();
+    let telegram_dm_policy = match telegram_dm_policy.trim() {
+        "allowlist" => "allowlist".to_string(),
+        "open" => "open".to_string(),
+        "disabled" => "disabled".to_string(),
+        _ => "pairing".to_string(),
+    };
+    let telegram_group_policy = match telegram_group_policy.trim() {
+        "open" => "open".to_string(),
+        "disabled" => "disabled".to_string(),
+        _ => "allowlist".to_string(),
+    };
+    let telegram_reply_to_mode = match telegram_reply_to_mode.trim() {
+        "first" => "first".to_string(),
+        "all" => "all".to_string(),
+        _ => "off".to_string(),
+    };
     let slack_bot_token = slack_bot_token.trim().to_string();
     let slack_app_token = slack_app_token.trim().to_string();
     let googlechat_service_account = googlechat_service_account.trim().to_string();
@@ -6775,22 +6883,32 @@ pub async fn set_channels_config(
     set_openclaw_config_value(
         &mut cfg,
         &["channels", "telegram", "dmPolicy"],
-        serde_json::json!("pairing"),
+        serde_json::json!(telegram_dm_policy),
     );
     set_openclaw_config_value(
         &mut cfg,
         &["channels", "telegram", "groupPolicy"],
-        serde_json::json!("allowlist"),
+        serde_json::json!(telegram_group_policy),
     );
     set_openclaw_config_value(
         &mut cfg,
         &["channels", "telegram", "configWrites"],
-        serde_json::json!(false),
+        serde_json::json!(telegram_config_writes),
     );
     set_openclaw_config_value(
         &mut cfg,
         &["channels", "telegram", "groups", "*", "requireMention"],
-        serde_json::json!(true),
+        serde_json::json!(telegram_require_mention),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "replyToMode"],
+        serde_json::json!(telegram_reply_to_mode),
+    );
+    set_openclaw_config_value(
+        &mut cfg,
+        &["channels", "telegram", "linkPreview"],
+        serde_json::json!(telegram_link_preview),
     );
     set_openclaw_config_value(
         &mut cfg,
@@ -6929,7 +7047,13 @@ pub async fn set_channels_config(
     settings.discord_enabled = discord_enabled;
     settings.discord_token = discord_token;
     settings.telegram_enabled = telegram_enabled;
-    settings.telegram_token = telegram_token;
+    settings.telegram_token = telegram_token.clone();
+    settings.telegram_dm_policy = telegram_dm_policy;
+    settings.telegram_group_policy = telegram_group_policy;
+    settings.telegram_config_writes = telegram_config_writes;
+    settings.telegram_require_mention = telegram_require_mention;
+    settings.telegram_reply_to_mode = telegram_reply_to_mode;
+    settings.telegram_link_preview = telegram_link_preview;
     settings.slack_enabled = slack_enabled;
     settings.slack_bot_token = slack_bot_token;
     settings.slack_app_token = slack_app_token;
@@ -6977,6 +7101,39 @@ pub async fn approve_pairing(channel: String, code: String) -> Result<String, St
     let result = docker_exec_output(&args);
     eprintln!("[approve_pairing] Docker command result: {:?}", result);
     result
+}
+
+#[tauri::command]
+pub async fn get_telegram_connection_status() -> Result<bool, String> {
+    let container = if named_gateway_container_exists(OPENCLAW_CONTAINER, true) {
+        OPENCLAW_CONTAINER
+    } else if named_gateway_container_exists(LEGACY_OPENCLAW_CONTAINER, true) {
+        LEGACY_OPENCLAW_CONTAINER
+    } else {
+        return Ok(false);
+    };
+
+    // Treat Telegram as "connected" once pairing allowFrom store has at least one entry.
+    // This aligns with OpenClaw DM/group authorization flow backed by pairing store.
+    let script = r#"const fs=require('fs');
+const paths=['/data/credentials/telegram-default-allowFrom.json','/data/credentials/telegram-allowFrom.json'];
+let connected=false;
+for (const p of paths) {
+  try {
+    const parsed=JSON.parse(fs.readFileSync(p,'utf8'));
+    if (Array.isArray(parsed.allowFrom) && parsed.allowFrom.some(v => String(v ?? '').trim().length > 0)) {
+      connected=true;
+      break;
+    }
+  } catch {}
+}
+process.stdout.write(connected ? '1' : '0');"#;
+
+    let args = ["exec", container, "node", "-e", script];
+    match docker_exec_output(&args) {
+        Ok(output) => Ok(output.trim() == "1"),
+        Err(_) => Ok(false),
+    }
 }
 
 #[tauri::command]
