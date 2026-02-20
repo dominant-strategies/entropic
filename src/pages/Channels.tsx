@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   CheckCircle2,
+  Loader2,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -92,6 +93,7 @@ type TelegramTokenValidationResult = {
 };
 
 export function Channels() {
+  const [initialLoading, setInitialLoading] = useState(true);
   const [telegramEnabled, setTelegramEnabled] = useState(false);
   const [telegramToken, setTelegramToken] = useState("");
   const [telegramDmPolicy, setTelegramDmPolicy] = useState<TelegramDmPolicy>("pairing");
@@ -126,17 +128,26 @@ export function Channels() {
   }
 
   useEffect(() => {
-    invoke<{
-      telegram_enabled: boolean;
-      telegram_token: string;
-      telegram_dm_policy?: string;
-      telegram_group_policy?: string;
-      telegram_config_writes?: boolean;
-      telegram_require_mention?: boolean;
-      telegram_reply_to_mode?: string;
-      telegram_link_preview?: boolean;
-    }>("get_agent_profile_state")
-      .then((state) => {
+    let cancelled = false;
+    const loadingGuard = window.setTimeout(() => {
+      if (!cancelled) {
+        setInitialLoading(false);
+      }
+    }, 8000);
+    const loadInitialState = async () => {
+      try {
+        const state = await invoke<{
+          telegram_enabled: boolean;
+          telegram_token: string;
+          telegram_dm_policy?: string;
+          telegram_group_policy?: string;
+          telegram_config_writes?: boolean;
+          telegram_require_mention?: boolean;
+          telegram_reply_to_mode?: string;
+          telegram_link_preview?: boolean;
+        }>("get_agent_profile_state");
+        if (cancelled) return;
+
         setTelegramEnabled(state.telegram_enabled ?? false);
         setTelegramToken(state.telegram_token || "");
         const dmPolicy = normalizeTelegramDmPolicy(state.telegram_dm_policy);
@@ -153,10 +164,10 @@ export function Channels() {
         setTelegramLinkPreview(linkPreview);
         setTelegramTokenSaved(Boolean(state.telegram_token?.trim()));
 
-        // Auto-configure runtime if Telegram is enabled with a token
+        // Auto-configure runtime if Telegram is enabled with a token.
         if (state.telegram_enabled && state.telegram_token?.trim()) {
           console.log("[Channels] Auto-configuring Telegram on startup");
-          autoConfigureTelegram({
+          void autoConfigureTelegram({
             enabled: state.telegram_enabled,
             token: state.telegram_token,
             dmPolicy,
@@ -167,10 +178,22 @@ export function Channels() {
             linkPreview,
           });
         }
-        refreshTelegramConnectedStatus();
-        refreshGatewayRunningStatus();
-      })
-      .catch(() => {});
+      } catch {
+        // Keep defaults; still transition out of loading.
+      } finally {
+        if (!cancelled) {
+          setInitialLoading(false);
+        }
+        void refreshTelegramConnectedStatus();
+        void refreshGatewayRunningStatus();
+      }
+    };
+
+    void loadInitialState();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(loadingGuard);
+    };
   }, []);
 
   async function autoConfigureTelegram(params: {
@@ -341,6 +364,21 @@ export function Channels() {
   }
 
   const telegramReady = telegramEnabled && telegramToken.trim().length > 0;
+
+  if (initialLoading) {
+    return (
+      <div className="max-w-6xl mx-auto px-6 pb-12">
+        <div className="pt-8 mb-8">
+          <h1 className="text-3xl font-bold text-[var(--text-primary)] mb-2 tracking-tight">Telegram Setup</h1>
+          <p className="text-lg text-[var(--text-secondary)]">Configure your Telegram bot to enable messaging.</p>
+        </div>
+        <div className="bg-white rounded-2xl shadow-sm border border-[var(--border-subtle)] p-8 flex items-center gap-3 text-sm text-[var(--text-secondary)]">
+          <Loader2 className="w-4 h-4 animate-spin text-[var(--text-tertiary)]" />
+          Loading Telegram configuration...
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-6xl mx-auto px-6 pb-12">

@@ -6458,53 +6458,94 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         .to_string();
 
     let telegram_cfg = cfg.get("channels").and_then(|v| v.get("telegram"));
-    let telegram_enabled = telegram_cfg
-        .and_then(|v| v.get("enabled"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(stored.telegram_enabled);
-    let telegram_token = telegram_cfg
+    let cfg_telegram_token = telegram_cfg
         .and_then(|v| v.get("botToken"))
         .and_then(|v| v.as_str())
-        .unwrap_or(&stored.telegram_token)
-        .to_string();
-    let telegram_dm_policy = telegram_cfg
-        .and_then(|v| v.get("dmPolicy"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(&stored.telegram_dm_policy);
-    let telegram_dm_policy = match telegram_dm_policy {
-        "pairing" | "allowlist" | "open" | "disabled" => telegram_dm_policy.to_string(),
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let stored_telegram_token = stored.telegram_token.trim();
+    // If runtime config lost Telegram token (common after a cold/reset bootstrap),
+    // prefer persisted desktop settings so Messaging UI can hydrate and re-apply.
+    let use_stored_telegram = cfg_telegram_token.is_none() && !stored_telegram_token.is_empty();
+
+    let telegram_enabled = if use_stored_telegram {
+        stored.telegram_enabled
+    } else {
+        telegram_cfg
+            .and_then(|v| v.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(stored.telegram_enabled)
+    };
+    let telegram_token = if use_stored_telegram {
+        stored.telegram_token.clone()
+    } else {
+        cfg_telegram_token.unwrap_or(stored_telegram_token).to_string()
+    };
+    let telegram_dm_policy = if use_stored_telegram {
+        stored.telegram_dm_policy.clone()
+    } else {
+        telegram_cfg
+            .and_then(|v| v.get("dmPolicy"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&stored.telegram_dm_policy)
+            .to_string()
+    };
+    let telegram_dm_policy = match telegram_dm_policy.as_str() {
+        "pairing" | "allowlist" | "open" | "disabled" => telegram_dm_policy,
         _ => "pairing".to_string(),
     };
-    let telegram_group_policy = telegram_cfg
-        .and_then(|v| v.get("groupPolicy"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(&stored.telegram_group_policy);
-    let telegram_group_policy = match telegram_group_policy {
-        "allowlist" | "open" | "disabled" => telegram_group_policy.to_string(),
+    let telegram_group_policy = if use_stored_telegram {
+        stored.telegram_group_policy.clone()
+    } else {
+        telegram_cfg
+            .and_then(|v| v.get("groupPolicy"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&stored.telegram_group_policy)
+            .to_string()
+    };
+    let telegram_group_policy = match telegram_group_policy.as_str() {
+        "allowlist" | "open" | "disabled" => telegram_group_policy,
         _ => "allowlist".to_string(),
     };
-    let telegram_config_writes = telegram_cfg
-        .and_then(|v| v.get("configWrites"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(stored.telegram_config_writes);
-    let telegram_require_mention = telegram_cfg
-        .and_then(|v| v.get("groups"))
-        .and_then(|v| v.get("*"))
-        .and_then(|v| v.get("requireMention"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(stored.telegram_require_mention);
-    let telegram_reply_to_mode = telegram_cfg
-        .and_then(|v| v.get("replyToMode"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(&stored.telegram_reply_to_mode);
-    let telegram_reply_to_mode = match telegram_reply_to_mode {
-        "off" | "first" | "all" => telegram_reply_to_mode.to_string(),
+    let telegram_config_writes = if use_stored_telegram {
+        stored.telegram_config_writes
+    } else {
+        telegram_cfg
+            .and_then(|v| v.get("configWrites"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(stored.telegram_config_writes)
+    };
+    let telegram_require_mention = if use_stored_telegram {
+        stored.telegram_require_mention
+    } else {
+        telegram_cfg
+            .and_then(|v| v.get("groups"))
+            .and_then(|v| v.get("*"))
+            .and_then(|v| v.get("requireMention"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(stored.telegram_require_mention)
+    };
+    let telegram_reply_to_mode = if use_stored_telegram {
+        stored.telegram_reply_to_mode.clone()
+    } else {
+        telegram_cfg
+            .and_then(|v| v.get("replyToMode"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&stored.telegram_reply_to_mode)
+            .to_string()
+    };
+    let telegram_reply_to_mode = match telegram_reply_to_mode.as_str() {
+        "off" | "first" | "all" => telegram_reply_to_mode,
         _ => "off".to_string(),
     };
-    let telegram_link_preview = telegram_cfg
-        .and_then(|v| v.get("linkPreview"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(stored.telegram_link_preview);
+    let telegram_link_preview = if use_stored_telegram {
+        stored.telegram_link_preview
+    } else {
+        telegram_cfg
+            .and_then(|v| v.get("linkPreview"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(stored.telegram_link_preview)
+    };
 
     let slack_cfg = cfg.get("channels").and_then(|v| v.get("slack"));
     let slack_enabled = slack_cfg
