@@ -72,15 +72,20 @@ fn append_client_log_line(message: &str) -> Result<(), String> {
 fn get_docker_host() -> Option<String> {
     match Platform::detect() {
         Platform::MacOS => {
-            // Prefer Entropic-managed Colima sockets, then Docker Desktop sockets.
+            // Colima-first on macOS. Desktop/system sockets are only included when
+            // ENTROPIC_RUNTIME_ALLOW_DOCKER_DESKTOP is truthy.
             for socket in macos_docker_socket_candidates() {
                 if socket.exists() {
                     return Some(format!("unix://{}", socket.display()));
                 }
             }
 
-            // Default fallback (use environment or system default)
-            None
+            // Do not silently fall back to the current Docker context on macOS.
+            // Keep commands pinned to Entropic's isolated Colima path.
+            let fallback = entropic_colima_home_path()
+                .join(ENTROPIC_VZ_PROFILE)
+                .join("docker.sock");
+            Some(format!("unix://{}", fallback.display()))
         }
         Platform::Linux => {
             if let Ok(host) = std::env::var("DOCKER_HOST") {

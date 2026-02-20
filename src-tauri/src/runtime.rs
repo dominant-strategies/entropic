@@ -226,13 +226,33 @@ pub(crate) fn entropic_colima_socket_candidates() -> Vec<PathBuf> {
     sockets
 }
 
+fn env_var_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Emergency-only escape hatch for local debugging.
+/// By default Entropic uses isolated Colima sockets on macOS.
+fn macos_docker_desktop_fallback_allowed() -> bool {
+    env_var_truthy("ENTROPIC_RUNTIME_ALLOW_DOCKER_DESKTOP")
+}
+
 pub(crate) fn macos_docker_socket_candidates() -> Vec<PathBuf> {
     let mut candidates = entropic_colima_socket_candidates();
-    if let Some(home) = dirs::home_dir() {
-        candidates.push(home.join(".docker/run/docker.sock"));
-        candidates.push(home.join(".docker/desktop/docker.sock"));
+    if macos_docker_desktop_fallback_allowed() {
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join(".docker/run/docker.sock"));
+            candidates.push(home.join(".docker/desktop/docker.sock"));
+        }
+        candidates.push(PathBuf::from("/var/run/docker.sock"));
     }
-    candidates.push(PathBuf::from("/var/run/docker.sock"));
     candidates
 }
 
@@ -834,7 +854,7 @@ impl Runtime {
         let colima_installed = colima_path.exists();
         debug_log(&format!("colima_installed: {}", colima_installed));
 
-        // In development mode, also check for system Docker (Docker Desktop)
+        // Check whether any Docker CLI is available (bundled or system).
         let system_docker = which::which("docker").is_ok();
         debug_log(&format!("system_docker available: {}", system_docker));
 
@@ -1025,7 +1045,7 @@ impl Runtime {
         }
     }
 
-    /// Check Docker on macOS (via Colima or Docker Desktop socket)
+    /// Check Docker on macOS (via Entropic-managed Colima socket by default).
     fn is_docker_ready_colima(&self) -> bool {
         debug_log("=== is_docker_ready_colima() called ===");
         let docker = self
@@ -1048,10 +1068,6 @@ impl Runtime {
     fn docker_socket_colima(&self) -> String {
         if let Some(socket) = self.preferred_colima_socket() {
             return format!("unix://{}", socket.display());
-        }
-
-        if std::path::Path::new("/var/run/docker.sock").exists() {
-            return "unix:///var/run/docker.sock".to_string();
         }
 
         format!(
