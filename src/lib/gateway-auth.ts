@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:19789";
+const DEFAULT_GATEWAY_URL = "ws://localhost:19789";
 
 function generateSessionGatewayToken(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {

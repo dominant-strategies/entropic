@@ -4072,7 +4072,7 @@ fn gateway_ws_url() -> String {
     if std::path::Path::new("/.dockerenv").exists() {
         format!("ws://{}:18789", OPENCLAW_CONTAINER)
     } else {
-        "ws://127.0.0.1:19789".to_string()
+        "ws://localhost:19789".to_string()
     }
 }
 

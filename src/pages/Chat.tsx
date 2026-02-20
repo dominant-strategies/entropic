@@ -807,7 +807,7 @@ const PROVIDERS: Provider[] = [
   { id: "google", name: "Google AI", icon: "G", placeholder: "AIza...", keyUrl: "https://aistudio.google.com/app/apikey" },
 ];
 
-const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:19789";
+const DEFAULT_GATEWAY_URL = "ws://localhost:19789";
 const HISTORY_LIMIT = 500;
 
 function buildSuggestions(userName: string, hasName: boolean) {
