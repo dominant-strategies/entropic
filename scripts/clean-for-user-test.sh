@@ -84,7 +84,20 @@ echo ""
 echo "📦 Cleaning production Colima runtime..."
 
 if [ -n "$COLIMA_BIN" ]; then
-    entropic_delete_colima_profiles "$COLIMA_BIN" "$PROJECT_ROOT" || true
+    _colima_home_check="$(entropic_colima_home 2>/dev/null || true)"
+    if [ -n "$_colima_home_check" ] && [ -d "$_colima_home_check/_lima" ] && [ "$(ls -A "$_colima_home_check/_lima" 2>/dev/null)" ]; then
+        entropic_delete_colima_profiles "$COLIMA_BIN" "$PROJECT_ROOT" &
+        _cleanup_pid=$!
+        ( sleep 30 && kill "$_cleanup_pid" 2>/dev/null ) &
+        _timer_pid=$!
+        if ! wait "$_cleanup_pid" 2>/dev/null; then
+            echo "  ⚠️  Colima profile cleanup timed out or failed (continuing)."
+        fi
+        kill "$_timer_pid" 2>/dev/null
+        wait "$_timer_pid" 2>/dev/null || true
+    else
+        echo "  ⚠️  Colima home not found or empty; skipping profile cleanup."
+    fi
 fi
 
 while IFS= read -r colima_home; do
