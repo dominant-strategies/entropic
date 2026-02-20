@@ -1,0 +1,203 @@
+name: Publish OpenClaw Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Runtime release tag in dominant-strategies/entropic-releases'
+        required: true
+        default: 'runtime-latest'
+      openclaw_ref:
+        description: 'OpenClaw git commit SHA (40 chars)'
+        required: true
+      entropic_skills_ref:
+        description: 'entropic-skills git commit SHA (40 chars)'
+        required: true
+      release_repo:
+        description: 'Target repo for release assets'
+        required: true
+        default: 'dominant-strategies/entropic-releases'
+
+env:
+  CARGO_TERM_COLOR: always
+  NODE_VERSION: '22'
+
+jobs:
+  publish-runtime:
+    runs-on: ubuntu-latest-m
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    concurrency:
+      group: runtime-publish-${{ github.event.inputs.release_repo }}-${{ github.event.inputs.release_tag }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout Entropic
+        uses: actions/checkout@v4
+        with:
+          path: entropic
+
+      - name: Validate immutable refs
+        run: |
+          set -euo pipefail
+          OPENCLAW_REF="${{ github.event.inputs.openclaw_ref }}"
+          SKILLS_REF="${{ github.event.inputs.entropic_skills_ref }}"
+
+          if ! [[ "$OPENCLAW_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "openclaw_ref must be a full 40-character commit SHA"
+            exit 1
+          fi
+          if ! [[ "$SKILLS_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "entropic_skills_ref must be a full 40-character commit SHA"
+            exit 1
+          fi
+
+      - name: Checkout OpenClaw
+        uses: actions/checkout@v4
+        with:
+          repository: dominant-strategies/openclaw
+          token: ${{ secrets.ENTROPIC_READ_PAT }}
+          path: openclaw
+          ref: ${{ github.event.inputs.openclaw_ref }}
+
+      - name: Checkout Entropic skills
+        uses: actions/checkout@v4
+        with:
+          repository: dominant-strategies/entropic-skills
+          token: ${{ secrets.ENTROPIC_READ_PAT }}
+          path: entropic-skills
+          ref: ${{ github.event.inputs.entropic_skills_ref }}
+
+      - name: Resolve pinned commits
+        id: refs
+        run: |
+          set -euo pipefail
+          OPENCLAW_COMMIT="$(git -C openclaw rev-parse HEAD)"
+          SKILLS_COMMIT="$(git -C entropic-skills rev-parse HEAD)"
+          if [ "$OPENCLAW_COMMIT" != "${{ github.event.inputs.openclaw_ref }}" ]; then
+            echo "OpenClaw checkout mismatch: expected ${{ github.event.inputs.openclaw_ref }}, got $OPENCLAW_COMMIT"
+            exit 1
+          fi
+          if [ "$SKILLS_COMMIT" != "${{ github.event.inputs.entropic_skills_ref }}" ]; then
+            echo "entropic-skills checkout mismatch: expected ${{ github.event.inputs.entropic_skills_ref }}, got $SKILLS_COMMIT"
+            exit 1
+          fi
+          echo "openclaw_commit=$OPENCLAW_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "skills_commit=$SKILLS_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "OpenClaw commit: $OPENCLAW_COMMIT"
+          echo "Skills commit:   $SKILLS_COMMIT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install OpenClaw dependencies
+        working-directory: openclaw
+        run: pnpm install
+
+      - name: Build OpenClaw
+        working-directory: openclaw
+        run: pnpm build
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build OpenClaw runtime image (linux/arm64)
+        working-directory: entropic
+        env:
+          OPENCLAW_SOURCE: ${{ github.workspace }}/openclaw
+          ENTROPIC_SKILLS_SOURCE: ${{ github.workspace }}/entropic-skills
+          DOCKER_DEFAULT_PLATFORM: linux/arm64
+          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
+        run: ./scripts/build-openclaw-runtime.sh
+
+      - name: Bundle runtime image tar
+        working-directory: entropic
+        env:
+          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
+        run: ./scripts/bundle-runtime-image.sh
+
+      - name: Prepare runtime release assets
+        run: |
+          set -euo pipefail
+          cp entropic/src-tauri/resources/openclaw-runtime.tar.gz openclaw-runtime.tar.gz
+          sha256sum openclaw-runtime.tar.gz > openclaw-runtime.tar.gz.sha256
+          RUNTIME_SHA256="$(awk '{print $1}' openclaw-runtime.tar.gz.sha256)"
+          export RUNTIME_VERSION="${{ github.event.inputs.release_tag }}"
+          export RUNTIME_RELEASE_REPO="${{ github.event.inputs.release_repo }}"
+          export OPENCLAW_COMMIT="${{ steps.refs.outputs.openclaw_commit }}"
+          export SKILLS_COMMIT="${{ steps.refs.outputs.skills_commit }}"
+          export RUNTIME_SHA256
+          python3 - <<'PY'
+          import json
+          import os
+
+          manifest = {
+              "version": os.environ["RUNTIME_VERSION"],
+              "url": "https://github.com/{}/releases/download/{}/openclaw-runtime.tar.gz".format(
+                  os.environ["RUNTIME_RELEASE_REPO"],
+                  os.environ["RUNTIME_VERSION"],
+              ),
+              "sha256": os.environ["RUNTIME_SHA256"],
+              "openclaw_commit": os.environ["OPENCLAW_COMMIT"],
+              "entropic_skills_commit": os.environ["SKILLS_COMMIT"],
+          }
+          with open("runtime-manifest.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, indent=2)
+              f.write("\n")
+          PY
+
+          cat > openclaw-runtime-metadata.json << METAEOF
+          {
+            "runtime_image_tar": "openclaw-runtime.tar.gz",
+            "release_tag": "${{ github.event.inputs.release_tag }}",
+            "release_repo": "${{ github.event.inputs.release_repo }}",
+            "openclaw_ref": "${{ github.event.inputs.openclaw_ref }}",
+            "openclaw_commit": "${{ steps.refs.outputs.openclaw_commit }}",
+            "entropic_skills_ref": "${{ github.event.inputs.entropic_skills_ref }}",
+            "entropic_skills_commit": "${{ steps.refs.outputs.skills_commit }}",
+            "entropic_repo": "${{ github.repository }}",
+            "entropic_commit": "${{ github.sha }}",
+            "built_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          METAEOF
+
+      - name: Upload runtime artifact (workflow)
+        uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-runtime-arm64
+          path: |
+            openclaw-runtime.tar.gz
+            openclaw-runtime.tar.gz.sha256
+            runtime-manifest.json
+            openclaw-runtime-metadata.json
+
+      - name: Publish runtime assets to release
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.release_tag }}"
+          REPO="${{ github.event.inputs.release_repo }}"
+          FILES=(
+            "openclaw-runtime.tar.gz"
+            "openclaw-runtime.tar.gz.sha256"
+            "runtime-manifest.json"
+            "openclaw-runtime-metadata.json"
+          )
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${FILES[@]}" --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" "${FILES[@]}" \
+              --repo "$REPO" \
+              --title "Runtime $TAG" \
+              --notes "OpenClaw runtime assets published by Publish OpenClaw Runtime workflow."
+          fi

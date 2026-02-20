@@ -16,86 +16,11 @@ env:
 
 jobs:
   # ──────────────────────────────────────────────
-  # Build OpenClaw runtime image for macOS (linux/arm64)
-  # ──────────────────────────────────────────────
-  build-runtime-arm64:
-    runs-on: ubuntu-latest-m
-    timeout-minutes: 60
-
-    steps:
-      - name: Checkout Entropic
-        uses: actions/checkout@v4
-        with:
-          path: entropic
-
-      - name: Checkout OpenClaw
-        uses: actions/checkout@v4
-        with:
-          repository: dominant-strategies/openclaw
-          token: ${{ secrets.ENTROPIC_READ_PAT }}
-          path: openclaw
-          ref: ${{ vars.OPENCLAW_REF || 'main' }}
-
-      - name: Checkout Entropic skills
-        uses: actions/checkout@v4
-        with:
-          repository: dominant-strategies/entropic-skills
-          token: ${{ secrets.ENTROPIC_READ_PAT }}
-          path: entropic-skills
-          ref: ${{ vars.ENTROPIC_SKILLS_REF || 'main' }}
-
-      - name: Print pinned dependency refs
-        run: |
-          echo "OPENCLAW_REF=${{ vars.OPENCLAW_REF || 'main' }}"
-          echo "ENTROPIC_SKILLS_REF=${{ vars.ENTROPIC_SKILLS_REF || 'main' }}"
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - run: npm install -g pnpm
-
-      - name: Install OpenClaw dependencies
-        working-directory: openclaw
-        run: pnpm install
-
-      - name: Build OpenClaw
-        working-directory: openclaw
-        run: pnpm build
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build OpenClaw runtime image (linux/arm64)
-        working-directory: entropic
-        env:
-          OPENCLAW_SOURCE: ${{ github.workspace }}/openclaw
-          ENTROPIC_SKILLS_SOURCE: ${{ github.workspace }}/entropic-skills
-          DOCKER_DEFAULT_PLATFORM: linux/arm64
-          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
-        run: ./scripts/build-openclaw-runtime.sh
-
-      - name: Bundle runtime image tar
-        working-directory: entropic
-        env:
-          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
-        run: ./scripts/bundle-runtime-image.sh
-
-      - name: Upload runtime image tar
-        uses: actions/upload-artifact@v4
-        with:
-          name: openclaw-runtime-arm64
-          path: entropic/src-tauri/resources/openclaw-runtime.tar.gz
-
-  # ──────────────────────────────────────────────
   # macOS (Apple Silicon)
   # ──────────────────────────────────────────────
   build-macos:
     runs-on: macos-latest-xlarge
     timeout-minutes: 60
-    needs: build-runtime-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -117,12 +42,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install
-
-      - name: Download runtime image tar (linux/arm64)
-        uses: actions/download-artifact@v4
-        with:
-          name: openclaw-runtime-arm64
-          path: src-tauri/resources
 
       - name: Bundle runtime (Colima + Lima + Docker CLI)
         run: ./scripts/bundle-runtime.sh

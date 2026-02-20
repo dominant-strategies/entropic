@@ -13,6 +13,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -254,23 +255,602 @@ const RUNTIME_IMAGE: &str = "openclaw-runtime:latest";
 const SCANNER_IMAGE_REPO: &str = "entropic-skill-scanner";
 const DEFAULT_SCANNER_GIT_REPO: &str = "https://github.com/cisco-ai-defense/skill-scanner.git";
 const DEFAULT_SCANNER_GIT_COMMIT: &str = "dff88dc5fa0fff6382ddb6eff19d245745b93f7a";
+const DEFAULT_RUNTIME_RELEASE_REPO: &str = "dominant-strategies/entropic-releases";
+const DEFAULT_RUNTIME_RELEASE_TAG: &str = "runtime-latest";
 const QMD_COMMAND_PATH: &str = "/data/.bun/bin/qmd";
 
-/// Registry to pull the runtime image from when not available locally.
-/// Override at build time with ENTROPIC_RUNTIME_REGISTRY env var.
-fn runtime_registry_image() -> String {
+/// Optional registry image to pull the runtime from when not available locally.
+/// Only used as an explicit fallback when OPENCLAW_RUNTIME_REGISTRY is set.
+fn runtime_registry_image() -> Option<String> {
     // Build-time override
-    if let Some(val) = option_env!("ENTROPIC_RUNTIME_REGISTRY") {
-        return val.to_string();
-    }
-    // Runtime override
-    if let Ok(val) = std::env::var("ENTROPIC_RUNTIME_REGISTRY") {
-        if !val.trim().is_empty() {
-            return val;
+    if let Some(val) = option_env!("OPENCLAW_RUNTIME_REGISTRY") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
         }
     }
-    // Default: GitHub Container Registry
-    "ghcr.io/nickthecook/openclaw-runtime:latest".to_string()
+    // Runtime override
+    if let Ok(val) = std::env::var("OPENCLAW_RUNTIME_REGISTRY") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+fn runtime_release_repo() -> String {
+    if let Some(val) = option_env!("OPENCLAW_RUNTIME_RELEASE_REPO") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(val) = std::env::var("OPENCLAW_RUNTIME_RELEASE_REPO") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    DEFAULT_RUNTIME_RELEASE_REPO.to_string()
+}
+
+const DEFAULT_RUNTIME_MANIFEST_NAME: &str = "runtime-manifest.json";
+const RUNTIME_MANIFEST_MAX_AGE_SECS: u64 = 60 * 60; // 1 hour
+const RUNTIME_TAR_MAX_TIME_SECS: u16 = 600; // 10 minutes
+const RUNTIME_TAR_SETUP_MAX_TIME_SECS: u16 = 180; // 3 minutes
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct RuntimeReleaseManifest {
+    version: String,
+    url: String,
+    sha256: String,
+    #[serde(default)]
+    openclaw_commit: Option<String>,
+    #[serde(default)]
+    entropic_skills_commit: Option<String>,
+}
+
+fn runtime_release_tag() -> String {
+    if let Some(val) = option_env!("OPENCLAW_RUNTIME_RELEASE_TAG") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(val) = std::env::var("OPENCLAW_RUNTIME_RELEASE_TAG") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    DEFAULT_RUNTIME_RELEASE_TAG.to_string()
+}
+
+fn runtime_manifest_url() -> String {
+    if let Some(val) = option_env!("OPENCLAW_RUNTIME_MANIFEST_URL") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(val) = std::env::var("OPENCLAW_RUNTIME_MANIFEST_URL") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    format!(
+        "https://github.com/{}/releases/download/{}/{}",
+        runtime_release_repo(),
+        runtime_release_tag(),
+        DEFAULT_RUNTIME_MANIFEST_NAME
+    )
+}
+
+fn runtime_release_tar_url() -> String {
+    if let Some(val) = option_env!("OPENCLAW_RUNTIME_TAR_URL") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(val) = std::env::var("OPENCLAW_RUNTIME_TAR_URL") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    format!(
+        "https://github.com/{}/releases/download/{}/openclaw-runtime.tar.gz",
+        runtime_release_repo(),
+        runtime_release_tag()
+    )
+}
+
+fn runtime_cache_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".entropic").join("cache"))
+}
+
+fn runtime_cached_tar_path() -> Option<PathBuf> {
+    runtime_cache_dir().map(|dir| dir.join("openclaw-runtime.tar.gz"))
+}
+
+fn runtime_cached_tar_partial_path() -> Option<PathBuf> {
+    runtime_cache_dir().map(|dir| dir.join("openclaw-runtime.tar.gz.partial"))
+}
+
+fn runtime_cached_tar_checksum_path() -> Option<PathBuf> {
+    runtime_cache_dir().map(|dir| dir.join("openclaw-runtime.tar.gz.sha256"))
+}
+
+fn runtime_cached_manifest_path() -> Option<PathBuf> {
+    runtime_cache_dir().map(|dir| dir.join(DEFAULT_RUNTIME_MANIFEST_NAME))
+}
+
+fn runtime_cached_manifest_partial_path() -> Option<PathBuf> {
+    runtime_cache_dir().map(|dir| dir.join("runtime-manifest.json.partial"))
+}
+
+fn runtime_cached_tar_valid() -> bool {
+    let Some(path) = runtime_cached_tar_path() else {
+        return false;
+    };
+    path.metadata()
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
+}
+
+fn runtime_manifest_cache_fresh() -> bool {
+    let Some(path) = runtime_cached_manifest_path() else {
+        return false;
+    };
+    let Ok(meta) = path.metadata() else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    modified
+        .elapsed()
+        .map(|elapsed| elapsed <= Duration::from_secs(RUNTIME_MANIFEST_MAX_AGE_SECS))
+        .unwrap_or(false)
+}
+
+fn download_url_to_path(
+    url: &str,
+    output_path: &Path,
+    retries: u8,
+    connect_timeout_secs: u16,
+    max_time_secs: u16,
+) -> Result<(), String> {
+    let retries_str = retries.to_string();
+    let connect_timeout_str = connect_timeout_secs.to_string();
+    let max_time_str = max_time_secs.to_string();
+    let curl = Command::new("curl")
+        .arg("-fL")
+        .arg("--retry")
+        .arg(&retries_str)
+        .arg("--retry-delay")
+        .arg("2")
+        .arg("--connect-timeout")
+        .arg(&connect_timeout_str)
+        .arg("--max-time")
+        .arg(&max_time_str)
+        .arg("-o")
+        .arg(output_path)
+        .arg(url)
+        .output();
+
+    match curl {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let curl_stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let wget_tries = format!("--tries={}", retries.max(1));
+            let wget_timeout = format!("--timeout={}", max_time_secs);
+            let wget = Command::new("wget")
+                .arg("-O")
+                .arg(output_path)
+                .arg(&wget_tries)
+                .arg(&wget_timeout)
+                .arg(url)
+                .output();
+            match wget {
+                Ok(wout) if wout.status.success() => Ok(()),
+                Ok(wout) => {
+                    let wget_stderr = String::from_utf8_lossy(&wout.stderr).trim().to_string();
+                    Err(format!("curl: {}\nwget: {}", curl_stderr, wget_stderr))
+                }
+                Err(werr) => Err(format!(
+                    "curl: {}\nwget invocation error: {}",
+                    curl_stderr, werr
+                )),
+            }
+        }
+        Err(cerr) => {
+            let wget_tries = format!("--tries={}", retries.max(1));
+            let wget_timeout = format!("--timeout={}", max_time_secs);
+            let wget = Command::new("wget")
+                .arg("-O")
+                .arg(output_path)
+                .arg(&wget_tries)
+                .arg(&wget_timeout)
+                .arg(url)
+                .output();
+            match wget {
+                Ok(wout) if wout.status.success() => Ok(()),
+                Ok(wout) => {
+                    let wget_stderr = String::from_utf8_lossy(&wout.stderr).trim().to_string();
+                    Err(format!(
+                        "curl invocation error: {}\nwget: {}",
+                        cerr, wget_stderr
+                    ))
+                }
+                Err(werr) => Err(format!(
+                    "curl invocation error: {}\nwget invocation error: {}",
+                    cerr, werr
+                )),
+            }
+        }
+    }
+}
+
+fn normalize_runtime_manifest(
+    mut manifest: RuntimeReleaseManifest,
+) -> Result<RuntimeReleaseManifest, String> {
+    let version = manifest.version.trim();
+    if version.is_empty() {
+        return Err("manifest.version is empty".to_string());
+    }
+
+    let url = manifest.url.trim();
+    if url.is_empty() {
+        return Err("manifest.url is empty".to_string());
+    }
+    let parsed_url = Url::parse(url).map_err(|e| format!("manifest.url is invalid: {}", e))?;
+    if parsed_url.scheme() != "https" {
+        return Err("manifest.url must use https".to_string());
+    }
+
+    let sha = manifest.sha256.trim().to_ascii_lowercase();
+    if sha.len() != 64 || !sha.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("manifest.sha256 must be a 64-character hex digest".to_string());
+    }
+
+    manifest.version = version.to_string();
+    manifest.url = url.to_string();
+    manifest.sha256 = sha;
+    Ok(manifest)
+}
+
+fn parse_runtime_manifest(raw: &str) -> Result<RuntimeReleaseManifest, String> {
+    let manifest: RuntimeReleaseManifest =
+        serde_json::from_str(raw).map_err(|e| format!("JSON parse error: {}", e))?;
+    normalize_runtime_manifest(manifest)
+}
+
+fn read_cached_runtime_manifest() -> Option<RuntimeReleaseManifest> {
+    let path = runtime_cached_manifest_path()?;
+    let raw = fs::read_to_string(path).ok()?;
+    parse_runtime_manifest(&raw).ok()
+}
+
+fn fetch_runtime_manifest_to_cache() -> Result<RuntimeReleaseManifest, String> {
+    let manifest_url = runtime_manifest_url();
+    let cache_dir = runtime_cache_dir()
+        .ok_or_else(|| "Could not resolve home directory for runtime cache".to_string())?;
+    fs::create_dir_all(&cache_dir).map_err(|e| {
+        format!(
+            "Failed to create runtime cache directory {}: {}",
+            cache_dir.display(),
+            e
+        )
+    })?;
+
+    let final_path = runtime_cached_manifest_path()
+        .ok_or_else(|| "Could not resolve runtime manifest cache path".to_string())?;
+    let partial_path = runtime_cached_manifest_partial_path()
+        .ok_or_else(|| "Could not resolve runtime manifest partial path".to_string())?;
+    let _ = fs::remove_file(&partial_path);
+
+    download_url_to_path(&manifest_url, &partial_path, 1, 3, 10).map_err(|e| {
+        format!(
+            "Runtime manifest download failed.\n\
+             • URL: {}\n\
+             • {}",
+            manifest_url, e
+        )
+    })?;
+
+    let raw = fs::read_to_string(&partial_path).map_err(|e| {
+        format!(
+            "Failed to read downloaded runtime manifest ({}): {}",
+            partial_path.display(),
+            e
+        )
+    })?;
+    let manifest = parse_runtime_manifest(&raw)
+        .map_err(|e| format!("Invalid runtime manifest from {}: {}", manifest_url, e))?;
+
+    fs::rename(&partial_path, &final_path).map_err(|e| {
+        format!(
+            "Failed to store runtime manifest cache ({} -> {}): {}",
+            partial_path.display(),
+            final_path.display(),
+            e
+        )
+    })?;
+
+    Ok(manifest)
+}
+
+fn resolve_runtime_manifest() -> Result<RuntimeReleaseManifest, String> {
+    if runtime_manifest_cache_fresh() {
+        if let Some(manifest) = read_cached_runtime_manifest() {
+            return Ok(manifest);
+        }
+    }
+
+    match fetch_runtime_manifest_to_cache() {
+        Ok(manifest) => Ok(manifest),
+        Err(download_err) => {
+            if let Some(cached_manifest) = read_cached_runtime_manifest() {
+                println!(
+                    "[Entropic] Runtime manifest refresh failed; using cached manifest: {}",
+                    download_err
+                );
+                return Ok(cached_manifest);
+            }
+            Err(download_err)
+        }
+    }
+}
+
+fn sha256_for_file(path: &Path) -> Result<String, String> {
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buf)
+            .map_err(|e| format!("Failed reading {}: {}", path.display(), e))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn cached_runtime_tar_checksum_marker_valid(expected_sha: &str, tar_path: &Path) -> bool {
+    let Some(checksum_path) = runtime_cached_tar_checksum_path() else {
+        return false;
+    };
+
+    let checksum_mtime = checksum_path
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok());
+    let tar_mtime = tar_path.metadata().ok().and_then(|m| m.modified().ok());
+    let fresh_marker = match (checksum_mtime, tar_mtime) {
+        (Some(checksum_mtime), Some(tar_mtime)) => checksum_mtime >= tar_mtime,
+        _ => false,
+    };
+    if !fresh_marker {
+        return false;
+    }
+
+    let raw = match fs::read_to_string(&checksum_path) {
+        Ok(raw) => raw,
+        Err(_) => return false,
+    };
+    let cached = raw
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    !cached.is_empty() && cached == expected_sha
+}
+
+fn runtime_cached_tar_matches_sha(tar_path: &Path, expected_sha: &str) -> Result<bool, String> {
+    let tar_exists = tar_path
+        .metadata()
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false);
+    if !tar_exists {
+        return Ok(false);
+    }
+
+    let expected = expected_sha.trim().to_ascii_lowercase();
+    if cached_runtime_tar_checksum_marker_valid(&expected, tar_path) {
+        return Ok(true);
+    }
+
+    let actual = sha256_for_file(tar_path)?;
+    if actual == expected {
+        if let Some(checksum_path) = runtime_cached_tar_checksum_path() {
+            let _ = fs::write(checksum_path, format!("{}\n", expected));
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn download_runtime_tar_to_cache_from_url(
+    url: &str,
+    max_time_secs: u16,
+) -> Result<PathBuf, String> {
+    let cache_dir = runtime_cache_dir()
+        .ok_or_else(|| "Could not resolve home directory for runtime cache".to_string())?;
+    fs::create_dir_all(&cache_dir).map_err(|e| {
+        format!(
+            "Failed to create runtime cache directory {}: {}",
+            cache_dir.display(),
+            e
+        )
+    })?;
+
+    let final_path = runtime_cached_tar_path()
+        .ok_or_else(|| "Could not resolve runtime cache tar path".to_string())?;
+
+    let partial_path = runtime_cached_tar_partial_path()
+        .ok_or_else(|| "Could not resolve runtime cache partial path".to_string())?;
+    let _ = fs::remove_file(&partial_path);
+
+    download_url_to_path(url, &partial_path, 2, 10, max_time_secs).map_err(|e| {
+        format!(
+            "Runtime tar download failed.\n\
+             • URL: {}\n\
+             • {}",
+            url, e
+        )
+    })?;
+
+    let partial_meta = partial_path.metadata().map_err(|e| {
+        format!(
+            "Downloaded runtime tar missing at {}: {}",
+            partial_path.display(),
+            e
+        )
+    })?;
+    if partial_meta.len() == 0 {
+        let _ = fs::remove_file(&partial_path);
+        return Err(format!(
+            "Downloaded runtime tar is empty: {}",
+            partial_path.display()
+        ));
+    }
+
+    fs::rename(&partial_path, &final_path).map_err(|e| {
+        format!(
+            "Failed to move runtime tar into cache ({} -> {}): {}",
+            partial_path.display(),
+            final_path.display(),
+            e
+        )
+    })?;
+
+    Ok(final_path)
+}
+
+fn download_runtime_tar_from_manifest_to_cache(max_time_secs: u16) -> Result<PathBuf, String> {
+    let manifest = resolve_runtime_manifest()?;
+    let cache_dir = runtime_cache_dir()
+        .ok_or_else(|| "Could not resolve home directory for runtime cache".to_string())?;
+    fs::create_dir_all(&cache_dir).map_err(|e| {
+        format!(
+            "Failed to create runtime cache directory {}: {}",
+            cache_dir.display(),
+            e
+        )
+    })?;
+
+    let final_path = runtime_cached_tar_path()
+        .ok_or_else(|| "Could not resolve runtime cache tar path".to_string())?;
+    if runtime_cached_tar_matches_sha(&final_path, &manifest.sha256)? {
+        return Ok(final_path);
+    }
+
+    let partial_path = runtime_cached_tar_partial_path()
+        .ok_or_else(|| "Could not resolve runtime cache partial path".to_string())?;
+    let _ = fs::remove_file(&partial_path);
+
+    download_url_to_path(&manifest.url, &partial_path, 2, 10, max_time_secs).map_err(|e| {
+        format!(
+            "Runtime tar download failed for manifest version {}.\n\
+             • URL: {}\n\
+             • {}",
+            manifest.version, manifest.url, e
+        )
+    })?;
+
+    let partial_meta = partial_path.metadata().map_err(|e| {
+        format!(
+            "Downloaded runtime tar missing at {}: {}",
+            partial_path.display(),
+            e
+        )
+    })?;
+    if partial_meta.len() == 0 {
+        let _ = fs::remove_file(&partial_path);
+        return Err(format!(
+            "Downloaded runtime tar is empty: {}",
+            partial_path.display()
+        ));
+    }
+
+    let actual_sha = sha256_for_file(&partial_path)?;
+    if actual_sha != manifest.sha256 {
+        let _ = fs::remove_file(&partial_path);
+        return Err(format!(
+            "Runtime tar sha256 mismatch for manifest version {}.\n\
+             • URL: {}\n\
+             • expected: {}\n\
+             • actual: {}",
+            manifest.version, manifest.url, manifest.sha256, actual_sha
+        ));
+    }
+
+    fs::rename(&partial_path, &final_path).map_err(|e| {
+        format!(
+            "Failed to move runtime tar into cache ({} -> {}): {}",
+            partial_path.display(),
+            final_path.display(),
+            e
+        )
+    })?;
+
+    if let Some(checksum_path) = runtime_cached_tar_checksum_path() {
+        let _ = fs::write(checksum_path, format!("{}\n", manifest.sha256));
+    }
+
+    Ok(final_path)
+}
+
+fn download_runtime_tar_to_cache(
+    allow_direct_url_fallback: bool,
+    tar_max_time_secs: u16,
+) -> Result<PathBuf, String> {
+    match download_runtime_tar_from_manifest_to_cache(tar_max_time_secs) {
+        Ok(path) => Ok(path),
+        Err(manifest_err) => {
+            println!("[Entropic] Runtime manifest sync failed: {}", manifest_err);
+
+            if allow_direct_url_fallback {
+                println!("[Entropic] Trying direct runtime tar URL fallback...");
+                let fallback_url = runtime_release_tar_url();
+                match download_runtime_tar_to_cache_from_url(&fallback_url, tar_max_time_secs) {
+                    Ok(path) => return Ok(path),
+                    Err(url_err) => {
+                        if runtime_cached_tar_valid() {
+                            if let Some(path) = runtime_cached_tar_path() {
+                                println!(
+                                    "[Entropic] Runtime tar URL fallback failed; using stale cached runtime tar: {}",
+                                    url_err
+                                );
+                                return Ok(path);
+                            }
+                        }
+                        return Err(format!(
+                            "Runtime manifest sync failed: {}\n\
+                             Runtime tar fallback failed from {}: {}",
+                            manifest_err, fallback_url, url_err
+                        ));
+                    }
+                }
+            }
+
+            if runtime_cached_tar_valid() {
+                if let Some(path) = runtime_cached_tar_path() {
+                    return Ok(path);
+                }
+            }
+
+            Err(manifest_err)
+        }
+    }
 }
 
 /// Registry to pull the scanner image from when not available locally.
@@ -574,7 +1154,7 @@ fn runtime_image_id() -> Result<Option<String>, String> {
     Ok(None)
 }
 
-fn find_runtime_tar() -> Option<PathBuf> {
+fn find_local_runtime_tar() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
 
@@ -595,12 +1175,24 @@ fn find_runtime_tar() -> Option<PathBuf> {
     for dir in search_dirs {
         for name in &["openclaw-runtime.tar.gz", "openclaw-runtime.tar"] {
             let tar_path = dir.join(name);
-            if tar_path.exists() {
+            if tar_path.is_file() {
                 return Some(tar_path);
             }
         }
     }
 
+    None
+}
+
+fn find_runtime_tar() -> Option<PathBuf> {
+    if let Some(local_path) = find_local_runtime_tar() {
+        return Some(local_path);
+    }
+    if let Some(cached_path) = runtime_cached_tar_path() {
+        if cached_path.is_file() {
+            return Some(cached_path);
+        }
+    }
     None
 }
 
@@ -678,9 +1270,27 @@ fn load_scanner_from_tar(tar_path: &Path) -> Result<bool, String> {
 }
 
 fn ensure_runtime_image() -> Result<(), String> {
+    let local_runtime_tar = find_local_runtime_tar();
+    let local_image_present = runtime_image_id()?.is_some();
+    if local_runtime_tar.is_none() {
+        if let Err(sync_err) =
+            download_runtime_tar_to_cache(!local_image_present, RUNTIME_TAR_MAX_TIME_SECS)
+        {
+            println!(
+                "[Entropic] Runtime tar cache refresh skipped/failed: {}",
+                sync_err
+            );
+        }
+    }
+
+    let mut runtime_tar_path = local_runtime_tar;
+    if runtime_tar_path.is_none() {
+        runtime_tar_path = find_runtime_tar();
+    }
+
     let mut require_local_reload = false;
 
-    if let Some(tar_path) = find_runtime_tar() {
+    if let Some(tar_path) = runtime_tar_path.as_ref() {
         let tar_signature = bundled_runtime_signature_from_manifest(&tar_path).map_err(|e| {
             println!("[Entropic] Failed to read bundled runtime signature: {}", e);
             e
@@ -720,9 +1330,9 @@ fn ensure_runtime_image() -> Result<(), String> {
         return Ok(());
     }
 
-    println!("[Entropic] Runtime image not found locally, attempting to load/pull...");
+    println!("[Entropic] Runtime image not found locally, attempting to load...");
 
-    if let Some(tar_path) = find_runtime_tar() {
+    if let Some(tar_path) = runtime_tar_path.as_ref() {
         match load_runtime_from_tar(&tar_path) {
             Ok(true) => return Ok(()),
             Ok(false) => {} // no tar found or load failed, continue
@@ -730,39 +1340,47 @@ fn ensure_runtime_image() -> Result<(), String> {
         }
     }
 
-    // 3. Pull from registry
-    let registry_image = runtime_registry_image();
-    println!(
-        "[Entropic] Pulling runtime image from {}...",
-        registry_image
-    );
-    let pull = docker_command()
-        .args(["pull", &registry_image])
-        .output()
-        .map_err(|e| format!("docker pull failed: {}", e))?;
+    // 3. Pull from registry fallback (if configured)
+    if let Some(registry_image) = runtime_registry_image() {
+        println!(
+            "[Entropic] Pulling runtime image from {}...",
+            registry_image
+        );
+        let pull = docker_command()
+            .args(["pull", &registry_image])
+            .output()
+            .map_err(|e| format!("docker pull failed: {}", e))?;
 
-    if pull.status.success() {
-        // Tag as the expected local name if the registry image differs
-        if registry_image != RUNTIME_IMAGE {
-            let _ = docker_command()
-                .args(["tag", &registry_image, RUNTIME_IMAGE])
-                .output();
+        if pull.status.success() {
+            // Tag as the expected local name if the registry image differs
+            if registry_image != RUNTIME_IMAGE {
+                let _ = docker_command()
+                    .args(["tag", &registry_image, RUNTIME_IMAGE])
+                    .output();
+            }
+            println!("[Entropic] Runtime image pulled successfully");
+            return Ok(());
         }
-        println!("[Entropic] Runtime image pulled successfully");
-        return Ok(());
+
+        let stderr = String::from_utf8_lossy(&pull.stderr);
+        println!("[Entropic] Pull failed: {}", stderr);
+        return Err(format!(
+            "OpenClaw runtime image not available.\n\
+             • Pull failed from {}: {}\n\
+             • No cached or bundled runtime image tar found.\n\
+             • To build locally: ./scripts/build-openclaw-runtime.sh",
+            registry_image,
+            stderr.trim()
+        ));
     }
 
-    let stderr = String::from_utf8_lossy(&pull.stderr);
-    println!("[Entropic] Pull failed: {}", stderr);
-
-    Err(format!(
+    Err(
         "OpenClaw runtime image not available.\n\
-         • Pull failed from {}: {}\n\
-         • No bundled image tar found in app resources.\n\
-         • To build locally: ./scripts/build-openclaw-runtime.sh",
-        registry_image,
-        stderr.trim()
-    ))
+         • No cached or bundled runtime image tar found.\n\
+         • Registry pull fallback is disabled (set OPENCLAW_RUNTIME_REGISTRY to enable).\n\
+         • To build locally: ./scripts/build-openclaw-runtime.sh"
+            .to_string(),
+    )
 }
 
 /// Ensure the scanner image is available locally.
@@ -9169,7 +9787,7 @@ async fn run_first_time_setup_internal(
                 };
             }
 
-            // Start Colima in a background thread so we can monitor download progress
+            // Start Colima in a background thread so we can monitor progress.
             let resources_dir = app.path().resource_dir().unwrap_or_default();
             let colima_result =
                 std::sync::Arc::new(std::sync::Mutex::new(None::<Result<(), String>>));
@@ -9180,7 +9798,24 @@ async fn run_first_time_setup_internal(
                 *colima_result_writer.lock().unwrap() = Some(result);
             });
 
-            // Monitor download progress while colima starts
+            // In parallel with Colima boot, prefetch the runtime tar over HTTP into
+            // ~/.entropic/cache. This does not require Docker to be up yet.
+            let runtime_download_result =
+                std::sync::Arc::new(std::sync::Mutex::new(None::<Result<PathBuf, String>>));
+            let runtime_download_started =
+                find_local_runtime_tar().is_none() && !runtime_cached_tar_valid();
+            let runtime_download_thread = if runtime_download_started {
+                let runtime_download_result_writer = runtime_download_result.clone();
+                Some(std::thread::spawn(move || {
+                    let result =
+                        download_runtime_tar_to_cache(true, RUNTIME_TAR_SETUP_MAX_TIME_SECS);
+                    *runtime_download_result_writer.lock().unwrap() = Some(result);
+                }))
+            } else {
+                None
+            };
+
+            // Monitor Colima boot progress while the runtime tar download runs in parallel.
             // Colima downloads VM image to ~/.cache/colima/caches/*.downloading
             let cache_dir = dirs::home_dir()
                 .unwrap_or_default()
@@ -9212,14 +9847,31 @@ async fn run_first_time_setup_internal(
                     })
                     .unwrap_or(0);
 
+                let runtime_partial_mb = runtime_cached_tar_partial_path()
+                    .and_then(|path| path.metadata().ok().map(|m| m.len() / (1024 * 1024)))
+                    .unwrap_or(0);
+                let runtime_note = if runtime_download_started {
+                    if runtime_download_result.lock().unwrap().is_some() {
+                        " • Runtime image download complete".to_string()
+                    } else if runtime_partial_mb > 0 {
+                        format!(" • Runtime image {} MB", runtime_partial_mb)
+                    } else {
+                        " • Starting runtime image download...".to_string()
+                    }
+                } else {
+                    " • Runtime image already cached".to_string()
+                };
+
                 let (message, percent) = if download_size > 0 {
                     let mb = download_size / (1024 * 1024);
                     let pct =
                         std::cmp::min(35, 10 + (download_size * 25 / EXPECTED_DOWNLOAD_SIZE) as u8);
-                    (format!("Downloading VM image... ({} MB)", mb), pct)
+                    (
+                        format!("Downloading VM image... ({} MB){}", mb, runtime_note),
+                        pct,
+                    )
                 } else {
-                    // No download file — either hasn't started or already finished
-                    ("Starting container runtime...".to_string(), 10)
+                    (format!("Starting container runtime...{}", runtime_note), 10)
                 };
 
                 if let Ok(mut progress) = state.setup_progress.lock() {
@@ -9242,6 +9894,9 @@ async fn run_first_time_setup_internal(
                 .unwrap_or_else(|| Err("Colima thread did not produce a result".to_string()));
 
             if let Err(e) = result {
+                if let Some(handle) = runtime_download_thread {
+                    let _ = handle.join();
+                }
                 let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
                 *progress = SetupProgress {
                     stage: "error".to_string(),
@@ -9281,18 +9936,62 @@ async fn run_first_time_setup_internal(
                 }
                 // Update progress with retry count
                 {
+                    let runtime_partial_mb = runtime_cached_tar_partial_path()
+                        .and_then(|path| path.metadata().ok().map(|m| m.len() / (1024 * 1024)))
+                        .unwrap_or(0);
+                    let runtime_note = if runtime_download_started {
+                        if runtime_download_result.lock().unwrap().is_some() {
+                            " • Runtime image download complete".to_string()
+                        } else if runtime_partial_mb > 0 {
+                            format!(" • Runtime image {} MB", runtime_partial_mb)
+                        } else {
+                            " • Starting runtime image download...".to_string()
+                        }
+                    } else {
+                        " • Runtime image already cached".to_string()
+                    };
                     let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
                     *progress = SetupProgress {
                         stage: "docker".to_string(),
                         message: format!(
-                            "Waiting for Docker to start ({}/{}s)...",
+                            "Waiting for Docker to start ({}/{}s)...{}",
                             (i + 1) * 2,
-                            max_retries * 2
+                            max_retries * 2,
+                            runtime_note
                         ),
                         percent: 40 + ((i as u8) * 30 / max_retries as u8),
                         complete: false,
                         error: None,
                     };
+                }
+            }
+
+            // If the runtime tar download was started in parallel, wait for it to
+            // complete now and report progress while waiting.
+            if let Some(download_thread) = runtime_download_thread {
+                while runtime_download_result.lock().unwrap().is_none() {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let runtime_partial_mb = runtime_cached_tar_partial_path()
+                        .and_then(|path| path.metadata().ok().map(|m| m.len() / (1024 * 1024)))
+                        .unwrap_or(0);
+                    let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
+                    *progress = SetupProgress {
+                        stage: "image".to_string(),
+                        message: format!(
+                            "Downloading OpenClaw runtime image... ({} MB)",
+                            runtime_partial_mb
+                        ),
+                        percent: 72,
+                        complete: false,
+                        error: None,
+                    };
+                }
+                let _ = download_thread.join();
+                if let Some(Err(err)) = runtime_download_result.lock().unwrap().take() {
+                    println!(
+                        "[Entropic] Runtime tar prefetch failed during setup: {}",
+                        err
+                    );
                 }
             }
         }
@@ -9333,42 +10032,43 @@ async fn run_first_time_setup_internal(
         return Err("Docker not available".to_string());
     }
 
-    // Defer runtime image check/pull to first launch so setup is fast.
+    // Preload runtime image now so first secure sandbox start is fast.
     {
         let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
         *progress = SetupProgress {
             stage: "image".to_string(),
-            message: "Deferring OpenClaw runtime check to first sandbox start...".to_string(),
-            percent: 70,
+            message: "Preparing OpenClaw runtime image...".to_string(),
+            percent: 75,
             complete: false,
             error: None,
         };
     }
 
-    tauri::async_runtime::spawn(async move {
-        let preload_started = Instant::now();
-        let preload = tokio::task::spawn_blocking(ensure_runtime_image).await;
-        match preload {
-            Ok(Ok(())) => {
-                println!(
-                    "[Entropic] Runtime image preload finished in {}ms",
-                    preload_started.elapsed().as_millis()
-                );
-            }
-            Ok(Err(e)) => {
-                println!("[Entropic] Runtime image preload deferred/failed: {}", e);
-            }
-            Err(e) => {
-                println!("[Entropic] Runtime image preload task error: {}", e);
-            }
+    let preload_started = Instant::now();
+    let preload = tokio::task::spawn_blocking(ensure_runtime_image).await;
+    let preload_message = match preload {
+        Ok(Ok(())) => {
+            println!(
+                "[Entropic] Runtime image preload finished in {}ms",
+                preload_started.elapsed().as_millis()
+            );
+            "Runtime image ready.".to_string()
         }
-    });
+        Ok(Err(e)) => {
+            println!("[Entropic] Runtime image preload deferred/failed: {}", e);
+            "Runtime image preload deferred; first sandbox start will retry.".to_string()
+        }
+        Err(e) => {
+            println!("[Entropic] Runtime image preload task error: {}", e);
+            "Runtime image preload deferred; first sandbox start will retry.".to_string()
+        }
+    };
 
     {
         let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
         *progress = SetupProgress {
             stage: "image".to_string(),
-            message: "Runtime image will be prepared on first secure sandbox start.".to_string(),
+            message: preload_message,
             percent: 90,
             complete: false,
             error: None,

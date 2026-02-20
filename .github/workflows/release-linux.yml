@@ -25,20 +25,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout OpenClaw
-        uses: actions/checkout@v4
-        with:
-          repository: dominant-strategies/openclaw
-          token: ${{ secrets.ENTROPIC_READ_PAT }}
-          path: openclaw
-
-      - name: Checkout Entropic skills
-        uses: actions/checkout@v4
-        with:
-          repository: dominant-strategies/entropic-skills
-          token: ${{ secrets.ENTROPIC_READ_PAT }}
-          path: entropic-skills
-
       - name: Determine version
         id: version
         run: |
@@ -84,36 +70,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install
-
-      - name: Install OpenClaw dependencies
-        working-directory: openclaw
-        run: pnpm install
-
-      - name: Build OpenClaw
-        working-directory: openclaw
-        run: pnpm build
-
-      - name: Build OpenClaw runtime image (linux/amd64)
-        env:
-          OPENCLAW_SOURCE: ${{ github.workspace }}/openclaw
-          ENTROPIC_SKILLS_SOURCE: ${{ github.workspace }}/entropic-skills
-          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
-        run: ./scripts/build-openclaw-runtime.sh
-
-      - name: Bundle runtime image tar
-        env:
-          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
-        run: ./scripts/bundle-runtime-image.sh
-
-      - name: Reclaim disk after runtime bundle
-        run: |
-          docker image rm openclaw-runtime:latest || true
-          docker builder prune -af || true
-          docker system prune -af --volumes || true
-          rm -rf openclaw/node_modules openclaw entropic-skills || true
-          pnpm store prune || true
-          echo "Disk usage after runtime cleanup:"
-          df -h
 
       - name: Bundle runtime (Linux)
         run: ./scripts/bundle-runtime.sh linux x86_64

@@ -44,8 +44,7 @@
     ],
     "resources": [
       "resources/bin/*",
-      "resources/share/**/*",
-      "resources/openclaw-runtime*.tar.gz"
+      "resources/share/**/*"
     ],
     "category": "DeveloperTool",
     "shortDescription": "AI assistant with secure sandboxing",
