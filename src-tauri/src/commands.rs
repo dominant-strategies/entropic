@@ -1954,14 +1954,10 @@ pub async fn build_gateway_device_auth(
     app: AppHandle,
     request: GatewayDeviceAuthRequest,
 ) -> Result<GatewayDeviceConnectPayload, String> {
-    let client_id = {
-        let trimmed = request.client_id.trim();
-        if trimmed.is_empty() {
-            "openclaw-control-ui"
-        } else {
-            trimmed
-        }
-    };
+    let client_id = request.client_id.trim();
+    if client_id.is_empty() {
+        return Err("clientId is required".to_string());
+    }
     let client_mode = {
         let trimmed = request.client_mode.trim();
         if trimmed.is_empty() {
