@@ -4225,6 +4225,7 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
     let paths: &[&[&str]] = &[
         &["agents", "defaults"],
         &["tools", "web", "search", "perplexity"],
+        &["gateway", "controlUi"],
         &["plugins", "slots"],
         &["plugins", "load", "paths"],
         &["plugins", "entries", "memory-lancedb"],
@@ -4256,6 +4257,19 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
     {
         set_openclaw_config_value(cfg, &["plugins", "load", "paths"], serde_json::json!([]));
     }
+
+    // Docker bridge requests can present a non-loopback source IP.
+    // Allow token-authenticated Control UI access in local desktop mode.
+    set_openclaw_config_value(
+        cfg,
+        &["gateway", "controlUi", "allowInsecureAuth"],
+        serde_json::json!(true),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["gateway", "controlUi", "dangerouslyDisableDeviceAuth"],
+        serde_json::json!(false),
+    );
 }
 
 fn disable_legacy_messaging_config(cfg: &mut serde_json::Value) {
