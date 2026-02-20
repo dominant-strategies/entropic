@@ -65,6 +65,7 @@ mkdir -p /data/tools
 mkdir -p /data/browser/profile
 mkdir -p /data/tmp
 mkdir -p /data/qmd-models
+mkdir -p /data/telegram
 
 # Keep OpenClaw's expected ~/.openclaw path mapped to tmpfs-backed state
 # even when HOME points at /data for durable tool caches.
@@ -78,6 +79,16 @@ rm -rf /home/node/.openclaw/.cache/qmd
 ln -sfn /data/.cache/qmd /home/node/.openclaw/.cache/qmd
 rm -rf /data/.cache/qmd/models
 ln -sfn /data/qmd-models /data/.cache/qmd/models
+
+# Persist Telegram runtime state (poll offsets, caches) across container restarts.
+# This avoids replay storms and reconnect churn while keeping auth profiles in tmpfs.
+if [ -d /home/node/.openclaw/telegram ] && [ ! -L /home/node/.openclaw/telegram ]; then
+  if [ -n "$(ls -A /home/node/.openclaw/telegram 2>/dev/null)" ] && [ -z "$(ls -A /data/telegram 2>/dev/null)" ]; then
+    cp -a /home/node/.openclaw/telegram/. /data/telegram/ 2>/dev/null || true
+  fi
+  rm -rf /home/node/.openclaw/telegram
+fi
+ln -sfn /data/telegram /home/node/.openclaw/telegram
 
 # Persist credentials (pairing data, etc.) in durable storage by overriding OPENCLAW_OAUTH_DIR
 # This environment variable tells OpenClaw to store credentials directly in /data/credentials

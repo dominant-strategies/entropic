@@ -3565,7 +3565,10 @@ Use it for durable decisions, preferences, and facts that should persist across 
         serde_json::json!(settings.imessage_enabled),
     );
 
-    if settings.bridge_enabled {
+    // Only suppress legacy messaging channels once bridge has at least one
+    // paired device. A stale bridge_enabled flag alone should not disable
+    // Telegram/Discord/Slack on gateway restarts.
+    if settings.bridge_enabled && has_paired_bridge_devices(&settings) {
         disable_legacy_messaging_config(&mut cfg);
     }
 
@@ -4027,6 +4030,14 @@ fn bridge_device_summaries(settings: &StoredAgentSettings) -> Vec<BridgeDeviceSu
     devices
 }
 
+fn has_paired_bridge_devices(settings: &StoredAgentSettings) -> bool {
+    settings
+        .bridge_devices
+        .iter()
+        .any(|device| !device.id.trim().is_empty())
+        || !settings.bridge_device_id.trim().is_empty()
+}
+
 fn sync_legacy_bridge_fields_from_devices(settings: &mut StoredAgentSettings) {
     let primary = settings
         .bridge_devices
@@ -4149,7 +4160,7 @@ fn bridge_status_from_settings(settings: &StoredAgentSettings) -> BridgeState {
         device_id: settings.bridge_device_id.clone(),
         device_name: settings.bridge_device_name.clone(),
         last_seen_at_ms: settings.bridge_last_seen_at_ms,
-        paired: settings.bridge_enabled && !devices.is_empty(),
+        paired: settings.bridge_enabled && has_paired_bridge_devices(settings),
         device_count: devices.len(),
         online_count,
         devices,
@@ -5391,7 +5402,8 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
         .map_err(|e| e.to_string())?
         .clone();
     let settings = load_agent_settings(&app);
-    let gateway_bind = if settings.bridge_enabled {
+    let bridge_mode_active = settings.bridge_enabled && has_paired_bridge_devices(&settings);
+    let gateway_bind = if bridge_mode_active {
         "0.0.0.0:19789:18789"
     } else {
         "127.0.0.1:19789:18789"
@@ -5761,7 +5773,8 @@ pub async fn start_gateway_with_proxy(
     let _start_guard = gateway_start_lock().lock().await;
     cleanup_legacy_gateway_artifacts();
     let settings = load_agent_settings(&app);
-    let gateway_bind = if settings.bridge_enabled {
+    let bridge_mode_active = settings.bridge_enabled && has_paired_bridge_devices(&settings);
+    let gateway_bind = if bridge_mode_active {
         "0.0.0.0:19789:18789"
     } else {
         "127.0.0.1:19789:18789"
