@@ -7,6 +7,7 @@ import { Store } from "./Store";
 import { Channels } from "./Channels";
 import { Files } from "./Files";
 import { Tasks } from "./Tasks";
+import { Jobs } from "./Jobs";
 import { BillingPage } from "./BillingPage";
 import { Settings } from "./Settings";
 import { useAuth } from "../contexts/AuthContext";
@@ -44,7 +45,7 @@ const SANDBOX_STARTUP_FACTS = [
   "Secure Execution: Entropic runs all shell commands in an isolated sandbox to protect your local system.",
   "Custom Providers: Add your own API keys in Settings for direct access to the latest models.",
   "Deep Context: Stage logs or documentation in 'Files' so Entropic can analyze them with full technical detail.",
-  "Autonomous Tasks: Use 'Tasks' for complex coding goals that require sustained, multi-step agent work.",
+  "Tasks + Jobs: Plan and track work in Tasks, then automate routines from Jobs.",
   "Codebase Awareness: Ask Entropic to 'read the repo' to generate precise implementation roadmaps.",
   "Seamless Integrations: Connect GitHub, Slack, or Linear via Integrations to extend Entropic's capabilities.",
   "One-click Workflow: Quickly initialize projects or deploy environments with a single command.",
@@ -216,6 +217,19 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     const interval = window.setInterval(checkGateway, intervalMs);
     return () => window.clearInterval(interval);
   }, [gatewayRunning, showGatewayStartup, isTogglingGateway]);
+
+  useEffect(() => {
+    const handleOpenPage = (event: Event) => {
+      const detail = (event as CustomEvent<{ page?: string }>).detail;
+      if (detail?.page === "billing") {
+        setCurrentPage("billing");
+      }
+    };
+    window.addEventListener("entropic-open-page", handleOpenPage as EventListener);
+    return () => {
+      window.removeEventListener("entropic-open-page", handleOpenPage as EventListener);
+    };
+  }, []);
 
   useEffect(() => {
     if (!experimentalDesktop && currentPage === "files") {
@@ -1095,6 +1109,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         );
       case "tasks":
         return <Tasks gatewayRunning={gatewayRunning} />;
+      case "jobs":
+        return <Jobs gatewayRunning={gatewayRunning} />;
       case "billing":
         return <BillingPage />;
       case "settings":

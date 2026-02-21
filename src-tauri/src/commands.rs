@@ -2060,11 +2060,6 @@ pub struct AgentProfileState {
     pub memory_qmd_enabled: bool,
     pub memory_sessions_enabled: bool,
     pub capabilities: Vec<CapabilityState>,
-    pub imessage_enabled: bool,
-    pub imessage_cli_path: String,
-    pub imessage_db_path: String,
-    pub imessage_remote_host: String,
-    pub imessage_include_attachments: bool,
     pub discord_enabled: bool,
     pub discord_token: String,
     pub telegram_enabled: bool,
@@ -2385,11 +2380,6 @@ struct StoredAgentSettings {
     capabilities: Vec<CapabilityState>,
     identity_name: String,
     identity_avatar: Option<String>,
-    imessage_enabled: bool,
-    imessage_cli_path: String,
-    imessage_db_path: String,
-    imessage_remote_host: String,
-    imessage_include_attachments: bool,
     discord_enabled: bool,
     discord_token: String,
     telegram_enabled: bool,
@@ -2450,11 +2440,6 @@ impl Default for StoredAgentSettings {
             ],
             identity_name: "Entropic".to_string(),
             identity_avatar: None,
-            imessage_enabled: false,
-            imessage_cli_path: "/usr/local/bin/imsg".to_string(),
-            imessage_db_path: String::new(),
-            imessage_remote_host: String::new(),
-            imessage_include_attachments: true,
             discord_enabled: false,
             discord_token: String::new(),
             telegram_enabled: false,
@@ -6001,7 +5986,6 @@ fn disable_legacy_messaging_config(cfg: &mut serde_json::Value) {
 }
 
 fn clear_legacy_messaging_settings(settings: &mut StoredAgentSettings) {
-    settings.imessage_enabled = false;
     settings.discord_enabled = false;
     settings.discord_token.clear();
     settings.telegram_enabled = false;
@@ -8355,12 +8339,6 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         .unwrap_or(stored.memory_qmd_enabled);
     let memory_sessions_enabled = stored.memory_sessions_enabled;
 
-    let imessage_enabled = false;
-    let imessage_cli_path = String::new();
-    let imessage_db_path = String::new();
-    let imessage_remote_host = String::new();
-    let imessage_include_attachments = false;
-
     let discord_cfg = cfg.get("channels").and_then(|v| v.get("discord"));
     let discord_enabled = discord_cfg
         .and_then(|v| v.get("enabled"))
@@ -8575,11 +8553,6 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         memory_qmd_enabled,
         memory_sessions_enabled,
         capabilities,
-        imessage_enabled,
-        imessage_cli_path,
-        imessage_db_path,
-        imessage_remote_host,
-        imessage_include_attachments,
         discord_enabled,
         discord_token,
         telegram_enabled,
@@ -8847,26 +8820,6 @@ pub async fn set_identity(
     settings.identity_avatar = avatar_data_url;
     save_agent_settings(&app, settings)?;
     Ok(())
-}
-
-#[tauri::command]
-pub async fn set_imessage_config(
-    app: AppHandle,
-    enabled: bool,
-    cli_path: String,
-    db_path: String,
-    remote_host: String,
-    include_attachments: bool,
-) -> Result<(), String> {
-    let _ = (enabled, cli_path, db_path, remote_host, include_attachments);
-    let mut settings = load_agent_settings(&app);
-    settings.imessage_enabled = false;
-    settings.imessage_cli_path = String::new();
-    settings.imessage_db_path = String::new();
-    settings.imessage_remote_host = String::new();
-    settings.imessage_include_attachments = false;
-    save_agent_settings(&app, settings)?;
-    Err("iMessage channel is disabled for security in Entropic.".to_string())
 }
 
 #[tauri::command]

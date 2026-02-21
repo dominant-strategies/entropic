@@ -17,7 +17,7 @@
 ## Security
 - [ ] Secrets storage: keychain/secure storage for provider tokens and channel creds
 - [ ] Resource limits for runtime container (`--memory`, `--cpus`, `--pids-limit`, `--ulimit nofile=...`)
-- [ ] Host helper auth: localhost-only + token + allowlist enforcement (iMessage/other bridges)
+- [ ] Host helper auth: localhost-only + token + allowlist enforcement (external bridges)
 
 ## Platform
 - [ ] Windows builds

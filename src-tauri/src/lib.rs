@@ -160,7 +160,6 @@ pub fn run() {
             commands::set_memory_session_indexing,
             commands::set_capabilities,
             commands::set_identity,
-            commands::set_imessage_config,
             commands::set_channels_config,
             commands::start_whatsapp_login,
             commands::wait_whatsapp_login,

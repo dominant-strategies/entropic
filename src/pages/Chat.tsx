@@ -50,6 +50,13 @@ import {
   type IntegrationQuickActionRequirement,
   type SuggestionTaskPreset,
 } from "../lib/chatQuickActions";
+import {
+  addTaskBoardItem,
+  formatTaskBoardOwnerLabel,
+  formatTaskBoardStatusLabel,
+  parseTaskBoardChatIntent,
+  type TaskBoardChatIntent,
+} from "../lib/taskBoard";
 import { resolveGatewayAuth } from "../lib/gateway-auth";
 import { appendDiagnosticLog } from "../lib/diagnostics";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
@@ -1000,7 +1007,6 @@ const CHANNEL_SESSION_KEY_MARKERS = [
   "slack",
   "discord",
   "whatsapp",
-  "imessage",
   "signal",
   "matrix",
   "googlechat",
@@ -2973,6 +2979,50 @@ export function Chat({
     return currentSessionRef.current;
   }
 
+  async function handleTaskBoardChatIntent(
+    intent: TaskBoardChatIntent,
+    sessionKey: string
+  ): Promise<boolean> {
+    if (!gatewayRunning) {
+      const message = "Gateway is offline. Start it to update the task board.";
+      setError(message);
+      appendAssistantNotice(message, sessionKey);
+      return true;
+    }
+
+    if (intent.action !== "create") return false;
+
+    try {
+      const created = await addTaskBoardItem({
+        title: intent.title,
+        description: intent.description,
+        status: intent.status,
+        priority: intent.priority,
+        owner: intent.owner,
+        labels: intent.labels,
+        dueAt: intent.dueAt,
+      });
+      const statusLabel = formatTaskBoardStatusLabel(created.status);
+      const ownerLabel = formatTaskBoardOwnerLabel(created.owner);
+      const dueText =
+        typeof created.dueAt === "string" && Number.isFinite(Date.parse(created.dueAt))
+          ? ` due ${new Date(created.dueAt).toLocaleDateString([], { month: "short", day: "numeric" })}`
+          : "";
+      appendAssistantNotice(
+        `Added "${created.title}" to ${statusLabel} for ${ownerLabel} (${created.priority} priority${dueText}).`,
+        sessionKey
+      );
+      window.dispatchEvent(new Event("entropic-task-board-updated"));
+      setError(null);
+      return true;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Failed to update task board.";
+      setError(message);
+      appendAssistantNotice(`I couldn't update the task board: ${message}`, sessionKey);
+      return true;
+    }
+  }
+
   async function handleSend(content?: string) {
     let sendSession = currentSessionRef.current;
     if (!sendSession) {
@@ -3056,6 +3106,33 @@ export function Chat({
       }
     }
     setShowWelcome(false);
+
+    const shouldCheckTaskBoardIntent =
+      !hasAttachments &&
+      !messageContent.startsWith(INTERNAL_USER_PROMPT_PREFIX) &&
+      messageContent.trim().length <= 500;
+    const looksLikeTaskBoardWriteCommand =
+      shouldCheckTaskBoardIntent &&
+      /^(?:please\s+)?(?:add|create|track)\b/i.test(messageContent.trim()) &&
+      /\b(?:task\s+)?board\b/i.test(messageContent);
+    const taskBoardIntent = shouldCheckTaskBoardIntent
+      ? parseTaskBoardChatIntent(messageContent)
+      : null;
+    if (taskBoardIntent && sendSession) {
+      const handled = await handleTaskBoardChatIntent(taskBoardIntent, sendSession);
+      if (handled) {
+        setPendingAttachments([]);
+        return;
+      }
+    }
+    if (!taskBoardIntent && looksLikeTaskBoardWriteCommand && sendSession) {
+      appendAssistantNotice(
+        "I couldn't safely parse that board command, so I didn't change tasks. Try: `add task board: <task>` or `add a task on my board to <task>`.",
+        sendSession
+      );
+      return;
+    }
+
     setIsLoading(true);
     setThinkingStatus("Thinking");
     setError(null);
@@ -3390,7 +3467,7 @@ export function Chat({
     if (!gatewayRunning) {
       setQuickSuggestionForSession(sessionKey, {
         ...quick,
-        error: "Start the gateway to create scheduled tasks.",
+        error: "Start the gateway to create scheduled jobs.",
       });
       return;
     }
@@ -3421,12 +3498,12 @@ export function Chat({
       setQuickSuggestionForSession(sessionKey, null);
       setShowWelcome(false);
       appendAssistantNotice(
-        `Scheduled task "${taskName}" created (${getTaskPresetLabel(quick.taskPreset)}). I can run "${quick.action.label}" automatically now.`,
+        `Scheduled job "${taskName}" created (${getTaskPresetLabel(quick.taskPreset)}). I can run "${quick.action.label}" automatically now.`,
         sessionKey
       );
       window.dispatchEvent(new Event("entropic-tasks-updated"));
     } catch (e) {
-      const message = e instanceof Error ? e.message : "Failed to create scheduled task";
+      const message = e instanceof Error ? e.message : "Failed to create scheduled job";
       setQuickSuggestionForSession(sessionKey, { ...quick, creatingTask: false, error: message });
     }
   }
@@ -3635,7 +3712,7 @@ export function Chat({
               ) : null}
               <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--glass-border-subtle)] bg-white/70 px-2 py-1 text-[11px] text-[var(--text-secondary)]">
                 <Calendar className="w-3.5 h-3.5 text-[var(--text-primary)]" />
-                Task: {getTaskPresetLabel(quick.taskPreset)}
+                Job schedule: {getTaskPresetLabel(quick.taskPreset)}
               </span>
             </div>
 
@@ -3643,7 +3720,7 @@ export function Chat({
               {quick.action.label}
             </p>
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Run this now in chat, or create a recurring task.
+              Run this now in chat, or create a recurring job.
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3">
@@ -3658,7 +3735,7 @@ export function Chat({
                       })
                     : undefined
                 }
-                placeholder="Task name"
+                placeholder="Job name"
                 className="form-input !py-2"
               />
               <select
@@ -3697,8 +3774,8 @@ export function Chat({
                 className="btn-secondary !text-xs !py-1.5"
               >
                 {quick.creatingTask
-                  ? "Creating task..."
-                  : `Create task (${getTaskPresetLabel(quick.taskPreset)})`}
+                  ? "Creating job..."
+                  : `Create job (${getTaskPresetLabel(quick.taskPreset)})`}
               </button>
             </div>
           </div>
@@ -4124,6 +4201,13 @@ export function Chat({
                 <p className="text-xs mt-6 text-[var(--text-tertiary)]">Your credentials are stored locally and securely.</p>
               </>
             ) : null}
+
+            <p className="text-xs text-center text-gray-400 mt-6 pt-4 border-t border-gray-100 leading-relaxed">
+              By continuing, you agree to the{" "}
+              <a href="https://entropic.qu.ai/terms" target="_blank" rel="noopener noreferrer" className="underline text-gray-500 hover:text-gray-700">Terms of Service</a>
+              {" "}and{" "}
+              <a href="https://entropic.qu.ai/privacy" target="_blank" rel="noopener noreferrer" className="underline text-gray-500 hover:text-gray-700">Privacy Policy</a>.
+            </p>
           </div>
         </div>
         {showKeyModal && selectedProvider && <ApiKeyModal />}

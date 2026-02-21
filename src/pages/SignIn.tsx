@@ -316,8 +316,11 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
           </button>
         </div>
 
-        <p className="text-[10px] text-center text-gray-400 mt-8 max-w-xs mx-auto leading-relaxed">
-          By continuing, you agree to our Terms of Service and Privacy Policy.
+        <p className="text-xs text-center text-gray-500 mt-8 max-w-xs mx-auto leading-relaxed">
+          By continuing, you agree to our{" "}
+          <a href="https://entropic.qu.ai/terms" target="_blank" rel="noopener noreferrer" className="underline text-gray-700 hover:text-black">Terms of Service</a>
+          {" "}and{" "}
+          <a href="https://entropic.qu.ai/privacy" target="_blank" rel="noopener noreferrer" className="underline text-gray-700 hover:text-black">Privacy Policy</a>.
         </p>
       </div>
     </div>

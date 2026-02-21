@@ -28,6 +28,7 @@ import {
   ScrollText,
   Settings as SettingsIcon,
   CalendarClock,
+  ListTodo,
   CreditCard,
 } from "lucide-react";
 import {
@@ -44,6 +45,7 @@ const Channels = lazy(() => import("./Channels").then((m) => ({ default: m.Chann
 const Logs = lazy(() => import("./Logs").then((m) => ({ default: m.Logs })));
 const Settings = lazy(() => import("./Settings").then((m) => ({ default: m.Settings })));
 const Tasks = lazy(() => import("./Tasks").then((m) => ({ default: m.Tasks })));
+const Jobs = lazy(() => import("./Jobs").then((m) => ({ default: m.Jobs })));
 const BillingPage = lazy(() => import("./BillingPage").then((m) => ({ default: m.BillingPage })));
 import { ModelSelector } from "../components/ModelSelector";
 import { useAuth } from "../contexts/AuthContext";
@@ -263,6 +265,7 @@ export function Files({
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [channelsOpen, setChannelsOpen] = useState(false);
   const [tasksOpen, setTasksOpen] = useState(false);
+  const [jobsOpen, setJobsOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [billingOpen, setBillingOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -284,13 +287,15 @@ export function Files({
   const [skillsPos, setSkillsPos] = useState({ x: 210, y: 95 });
   const [channelsPos, setChannelsPos] = useState({ x: 240, y: 120 });
   const [tasksPos, setTasksPos] = useState({ x: 220, y: 140 });
+  const [jobsPos, setJobsPos] = useState({ x: 250, y: 150 });
   const [logsPos, setLogsPos] = useState({ x: 300, y: 160 });
   const [billingPos, setBillingPos] = useState({ x: 260, y: 110 });
   const [settingsPos, setSettingsPos] = useState({ x: 200, y: 70 });
   const [pluginsSize] = useState({ w: 520, h: 540 });
   const [skillsSize] = useState({ w: 520, h: 560 });
   const [channelsSize] = useState({ w: 520, h: 520 });
-  const [tasksSize] = useState({ w: 620, h: 560 });
+  const [tasksSize] = useState({ w: 760, h: 560 });
+  const [jobsSize] = useState({ w: 620, h: 560 });
   const [logsSize] = useState({ w: 560, h: 420 });
   const [billingSize] = useState({ w: 520, h: 520 });
   const [settingsSize] = useState({ w: 740, h: 560 });
@@ -298,6 +303,7 @@ export function Files({
   const skillsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
   const channelsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
   const tasksDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const jobsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
   const logsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
   const billingDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
   const settingsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
@@ -1291,11 +1297,11 @@ export function Files({
             </AppWindow>
           )}
 
-          {/* ── TASKS WINDOW ───────────────────────────────────────── */}
+          {/* ── TASKS WINDOW ──────────────────────────────────────── */}
           {tasksOpen && (
             <AppWindow
               title="Tasks"
-              icon={CalendarClock}
+              icon={ListTodo}
               position={tasksPos}
               size={tasksSize}
               zIndex={windowZ.tasks ?? 66}
@@ -1311,6 +1317,26 @@ export function Files({
             </AppWindow>
           )}
 
+          {/* ── JOBS WINDOW ───────────────────────────────────────── */}
+          {jobsOpen && (
+            <AppWindow
+              title="Jobs"
+              icon={CalendarClock}
+              position={jobsPos}
+              size={jobsSize}
+              zIndex={windowZ.jobs ?? 67}
+              onClose={() => setJobsOpen(false)}
+              onFocus={() => focusWindow("jobs")}
+              onDragStart={(e) =>
+                startWindowDrag(e, jobsDragRef, jobsPos, setJobsPos, "jobs")
+              }
+            >
+              <Suspense fallback={PANEL_FALLBACK}>
+                <Jobs gatewayRunning={gatewayRunning} />
+              </Suspense>
+            </AppWindow>
+          )}
+
           {/* ── LOGS WINDOW ─────────────────────────────────────────── */}
           {logsOpen && (
             <AppWindow
@@ -1318,7 +1344,7 @@ export function Files({
               icon={ScrollText}
               position={logsPos}
               size={logsSize}
-              zIndex={windowZ.logs ?? 67}
+              zIndex={windowZ.logs ?? 68}
               onClose={() => setLogsOpen(false)}
               onFocus={() => focusWindow("logs")}
               onDragStart={(e) =>
@@ -1522,11 +1548,29 @@ export function Files({
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #22c55e 0%, #16a34a 100%)", boxShadow: "0 3px 10px rgba(22,163,74,0.35)" }}
+              >
+                <ListTodo className="w-6 h-6 text-white" />
+              </div>
+              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${tasksOpen ? "bg-white/80" : "opacity-0"}`} />
+            </button>
+
+            {/* Jobs */}
+            <button
+              onClick={() => {
+                if (!jobsOpen) setJobsOpen(true);
+                focusWindow("jobs");
+              }}
+              className="group flex flex-col items-center"
+              title="Jobs"
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
                 style={{ background: "linear-gradient(180deg, #f97316 0%, #ea580c 100%)", boxShadow: "0 3px 10px rgba(234,88,12,0.35)" }}
               >
                 <CalendarClock className="w-6 h-6 text-white" />
               </div>
-              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${tasksOpen ? "bg-white/80" : "opacity-0"}`} />
+              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${jobsOpen ? "bg-white/80" : "opacity-0"}`} />
             </button>
 
             {/* Logs */}

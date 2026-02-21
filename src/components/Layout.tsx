@@ -5,6 +5,7 @@ import {
   Settings,
   FolderOpen,
   CalendarClock,
+  ListTodo,
   CreditCard,
   Loader2,
   Plus,
@@ -33,12 +34,21 @@ import {
 function startDrag(e: React.MouseEvent) {
   if (e.button !== 0) return;
   const target = e.target as HTMLElement;
-  if (target.closest("button, a, input, select, textarea, [role='button']")) return;
+  if (target.closest("button, a, input, select, textarea, [role='button'], [draggable='true']")) return;
   e.preventDefault();
   getCurrentWindow().startDragging();
 }
 
-export type Page = "chat" | "store" | "skills" | "channels" | "files" | "tasks" | "settings" | "billing";
+export type Page =
+  | "chat"
+  | "store"
+  | "skills"
+  | "channels"
+  | "files"
+  | "tasks"
+  | "jobs"
+  | "settings"
+  | "billing";
 
 type Props = {
   currentPage: Page;
@@ -61,11 +71,12 @@ type Props = {
 
 const baseNavItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
   { id: "chat", label: "New Chat", icon: Plus },
+  { id: "tasks", label: "Tasks", icon: ListTodo },
+  { id: "jobs", label: "Jobs", icon: CalendarClock },
   { id: "files", label: "Desktop", icon: FolderOpen },
   { id: "channels", label: "Messaging", icon: Radio },
   // { id: "store", label: "Integrations", icon: Puzzle },
   { id: "skills", label: "Skills", icon: Sparkles },
-  { id: "tasks", label: "Tasks", icon: CalendarClock },
   { id: "billing", label: "Billing", icon: CreditCard },
   { id: "settings", label: "Settings", icon: Settings },
 ];

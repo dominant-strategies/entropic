@@ -120,7 +120,6 @@ PLUGINS_TO_BUNDLE=(
     "telegram"
     "slack"
     "whatsapp"
-    "imessage"
     "msteams"
     "voice-call"
     "matrix"

@@ -31,7 +31,7 @@ const EDUCATIONAL_FACTS = [
   "Use Integrations to connect tools like Calendar or Gmail after setup completes.",
   "Local Keys mode lets you use your own provider keys directly from Settings.",
   "Proxy mode uses Entropic credits and keeps model routing and billing centralized.",
-  "Tasks and Files are designed for longer-running automation, while Chat is best for quick iterations.",
+  "Jobs and Files are designed for longer-running automation, while Chat is best for quick iterations.",
 ];
 
 function sanitizeSetupError(rawError: string): string {
@@ -106,6 +106,7 @@ export function SetupScreen({ onComplete }: Props) {
   const [progress, setProgress] = useState<SetupProgress | null>(null);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
   const [factIndex, setFactIndex] = useState(0);
+  const [tosAccepted, setTosAccepted] = useState(false);
 
   useEffect(() => {
     if (isRunning) {
@@ -132,9 +133,9 @@ export function SetupScreen({ onComplete }: Props) {
     return () => window.clearInterval(interval);
   }, [isRunning, progress]);
 
-  // Auto-start setup on component mount
+  // Auto-start setup on component mount only if ToS already accepted
   useEffect(() => {
-    if (!isRunning && !progress) {
+    if (!isRunning && !progress && tosAccepted) {
       startSetup(false);
     }
   }, []);
@@ -200,9 +201,40 @@ export function SetupScreen({ onComplete }: Props) {
               included — no Docker Desktop or other tools required. This only
               needs to happen once.
             </p>
+            <label className="flex items-start gap-3 mb-6 cursor-pointer group">
+              <input
+                type="checkbox"
+                checked={tosAccepted}
+                onChange={(e) => setTosAccepted(e.target.checked)}
+                className="mt-0.5 w-4 h-4 rounded border-gray-300 text-violet-600 focus:ring-violet-500 cursor-pointer"
+              />
+              <span className="text-sm text-gray-600 leading-relaxed">
+                I have read and agree to the{" "}
+                <a
+                  href="https://entropic.qu.ai/terms"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-violet-600 hover:text-violet-800 underline font-medium"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  Terms of Service
+                </a>
+                {" "}and{" "}
+                <a
+                  href="https://entropic.qu.ai/privacy"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-violet-600 hover:text-violet-800 underline font-medium"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  Privacy Policy
+                </a>.
+              </span>
+            </label>
             <button
               onClick={() => startSetup(false)}
-              className="w-full py-3 px-4 bg-violet-600 hover:bg-violet-700 text-white font-medium rounded-xl transition-colors"
+              disabled={!tosAccepted}
+              className="w-full py-3 px-4 bg-violet-600 hover:bg-violet-700 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white font-medium rounded-xl transition-colors"
             >
               Set Up Secure Sandbox
             </button>

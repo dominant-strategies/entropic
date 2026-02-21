@@ -226,7 +226,6 @@ const MESSAGING_PLUGIN_IDS = new Set([
   "discord",
   "telegram",
   "whatsapp",
-  "imessage",
   "slack",
   "googlechat",
 ]);
