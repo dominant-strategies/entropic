@@ -2766,6 +2766,68 @@ fn parse_markdown_bold_field(content: &str, field: &str) -> Option<String> {
     None
 }
 
+fn sanitize_identity_name(raw: &str) -> Option<String> {
+    let mut value = raw.trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+
+    // Peel common markdown wrappers repeatedly (e.g. "**Nova**", "`Nova`").
+    for _ in 0..4 {
+        let trimmed = value.trim();
+        let unwrapped = trimmed
+            .strip_prefix("**")
+            .and_then(|s| s.strip_suffix("**"))
+            .or_else(|| trimmed.strip_prefix("__").and_then(|s| s.strip_suffix("__")))
+            .or_else(|| trimmed.strip_prefix('*').and_then(|s| s.strip_suffix('*')))
+            .or_else(|| trimmed.strip_prefix('_').and_then(|s| s.strip_suffix('_')))
+            .or_else(|| trimmed.strip_prefix('`').and_then(|s| s.strip_suffix('`')));
+        if let Some(inner) = unwrapped {
+            value = inner.trim().to_string();
+        } else {
+            break;
+        }
+    }
+
+    let trimmed = value
+        .trim()
+        .trim_start_matches(|c: char| {
+            c.is_whitespace()
+                || c == '-'
+                || c == '+'
+                || c == ':'
+                || c == '*'
+                || c == '_'
+                || c == '`'
+                || c == '~'
+        })
+        .trim_end_matches(|c: char| {
+            c.is_whitespace()
+                || c == '-'
+                || c == '+'
+                || c == ':'
+                || c == '*'
+                || c == '_'
+                || c == '`'
+                || c == '~'
+        });
+
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let collapsed = trimmed
+        .split_whitespace()
+        .filter(|token| !token.chars().all(|ch| ch == '*' || ch == '_' || ch == '`' || ch == '~'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.is_empty() {
+        None
+    } else {
+        Some(collapsed)
+    }
+}
+
 fn state_file(path: &str) -> String {
     let trimmed = path.trim_start_matches('/');
     if trimmed.is_empty() {
@@ -4671,10 +4733,26 @@ Use it for durable decisions, preferences, and facts that should persist across 
             let mut models = Vec::new();
 
             if !model_id.is_empty() {
-                models.push(serde_json::json!({ "id": model_id, "name": model_id }));
+                models.push(serde_json::json!({
+                    "id": model_id,
+                    "name": model_id,
+                    "input": ["text", "image"],
+                    "reasoning": false,
+                    "contextWindow": 200000,
+                    "maxTokens": 8192,
+                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+                }));
             }
             if !image_model_id.is_empty() && image_model_id != model_id {
-                models.push(serde_json::json!({ "id": image_model_id, "name": image_model_id }));
+                models.push(serde_json::json!({
+                    "id": image_model_id,
+                    "name": image_model_id,
+                    "input": ["text", "image"],
+                    "reasoning": false,
+                    "contextWindow": 200000,
+                    "maxTokens": 8192,
+                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+                }));
             }
             set_openclaw_config_value(
                 &mut cfg,
@@ -8045,7 +8123,9 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
     let soul = read_container_file(&workspace_file("SOUL.md")).unwrap_or_default();
     let identity_raw = read_container_file(&workspace_file("IDENTITY.md")).unwrap_or_default();
     let identity_name = parse_markdown_bold_field(&identity_raw, "Name")
-        .unwrap_or_else(|| stored.identity_name.clone());
+        .and_then(|value| sanitize_identity_name(&value))
+        .or_else(|| sanitize_identity_name(&stored.identity_name))
+        .unwrap_or_else(|| "Entropic".to_string());
     let identity_avatar = parse_markdown_bold_field(&identity_raw, "Avatar")
         .or_else(|| stored.identity_avatar.clone())
         .and_then(|value| {
@@ -8594,24 +8674,10 @@ pub async fn set_identity(
 ) -> Result<(), String> {
     let existing = read_container_file(&workspace_file("IDENTITY.md")).unwrap_or_default();
     let stored = load_agent_settings(&app);
-    let next_name = {
-        let trimmed = name.trim();
-        if !trimmed.is_empty() {
-            trimmed.to_string()
-        } else {
-            parse_markdown_bold_field(&existing, "Name")
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| {
-                    let fallback = stored.identity_name.trim();
-                    if fallback.is_empty() {
-                        None
-                    } else {
-                        Some(fallback.to_string())
-                    }
-                })
-                .unwrap_or_else(|| "Entropic".to_string())
-        }
-    };
+    let next_name = sanitize_identity_name(&name)
+        .or_else(|| parse_markdown_bold_field(&existing, "Name").and_then(|value| sanitize_identity_name(&value)))
+        .or_else(|| sanitize_identity_name(&stored.identity_name))
+        .unwrap_or_else(|| "Entropic".to_string());
     let creature = parse_markdown_bold_field(&existing, "Creature").unwrap_or_default();
     let vibe = parse_markdown_bold_field(&existing, "Vibe").unwrap_or_default();
     let emoji = parse_markdown_bold_field(&existing, "Emoji").unwrap_or_default();

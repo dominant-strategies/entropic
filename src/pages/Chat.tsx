@@ -20,7 +20,16 @@ import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import { GatewayClient, createGatewayClient, type ChatEvent, type AgentEvent, type GatewayMessage } from "../lib/gateway";
-import { loadOnboardingData, loadProfile, saveProfile, type OnboardingData, type AgentProfile } from "../lib/profile";
+import {
+  getProfileInitials,
+  isRenderableAvatarDataUrl,
+  loadOnboardingData,
+  loadProfile,
+  sanitizeProfileName,
+  saveProfile,
+  type OnboardingData,
+  type AgentProfile,
+} from "../lib/profile";
 import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
 import { ChannelSetupModal } from "../components/ChannelSetupModal";
 import { TelegramSetupModal } from "../components/TelegramSetupModal";
@@ -51,6 +60,11 @@ import entropicLogo from "../assets/entropic-logo.png";
 import type { Page } from "../components/Layout";
 
 // NOTE: Most type definitions are omitted for brevity in this example
+type MessageAttachment = {
+  fileName: string;
+  mimeType: string;
+  previewUrl: string;
+};
 type Message = {
   id: string;
   role: "user" | "assistant";
@@ -58,6 +72,7 @@ type Message = {
   kind?: "toolResult";
   toolName?: string;
   sentAt?: number | null;
+  attachments?: MessageAttachment[];
   assistantPayload?: {
     events: CalendarEvent[];
     errors: ToolError[];
@@ -122,9 +137,7 @@ function getAvatarColor(name: string): string {
 }
 
 function getInitials(name: string): string {
-  const parts = name.trim().split(/\s+/);
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return name.slice(0, 2).toUpperCase();
+  return getProfileInitials(name, 2);
 }
 
 function GoogleCalendarLogo({ className }: { className?: string }) {
@@ -234,7 +247,12 @@ async function persistChatData(data: PersistedChatData): Promise<void> {
     for (const s of trimmed.sessions) {
       const msgs = data.messages[s.key];
       if (msgs && msgs.length > 0) {
-        trimmed.messages[s.key] = msgs.slice(-MAX_PERSISTED_MESSAGES);
+        // Strip large previewUrl data from attachments to avoid bloating the store
+        trimmed.messages[s.key] = msgs.slice(-MAX_PERSISTED_MESSAGES).map((m) =>
+          m.attachments
+            ? { ...m, attachments: m.attachments.map(({ fileName, mimeType }) => ({ fileName, mimeType, previewUrl: "" })) }
+            : m,
+        );
       }
       const draft = data.drafts[s.key];
       if (typeof draft === "string" && draft.length > 0) {
@@ -2750,6 +2768,13 @@ export function Chat({
       role: "user",
       content: userVisibleContent,
       sentAt: Date.now(),
+      attachments: hasAttachments
+        ? pendingAttachments.map((a) => ({
+            fileName: a.fileName,
+            mimeType: a.mimeType,
+            previewUrl: a.previewUrl || `data:${a.mimeType};base64,${a.content}`,
+          }))
+        : undefined,
     };
     visibleMessagesSessionRef.current = sendSession;
     setMessages(prev => [...prev, userMessage]);
@@ -2912,18 +2937,16 @@ export function Chat({
     rawIdentityAvatar: string | null | undefined,
     currentAvatar?: string
   ): string | undefined {
+    const current = isRenderableAvatarDataUrl(currentAvatar) ? currentAvatar.trim() : undefined;
     const raw = typeof rawIdentityAvatar === "string" ? rawIdentityAvatar.trim() : "";
     if (!raw) {
-      return currentAvatar;
+      return current;
     }
-    if (/^data:image\//i.test(raw)) {
-      return raw;
-    }
-    if (/^https?:\/\//i.test(raw)) {
+    if (isRenderableAvatarDataUrl(raw)) {
       return raw;
     }
     const mapped = avatarUploadDataUrlByFileNameRef.current.get(normalizeAttachmentFileName(raw));
-    return mapped || currentAvatar;
+    return (isRenderableAvatarDataUrl(mapped) ? mapped.trim() : undefined) || current;
   }
 
   async function syncDesktopProfileFromIdentity() {
@@ -2935,7 +2958,7 @@ export function Chat({
       const current = await loadProfile();
       const nextName =
         typeof state.identity_name === "string" && state.identity_name.trim()
-          ? state.identity_name.trim()
+          ? sanitizeProfileName(state.identity_name)
           : current.name;
       const nextAvatar = resolveProfileAvatarDataUrl(state.identity_avatar, current.avatarDataUrl);
       if (nextName === current.name && nextAvatar === current.avatarDataUrl) {
@@ -3864,7 +3887,10 @@ export function Chat({
     error && isBillingIssueMessage(error) && !isAuthenticated && isAuthConfigured
   );
 
-  const chatAgentName = agentProfile?.name || onboardingData?.agentName || "Joulie";
+  const chatAgentName = sanitizeProfileName(agentProfile?.name || onboardingData?.agentName || "Entropic");
+  const chatAgentAvatarUrl = isRenderableAvatarDataUrl(agentProfile?.avatarDataUrl)
+    ? agentProfile?.avatarDataUrl.trim()
+    : undefined;
 
   // Main Chat UI
   return (
@@ -3976,9 +4002,17 @@ export function Chat({
                   hadToolPayload: msg.assistantPayload?.hadToolPayload ?? false,
                 }
               : null;
-            const bodyContent = msg.role === "user" ? normalizedUser?.content ?? "" : msg.content;
+            let bodyContent = msg.role === "user" ? normalizedUser?.content ?? "" : msg.content;
             const messageTime = formatMessageTime(msg.role === "user" ? normalizedUser?.sentAt : msg.sentAt);
-            if (msg.role === "user" && !bodyContent) {
+            const attachmentsWithPreview = msg.role === "user" && msg.attachments
+              ? msg.attachments.filter((a) => a.previewUrl)
+              : [];
+            const hasAttachedImages = attachmentsWithPreview.length > 0;
+            // Strip "[Attached image: ...]" text when we have actual image thumbnails to show
+            if (hasAttachedImages) {
+              bodyContent = bodyContent.replace(/\n*\[Attached (?:image: [^\]]+|\d+ images)\]\s*$/, "").trim();
+            }
+            if (msg.role === "user" && !bodyContent && !hasAttachedImages) {
               return null;
             }
             const isUser = msg.role === "user";
@@ -3988,16 +4022,32 @@ export function Chat({
                 <div className={clsx("max-w-[85%]", !isUser && "relative")}>
                   <div className={clsx("px-4 py-2.5 rounded-2xl",
                     isUser ? "bg-[var(--purple-accent)] text-white" : "bg-[var(--bg-tertiary)] text-[var(--text-primary)]")}>
-                    {msg.role === "assistant" ? renderAssistantContent(msg) : <p className="whitespace-pre-wrap">{bodyContent}</p>}
+                    {msg.role === "assistant" ? renderAssistantContent(msg) : (
+                      <>
+                        {hasAttachedImages && (
+                          <div className={clsx("flex flex-wrap gap-1.5", bodyContent && "mb-2")}>
+                            {attachmentsWithPreview.map((att, i) => (
+                              <img
+                                key={i}
+                                src={att.previewUrl}
+                                alt={att.fileName}
+                                className="max-w-[200px] max-h-[160px] rounded-lg object-cover"
+                              />
+                            ))}
+                          </div>
+                        )}
+                        {bodyContent && <p className="whitespace-pre-wrap">{bodyContent}</p>}
+                      </>
+                    )}
                   </div>
                   {!isUser && (
                     <div
                       className="absolute -bottom-1.5 -left-2.5 w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-semibold text-white overflow-hidden ring-2 ring-[var(--bg-primary)]"
                       title={chatAgentName}
-                      style={agentProfile?.avatarDataUrl ? undefined : { background: getAvatarColor(chatAgentName) }}
+                      style={chatAgentAvatarUrl ? undefined : { background: getAvatarColor(chatAgentName) }}
                     >
-                      {agentProfile?.avatarDataUrl ? (
-                        <img src={agentProfile.avatarDataUrl} alt="" className="w-full h-full object-cover" />
+                      {chatAgentAvatarUrl ? (
+                        <img src={chatAgentAvatarUrl} alt="" className="w-full h-full object-cover" />
                       ) : (
                         getInitials(chatAgentName)
                       )}

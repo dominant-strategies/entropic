@@ -22,7 +22,13 @@ import type { ChatSession } from "../pages/Chat";
 import clsx from "clsx";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { platform } from "@tauri-apps/plugin-os";
-import { loadProfile, type AgentProfile } from "../lib/profile";
+import {
+  getProfileInitials,
+  isRenderableAvatarDataUrl,
+  loadProfile,
+  sanitizeProfileName,
+  type AgentProfile,
+} from "../lib/profile";
 
 function startDrag(e: React.MouseEvent) {
   if (e.button !== 0) return;
@@ -91,7 +97,7 @@ export function Layout({
   onNewChat,
   onChatSessionAction,
 }: Props) {
-  const [profile, setProfile] = useState<AgentProfile>({ name: "Joulie" });
+  const [profile, setProfile] = useState<AgentProfile>({ name: "Entropic" });
   const [isMacOS, setIsMacOS] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showAllChatSessions, setShowAllChatSessions] = useState(false);
@@ -171,6 +177,10 @@ export function Layout({
     ? sortedChatSessions
     : sortedChatSessions.slice(0, 5);
   const hasMoreChatSessions = sortedChatSessions.length > 5;
+  const profileName = sanitizeProfileName(profile.name);
+  const profileAvatarUrl = isRenderableAvatarDataUrl(profile.avatarDataUrl)
+    ? profile.avatarDataUrl.trim()
+    : undefined;
   const navItems = baseNavItems.filter((item) =>
     item.id === "files" ? experimentalDesktop : true
   );
@@ -372,18 +382,18 @@ export function Layout({
              )}
           >
             <div className="w-8 h-8 rounded-full bg-gray-200 overflow-hidden flex-shrink-0 border border-black/5">
-              {profile.avatarDataUrl ? (
-                <img src={profile.avatarDataUrl} alt="Avatar" className="w-full h-full object-cover" />
+              {profileAvatarUrl ? (
+                <img src={profileAvatarUrl} alt="Avatar" className="w-full h-full object-cover" />
               ) : (
                 <div className="w-full h-full flex items-center justify-center text-xs font-medium text-gray-500">
-                  {profile.name.slice(0, 1).toUpperCase()}
+                  {getProfileInitials(profileName, 1)}
                 </div>
               )}
             </div>
             {!sidebarCollapsed && (
               <div className="flex-1 min-w-0">
                 <div className="text-[13px] font-medium text-[var(--text-primary)] truncate group-hover:text-black">
-                  {profile.name}
+                  {profileName}
                 </div>
                 <div className="flex items-center gap-1.5 mt-0.5">
                   <div className={clsx("w-1.5 h-1.5 rounded-full", gatewayRunning ? "bg-green-500" : "bg-gray-300")} />

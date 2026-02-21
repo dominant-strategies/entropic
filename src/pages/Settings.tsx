@@ -4,7 +4,14 @@ import { Store } from "@tauri-apps/plugin-store";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Key, Shield, Sparkles, Cpu, Image, ChevronRight, User, Palette, ChevronDown, ScrollText, LogIn, LogOut, Loader2, Trash2, AlertTriangle, Copy, Download } from "lucide-react";
 import clsx from "clsx";
-import { loadProfile, saveProfile, type AgentProfile } from "../lib/profile";
+import {
+  getProfileInitials,
+  isRenderableAvatarDataUrl,
+  loadProfile,
+  sanitizeProfileName,
+  saveProfile,
+  type AgentProfile,
+} from "../lib/profile";
 import { useAuth } from "../contexts/AuthContext";
 import { ModelSelector } from "../components/ModelSelector";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
@@ -140,7 +147,7 @@ export function Settings({
   const { isAuthenticated, isAuthConfigured } = useAuth();
   const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
   const [apiKeys, setApiKeys] = useState({ anthropic: "", openai: "", google: "" });
-  const [profile, setProfile] = useState<AgentProfile>({ name: "Joulie" });
+  const [profile, setProfile] = useState<AgentProfile>({ name: "Entropic" });
   const [saving, setSaving] = useState(false);
   const [memorySessionIndexing, setMemorySessionIndexing] = useState(false);
   const [memoryEnabled, setMemoryEnabled] = useState(true);
@@ -175,6 +182,10 @@ export function Settings({
   const appManifestDate = runtimeVersionInfo?.app_manifest_pub_date
     ? runtimeVersionInfo.app_manifest_pub_date.slice(0, 10)
     : null;
+  const profileDisplayName = sanitizeProfileName(profile.name);
+  const profileAvatarDataUrl = isRenderableAvatarDataUrl(profile.avatarDataUrl)
+    ? profile.avatarDataUrl.trim()
+    : undefined;
 
   // Wallpaper state
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
@@ -197,10 +208,10 @@ export function Settings({
           const next: AgentProfile = {
             name:
               hasIdentityName && typeof state.identity_name === "string" && state.identity_name.trim()
-                ? state.identity_name.trim()
+                ? sanitizeProfileName(state.identity_name)
                 : prev.name,
             avatarDataUrl: hasIdentityAvatar
-              ? typeof state.identity_avatar === "string" && state.identity_avatar.trim()
+              ? isRenderableAvatarDataUrl(state.identity_avatar)
                 ? state.identity_avatar.trim()
                 : undefined
               : prev.avatarDataUrl,
@@ -559,11 +570,11 @@ export function Settings({
         <div className="p-4 flex items-start gap-6">
           <div className="relative group cursor-pointer flex-shrink-0">
             <div className="w-20 h-20 rounded-full bg-[var(--system-gray-5)] overflow-hidden shadow-sm">
-              {profile.avatarDataUrl ? (
-                <img src={profile.avatarDataUrl} alt="Avatar" className="w-full h-full object-cover" />
+              {profileAvatarDataUrl ? (
+                <img src={profileAvatarDataUrl} alt="Avatar" className="w-full h-full object-cover" />
               ) : (
                 <div className="w-full h-full flex items-center justify-center text-2xl font-semibold text-[var(--text-secondary)]">
-                  {profile.name.slice(0, 2).toUpperCase()}
+                  {getProfileInitials(profileDisplayName, 2)}
                 </div>
               )}
             </div>
@@ -609,7 +620,7 @@ export function Settings({
                 onBlur={(e) => {
                   invoke("set_identity", {
                     name: e.target.value,
-                    avatarDataUrl: profile.avatarDataUrl ?? null,
+                    avatarDataUrl: profileAvatarDataUrl ?? null,
                   }).catch(() => {});
                 }}
                 className="w-full bg-transparent text-xl font-bold text-[var(--text-primary)] focus:outline-none border-b border-transparent focus:border-[var(--system-blue)] transition-colors placeholder:text-[var(--text-tertiary)]"
