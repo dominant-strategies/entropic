@@ -237,7 +237,13 @@ export function Settings({
   }, []);
 
   useEffect(() => {
-    refreshGatewayConfigHealth();
+    if (!gatewayRunning) {
+      setGatewayConfigHealth(null);
+      setGatewayConfigError(null);
+      setGatewayConfigNotice(null);
+      return;
+    }
+    void refreshGatewayConfigHealth();
   }, [gatewayRunning]);
 
   useEffect(() => {

@@ -31,7 +31,6 @@ import {
   type AgentProfile,
 } from "../lib/profile";
 import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
-import { ChannelSetupModal } from "../components/ChannelSetupModal";
 import { TelegramSetupModal } from "../components/TelegramSetupModal";
 import { MarkdownContent } from "../components/MarkdownContent";
 import { useAuth } from "../contexts/AuthContext";
@@ -187,6 +186,7 @@ function normalizeSessionsList(list: ChatSession[]): ChatSession[] {
   for (const raw of list) {
     const key = typeof raw?.key === "string" ? raw.key.trim() : "";
     if (!key) continue;
+    if (!shouldDisplayGatewaySession(key)) continue;
     const prev = byKey.get(key);
     if (!prev) {
       byKey.set(key, { ...raw, key });
@@ -276,7 +276,33 @@ async function loadPersistedChatData(): Promise<PersistedChatData | null> {
   try {
     const store = await getChatStore();
     const data = await store.get("chatData") as PersistedChatData | null;
-    return data;
+    if (!data) return null;
+
+    const sessions = normalizeSessionsList(Array.isArray(data.sessions) ? data.sessions : []);
+    const allowedKeys = new Set(sessions.map((session) => session.key));
+    const messages: Record<string, Message[]> = {};
+    for (const [sessionKey, sessionMessages] of Object.entries(data.messages || {})) {
+      if (!allowedKeys.has(sessionKey)) continue;
+      if (!Array.isArray(sessionMessages)) continue;
+      messages[sessionKey] = sessionMessages;
+    }
+    const drafts: Record<string, string> = {};
+    for (const [sessionKey, draft] of Object.entries(data.drafts || {})) {
+      if (!allowedKeys.has(sessionKey)) continue;
+      if (typeof draft !== "string") continue;
+      drafts[sessionKey] = draft;
+    }
+    const currentSession =
+      typeof data.currentSession === "string" && allowedKeys.has(data.currentSession)
+        ? data.currentSession
+        : null;
+
+    return {
+      sessions,
+      messages,
+      drafts,
+      currentSession,
+    };
   } catch (err) {
     console.warn("[Entropic] Failed to load persisted chat data:", err);
     return null;
@@ -1362,15 +1388,9 @@ export function Chat({
   const sessionModelRef = useRef<Record<string, string | null>>({});
   const runRevertModelRef = useRef<Record<string, string | null>>({});
   const [channelConfig, setChannelConfig] = useState<{
-    imessageEnabled: boolean;
-    whatsappEnabled: boolean;
     telegramEnabled: boolean;
     telegramConnected: boolean;
   } | null>(null);
-  const [channelModal, setChannelModal] = useState<{ isOpen: boolean; channel: "imessage" | "whatsapp" }>({
-    isOpen: false,
-    channel: "imessage",
-  });
   const [telegramSetupOpen, setTelegramSetupOpen] = useState(false);
   const [integrationSetupBySession, setIntegrationSetupBySession] = useState<Record<string, IntegrationSetupState>>({});
   const [quickSuggestionBySession, setQuickSuggestionBySession] = useState<Record<string, QuickSuggestionState>>({});
@@ -1733,8 +1753,6 @@ export function Chat({
     let cancelled = false;
     Promise.all([
       invoke<{
-        imessage_enabled?: boolean;
-        whatsapp_enabled?: boolean;
         telegram_enabled?: boolean;
         telegram_token?: string;
       }>("get_agent_profile_state"),
@@ -1743,8 +1761,6 @@ export function Chat({
       .then(([state, telegramConnected]) => {
         if (cancelled) return;
         setChannelConfig({
-          imessageEnabled: state.imessage_enabled ?? false,
-          whatsappEnabled: state.whatsapp_enabled ?? false,
           telegramEnabled: Boolean(state.telegram_enabled && state.telegram_token?.trim()),
           telegramConnected: Boolean(telegramConnected),
         });
@@ -3781,28 +3797,9 @@ export function Chat({
     };
   }, [integrationSetup]);
 
-  function handleChannelSetupComplete(channel: "imessage" | "whatsapp") {
-    setChannelModal({ isOpen: false, channel });
-    setChannelConfig((prev) => {
-      const next = prev ?? {
-        imessageEnabled: false,
-        whatsappEnabled: false,
-        telegramEnabled: false,
-        telegramConnected: false,
-      };
-      return channel === "imessage"
-        ? { ...next, imessageEnabled: true }
-        : { ...next, whatsappEnabled: true };
-    });
-    const channelName = channel === "imessage" ? "iMessage" : "WhatsApp";
-    handleSend(`I've connected ${channelName}. Please send me a test message!`);
-  }
-
   function handleTelegramSetupComplete() {
     setTelegramSetupOpen(false);
     setChannelConfig((prev) => ({
-      imessageEnabled: prev?.imessageEnabled ?? false,
-      whatsappEnabled: prev?.whatsappEnabled ?? false,
       telegramEnabled: true,
       telegramConnected: true,
     }));
@@ -4658,13 +4655,6 @@ export function Chat({
         </div>
       )}
 
-      {/* Channel Setup Modal */}
-      <ChannelSetupModal
-        channel={channelModal.channel}
-        isOpen={channelModal.isOpen}
-        onClose={() => setChannelModal({ ...channelModal, isOpen: false })}
-        onSetupComplete={handleChannelSetupComplete}
-      />
       <TelegramSetupModal
         isOpen={telegramSetupOpen}
         onClose={() => setTelegramSetupOpen(false)}

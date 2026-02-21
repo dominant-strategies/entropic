@@ -1979,6 +1979,8 @@ pub struct AppState {
     pub bridge_server_started: Mutex<bool>,
     /// Stores the PKCE verifier for the in-flight Anthropic OAuth flow
     pub anthropic_oauth_verifier: Mutex<Option<String>>,
+    /// Opaque attachment IDs mapped to container temp upload paths.
+    pending_attachments: Mutex<HashMap<String, PendingAttachmentRecord>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, Default)]
@@ -1999,6 +2001,7 @@ impl Default for AppState {
             whatsapp_login: Mutex::new(WhatsAppLoginCache::default()),
             bridge_server_started: Mutex::new(false),
             anthropic_oauth_verifier: Mutex::new(None),
+            pending_attachments: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -2180,9 +2183,15 @@ pub struct AttachmentInfo {
     pub id: String,
     pub file_name: String,
     pub mime_type: String,
-    pub temp_path: String,
     pub size_bytes: u64,
     pub is_image: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PendingAttachmentRecord {
+    file_name: String,
+    temp_path: String,
+    created_at_ms: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2507,6 +2516,11 @@ const SCANNER_CONTAINER: &str = "entropic-skill-scanner";
 const SCANNER_HOST_PORT: &str = "19791";
 const ENTROPIC_GATEWAY_SCHEMA_VERSION: &str = "2026-02-13";
 const OPENCLAW_STATE_ROOT: &str = "/home/node/.openclaw";
+const ATTACHMENT_TMP_ROOT: &str = "/home/node/.openclaw/uploads/tmp";
+const ATTACHMENT_SAVE_ROOT: &str = "/data/uploads";
+const ATTACHMENT_ID_RANDOM_BYTES: usize = 18;
+const ATTACHMENT_MAX_PENDING: usize = 256;
+const ATTACHMENT_PENDING_TTL_MS: u64 = 60 * 60 * 1000;
 const WORKSPACE_ROOT: &str = "/data/workspace";
 const SKILLS_ROOT: &str = "/data/skills";
 const SKILL_MANIFESTS_ROOT: &str = "/data/skill-manifests";
@@ -2724,9 +2738,10 @@ fn parse_markdown_bold_field(content: &str, field: &str) -> Option<String> {
             .or_else(|| trimmed.strip_prefix("+ "))
             .unwrap_or(trimmed)
             .trim();
-        let heading_matches = !heading_label.is_empty()
-            && normalize_markdown_field_label(heading_label) == target;
-        let list_matches = !list_label.is_empty() && normalize_markdown_field_label(list_label) == target;
+        let heading_matches =
+            !heading_label.is_empty() && normalize_markdown_field_label(heading_label) == target;
+        let list_matches =
+            !list_label.is_empty() && normalize_markdown_field_label(list_label) == target;
         if !heading_matches && !list_matches {
             continue;
         }
@@ -2778,7 +2793,11 @@ fn sanitize_identity_name(raw: &str) -> Option<String> {
         let unwrapped = trimmed
             .strip_prefix("**")
             .and_then(|s| s.strip_suffix("**"))
-            .or_else(|| trimmed.strip_prefix("__").and_then(|s| s.strip_suffix("__")))
+            .or_else(|| {
+                trimmed
+                    .strip_prefix("__")
+                    .and_then(|s| s.strip_suffix("__"))
+            })
             .or_else(|| trimmed.strip_prefix('*').and_then(|s| s.strip_suffix('*')))
             .or_else(|| trimmed.strip_prefix('_').and_then(|s| s.strip_suffix('_')))
             .or_else(|| trimmed.strip_prefix('`').and_then(|s| s.strip_suffix('`')));
@@ -2818,7 +2837,11 @@ fn sanitize_identity_name(raw: &str) -> Option<String> {
 
     let collapsed = trimmed
         .split_whitespace()
-        .filter(|token| !token.chars().all(|ch| ch == '*' || ch == '_' || ch == '`' || ch == '~'))
+        .filter(|token| {
+            !token
+                .chars()
+                .all(|ch| ch == '*' || ch == '_' || ch == '`' || ch == '~')
+        })
         .collect::<Vec<_>>()
         .join(" ");
     if collapsed.is_empty() {
@@ -4542,6 +4565,70 @@ fn sanitize_filename(name: &str) -> String {
         "file".to_string()
     } else {
         out
+    }
+}
+
+fn generate_attachment_id() -> String {
+    let mut bytes = [0u8; ATTACHMENT_ID_RANDOM_BYTES];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn normalize_attachment_id(raw: &str) -> Result<String, String> {
+    let id = raw.trim();
+    if id.is_empty() {
+        return Err("Attachment id required".to_string());
+    }
+    if id.len() > 128 || id.len() < 8 {
+        return Err("Invalid attachment id".to_string());
+    }
+    if !id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("Invalid attachment id".to_string());
+    }
+    Ok(id.to_string())
+}
+
+fn validate_attachment_temp_path(attachment_id: &str, temp_path: &str) -> Result<(), String> {
+    let trimmed = temp_path.trim();
+    if trimmed.is_empty() {
+        return Err("Attachment path is empty".to_string());
+    }
+    let allowed_prefix = format!("{}/", ATTACHMENT_TMP_ROOT);
+    if !trimmed.starts_with(&allowed_prefix) {
+        return Err("Attachment path is outside allowed temp directory".to_string());
+    }
+    let file_name = Path::new(trimmed)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Attachment path is invalid".to_string())?;
+    if file_name.contains('/') || file_name.contains('\\') || file_name.contains("..") {
+        return Err("Attachment path is invalid".to_string());
+    }
+    let expected_prefix = format!("{}_", attachment_id);
+    if !file_name.starts_with(&expected_prefix) {
+        return Err("Attachment path does not match attachment id".to_string());
+    }
+    Ok(())
+}
+
+fn prune_pending_attachments(pending: &mut HashMap<String, PendingAttachmentRecord>) {
+    let now = now_ms_u64();
+    pending
+        .retain(|_, record| now.saturating_sub(record.created_at_ms) <= ATTACHMENT_PENDING_TTL_MS);
+    if pending.len() <= ATTACHMENT_MAX_PENDING {
+        return;
+    }
+    let mut oldest: Vec<(String, u64)> = pending
+        .iter()
+        .map(|(id, record)| (id.clone(), record.created_at_ms))
+        .collect();
+    oldest.sort_by_key(|(_, created_at_ms)| *created_at_ms);
+    let remove_count = pending.len().saturating_sub(ATTACHMENT_MAX_PENDING);
+    for (id, _) in oldest.into_iter().take(remove_count) {
+        pending.remove(&id);
     }
 }
 
@@ -6896,6 +6983,7 @@ pub fn init_state(app: &AppHandle) -> AppState {
         whatsapp_login: Mutex::new(WhatsAppLoginCache::default()),
         bridge_server_started: Mutex::new(false),
         anthropic_oauth_verifier: Mutex::new(None),
+        pending_attachments: Mutex::new(HashMap::new()),
     }
 }
 
@@ -7052,8 +7140,13 @@ pub async fn clear_client_log() -> Result<(), String> {
 pub async fn export_client_log() -> Result<String, String> {
     let log_text = read_client_log_text(None)?;
     let export_path = default_client_log_export_path()?;
-    fs::write(&export_path, log_text)
-        .map_err(|e| format!("Failed to export client log to {}: {}", export_path.display(), e))?;
+    fs::write(&export_path, log_text).map_err(|e| {
+        format!(
+            "Failed to export client log to {}: {}",
+            export_path.display(),
+            e
+        )
+    })?;
     Ok(export_path.display().to_string())
 }
 
@@ -7341,12 +7434,12 @@ pub async fn start_gateway(
         .map_err(|e| e.to_string())?
         .clone();
     let settings = load_agent_settings(&app);
-    let bridge_mode_active = settings.bridge_enabled && has_paired_bridge_devices(&settings);
-    let gateway_bind = if bridge_mode_active {
-        "0.0.0.0:19789:18789"
-    } else {
-        "127.0.0.1:19789:18789"
-    };
+    if settings.bridge_enabled && has_paired_bridge_devices(&settings) {
+        println!(
+            "[Entropic] Bridge mode requested in settings but disabled for security; binding gateway to localhost only.",
+        );
+    }
+    let gateway_bind = "127.0.0.1:19789:18789";
     let mut memory_slot = if !settings.memory_enabled {
         "none"
     } else if settings.memory_long_term {
@@ -7727,12 +7820,12 @@ pub async fn start_gateway_with_proxy(
     let _start_guard = gateway_start_lock().lock().await;
     cleanup_legacy_gateway_artifacts();
     let settings = load_agent_settings(&app);
-    let bridge_mode_active = settings.bridge_enabled && has_paired_bridge_devices(&settings);
-    let gateway_bind = if bridge_mode_active {
-        "0.0.0.0:19789:18789"
-    } else {
-        "127.0.0.1:19789:18789"
-    };
+    if settings.bridge_enabled && has_paired_bridge_devices(&settings) {
+        println!(
+            "[Entropic] Bridge mode requested in settings but disabled for security; binding proxy gateway to localhost only.",
+        );
+    }
+    let gateway_bind = "127.0.0.1:19789:18789";
     let resolved_proxy_url = resolve_container_proxy_base(&proxy_url)?;
     let docker_proxy_api_url = resolve_container_openai_base(&resolved_proxy_url);
     // Ensure runtime (Colima) is running on macOS
@@ -8174,8 +8267,18 @@ pub async fn get_gateway_auth(app: AppHandle) -> Result<GatewayAuthPayload, Stri
 #[tauri::command]
 pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState, String> {
     let stored = load_agent_settings(&app);
-    let soul = read_container_file(&workspace_file("SOUL.md")).unwrap_or_default();
-    let identity_raw = read_container_file(&workspace_file("IDENTITY.md")).unwrap_or_default();
+    let gateway_running = named_gateway_container_exists(OPENCLAW_CONTAINER, true)
+        || named_gateway_container_exists(LEGACY_OPENCLAW_CONTAINER, true);
+    let soul = if gateway_running {
+        read_container_file(&workspace_file("SOUL.md")).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let identity_raw = if gateway_running {
+        read_container_file(&workspace_file("IDENTITY.md")).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let identity_name = parse_markdown_bold_field(&identity_raw, "Name")
         .and_then(|value| sanitize_identity_name(&value))
         .or_else(|| sanitize_identity_name(&stored.identity_name))
@@ -8190,7 +8293,11 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
                 Some(trimmed.to_string())
             }
         });
-    let heartbeat_raw = read_container_file(&workspace_file("HEARTBEAT.md")).unwrap_or_default();
+    let heartbeat_raw = if gateway_running {
+        read_container_file(&workspace_file("HEARTBEAT.md")).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let heartbeat_tasks = heartbeat_raw
         .lines()
         .filter_map(|line| {
@@ -8206,7 +8313,11 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>();
 
-    let cfg = read_openclaw_config();
+    let cfg = if gateway_running {
+        read_openclaw_config()
+    } else {
+        serde_json::json!({})
+    };
     let heartbeat_every = cfg
         .get("agents")
         .and_then(|v| v.get("defaults"))
@@ -8244,30 +8355,11 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         .unwrap_or(stored.memory_qmd_enabled);
     let memory_sessions_enabled = stored.memory_sessions_enabled;
 
-    let imessage_cfg = cfg.get("channels").and_then(|v| v.get("imessage"));
-    let imessage_enabled = imessage_cfg
-        .and_then(|v| v.get("enabled"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(stored.imessage_enabled);
-    let imessage_cli_path = imessage_cfg
-        .and_then(|v| v.get("cliPath"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(&stored.imessage_cli_path)
-        .to_string();
-    let imessage_db_path = imessage_cfg
-        .and_then(|v| v.get("dbPath"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(&stored.imessage_db_path)
-        .to_string();
-    let imessage_remote_host = imessage_cfg
-        .and_then(|v| v.get("remoteHost"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(&stored.imessage_remote_host)
-        .to_string();
-    let imessage_include_attachments = imessage_cfg
-        .and_then(|v| v.get("includeAttachments"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(stored.imessage_include_attachments);
+    let imessage_enabled = false;
+    let imessage_cli_path = String::new();
+    let imessage_db_path = String::new();
+    let imessage_remote_host = String::new();
+    let imessage_include_attachments = false;
 
     let discord_cfg = cfg.get("channels").and_then(|v| v.get("discord"));
     let discord_enabled = discord_cfg
@@ -8421,20 +8513,21 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         .and_then(|v| v.as_str())
         .unwrap_or(&stored.whatsapp_allow_from)
         .to_string();
-    let bridge_enabled = stored.bridge_enabled;
-    let bridge_tailnet_ip = stored.bridge_tailnet_ip.clone();
-    let bridge_port = stored.bridge_port;
-    let bridge_pairing_expires_at_ms = stored.bridge_pairing_expires_at_ms;
-    let bridge_device_id = stored.bridge_device_id.clone();
-    let bridge_device_name = stored.bridge_device_name.clone();
-    let bridge_devices = bridge_device_summaries(&stored);
-    let bridge_device_count = bridge_devices.len();
-    let bridge_online_count = bridge_devices
-        .iter()
-        .filter(|device| device.is_online)
-        .count();
-    let bridge_paired = bridge_enabled && bridge_device_count > 0;
-    let tools = read_container_file(&workspace_file("TOOLS.md")).unwrap_or_default();
+    let bridge_enabled = false;
+    let bridge_tailnet_ip = String::new();
+    let bridge_port = 0;
+    let bridge_pairing_expires_at_ms = 0;
+    let bridge_device_id = String::new();
+    let bridge_device_name = String::new();
+    let bridge_devices: Vec<BridgeDeviceSummary> = Vec::new();
+    let bridge_device_count = 0;
+    let bridge_online_count = 0;
+    let bridge_paired = false;
+    let tools = if gateway_running {
+        read_container_file(&workspace_file("TOOLS.md")).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let capabilities = if tools.trim().is_empty() {
         stored.capabilities.clone()
     } else {
@@ -8729,7 +8822,10 @@ pub async fn set_identity(
     let existing = read_container_file(&workspace_file("IDENTITY.md")).unwrap_or_default();
     let stored = load_agent_settings(&app);
     let next_name = sanitize_identity_name(&name)
-        .or_else(|| parse_markdown_bold_field(&existing, "Name").and_then(|value| sanitize_identity_name(&value)))
+        .or_else(|| {
+            parse_markdown_bold_field(&existing, "Name")
+                .and_then(|value| sanitize_identity_name(&value))
+        })
         .or_else(|| sanitize_identity_name(&stored.identity_name))
         .unwrap_or_else(|| "Entropic".to_string());
     let creature = parse_markdown_bold_field(&existing, "Creature").unwrap_or_default();
@@ -8762,18 +8858,15 @@ pub async fn set_imessage_config(
     remote_host: String,
     include_attachments: bool,
 ) -> Result<(), String> {
-    let cli = cli_path.trim();
-    let db = db_path.trim();
-    let remote = remote_host.trim();
-
+    let _ = (enabled, cli_path, db_path, remote_host, include_attachments);
     let mut settings = load_agent_settings(&app);
-    settings.imessage_enabled = enabled;
-    settings.imessage_cli_path = cli.to_string();
-    settings.imessage_db_path = db.to_string();
-    settings.imessage_remote_host = remote.to_string();
-    settings.imessage_include_attachments = include_attachments;
+    settings.imessage_enabled = false;
+    settings.imessage_cli_path = String::new();
+    settings.imessage_db_path = String::new();
+    settings.imessage_remote_host = String::new();
+    settings.imessage_include_attachments = false;
     save_agent_settings(&app, settings)?;
-    Ok(())
+    Err("iMessage channel is disabled for security in Entropic.".to_string())
 }
 
 #[tauri::command]
@@ -9116,13 +9209,11 @@ for (const p of paths) {
 console.log(JSON.stringify({token,chatIds}));"#;
 
     let args = ["exec", container, "node", "-e", script];
-    let output = docker_exec_output(&args).map_err(|e| {
-        format!("Failed to read Telegram config from gateway: {}", e)
-    })?;
+    let output = docker_exec_output(&args)
+        .map_err(|e| format!("Failed to read Telegram config from gateway: {}", e))?;
 
-    let data: serde_json::Value = serde_json::from_str(&output.trim()).map_err(|e| {
-        format!("Failed to parse gateway Telegram config: {}", e)
-    })?;
+    let data: serde_json::Value = serde_json::from_str(&output.trim())
+        .map_err(|e| format!("Failed to parse gateway Telegram config: {}", e))?;
 
     let token = data
         .get("token")
@@ -9132,11 +9223,7 @@ console.log(JSON.stringify({token,chatIds}));"#;
     let chat_ids: Vec<i64> = data
         .get("chatIds")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_i64())
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
         .unwrap_or_default();
 
     if token.is_empty() {
@@ -9165,7 +9252,11 @@ console.log(JSON.stringify({token,chatIds}));"#;
         match client.post(&url).json(&payload).send().await {
             Ok(resp) => {
                 if !resp.status().is_success() {
-                    eprintln!("Failed to send welcome message to chat {}: HTTP {}", chat_id, resp.status());
+                    eprintln!(
+                        "Failed to send welcome message to chat {}: HTTP {}",
+                        chat_id,
+                        resp.status()
+                    );
                 }
             }
             Err(e) => {
@@ -9528,16 +9619,38 @@ pub async fn upload_attachment(
     file_name: String,
     mime_type: String,
     base64: String,
+    state: State<'_, AppState>,
 ) -> Result<AttachmentInfo, String> {
     let sanitized = sanitize_filename(&file_name);
-    let id = unique_id();
-    let temp_path = format!("/home/node/.openclaw/uploads/tmp/{}_{}", id, sanitized);
+    let id = {
+        let mut pending = state
+            .pending_attachments
+            .lock()
+            .map_err(|e| e.to_string())?;
+        prune_pending_attachments(&mut pending);
+        let mut generated = None;
+        for _ in 0..16 {
+            let candidate = generate_attachment_id();
+            if !pending.contains_key(&candidate) {
+                generated = Some(candidate);
+                break;
+            }
+        }
+        generated.ok_or_else(|| "Failed to allocate attachment id".to_string())?
+    };
+    let temp_path = format!("{}/{}_{}", ATTACHMENT_TMP_ROOT, id, sanitized);
     let size_estimate = (base64.len() as u64 * 3) / 4;
     if size_estimate > 25 * 1024 * 1024 {
         return Err("Attachment too large (max 25MB)".to_string());
     }
-    let mk = "/home/node/.openclaw/uploads/tmp";
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", mk])?;
+    docker_exec_output(&[
+        "exec",
+        OPENCLAW_CONTAINER,
+        "mkdir",
+        "-p",
+        "--",
+        ATTACHMENT_TMP_ROOT,
+    ])?;
     let decoded = decode_base64_payload(&base64)?;
     let size_bytes = decoded.len() as u64;
     if size_bytes > 25 * 1024 * 1024 {
@@ -9561,42 +9674,120 @@ pub async fn upload_attachment(
     if !status.success() {
         return Err("Failed to upload file in container".to_string());
     }
+    {
+        let mut pending = state
+            .pending_attachments
+            .lock()
+            .map_err(|e| e.to_string())?;
+        prune_pending_attachments(&mut pending);
+        if pending.contains_key(&id) {
+            let _ = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-f", "--", &temp_path]);
+            return Err("Failed to store attachment metadata; retry upload".to_string());
+        }
+        pending.insert(
+            id.clone(),
+            PendingAttachmentRecord {
+                file_name: sanitized.clone(),
+                temp_path: temp_path.clone(),
+                created_at_ms: now_ms_u64(),
+            },
+        );
+    }
     let is_image = mime_type.starts_with("image/");
     Ok(AttachmentInfo {
         id,
         file_name: sanitized,
         mime_type,
-        temp_path,
         size_bytes,
         is_image,
     })
 }
 
 #[tauri::command]
-pub async fn save_attachment(temp_path: String) -> Result<String, String> {
-    let file_name = temp_path.split('/').last().unwrap_or("file").to_string();
-    let dest_dir = "/data/uploads";
-    let mut dest_path = format!("{}/{}", dest_dir, file_name);
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", dest_dir])?;
+pub async fn save_attachment(
+    attachment_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let attachment_id = normalize_attachment_id(&attachment_id)?;
+    let pending = {
+        let mut attachments = state
+            .pending_attachments
+            .lock()
+            .map_err(|e| e.to_string())?;
+        prune_pending_attachments(&mut attachments);
+        attachments
+            .get(&attachment_id)
+            .cloned()
+            .ok_or_else(|| "Attachment not found or expired".to_string())?
+    };
+    validate_attachment_temp_path(&attachment_id, &pending.temp_path)?;
+
+    let file_name = sanitize_filename(&pending.file_name);
+    let mut dest_path = format!("{}/{}", ATTACHMENT_SAVE_ROOT, file_name);
+    docker_exec_output(&[
+        "exec",
+        OPENCLAW_CONTAINER,
+        "mkdir",
+        "-p",
+        "--",
+        ATTACHMENT_SAVE_ROOT,
+    ])?;
     // Avoid overwrite: add suffix if exists
     if docker_exec_output(&["exec", OPENCLAW_CONTAINER, "test", "-e", &dest_path]).is_ok() {
         let ts = unique_id();
-        dest_path = format!("{}/{}_{}", dest_dir, ts, file_name);
+        dest_path = format!("{}/{}_{}", ATTACHMENT_SAVE_ROOT, ts, file_name);
     }
     docker_exec_output(&[
         "exec",
         OPENCLAW_CONTAINER,
         "mv",
         "--",
-        &temp_path,
+        &pending.temp_path,
         &dest_path,
     ])?;
+    {
+        let mut attachments = state
+            .pending_attachments
+            .lock()
+            .map_err(|e| e.to_string())?;
+        attachments.remove(&attachment_id);
+    }
     Ok(dest_path)
 }
 
 #[tauri::command]
-pub async fn delete_attachment(temp_path: String) -> Result<(), String> {
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-f", "--", &temp_path])?;
+pub async fn delete_attachment(
+    attachment_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let attachment_id = normalize_attachment_id(&attachment_id)?;
+    let pending = {
+        let mut attachments = state
+            .pending_attachments
+            .lock()
+            .map_err(|e| e.to_string())?;
+        prune_pending_attachments(&mut attachments);
+        attachments
+            .get(&attachment_id)
+            .cloned()
+            .ok_or_else(|| "Attachment not found or expired".to_string())?
+    };
+    validate_attachment_temp_path(&attachment_id, &pending.temp_path)?;
+    docker_exec_output(&[
+        "exec",
+        OPENCLAW_CONTAINER,
+        "rm",
+        "-f",
+        "--",
+        &pending.temp_path,
+    ])?;
+    {
+        let mut attachments = state
+            .pending_attachments
+            .lock()
+            .map_err(|e| e.to_string())?;
+        attachments.remove(&attachment_id);
+    }
     Ok(())
 }
 
