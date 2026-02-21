@@ -28,7 +28,7 @@ type SetupErrorDiagnosis = {
 const EDUCATIONAL_FACTS = [
   "Entropic runs OpenClaw in an isolated container so generated commands stay sandboxed.",
   "Colima is a lightweight local VM runtime that Entropic uses on macOS for secure container execution.",
-  "Use Plugins to connect tools like Calendar or Gmail after setup completes.",
+  "Use Integrations to connect tools like Calendar or Gmail after setup completes.",
   "Local Keys mode lets you use your own provider keys directly from Settings.",
   "Proxy mode uses Entropic credits and keeps model routing and billing centralized.",
   "Tasks and Files are designed for longer-running automation, while Chat is best for quick iterations.",
@@ -329,11 +329,13 @@ export function SetupScreen({ onComplete }: Props) {
       {/* Footer */}
       <div className="mt-8 flex flex-col items-center gap-1.5">
         <p className="text-gray-400 text-sm">Powered by OpenClaw</p>
-        <img
-          src={quaiLogo}
-          alt="Quai Network"
-          className="h-5 w-auto grayscale opacity-50"
-        />
+        <a href="https://qu.ai" target="_blank" rel="noopener noreferrer">
+          <img
+            src={quaiLogo}
+            alt="Quai Network"
+            className="h-5 w-auto"
+          />
+        </a>
       </div>
     </div>
   );

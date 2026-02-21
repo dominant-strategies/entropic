@@ -1022,6 +1022,221 @@ type QuickSuggestionState = {
   error: string | null;
 };
 
+type BuilderQuickActionId = "build_agent_identity" | "build_user_profile";
+
+type BuilderChecklistOption = {
+  id: string;
+  label: string;
+  fileTarget: string;
+  uiHint?: string;
+  promptInstruction: string;
+  defaultSelected?: boolean;
+};
+
+type BuilderChecklistConfig = {
+  title: string;
+  summary: string;
+  options: BuilderChecklistOption[];
+};
+
+type BuilderChecklistState = {
+  action: AgentQuickActionDefinition & { id: BuilderQuickActionId };
+  selectedByOptionId: Record<string, boolean>;
+  error: string | null;
+};
+
+const AGENT_BUILDER_CHECKLIST_OPTIONS: BuilderChecklistOption[] = [
+  {
+    id: "identity_name",
+    label: "Agent name",
+    fileTarget: "IDENTITY.md - Name",
+    uiHint: "How your agent is introduced",
+    promptInstruction: "Confirm or update `- **Name:**` in IDENTITY.md.",
+  },
+  {
+    id: "identity_avatar",
+    label: "Avatar image",
+    fileTarget: "IDENTITY.md - Avatar",
+    uiHint: "Profile visual (upload or generate)",
+    promptInstruction:
+      "Run avatar upload/generation flow and update `- **Avatar:**` only after explicit approval.",
+  },
+  {
+    id: "identity_creature",
+    label: "Creature archetype",
+    fileTarget: "IDENTITY.md - Creature",
+    uiHint: "The character or form your agent embodies",
+    promptInstruction: "Confirm or update `- **Creature:**`.",
+  },
+  {
+    id: "identity_vibe",
+    label: "Vibe and tone",
+    fileTarget: "IDENTITY.md - Vibe + SOUL.md - Vibe",
+    uiHint: "How your agent should feel in conversation",
+    promptInstruction: "Align `- **Vibe:**` with SOUL.md vibe guidance.",
+  },
+  {
+    id: "identity_emoji",
+    label: "Signature emoji",
+    fileTarget: "IDENTITY.md - Emoji",
+    uiHint: "A small signature marker for your agent",
+    promptInstruction: "Confirm or update `- **Emoji:**`.",
+  },
+  {
+    id: "soul_mission",
+    label: "Mission statement",
+    fileTarget: "SOUL.md - Mission Statement",
+    uiHint: "One-line north star for how the agent helps",
+    promptInstruction: "Draft or revise `## Mission Statement` (north star).",
+  },
+  {
+    id: "soul_core_truths",
+    label: "Core principles",
+    fileTarget: "SOUL.md - Core Truths",
+    uiHint: "Guiding beliefs the agent should follow",
+    promptInstruction: "Draft or revise `## Core Truths`.",
+  },
+  {
+    id: "soul_boundaries",
+    label: "Boundaries",
+    fileTarget: "SOUL.md - Boundaries",
+    uiHint: "What the agent should avoid or confirm first",
+    promptInstruction: "Draft or revise `## Boundaries`.",
+  },
+  {
+    id: "soul_continuity",
+    label: "Continuity and work style",
+    fileTarget: "SOUL.md - Continuity + Working Preferences",
+    uiHint: "How it should persist context and collaborate",
+    promptInstruction: "Draft or revise continuity and working-style sections.",
+  },
+  {
+    id: "heartbeat",
+    label: "Recurring check-ins",
+    fileTarget: "HEARTBEAT.md",
+    uiHint: "Periodic reminders and routine tasks",
+    promptInstruction: "Keep empty/comment-only or add a concise recurring checklist if requested.",
+  },
+];
+
+const PROFILE_BUILDER_CHECKLIST_OPTIONS: BuilderChecklistOption[] = [
+  {
+    id: "user_name",
+    label: "Your name",
+    fileTarget: "USER.md - Name",
+    uiHint: "The name your agent should remember",
+    promptInstruction: "Confirm or update `- **Name:**`.",
+  },
+  {
+    id: "user_call_them",
+    label: "How I should address you",
+    fileTarget: "USER.md - What to call them",
+    uiHint: "Preferred way your agent should call you",
+    promptInstruction: "Confirm or update `- **What to call them:**`.",
+  },
+  {
+    id: "user_timezone",
+    label: "Timezone",
+    fileTarget: "USER.md - Timezone",
+    uiHint: "Your local time context",
+    promptInstruction: "Confirm or update `- **Timezone:**`.",
+  },
+  {
+    id: "user_interests",
+    label: "Interests",
+    fileTarget: "USER.md - Notes",
+    uiHint: "Topics and domains you care about",
+    promptInstruction: "Capture interests in Notes/Context.",
+  },
+  {
+    id: "user_career",
+    label: "Career background",
+    fileTarget: "USER.md - Notes",
+    uiHint: "What you do and your professional context",
+    promptInstruction: "Capture career background in Notes/Context.",
+  },
+  {
+    id: "user_goals",
+    label: "Current goals",
+    fileTarget: "USER.md - Notes",
+    uiHint: "Near-term outcomes you want to hit",
+    promptInstruction: "Capture near-term goals in Notes/Context.",
+  },
+  {
+    id: "user_ambitions",
+    label: "Long-term ambitions",
+    fileTarget: "USER.md - Notes",
+    uiHint: "Bigger direction you are building toward",
+    promptInstruction: "Capture long-term ambitions in Notes/Context.",
+  },
+  {
+    id: "user_working_preferences",
+    label: "Working preferences",
+    fileTarget: "USER.md - Notes",
+    uiHint: "How you like to plan, execute, and review",
+    promptInstruction: "Capture preferred workflows and collaboration style.",
+  },
+  {
+    id: "user_communication_and_context",
+    label: "Communication style and context",
+    fileTarget: "USER.md - Notes + Context",
+    uiHint: "Tone, cadence, and personal context to remember",
+    promptInstruction: "Capture communication style and relevant personal context to remember.",
+  },
+];
+
+const BUILDER_CHECKLIST_CONFIG_BY_ACTION: Record<BuilderQuickActionId, BuilderChecklistConfig> = {
+  build_agent_identity: {
+    title: "Build my agent checklist",
+    summary: "Pick what you want to shape in this session.",
+    options: AGENT_BUILDER_CHECKLIST_OPTIONS,
+  },
+  build_user_profile: {
+    title: "Build my profile checklist",
+    summary: "Pick what you want your agent to update about you.",
+    options: PROFILE_BUILDER_CHECKLIST_OPTIONS,
+  },
+};
+
+function isBuilderQuickAction(
+  action: AgentQuickActionDefinition
+): action is AgentQuickActionDefinition & { id: BuilderQuickActionId } {
+  return action.id === "build_agent_identity" || action.id === "build_user_profile";
+}
+
+function createDefaultBuilderSelection(actionId: BuilderQuickActionId): Record<string, boolean> {
+  const options = BUILDER_CHECKLIST_CONFIG_BY_ACTION[actionId].options;
+  const selected = Object.fromEntries(
+    options.map((option) => [option.id, option.defaultSelected !== false])
+  );
+  return selected;
+}
+
+function selectedBuilderChecklistOptions(state: BuilderChecklistState): BuilderChecklistOption[] {
+  const options = BUILDER_CHECKLIST_CONFIG_BY_ACTION[state.action.id].options;
+  return options.filter((option) => Boolean(state.selectedByOptionId[option.id]));
+}
+
+function buildChecklistScopeBlock(
+  actionId: BuilderQuickActionId,
+  selectedOptions: BuilderChecklistOption[]
+): string {
+  const selectedLines = selectedOptions
+    .map((option) => `- ${option.label} (${option.fileTarget}): ${option.promptInstruction}`)
+    .join("\n");
+  const flowLabel = actionId === "build_agent_identity" ? "Build my agent" : "Build my profile";
+  return [
+    `Checklist selections for this session (${flowLabel}):`,
+    "This checklist overrides default scope for this session.",
+    selectedLines,
+    "",
+    "Scope rules:",
+    "- Ask questions only for selected checklist items unless the user expands scope.",
+    "- Only draft/edit selected file sections unless the user asks for broader edits.",
+    "- If an unselected field is required for validity, ask for confirmation before changing it.",
+  ].join("\n");
+}
+
 function integrationRequirementLabel(requirement: IntegrationQuickActionRequirement): string {
   return requirement.label;
 }
@@ -1159,6 +1374,7 @@ export function Chat({
   const [telegramSetupOpen, setTelegramSetupOpen] = useState(false);
   const [integrationSetupBySession, setIntegrationSetupBySession] = useState<Record<string, IntegrationSetupState>>({});
   const [quickSuggestionBySession, setQuickSuggestionBySession] = useState<Record<string, QuickSuggestionState>>({});
+  const [builderChecklistBySession, setBuilderChecklistBySession] = useState<Record<string, BuilderChecklistState>>({});
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1195,6 +1411,7 @@ export function Chat({
   const avatarUploadDataUrlByFileNameRef = useRef<Map<string, string>>(new Map());
   const integrationSetup = currentSession ? integrationSetupBySession[currentSession] || null : null;
   const quickSuggestion = currentSession ? quickSuggestionBySession[currentSession] || null : null;
+  const builderChecklist = currentSession ? builderChecklistBySession[currentSession] || null : null;
 
   function setIntegrationSetupForSession(sessionKey: string, value: IntegrationSetupState | null) {
     setIntegrationSetupBySession((prev) => {
@@ -1210,6 +1427,18 @@ export function Chat({
 
   function setQuickSuggestionForSession(sessionKey: string, value: QuickSuggestionState | null) {
     setQuickSuggestionBySession((prev) => {
+      const next = { ...prev };
+      if (value) {
+        next[sessionKey] = value;
+      } else {
+        delete next[sessionKey];
+      }
+      return next;
+    });
+  }
+
+  function setBuilderChecklistForSession(sessionKey: string, value: BuilderChecklistState | null) {
+    setBuilderChecklistBySession((prev) => {
       const next = { ...prev };
       if (value) {
         next[sessionKey] = value;
@@ -1982,7 +2211,7 @@ export function Chat({
               getCachedIntegrationProviders()
                 .then((cached) => {
                   if (cached.length > 0) {
-                    addDiag("integrations missing secrets; reconnect in Plugins");
+                    addDiag("integrations missing secrets; reconnect in Integrations");
                   }
                 })
                 .catch(() => {});
@@ -2612,6 +2841,7 @@ export function Chat({
       const snapshotDraft = draftsRef.current[action.key] || "";
       const snapshotIntegrationSetup = integrationSetupBySession[action.key] || null;
       const snapshotQuickSuggestion = quickSuggestionBySession[action.key] || null;
+      const snapshotBuilderChecklist = builderChecklistBySession[action.key] || null;
       const deletingCurrent = currentSessionRef.current === action.key;
       const remaining = normalizeSessionsList(
         sessionsRef.current.filter((session) => session.key !== action.key),
@@ -2633,6 +2863,12 @@ export function Chat({
         return next;
       });
       setQuickSuggestionBySession((prev) => {
+        if (!prev[action.key]) return prev;
+        const next = { ...prev };
+        delete next[action.key];
+        return next;
+      });
+      setBuilderChecklistBySession((prev) => {
         if (!prev[action.key]) return prev;
         const next = { ...prev };
         delete next[action.key];
@@ -2669,6 +2905,9 @@ export function Chat({
           }
           if (snapshotQuickSuggestion) {
             setQuickSuggestionBySession((prev) => ({ ...prev, [action.key]: snapshotQuickSuggestion }));
+          }
+          if (snapshotBuilderChecklist) {
+            setBuilderChecklistBySession((prev) => ({ ...prev, [action.key]: snapshotBuilderChecklist }));
           }
           schedulePersist();
           if (deletingCurrent) {
@@ -2925,6 +3164,89 @@ export function Chat({
       error: null,
     });
     setIntegrationSetupForSession(sessionKey, null);
+    setBuilderChecklistForSession(sessionKey, null);
+  }
+
+  function openBuilderChecklist(
+    action: AgentQuickActionDefinition & { id: BuilderQuickActionId },
+    sessionKeyInput?: string
+  ) {
+    const sessionKey = sessionKeyInput || ensureComposerSession();
+    if (!sessionKey) return;
+    setBuilderChecklistForSession(sessionKey, {
+      action,
+      selectedByOptionId: createDefaultBuilderSelection(action.id),
+      error: null,
+    });
+    setQuickSuggestionForSession(sessionKey, null);
+    setIntegrationSetupForSession(sessionKey, null);
+    setShowWelcome(false);
+  }
+
+  function toggleBuilderChecklistOption(optionId: string) {
+    const sessionKey = currentSessionRef.current;
+    if (!sessionKey) return;
+    const checklist = builderChecklistBySession[sessionKey];
+    if (!checklist) return;
+    setBuilderChecklistForSession(sessionKey, {
+      ...checklist,
+      selectedByOptionId: {
+        ...checklist.selectedByOptionId,
+        [optionId]: !checklist.selectedByOptionId[optionId],
+      },
+      error: null,
+    });
+  }
+
+  function setAllBuilderChecklistOptions(selected: boolean) {
+    const sessionKey = currentSessionRef.current;
+    if (!sessionKey) return;
+    const checklist = builderChecklistBySession[sessionKey];
+    if (!checklist) return;
+    const options = BUILDER_CHECKLIST_CONFIG_BY_ACTION[checklist.action.id].options;
+    const selectedByOptionId = Object.fromEntries(options.map((option) => [option.id, selected]));
+    setBuilderChecklistForSession(sessionKey, {
+      ...checklist,
+      selectedByOptionId,
+      error: null,
+    });
+  }
+
+  function startBuilderFromChecklist() {
+    const sessionKey = currentSessionRef.current;
+    if (!sessionKey) return;
+    const checklist = builderChecklistBySession[sessionKey];
+    if (!checklist) return;
+    const selectedOptions = selectedBuilderChecklistOptions(checklist);
+    if (selectedOptions.length === 0) {
+      setBuilderChecklistForSession(sessionKey, {
+        ...checklist,
+        error: "Select at least one item to edit in this session.",
+      });
+      return;
+    }
+
+    setBuilderChecklistForSession(sessionKey, null);
+    setQuickSuggestionForSession(sessionKey, null);
+    setIntegrationSetupForSession(sessionKey, null);
+    setShowWelcome(false);
+    if (checklist.action.id === "build_agent_identity") {
+      builderSessionsRef.current.add(sessionKey);
+    }
+    let payload = resolveQuickActionMessage(checklist.action);
+    payload = `${INTERNAL_USER_PROMPT_PREFIX}\n${payload}\n\n${buildChecklistScopeBlock(checklist.action.id, selectedOptions)}`;
+    if (checklist.action.id === "build_agent_identity") {
+      appendAssistantNotice(
+        `Agent Builder started with ${selectedOptions.length} selected section${selectedOptions.length === 1 ? "" : "s"}. I will stay scoped to these edits unless you expand.`,
+        sessionKey
+      );
+    } else {
+      appendAssistantNotice(
+        `Profile Builder started with ${selectedOptions.length} selected section${selectedOptions.length === 1 ? "" : "s"}. I will stay scoped to these edits unless you expand.`,
+        sessionKey
+      );
+    }
+    void handleSend(payload);
   }
 
   function resolveQuickActionMessage(action: AgentQuickActionDefinition): string {
@@ -3091,6 +3413,105 @@ export function Chat({
       const message = e instanceof Error ? e.message : "Failed to create scheduled task";
       setQuickSuggestionForSession(sessionKey, { ...quick, creatingTask: false, error: message });
     }
+  }
+
+  function renderBuilderChecklistAssistantCard() {
+    if (!builderChecklist) return null;
+    const checklist = builderChecklist;
+    const config = BUILDER_CHECKLIST_CONFIG_BY_ACTION[checklist.action.id];
+    const selectedCount = selectedBuilderChecklistOptions(checklist).length;
+
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[92%] sm:max-w-[80%]">
+          <div className="px-4 py-3 rounded-2xl bg-white/85 text-[var(--text-primary)] border border-[var(--glass-border-subtle)] shadow-sm backdrop-blur-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <img src={entropicLogo} alt="Entropic" className="w-5 h-5 rounded-md" />
+                <span className="text-xs font-semibold text-[var(--text-primary)]">{config.title}</span>
+              </div>
+              <button
+                onClick={() => {
+                  if (!currentSession) return;
+                  setBuilderChecklistForSession(currentSession, null);
+                }}
+                className="text-xs text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <p className="text-xs text-[var(--text-secondary)]">
+                {config.summary}
+              </p>
+              <span className="inline-flex items-center rounded-full border border-[var(--glass-border-subtle)] bg-white px-2 py-0.5 text-[11px] text-[var(--text-tertiary)] whitespace-nowrap">
+                {selectedCount} selected
+              </span>
+            </div>
+
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-[30rem] overflow-auto pr-1">
+              {config.options.map((option) => {
+                const checked = Boolean(checklist.selectedByOptionId[option.id]);
+                return (
+                  <label
+                    key={option.id}
+                    className={clsx(
+                      "flex items-start gap-2 rounded-xl border px-3 py-2.5 cursor-pointer transition-colors",
+                      checked
+                        ? "border-[var(--purple-accent)] bg-violet-50/70 shadow-sm"
+                        : "border-[var(--glass-border-subtle)] bg-white/70 hover:bg-white"
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleBuilderChecklistOption(option.id)}
+                      className="mt-0.5 h-4 w-4 rounded border-[var(--border-subtle)] text-[var(--purple-accent)]"
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-[var(--text-primary)]">{option.label}</span>
+                      {option.uiHint ? (
+                        <span className="block text-[11px] text-[var(--text-tertiary)]">{option.uiHint}</span>
+                      ) : null}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+
+            {checklist.error ? <p className="text-xs text-red-600 mt-2">{checklist.error}</p> : null}
+
+            <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
+              <p className="text-[11px] text-[var(--text-tertiary)]">
+                Your selections scope this session.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setAllBuilderChecklistOptions(true)}
+                  className="btn-secondary !text-xs !py-1.5"
+                >
+                  All
+                </button>
+                <button
+                  onClick={() => setAllBuilderChecklistOptions(false)}
+                  className="btn-secondary !text-xs !py-1.5"
+                >
+                  None
+                </button>
+                <button
+                  onClick={startBuilderFromChecklist}
+                  disabled={isLoading}
+                  className="btn-primary !text-xs !py-1.5"
+                >
+                  Start
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   function renderIntegrationSetupAssistantCard() {
@@ -3279,16 +3700,22 @@ export function Chat({
     if (!sessionKey) return;
 
     if (quickAction.handoffPage && onNavigate) {
+      setBuilderChecklistForSession(sessionKey, null);
+      setQuickSuggestionForSession(sessionKey, null);
+      setIntegrationSetupForSession(sessionKey, null);
       onNavigate(quickAction.handoffPage);
       if (quickAction.handoffPage === "channels") {
         appendAssistantNotice("Open Messaging to set up Telegram, then come back here to run it in chat.", sessionKey);
       } else if (quickAction.handoffPage === "store") {
-        appendAssistantNotice("Open Plugins to connect this integration, then return to run it in chat.", sessionKey);
+        appendAssistantNotice("Open Integrations to connect this integration, then return to run it in chat.", sessionKey);
       }
       return;
     }
 
     if (quickAction.kind === "telegram_setup") {
+      setBuilderChecklistForSession(sessionKey, null);
+      setQuickSuggestionForSession(sessionKey, null);
+      setIntegrationSetupForSession(sessionKey, null);
       setTelegramSetupOpen(true);
       return;
     }
@@ -3306,6 +3733,7 @@ export function Chat({
             error: null,
           });
           setQuickSuggestionForSession(sessionKey, null);
+          setBuilderChecklistForSession(sessionKey, null);
           appendAssistantNotice(
             `To run "${quickAction.label}", connect ${integrationRequirementLabel(requirement)} in chat. I will continue once it is connected.`,
             sessionKey
@@ -3320,32 +3748,21 @@ export function Chat({
           error: `Failed to check ${integrationRequirementLabel(requirement)} status.`,
         });
         setQuickSuggestionForSession(sessionKey, null);
+        setBuilderChecklistForSession(sessionKey, null);
         return;
       }
     }
 
     if (quickAction.runMode === "direct_send") {
+      if (isBuilderQuickAction(quickAction)) {
+        openBuilderChecklist(quickAction, sessionKey);
+        return;
+      }
       setIntegrationSetupForSession(sessionKey, null);
       setQuickSuggestionForSession(sessionKey, null);
+      setBuilderChecklistForSession(sessionKey, null);
       setShowWelcome(false);
-      if (quickAction.id === "build_agent_identity") {
-        builderSessionsRef.current.add(sessionKey);
-      }
-      let payload = resolveQuickActionMessage(quickAction);
-      if (quickAction.id === "build_agent_identity" || quickAction.id === "build_user_profile") {
-        payload = `${INTERNAL_USER_PROMPT_PREFIX}\n${payload}`;
-        if (quickAction.id === "build_agent_identity") {
-          appendAssistantNotice(
-            "Agent Builder started. I will ask one focused question at a time to shape your agent. We will start with your agent name and profile picture, then confirm identity details.",
-            sessionKey
-          );
-        } else if (quickAction.id === "build_user_profile") {
-          appendAssistantNotice(
-            "Profile Builder started. I will ask one focused question at a time to build USER.md.",
-            sessionKey
-          );
-        }
-      }
+      const payload = resolveQuickActionMessage(quickAction);
       void handleSend(payload);
       return;
     }
@@ -3891,6 +4308,7 @@ export function Chat({
   const chatAgentAvatarUrl = isRenderableAvatarDataUrl(agentProfile?.avatarDataUrl)
     ? agentProfile?.avatarDataUrl.trim()
     : undefined;
+  const hasInlineAssistantCard = Boolean(builderChecklist || integrationSetup || quickSuggestion);
 
   // Main Chat UI
   return (
@@ -3984,7 +4402,7 @@ export function Chat({
         <div className="max-w-3xl mx-auto space-y-4">
           {messages.length === 0 && showWelcome ? (
             renderWelcome()
-          ) : messages.length === 0 ? (
+          ) : messages.length === 0 && !hasInlineAssistantCard ? (
             <div className="h-full flex items-center justify-center text-center text-[var(--text-tertiary)]">
               <div>
                 <Sparkles className="w-8 h-8 mx-auto mb-2 opacity-50" />
@@ -4067,6 +4485,7 @@ export function Chat({
               </div>
             );
           })}
+          {renderBuilderChecklistAssistantCard()}
           {renderIntegrationSetupAssistantCard()}
           {renderQuickSuggestionAssistantCard()}
           {isLoading && (

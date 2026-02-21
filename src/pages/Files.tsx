@@ -1228,7 +1228,7 @@ export function Files({
           {/* ── PLUGINS WINDOW ───────────────────────────────────────── */}
           {pluginsOpen && (
             <AppWindow
-              title="Plugins"
+              title="Integrations"
               icon={Puzzle}
               position={pluginsPos}
               size={pluginsSize}
@@ -1459,14 +1459,14 @@ export function Files({
               <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${browserOpen ? "bg-white/80" : "opacity-0"}`} />
             </button>
 
-            {/* Plugins */}
+            {/* Integrations */}
             <button
               onClick={() => {
                 if (!pluginsOpen) setPluginsOpen(true);
                 focusWindow("plugins");
               }}
               className="group flex flex-col items-center"
-              title="Plugins"
+              title="Integrations"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"

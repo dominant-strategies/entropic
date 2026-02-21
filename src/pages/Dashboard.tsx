@@ -46,7 +46,7 @@ const SANDBOX_STARTUP_FACTS = [
   "Deep Context: Stage logs or documentation in 'Files' so Entropic can analyze them with full technical detail.",
   "Autonomous Tasks: Use 'Tasks' for complex coding goals that require sustained, multi-step agent work.",
   "Codebase Awareness: Ask Entropic to 'read the repo' to generate precise implementation roadmaps.",
-  "Seamless Integrations: Connect GitHub, Slack, or Linear via Plugins to extend Entropic's capabilities.",
+  "Seamless Integrations: Connect GitHub, Slack, or Linear via Integrations to extend Entropic's capabilities.",
   "One-click Workflow: Quickly initialize projects or deploy environments with a single command.",
 ];
 

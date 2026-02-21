@@ -921,7 +921,7 @@ export function Store({
       <div className="mb-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold" style={{ color: "var(--text-primary)" }}>
-            {activeTab === "skills" ? "Skills" : "Plugins"}
+            {activeTab === "skills" ? "Skills" : "Integrations"}
           </h1>
           <p className="text-sm" style={{ color: "var(--text-tertiary)" }}>
             {activeTab === "skills"

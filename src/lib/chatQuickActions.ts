@@ -60,6 +60,8 @@ const CHAT_QUICK_ACTIONS: ChatQuickActionDefinition[] = [
 Read existing SOUL.md and HEARTBEAT.md quietly if they exist.
 Read existing USER.md quietly if it exists.
 Read existing IDENTITY.md quietly if it exists.
+If a "Checklist selections for this session" block is provided, treat it as scope for this session.
+Only ask and edit within selected checklist items unless the user expands scope.
 Start with agent identity first. Ask these first:
 1) "What should your agent be called?"
 2) "Do you want to upload a profile picture now, or have me generate options?"
@@ -67,16 +69,13 @@ Start with agent identity first. Ask these first:
 If they choose upload, ask them to attach an image in chat and wait for it.
 If they choose generation, propose 3 distinct avatar concepts and ask them to approve one.
 Do not finalize avatar changes until they explicitly approve.
-
-Always replace SOUL.md entirely in this flow.
-Do not ask whether to refine SOUL.md or replace it.
-If IDENTITY.md exists, keep what still fits and only replace parts I ask to change.
+If IDENTITY.md exists, keep what still fits and only replace parts requested in this session.
 
 Do not run full USER.md interview questions here (name/career/goals/ambitions/timezone).
 Those belong in "Build my profile". Use USER.md as context if available.
 
 Ask exactly one short, targeted question at a time (max two lines), then wait.
-Collect:
+Collect (unless checklist narrows scope):
 - identity details:
   - agent name
   - creature
@@ -123,11 +122,14 @@ Ask for explicit approval before writing files. If approved, apply updates.`,
 
 Read existing USER.md quietly if it exists.
 If it exists, briefly summarize what is already known and what is missing.
+If a "Checklist selections for this session" block is provided, treat it as scope for this session.
+Only ask and edit within selected checklist items unless the user expands scope.
 
 Ask exactly one short, targeted question at a time (max two lines), then wait.
-Collect for USER.md:
+Collect for USER.md (unless checklist narrows scope):
 - Name
 - What to call them
+- Pronouns (optional)
 - Timezone
 - Notes:
   - interests
@@ -142,6 +144,7 @@ Then propose a concise USER.md draft in OpenClaw template shape:
 - # USER.md - About Your Human
 - Name
 - What to call them
+- Pronouns
 - Timezone
 - Notes
 - ## Context

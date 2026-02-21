@@ -63,7 +63,7 @@ const baseNavItems: { id: Page; label: string; icon: typeof MessageSquare }[] = 
   { id: "chat", label: "New Chat", icon: Plus },
   { id: "files", label: "Desktop", icon: FolderOpen },
   { id: "channels", label: "Messaging", icon: Radio },
-  { id: "store", label: "Plugins", icon: Puzzle },
+  { id: "store", label: "Integrations", icon: Puzzle },
   { id: "skills", label: "Skills", icon: Sparkles },
   { id: "tasks", label: "Tasks", icon: CalendarClock },
   { id: "billing", label: "Billing", icon: CreditCard },
@@ -202,15 +202,20 @@ export function Layout({
             {/* Clear native macOS traffic light buttons */}
             {isMacOS && <div className="h-7 shrink-0" />}
             <img src={entropicLogo} alt="Entropic" className="w-8 h-8 rounded-lg shadow-md mt-3 mb-4 pointer-events-none" />
-            <button
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={toggleSidebarCollapsed}
-              className="w-8 h-8 mb-4 rounded-md bg-black/5 hover:bg-black/10 text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center justify-center transition-colors"
-              title="Expand navigation"
-              aria-label="Expand navigation"
-            >
-              <PanelLeftOpen className="w-4 h-4" />
-            </button>
+            <div className="relative group mb-4">
+              <button
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={toggleSidebarCollapsed}
+                className="w-8 h-8 rounded-md bg-black/5 hover:bg-black/10 text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center justify-center transition-colors"
+                title="Expand navigation"
+                aria-label="Expand navigation"
+              >
+                <PanelLeftOpen className="w-4 h-4" />
+              </button>
+              <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2.5 py-1 rounded-md bg-gray-900 text-white text-xs font-medium whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
+                Expand navigation
+              </div>
+            </div>
           </div>
         ) : (
           /* Expanded: horizontal row — spacer, logo + title, collapse button */
@@ -239,7 +244,12 @@ export function Layout({
         )}
 
         {/* Navigation */}
-        <nav className={clsx("flex-1 space-y-0.5 overflow-y-auto custom-scrollbar", sidebarCollapsed ? "pr-1" : "pr-2")}>
+        <nav
+          className={clsx(
+            "flex-1 custom-scrollbar",
+            sidebarCollapsed ? "space-y-0.5 overflow-visible pr-1" : "space-y-0.5 overflow-y-auto pr-2"
+          )}
+        >
           {!sidebarCollapsed && (
             <div className="text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wider px-3 mb-2 mt-0">
               Menu
@@ -250,7 +260,7 @@ export function Layout({
             const Icon = item.icon;
             const isChat = item.id === "chat";
             const isActive = isChat ? currentPage === "chat" && !currentChatSession : currentPage === item.id;
-            
+
             return (
               <div key={item.id}>
                 <button
@@ -271,11 +281,12 @@ export function Layout({
                   }}
                     className={clsx(
                       "w-full flex items-center rounded-md text-[13px] font-medium transition-all duration-200",
-                      sidebarCollapsed ? "justify-center px-1.5 py-2" : "gap-3 px-3 py-2",
+                      sidebarCollapsed ? "justify-center px-1.5 py-2 relative group" : "gap-3 px-3 py-2",
                       isActive
                       ? "bg-[rgba(0,0,0,0.06)] text-black shadow-sm"
                       : "text-black/70 hover:bg-[rgba(0,0,0,0.03)] hover:text-black"
                     )}
+                    aria-label={item.label}
                   >
                   <div
                     className={clsx(
@@ -288,6 +299,11 @@ export function Layout({
                     />
                   </div>
                   {!sidebarCollapsed && item.label}
+                  {sidebarCollapsed && (
+                    <div className="absolute left-full ml-2 px-2.5 py-1 rounded-md bg-gray-900 text-white text-xs font-medium whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
+                      {item.label}
+                    </div>
+                  )}
                 </button>
 
                 {/* Chat History sub-items */}
@@ -378,8 +394,9 @@ export function Layout({
              onClick={() => onNavigate("settings")}
              className={clsx(
                "w-full flex items-center p-2 rounded-lg hover:bg-[rgba(0,0,0,0.04)] transition-colors text-left group",
-               sidebarCollapsed ? "justify-center" : "gap-3"
+               sidebarCollapsed ? "justify-center relative" : "gap-3"
              )}
+             {...(sidebarCollapsed ? { title: profileName, "aria-label": profileName } : {})}
           >
             <div className="w-8 h-8 rounded-full bg-gray-200 overflow-hidden flex-shrink-0 border border-black/5">
               {profileAvatarUrl ? (
@@ -405,6 +422,11 @@ export function Layout({
             )}
             {!sidebarCollapsed && (
               <Settings className="w-4 h-4 text-[var(--text-tertiary)] opacity-0 group-hover:opacity-100 transition-opacity" />
+            )}
+            {sidebarCollapsed && (
+              <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2.5 py-1 rounded-md bg-gray-900 text-white text-xs font-medium whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
+                {profileName}
+              </div>
             )}
           </button>
         </div>
