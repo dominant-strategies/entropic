@@ -2020,7 +2020,7 @@ export function Chat({
     if (handledRequestedSessionRef.current === requestedSession) return;
     handledRequestedSessionRef.current = requestedSession;
     if (requestedSession === "__new__") {
-      createNewSession();
+      createNewSession({ force: true });
     } else if (requestedSession !== currentSession) {
       void selectSession(requestedSession);
     }
