@@ -499,7 +499,7 @@ export function Channels() {
                     checking={checkingConnection}
                   />
                 </div>
-                <p className="text-sm text-[var(--text-secondary)]">Connect your Telegram bot to enable messaging with Joulie.</p>
+                <p className="text-sm text-[var(--text-secondary)]">Connect your Telegram bot to enable messaging with your agent.</p>
                 {telegramTokenSaved && (
                   <p className="text-xs text-[var(--text-tertiary)] mt-1">
                     If Telegram is not responding, try clicking "Save Bot Token" to reconnect.

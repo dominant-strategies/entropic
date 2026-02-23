@@ -165,7 +165,8 @@ export function Settings({
   // Anthropic OAuth code-paste state
   const [anthropicCodePending, setAnthropicCodePending] = useState(false);
   const [anthropicCodeInput, setAnthropicCodeInput] = useState("");
-  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
+  const [uninstallLoading, setUninstallLoading] = useState(false);
   const [legacyMigrationLoading, setLegacyMigrationLoading] = useState(false);
   const [legacyUpgradeLoading, setLegacyUpgradeLoading] = useState(false);
   const [gatewayConfigHealth, setGatewayConfigHealth] = useState<GatewayConfigHealth | null>(null);
@@ -1285,7 +1286,7 @@ export function Settings({
                     return;
                   }
 
-                  setCleanupLoading(true);
+                  setResetLoading(true);
                   console.log("[Settings] Starting cleanup...");
                   try {
                     const result = await invoke<string>("cleanup_app_data", { includeVms: true });
@@ -1295,15 +1296,15 @@ export function Settings({
                     console.error("[Settings] Cleanup failed:", err);
                     alert("Cleanup failed: " + (err instanceof Error ? err.message : String(err)));
                   } finally {
-                    setCleanupLoading(false);
+                    setResetLoading(false);
                     console.log("[Settings] Cleanup finished");
                   }
                 }}
-                disabled={cleanupLoading}
+                disabled={resetLoading || uninstallLoading}
                 className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
-                {cleanupLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                {cleanupLoading ? "Cleaning up..." : "Reset Application"}
+                {resetLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                {resetLoading ? "Resetting..." : "Reset Application"}
               </button>
             </div>
           </div>
@@ -1339,7 +1340,7 @@ export function Settings({
                       return;
                     }
 
-                    setCleanupLoading(true);
+                    setUninstallLoading(true);
                     console.log("[Settings] Starting uninstall cleanup...");
                     try {
                       const result = await invoke<string>("cleanup_app_data", { includeVms: true });
@@ -1365,14 +1366,14 @@ export function Settings({
                     } catch (err) {
                       console.error("[Settings] Cleanup failed:", err);
                       alert("Cleanup failed: " + (err instanceof Error ? err.message : String(err)));
-                      setCleanupLoading(false);
+                      setUninstallLoading(false);
                     }
                   }}
-                  disabled={cleanupLoading}
+                  disabled={resetLoading || uninstallLoading}
                   className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                 >
-                  {cleanupLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                  {cleanupLoading ? "Cleaning up..." : "Cleanup and Quit"}
+                  {uninstallLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {uninstallLoading ? "Uninstalling..." : "Cleanup and Quit"}
                 </button>
               </div>
             </div>

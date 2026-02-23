@@ -30,6 +30,7 @@ import {
 } from "../lib/gateway";
 import { resolveGatewayAuth } from "../lib/gateway-auth";
 import { getIntegrations, getIntegrationsCached, type Integration } from "../lib/integrations";
+import { loadProfile } from "../lib/profile";
 
 type Props = {
   gatewayRunning: boolean;
@@ -916,6 +917,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
   const [jobs, setJobs] = useState<CronJob[]>(_cachedJobs);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [agentName, setAgentName] = useState("your agent");
   const [boardTasks, setBoardTasks] = useState<TaskBoardItem[]>([]);
   const [boardLoading, setBoardLoading] = useState(false);
   const [boardSaving, setBoardSaving] = useState(false);
@@ -1063,6 +1065,12 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
       cancelled = true;
     };
   }, [jobsEnabled]);
+
+  useEffect(() => {
+    loadProfile().then((p) => {
+      if (p.name) setAgentName(p.name);
+    });
+  }, []);
 
   const fetchJobs = useCallback(async () => {
     // Only show the full-screen spinner when there are no cached jobs to display.
@@ -2723,7 +2731,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                 </div>
                 <textarea
                   className="w-full px-4 py-3.5 bg-white border border-[var(--border-default)] rounded-xl text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20 min-h-[160px] leading-relaxed"
-                  placeholder="Tell Joulie exactly what steps to execute on each run..."
+                  placeholder={`Tell ${agentName} exactly what steps to execute on each run...`}
                   value={editor.message}
                   onChange={(e) => updateEditor({ message: e.target.value })}
                 />
