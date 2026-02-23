@@ -1341,7 +1341,7 @@ export function Chat({
   requestedSession?: string | null;
   requestedSessionAction?: ChatSessionActionRequest | null;
 }) {
-  const { isAuthenticated, isAuthConfigured } = useAuth();
+  const { isAuthenticated, isAuthConfigured, refreshBalance } = useAuth();
   const [localCreditsCents, setLocalCreditsCents] = useState<number | null>(null);
   const localTrialLoading =
     !isAuthenticated && isAuthConfigured && !useLocalKeys && localCreditsCents === null;
@@ -2502,8 +2502,11 @@ export function Chat({
       setIsLoading(false);
       setThinkingStatus(null);
       clearActiveRunTracking();
-      // Notify Dashboard to refresh credit balance after message completion
+      // Refresh credit balance after message completion
       window.dispatchEvent(new Event("entropic-local-credits-changed"));
+      if (isAuthenticated) {
+        refreshBalance();
+      }
     }
     if (
       !isActiveRun &&

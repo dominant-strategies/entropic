@@ -52,7 +52,7 @@ const SANDBOX_STARTUP_FACTS = [
 ];
 
 export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
-  const { isAuthenticated, isAuthConfigured } = useAuth();
+  const { isAuthenticated, isAuthConfigured, refreshBalance } = useAuth();
   const [useLocalKeys, setUseLocalKeys] = useState(false);
   const [currentPage, setCurrentPage] = useState<Page>("chat");
   const [gatewayRunning, setGatewayRunning] = useState(false);
@@ -182,6 +182,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       } else {
         refreshLocalCredits();
       }
+      // Also refresh authenticated balance so the UI stays in sync
+      if (isAuthenticated) {
+        refreshBalance();
+      }
     };
     window.addEventListener("entropic-local-credits-changed", onLocalCreditsChanged as EventListener);
 
@@ -197,7 +201,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       );
       window.clearInterval(pollInterval);
     };
-  }, [isAuthenticated, isAuthConfigured]);
+  }, [isAuthenticated, isAuthConfigured, refreshBalance]);
 
   useEffect(() => {
     if (!showGatewayStartup) {
