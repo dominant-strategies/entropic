@@ -278,15 +278,8 @@ export function Layout({
                       onNavigate(item.id);
                       return;
                     }
-                    if (currentPage === "chat") {
-                      onNewChat?.();
-                      return;
-                    }
-                    if (currentChatSession) {
-                      onSelectChatSession?.(currentChatSession);
-                      return;
-                    }
-                    onNavigate("chat");
+                    // Always create a new chat when clicking "New Chat"
+                    onNewChat?.();
                   }}
                     className={clsx(
                       "w-full flex items-center rounded-md text-[13px] font-medium transition-all duration-200",
