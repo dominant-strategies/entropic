@@ -4410,23 +4410,6 @@ export function Chat({
       }}
     >
 
-      {integrationsSyncing ? (
-        <div className="flex-shrink-0" style={{
-            background: 'rgba(255,255,255,0.8)',
-            borderBottom: '1px solid var(--border-subtle)',
-            backdropFilter: 'blur(12px)',
-            WebkitBackdropFilter: 'blur(12px)'
-          }}>
-          <div className="flex items-center justify-end px-3 py-1.5">
-            <div className="flex items-center gap-3 px-2">
-              <span className="text-[10px] font-medium text-[var(--text-tertiary)] flex items-center gap-1 animate-pulse">
-                <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                Syncing
-              </span>
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       {(gatewayStarting || autoStartExpected) && (
         <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-600">

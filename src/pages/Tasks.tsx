@@ -10,7 +10,6 @@ import {
   Smartphone,
   Info,
   ChevronRight,
-  Bell,
   CheckCircle2,
   AlertCircle,
   MoreHorizontal,
@@ -193,14 +192,6 @@ const PLUGIN_LABELS: Record<string, string> = {
   slack: "Slack",
   googlechat: "Google Chat",
 };
-
-const CHANNEL_OPTIONS: Array<{ id: string; label: string; helper: string }> = [
-  { id: "telegram", label: "Telegram", helper: "Chat ID or @username" },
-  { id: "whatsapp", label: "WhatsApp", helper: "Phone number with country code" },
-  { id: "discord", label: "Discord", helper: "User ID or channel ID" },
-  { id: "slack", label: "Slack", helper: "User ID or channel ID" },
-  { id: "googlechat", label: "Google Chat", helper: "users/<id> or spaces/<id>" },
-];
 
 const SCHEDULE_PRESETS: Array<{ id: SchedulePreset; label: string; needsTime?: boolean }> = [
   { id: "every_hour", label: "Hourly" },
@@ -951,9 +942,6 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
   const [skills, setSkills] = useState<SkillOption[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
-  const [channelOptions, setChannelOptions] = useState<Array<{ id: string; label: string; helper: string }>>([]);
-  const [channelsLoading, setChannelsLoading] = useState(false);
-  const [channelsError, setChannelsError] = useState<string | null>(null);
 
   // Editor modal
   const [editingJob, setEditingJob] = useState<CronJob | null>(null);
@@ -1071,46 +1059,6 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
     }
 
     loadSkills();
-    return () => {
-      cancelled = true;
-    };
-  }, [jobsEnabled]);
-
-  useEffect(() => {
-    if (!jobsEnabled) {
-      setChannelOptions([]);
-      setChannelsLoading(false);
-      setChannelsError(null);
-      return;
-    }
-    let cancelled = false;
-    async function loadChannels() {
-      setChannelsLoading(true);
-      setChannelsError(null);
-      try {
-        const state = await invoke<{
-          telegram_enabled?: boolean;
-          whatsapp_enabled?: boolean;
-          discord_enabled?: boolean;
-          slack_enabled?: boolean;
-          googlechat_enabled?: boolean;
-        }>("get_agent_profile_state");
-        if (cancelled) return;
-        const enabledIds = new Set<string>();
-        if (state.telegram_enabled) enabledIds.add("telegram");
-        if (state.whatsapp_enabled) enabledIds.add("whatsapp");
-        if (state.discord_enabled) enabledIds.add("discord");
-        if (state.slack_enabled) enabledIds.add("slack");
-        if (state.googlechat_enabled) enabledIds.add("googlechat");
-        const filtered = CHANNEL_OPTIONS.filter((c) => enabledIds.has(c.id));
-        setChannelOptions(filtered);
-      } catch (e) {
-        if (!cancelled) setChannelsError("Failed to load channels");
-      } finally {
-        if (!cancelled) setChannelsLoading(false);
-      }
-    }
-    loadChannels();
     return () => {
       cancelled = true;
     };
@@ -1459,7 +1407,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
     try {
       setRunningJobIds((prev) => new Set(prev).add(job.id));
       await withGatewayClient((client) => client.runCronJob(job.id, "force"));
-      // Poll until the job finishes running
+      // Poll until the job finishes running, then show the result
       const pollUntilDone = async () => {
         for (let i = 0; i < 120; i++) {
           await new Promise((r) => setTimeout(r, 3000));
@@ -1478,6 +1426,8 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
           next.delete(job.id);
           return next;
         });
+        // Automatically open history so the user sees the run output
+        openHistory(job);
       };
       pollUntilDone();
       // Initial refresh to pick up the "running" state
@@ -1609,12 +1559,6 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
   const selectedSkillLabels = useMemo(
     () => selectedSkills.map((skill) => skill.label).join(", "),
     [selectedSkills]
-  );
-  const notifyInvalid =
-    editor.notifyEnabled && (!editor.notifyChannel || !editor.notifyTo.trim());
-  const selectedChannelMeta = useMemo(
-    () => CHANNEL_OPTIONS.find((c) => c.id === editor.notifyChannel) || null,
-    [editor.notifyChannel]
   );
 
   async function ensureTasksClient(): Promise<GatewayClient> {
@@ -2786,57 +2730,6 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                 {generateStepsError && <p className="text-xs text-red-500 font-semibold ml-1">{generateStepsError}</p>}
               </div>
 
-              {/* Notifications */}
-              <div className="pt-4 border-t border-[var(--border-subtle)]">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-2">
-                    <Bell className={clsx("w-5 h-5", editor.notifyEnabled ? "text-[var(--system-blue)]" : "text-[var(--text-tertiary)]")} />
-                    <span className="text-sm font-semibold text-[var(--text-primary)]">Push Notifications</span>
-                  </div>
-                  <button
-                    onClick={() => updateEditor({ notifyEnabled: !editor.notifyEnabled })}
-                    className={clsx(
-                      "relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
-                      editor.notifyEnabled ? "bg-[var(--system-blue)]" : "bg-gray-200"
-                    )}
-                  >
-                    <span className={clsx(
-                      "pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow-lg transition duration-200",
-                      editor.notifyEnabled ? "translate-x-5" : "translate-x-0"
-                    )} />
-                  </button>
-                </div>
-
-                {editor.notifyEnabled && (
-                  <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
-                    <div className="flex flex-wrap gap-2">
-                      {channelOptions.map((c) => {
-                        const sel = editor.notifyChannel === c.id;
-                        return (
-                          <button
-                            key={c.id}
-                            type="button"
-                            onClick={() => updateEditor({ notifyChannel: c.id })}
-                            className={clsx(
-                              "px-3 py-1.5 rounded-full text-[11px] font-semibold transition-all border",
-                              sel ? "bg-[var(--system-blue)]/10 text-[var(--system-blue)] border-[var(--system-blue)]/20" : "bg-white text-[var(--text-secondary)] border-[var(--border-default)] hover:bg-[var(--system-gray-6)]"
-                            )}
-                          >
-                            {c.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <input
-                      type="text"
-                      className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
-                      placeholder={selectedChannelMeta?.helper || "Recipient address..."}
-                      value={editor.notifyTo}
-                      onChange={(e) => updateEditor({ notifyTo: e.target.value })}
-                    />
-                  </div>
-                )}
-              </div>
             </div>
 
             {/* Modal Footer */}
@@ -2849,7 +2742,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
               </button>
               <button
                 onClick={handleSave}
-                disabled={saving || !editor.name.trim() || notifyInvalid}
+                disabled={saving || !editor.name.trim()}
                 className="flex-1 py-2.5 text-sm font-semibold bg-[var(--system-blue)] text-white rounded-lg hover:opacity-90 disabled:opacity-50 transition-all"
               >
                 {saving ? "Saving..." : editingJob ? "Update Job" : "Create Job"}
