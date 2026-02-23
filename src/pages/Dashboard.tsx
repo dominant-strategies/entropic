@@ -1046,6 +1046,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       showGatewayStartup || (isTogglingGateway && !gatewayRunning) || gatewayRetryIn !== null;
     return (
       <Chat
+        isVisible={currentPage === "chat"}
         gatewayRunning={gatewayRunning}
         gatewayStarting={gatewayStarting}
         gatewayRetryIn={gatewayRetryIn}
@@ -1059,7 +1060,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         integrationsMissing={integrationsMissing}
         onNavigate={setCurrentPage}
         onSessionsChange={(sessions, currentKey) => {
-          setChatSessions(sessions);
+          setChatSessions((prev) => {
+            // Guard against transient empty snapshots while chat state is still rehydrating.
+            if (sessions.length === 0 && prev.length > 0 && currentPage !== "chat") {
+              return prev;
+            }
+            return sessions;
+          });
           setCurrentChatSession((prev) => currentKey ?? prev);
           setPendingChatSession((pending) => {
             if (!pending) return pending;

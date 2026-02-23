@@ -1310,7 +1310,65 @@ function getRoutingDecision(messageContent: string) {
   };
 }
 
+type XSearchIntent = {
+  topic: string | null;
+};
+
+function cleanXIntentTopic(raw: string): string | null {
+  const collapsed = raw
+    .replace(/\s+/g, " ")
+    .replace(/[.?!,:;]+$/g, "")
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .trim();
+  if (!collapsed) return null;
+  if (/^(?:x|twitter)$/i.test(collapsed)) return null;
+  return collapsed;
+}
+
+function parseXSearchIntent(raw: string): XSearchIntent | null {
+  const text = raw.trim();
+  if (!text) return null;
+
+  const hasTwitterMention = /\btwitter\b/i.test(text);
+  const hasXPlatformMention =
+    /\b(?:on|from|in|via|using)\s+x\b(?!\s*(?:axis|value|values|coordinate|coordinates|chart|graph|plot|table)\b)/i.test(
+      text
+    ) || hasTwitterMention;
+  if (!hasXPlatformMention) return null;
+
+  const directQueryPatterns = [
+    /\bwhat(?:'s| is)\s+on\s+(?:x|twitter)\b/i,
+    /\bwhat(?:'s| is)\s+latest\b.*\b(?:on|from|in)\s+(?:x|twitter)\b/i,
+    /\b(?:latest|newest|recent|trending|trend|news|updates?)\s+on\s+.+\s+(?:on|from|in)\s+(?:x|twitter)\b/i,
+    /\b(?:search|find|look(?:\s+up)?|check|show|track)\b.*\b(?:on|from|in)\s+(?:x|twitter)\b/i,
+    /\b(?:on|from|in)\s+(?:x|twitter)\s+(?:about|for|regarding)\b/i,
+    /\bwhat\s+are\s+people\s+saying\b.*\b(?:on|from|in)\s+(?:x|twitter)\b/i,
+  ];
+  if (!directQueryPatterns.some((pattern) => pattern.test(text))) {
+    return null;
+  }
+
+  const topicPatterns = [
+    /\b(?:latest|newest|recent|trending|trend|news|updates?)\s+on\s+(.+?)\s+(?:on|from|in)\s+(?:x|twitter)\b/i,
+    /\bwhat(?:'s| is)\s+latest\s+on\s+(.+?)\s+(?:on|from|in)\s+(?:x|twitter)\b/i,
+    /\b(?:on|from|in)\s+(?:x|twitter)\s+(?:about|for|regarding)\s+(.+)$/i,
+    /\b(?:search|find|look(?:\s+up)?|check|show|track)\s+(?:on\s+)?(?:x|twitter)\s+(?:for|about)\s+(.+)$/i,
+    /\b(?:search|find|look(?:\s+up)?|check|show|track)\s+(.+?)\s+(?:on|from|in)\s+(?:x|twitter)\b/i,
+  ];
+
+  for (const pattern of topicPatterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const topic = cleanXIntentTopic(match[1]);
+    if (topic) return { topic };
+  }
+
+  return { topic: null };
+}
+
 export function Chat({
+  isVisible,
   gatewayRunning,
   gatewayStarting,
   gatewayRetryIn,
@@ -1327,6 +1385,7 @@ export function Chat({
   requestedSession,
   requestedSessionAction,
 }: {
+  isVisible?: boolean;
   gatewayRunning: boolean;
   gatewayStarting: boolean;
   gatewayRetryIn: number | null;
@@ -1437,6 +1496,7 @@ export function Chat({
   const visibleMessagesSessionRef = useRef<string | null>(null);
   const builderSessionsRef = useRef<Set<string>>(new Set());
   const avatarUploadDataUrlByFileNameRef = useRef<Map<string, string>>(new Map());
+  const wasVisibleRef = useRef(isVisible !== false);
   const integrationSetup = currentSession ? integrationSetupBySession[currentSession] || null : null;
   const quickSuggestion = currentSession ? quickSuggestionBySession[currentSession] || null : null;
   const builderChecklist = currentSession ? builderChecklistBySession[currentSession] || null : null;
@@ -2043,6 +2103,41 @@ export function Chat({
   useEffect(() => {
     currentSessionRef.current = currentSession;
   }, [currentSession]);
+
+  // When returning to the chat view, rehydrate the currently selected session.
+  useEffect(() => {
+    const visible = isVisible !== false;
+    if (!visible) {
+      wasVisibleRef.current = false;
+      return;
+    }
+    if (wasVisibleRef.current) return;
+    wasVisibleRef.current = true;
+
+    const sessionKey = currentSessionRef.current;
+    if (!sessionKey) {
+      const fallback = sessionsRef.current[0]?.key;
+      if (fallback) {
+        void selectSession(fallback);
+      }
+      return;
+    }
+
+    const sessionExists = sessionsRef.current.some((session) => session.key === sessionKey);
+    if (!sessionExists) {
+      const fallback = sessionsRef.current[0]?.key;
+      if (fallback && fallback !== sessionKey) {
+        void selectSession(fallback);
+      }
+      return;
+    }
+
+    const cachedMsgs = (sessionMessagesRef.current[sessionKey] || []).map(normalizeCachedMessage);
+    visibleMessagesSessionRef.current = sessionKey;
+    setMessages(cachedMsgs);
+    setShowWelcome(cachedMsgs.length === 0);
+    void selectSession(sessionKey);
+  }, [isVisible]);
 
   // Load onboarding data + agent profile for personalized welcome & avatars
   useEffect(() => {
@@ -2729,7 +2824,16 @@ export function Chat({
     }
 
     const merged = [...gatewaySessions, ...localOnly];
-    setSessions(prev => applySessionTitles(overlaySessionMetadata(merged, [...(cached?.sessions || []), ...prev])));
+    const fallbackSessions = normalizeSessionsList([
+      ...(cached?.sessions || []),
+      ...sessionsRef.current,
+    ]);
+    const nextSessions = merged.length > 0 ? merged : fallbackSessions;
+    setSessions((prev) =>
+      applySessionTitles(
+        overlaySessionMetadata(nextSessions, [...(cached?.sessions || []), ...prev]),
+      ),
+    );
 
     // Restore messages cache from persisted data
     if (cached?.messages) {
@@ -2759,18 +2863,18 @@ export function Chat({
       });
     }
 
-    if (merged.length > 0) {
+    if (nextSessions.length > 0) {
       // Prefer the active session, then persisted session, then first in list.
       const activeKeyRaw = currentSessionRef.current;
       const preferredKeyRaw = cached?.currentSession;
       const activeKey = activeKeyRaw ? localToGateway.get(activeKeyRaw) || activeKeyRaw : null;
       const preferredKey = preferredKeyRaw ? localToGateway.get(preferredKeyRaw) || preferredKeyRaw : null;
       const target =
-        activeKey && merged.find((s) => s.key === activeKey)
+        activeKey && nextSessions.find((s) => s.key === activeKey)
           ? activeKey
-          : preferredKey && merged.find((s) => s.key === preferredKey)
+          : preferredKey && nextSessions.find((s) => s.key === preferredKey)
             ? preferredKey
-            : merged[0].key;
+            : nextSessions[0].key;
       await selectSession(target);
     } else {
       createNewSession();
@@ -3065,7 +3169,7 @@ export function Chat({
         ? `${messageContent}\n\n${attachmentLine}`
         : attachmentLine
       : messageContent;
-    const outboundMessageContent = hasAttachments
+    let outboundMessageContent = hasAttachments
       ? messageContent
         ? `${messageContent}\n\nAttached image context: ${pendingAttachments.map((attachment) => attachment.fileName || "image").join(", ")}`
         : `Attached image context: ${pendingAttachments.map((attachment) => attachment.fileName || "image").join(", ")}`
@@ -3148,6 +3252,63 @@ export function Chat({
         sendSession
       );
       return;
+    }
+
+    const shouldCheckXIntent =
+      !hasAttachments &&
+      !messageContent.startsWith(INTERNAL_USER_PROMPT_PREFIX) &&
+      messageContent.trim().length <= 500;
+    const xIntent = shouldCheckXIntent ? parseXSearchIntent(messageContent) : null;
+    if (xIntent && sendSession) {
+      const xQuickActionCandidate = getQuickActionById("x_trending_news");
+      const xQuickAction =
+        xQuickActionCandidate && xQuickActionCandidate.kind === "agent"
+          ? xQuickActionCandidate
+          : null;
+      const requirement = xQuickAction?.requirement;
+
+      if (xQuickAction && requirement?.kind === "integration") {
+        try {
+          const connectedNow = await isIntegrationReady(requirement.provider);
+          if (!connectedNow) {
+            addDiag("x intent detected; X integration not connected");
+            setIntegrationSetupForSession(sendSession, {
+              requirement,
+              pendingAction: xQuickAction,
+              status: "idle",
+              error: null,
+            });
+            setQuickSuggestionForSession(sendSession, null);
+            setBuilderChecklistForSession(sendSession, null);
+            appendAssistantNotice(
+              `I can do that with ${integrationRequirementLabel(requirement)}, but it is not connected yet. Complete setup below and I will continue.`,
+              sendSession
+            );
+            return;
+          }
+        } catch {
+          setIntegrationSetupForSession(sendSession, {
+            requirement,
+            pendingAction: xQuickAction,
+            status: "idle",
+            error: `Failed to check ${integrationRequirementLabel(requirement)} status.`,
+          });
+          setQuickSuggestionForSession(sendSession, null);
+          setBuilderChecklistForSession(sendSession, null);
+          return;
+        }
+      }
+
+      const topicLine = xIntent.topic
+        ? `Primary topic: ${xIntent.topic}.`
+        : "Primary topic: top trending conversations right now.";
+      outboundMessageContent = [
+        "Use the connected X integration for this request.",
+        topicLine,
+        "Return concise bullets with direct X links, a short why-it-matters note, and clear recency cues.",
+        `Original user request: ${messageContent.trim()}`,
+      ].join("\n");
+      addDiag(`x intent detected; routing via X integration topic=${xIntent.topic ? "yes" : "no"}`);
     }
 
     setIsLoading(true);

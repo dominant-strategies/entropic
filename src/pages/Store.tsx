@@ -1408,7 +1408,7 @@ export function Store({
                 }}
                 disabled={setupVerifying}
               >
-                {setupVerifying ? "Checking..." : "I&apos;ve Completed Setup"}
+                {setupVerifying ? "Checking..." : "I've Completed Setup"}
               </button>
               <button
                 className="w-full py-3 bg-gray-100 text-gray-900 rounded-2xl text-[14px] font-bold hover:bg-gray-200 transition-colors"
