@@ -900,6 +900,8 @@ function extractMessageText(message: GatewayMessage): { text: string; hasText: b
 function isChannelOrSystemSessionKey(rawKey: string | null | undefined): boolean {
   const key = (rawKey || "").trim().toLowerCase();
   if (!key) return true;
+  // agent:main:* are user chat sessions — don't filter them out
+  if (key.startsWith("agent:main:")) return false;
   if (key.startsWith("agent:") || key.startsWith("cron:") || key.startsWith("system:")) {
     return true;
   }
@@ -2619,7 +2621,7 @@ export function Chat({
               setSessions(prev => {
                 // Merge: gateway sessions take priority, keep local-only sessions
                 const gatewayKeys = new Set(updatedSessions.map(s => s.key));
-                const localOnly = prev.filter(s => !gatewayKeys.has(s.key) && (sessionMessagesRef.current[s.key]?.length ?? 0) > 0);
+                const localOnly = prev.filter(s => !gatewayKeys.has(s.key) && ((sessionMessagesRef.current[s.key]?.length ?? 0) > 0 || s.key === currentSessionRef.current));
                 return applySessionTitles(overlaySessionMetadata([...updatedSessions, ...localOnly], prev));
               });
             }
@@ -2690,11 +2692,12 @@ export function Chat({
     const localOnly: ChatSession[] = [];
     const localToGateway = new Map<string, string>();
     const claimedGatewayTargets = new Set<string>();
+    const localOnlyKeys = new Set<string>();
     if (cached?.sessions) {
       for (const s of cached.sessions) {
         if (gatewayKeys.has(s.key)) continue;
         const rawLocalMessages = cached.messages[s.key] || [];
-        if (rawLocalMessages.length === 0) continue;
+        if (rawLocalMessages.length === 0 && s.key !== currentSessionRef.current) continue;
         const normalizedLocalMessages = rawLocalMessages.map(normalizeCachedMessage);
         const localSummary = summarizeSessionTitleFromMessages(normalizedLocalMessages);
         const localSummaryKey = localSummary ? titleDedupKey(localSummary) : "";
@@ -2711,7 +2714,18 @@ export function Chat({
         }
 
         localOnly.push(s);
+        localOnlyKeys.add(s.key);
       }
+    }
+
+    // Preserve in-memory sessions that haven't been persisted yet
+    // (e.g., just created by createNewSession before schedulePersist fires)
+    for (const s of sessionsRef.current) {
+      if (gatewayKeys.has(s.key) || localOnlyKeys.has(s.key)) continue;
+      const inMemoryMessages = sessionMessagesRef.current[s.key] || [];
+      if (inMemoryMessages.length === 0 && s.key !== currentSessionRef.current) continue;
+      localOnly.push(s);
+      localOnlyKeys.add(s.key);
     }
 
     const merged = [...gatewaySessions, ...localOnly];
