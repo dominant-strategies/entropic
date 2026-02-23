@@ -14,9 +14,12 @@ import {
 } from "./vault";
 
 const INTEGRATION_STORE = "entropic-integrations.json";
+const DEFAULT_INTEGRATIONS_REDIRECT_URL = (import.meta as any).env?.DEV
+  ? "entropic-dev://integrations/success"
+  : "entropic://integrations/success";
 const INTEGRATIONS_REDIRECT_URL =
   (import.meta as any).env?.VITE_INTEGRATIONS_REDIRECT_URL ||
-  "entropic://integrations/success";
+  DEFAULT_INTEGRATIONS_REDIRECT_URL;
 
 const OPENCLAW_SYNC_PROVIDERS = new Set<IntegrationProvider>([
   "google_calendar",
@@ -158,7 +161,9 @@ export async function isIntegrationConnected(provider: IntegrationProvider): Pro
   return Boolean(record?.access_token);
 }
 
-export async function connectIntegration(provider: IntegrationProvider): Promise<void> {
+export async function connectIntegration(
+  provider: IntegrationProvider
+): Promise<{ oauthUrl?: string }> {
   if (provider === "x") {
     const result = await apiRequest<{ url: string }>("/x/oauth/start", {
       method: "POST",
@@ -166,8 +171,9 @@ export async function connectIntegration(provider: IntegrationProvider): Promise
     });
     if (result?.url) {
       await open(result.url);
+      return { oauthUrl: result.url };
     }
-    return;
+    return {};
   }
 
   const result = await invoke<OAuthExchangeResponse>("start_google_oauth", { provider });
@@ -190,6 +196,7 @@ export async function connectIntegration(provider: IntegrationProvider): Promise
   syncIntegrationToGateway(provider).catch((err) => {
     console.warn(`Failed to sync ${provider} after connect:`, err);
   });
+  return {};
 }
 
 export async function disconnectIntegration(provider: IntegrationProvider): Promise<void> {

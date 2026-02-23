@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-shell";
 import clsx from "clsx";
 import { CheckCircle2, Loader2, Search, ShieldCheck, Download, Star, ExternalLink, Box, Puzzle, Sparkles, ChevronRight, Info, X } from "lucide-react";
 import {
@@ -287,6 +288,9 @@ export function Store({
   const [setupProvider, setSetupProvider] = useState<IntegrationProvider | null>(null);
   const [setupStage, setSetupStage] = useState<"authorizing" | "syncing">("authorizing");
   const [setupTimedOut, setSetupTimedOut] = useState(false);
+  const [setupLaunchUrl, setSetupLaunchUrl] = useState<string | null>(null);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const [setupVerifying, setSetupVerifying] = useState(false);
   const [scanModalOpen, setScanModalOpen] = useState(false);
   const [scanPluginId, setScanPluginId] = useState<string | null>(null);
   const [scanResult, setScanResult] = useState<PluginScanResult | null>(null);
@@ -336,13 +340,24 @@ export function Store({
 
   useEffect(() => {
     const handleIntegrationUpdate = () => {
-      refreshIntegrations();
+      setSetupError(null);
+      refreshIntegrations({ force: true });
+    };
+    const handleIntegrationError = (event: Event) => {
+      const detail = (event as CustomEvent<{ error?: string }>).detail;
+      const message =
+        typeof detail?.error === "string" && detail.error.trim().length > 0
+          ? detail.error
+          : "Integration authorization failed.";
+      setSetupError(message);
+      setSetupTimedOut(true);
+      refreshIntegrations({ force: true });
     };
     window.addEventListener("entropic-integration-updated", handleIntegrationUpdate);
-    window.addEventListener("entropic-integration-error", handleIntegrationUpdate);
+    window.addEventListener("entropic-integration-error", handleIntegrationError as EventListener);
     return () => {
       window.removeEventListener("entropic-integration-updated", handleIntegrationUpdate);
-      window.removeEventListener("entropic-integration-error", handleIntegrationUpdate);
+      window.removeEventListener("entropic-integration-error", handleIntegrationError as EventListener);
     };
   }, []);
 
@@ -439,42 +454,43 @@ export function Store({
   }
 
   async function refreshIntegrations(opts?: { force?: boolean }) {
+    let cached: Integration[] = [];
     try {
-      const cached = await getIntegrationsCached(opts);
+      cached = await getIntegrationsCached(opts);
       if (cached.length > 0) {
         setIntegrations(cached);
       }
-      try {
-        const list = await getIntegrations(opts);
-        const listProviders = new Set(list.map((entry) => entry.provider));
-        const merged: Integration[] = [];
-        for (const entry of cached) {
-          if (listProviders.has(entry.provider)) {
-            const real = list.find((item) => item.provider === entry.provider);
-            if (real) merged.push(real);
-          } else {
-            merged.push({ ...entry, connected: false, stale: true });
-          }
+    } catch (err) {
+      console.warn("Failed to load cached integrations:", err);
+    }
+
+    try {
+      const list = await getIntegrations(opts);
+      const listProviders = new Set(list.map((entry) => entry.provider));
+      const merged: Integration[] = [];
+      for (const entry of cached) {
+        if (listProviders.has(entry.provider)) {
+          const real = list.find((item) => item.provider === entry.provider);
+          if (real) merged.push(real);
+        } else {
+          merged.push({ ...entry, connected: false, stale: true });
         }
-        for (const entry of list) {
-          if (!cached.find((item) => item.provider === entry.provider)) {
-            merged.push(entry);
-          }
-        }
-        setIntegrations(merged.length ? merged : list);
-        const connectedIds = new Set(list.filter((i) => i.connected).map((i) => i.provider));
-        for (const id of Array.from(syncedIntegrationsRef.current)) {
-          if (!connectedIds.has(id as IntegrationProvider)) {
-            syncedIntegrationsRef.current.delete(id);
-          }
-        }
-        syncConnectedIntegrations(list).catch((err) => {
-          console.warn("Failed to sync integrations:", err);
-        });
-        return;
-      } catch {
-        // ignore cache failures
       }
+      for (const entry of list) {
+        if (!cached.find((item) => item.provider === entry.provider)) {
+          merged.push(entry);
+        }
+      }
+      setIntegrations(merged.length ? merged : list);
+      const connectedIds = new Set(list.filter((i) => i.connected).map((i) => i.provider));
+      for (const id of Array.from(syncedIntegrationsRef.current)) {
+        if (!connectedIds.has(id as IntegrationProvider)) {
+          syncedIntegrationsRef.current.delete(id);
+        }
+      }
+      syncConnectedIntegrations(list).catch((err) => {
+        console.warn("Failed to sync integrations:", err);
+      });
     } catch (err) {
       console.error("Failed to load integrations:", err);
     }
@@ -491,6 +507,9 @@ export function Store({
   useEffect(() => {
     if (!setupProvider) {
       setSetupTimedOut(false);
+      setSetupLaunchUrl(null);
+      setSetupError(null);
+      setSetupVerifying(false);
       return;
     }
     setSetupTimedOut(false);
@@ -517,6 +536,9 @@ export function Store({
     }
     setSetupProvider(null);
     setSetupTimedOut(false);
+    setSetupLaunchUrl(null);
+    setSetupError(null);
+    setSetupVerifying(false);
   }, [integrations, setupProvider]);
 
   async function syncConnectedIntegrations(list: Integration[]) {
@@ -615,8 +637,13 @@ export function Store({
     setSetupProvider(provider);
     setSetupStage("authorizing");
     setSetupTimedOut(false);
+    setSetupLaunchUrl(null);
+    setSetupError(null);
     try {
-      await connectIntegration(provider);
+      const result = await connectIntegration(provider);
+      if (provider === "x") {
+        setSetupLaunchUrl(result.oauthUrl || null);
+      }
       if (provider !== "x") {
         setSetupStage("syncing");
       }
@@ -628,9 +655,58 @@ export function Store({
       await refreshIntegrations({ force: true });
     } catch (err) {
       console.error("Failed to start OAuth:", err);
-      setSetupProvider(null);
+      const message = err instanceof Error ? err.message : String(err);
+      setSetupError(message);
+      setSetupTimedOut(true);
     } finally {
       setConnecting(null);
+    }
+  }
+
+  async function reopenSetupLaunchUrl() {
+    if (!setupLaunchUrl) return;
+    try {
+      await open(setupLaunchUrl);
+      setSetupError(null);
+      setSetupTimedOut(false);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setSetupError(`Couldn't open browser: ${message}`);
+      setSetupTimedOut(true);
+    }
+  }
+
+  async function verifySetupComplete() {
+    const provider = setupProvider;
+    if (!provider) return;
+
+    setSetupVerifying(true);
+    setSetupError(null);
+    setSetupTimedOut(false);
+    try {
+      await refreshIntegrations({ force: true });
+      const latest = await getIntegrations({ force: true });
+      const entry = latest.find((integration) => integration.provider === provider);
+      const connected = Boolean(entry && entry.connected && !entry.stale);
+
+      if (connected) {
+        setSetupProvider(null);
+        setSetupTimedOut(false);
+        setSetupLaunchUrl(null);
+        setSetupError(null);
+        return;
+      }
+
+      setSetupError(
+        `${INTEGRATION_NAMES[provider]} is not connected yet. Finish authorization in your browser, then try again.`
+      );
+      setSetupTimedOut(true);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setSetupError(`Failed to verify connection: ${message}`);
+      setSetupTimedOut(true);
+    } finally {
+      setSetupVerifying(false);
     }
   }
 
@@ -1296,15 +1372,54 @@ export function Store({
               <div className="w-16 h-16 rounded-3xl bg-blue-50 flex items-center justify-center mb-6">
                 <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
               </div>
-              <h2 className="text-xl font-bold text-gray-900 mb-2">Setting up {setupProvider}</h2>
-              <p className="text-sm text-gray-500 font-medium leading-relaxed mb-8">
+              <h2 className="text-xl font-bold text-gray-900 mb-2">
+                Setting up {INTEGRATION_NAMES[setupProvider]}
+              </h2>
+              <p className="text-sm text-gray-500 font-medium leading-relaxed mb-3">
                 {setupStage === "authorizing"
                   ? "Finish authorization in your browser. We'll update Entropic as soon as it's complete."
                   : "Syncing your credentials with Entropic..."}
               </p>
+              {setupTimedOut && (
+                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mb-3 w-full">
+                  This is taking longer than expected. If your browser didn&apos;t open, retry launching authorization.
+                </p>
+              )}
+              {setupError && (
+                <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2 mb-3 w-full">
+                  {setupError}
+                </p>
+              )}
+              {setupProvider === "x" && setupLaunchUrl && (
+                <button
+                  className="w-full py-2.5 mb-3 bg-blue-600 text-white rounded-2xl text-[13px] font-bold hover:bg-blue-700 transition-colors"
+                  onClick={() => {
+                    void reopenSetupLaunchUrl();
+                  }}
+                  disabled={setupVerifying}
+                >
+                  Open Authorization Again
+                </button>
+              )}
+              <button
+                className="w-full py-2.5 mb-3 bg-white border border-gray-200 text-gray-900 rounded-2xl text-[13px] font-bold hover:bg-gray-50 transition-colors"
+                onClick={() => {
+                  void verifySetupComplete();
+                }}
+                disabled={setupVerifying}
+              >
+                {setupVerifying ? "Checking..." : "I&apos;ve Completed Setup"}
+              </button>
               <button
                 className="w-full py-3 bg-gray-100 text-gray-900 rounded-2xl text-[14px] font-bold hover:bg-gray-200 transition-colors"
-                onClick={() => setSetupProvider(null)}
+                onClick={() => {
+                  setSetupProvider(null);
+                  setSetupTimedOut(false);
+                  setSetupLaunchUrl(null);
+                  setSetupError(null);
+                  setSetupVerifying(false);
+                }}
+                disabled={setupVerifying}
               >
                 Continue in Background
               </button>
