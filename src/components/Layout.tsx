@@ -5,7 +5,6 @@ import {
   Settings,
   FolderOpen,
   CalendarClock,
-  ListTodo,
   CreditCard,
   Loader2,
   Plus,
@@ -71,7 +70,6 @@ type Props = {
 
 const baseNavItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
   { id: "chat", label: "New Chat", icon: Plus },
-  { id: "tasks", label: "Tasks", icon: ListTodo },
   { id: "jobs", label: "Jobs", icon: CalendarClock },
   { id: "files", label: "Desktop", icon: FolderOpen },
   { id: "channels", label: "Messaging", icon: Radio },

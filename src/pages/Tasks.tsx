@@ -452,7 +452,11 @@ function editorToPayload(editor: EditorState): CronPayload {
     if (editor.notifyTo.trim()) {
       payload.to = editor.notifyTo.trim();
     }
-    payload.bestEffortDeliver = false;
+    // best-effort so delivery failures don't kill the entire job run
+    payload.bestEffortDeliver = true;
+  } else {
+    // Explicitly disable delivery to prevent the runtime from attempting it
+    payload.deliver = false;
   }
 
   return payload;
@@ -909,13 +913,16 @@ function summarizeBoardForCleanup(tasks: TaskBoardItem[]): string {
   return lines.join("\n");
 }
 
+// Module-level cache so jobs persist across component remounts (navigation).
+let _cachedJobs: CronJob[] = [];
+
 export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
   const jobsEnabled = view !== "tasks";
   const tasksEnabled = view !== "jobs";
   const showTabs = view === "all";
   const [plannerTab, setPlannerTab] = useState<PlannerTab>(view === "jobs" ? "jobs" : "tasks");
   const activeTab: PlannerTab = showTabs ? plannerTab : view === "jobs" ? "jobs" : "tasks";
-  const [jobs, setJobs] = useState<CronJob[]>([]);
+  const [jobs, setJobs] = useState<CronJob[]>(_cachedJobs);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [boardTasks, setBoardTasks] = useState<TaskBoardItem[]>([]);
@@ -955,6 +962,9 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
   const [saving, setSaving] = useState(false);
   const [generatingSteps, setGeneratingSteps] = useState(false);
   const [generateStepsError, setGenerateStepsError] = useState<string | null>(null);
+
+  // Track jobs being manually triggered
+  const [runningJobIds, setRunningJobIds] = useState<Set<string>>(new Set());
 
   // History modal
   const [historyJobId, setHistoryJobId] = useState<string | null>(null);
@@ -1107,11 +1117,15 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
   }, [jobsEnabled]);
 
   const fetchJobs = useCallback(async () => {
-    setLoading(true);
+    // Only show the full-screen spinner when there are no cached jobs to display.
+    if (_cachedJobs.length === 0) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const result = await withGatewayClient((client) => client.listCronJobs(true));
       setJobs(result);
+      _cachedJobs = result;
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Gateway is offline. Start it to manage jobs."
@@ -1213,7 +1227,11 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
   useEffect(() => {
     if (!jobsEnabled || !gatewayRunning) {
       tasksClientRef.current = null;
-      setJobs([]);
+      // Keep _cachedJobs intact so remounts don't flash the spinner.
+      // Only clear displayed state when there's nothing cached.
+      if (_cachedJobs.length === 0) {
+        setJobs([]);
+      }
       setLoading(false);
       return;
     }
@@ -1439,10 +1457,37 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
 
   async function handleRun(job: CronJob) {
     try {
+      setRunningJobIds((prev) => new Set(prev).add(job.id));
       await withGatewayClient((client) => client.runCronJob(job.id, "force"));
-      // Refresh after a brief delay to pick up state change
+      // Poll until the job finishes running
+      const pollUntilDone = async () => {
+        for (let i = 0; i < 120; i++) {
+          await new Promise((r) => setTimeout(r, 3000));
+          try {
+            const refreshed = await withGatewayClient((c) => c.listCronJobs(true));
+            setJobs(refreshed);
+            _cachedJobs = refreshed;
+            const current = refreshed.find((j) => j.id === job.id);
+            if (!current || current.state !== "running") break;
+          } catch {
+            break;
+          }
+        }
+        setRunningJobIds((prev) => {
+          const next = new Set(prev);
+          next.delete(job.id);
+          return next;
+        });
+      };
+      pollUntilDone();
+      // Initial refresh to pick up the "running" state
       setTimeout(fetchJobs, 1000);
     } catch (e) {
+      setRunningJobIds((prev) => {
+        const next = new Set(prev);
+        next.delete(job.id);
+        return next;
+      });
       setError(
         e instanceof Error ? e.message : "Gateway is offline. Start it to run jobs."
       );
@@ -2445,7 +2490,10 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                 </div>
               ) : (
                 jobs.map((job) => {
-                  const badge = statusBadge(job);
+                  const isManuallyRunning = runningJobIds.has(job.id) || job.state === "running";
+                  const badge = isManuallyRunning
+                    ? { label: "Running", className: "bg-amber-50 text-amber-600 border-amber-100" }
+                    : statusBadge(job);
                   return (
                     <div key={job.id} className="group bg-white rounded-xl p-5 shadow-sm border border-[var(--border-subtle)] hover:shadow-md transition-all duration-300 flex flex-col">
                       <div className="flex items-start justify-between gap-4 mb-6">
@@ -2495,10 +2543,20 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                         <div className="flex items-center gap-1.5">
                           <button
                             onClick={() => handleRun(job)}
-                            className="p-2 rounded-lg bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:bg-green-50 hover:text-green-600 transition-all border border-[var(--border-subtle)]"
-                            title="Run Now"
+                            disabled={job.state === "running" || runningJobIds.has(job.id)}
+                            className={clsx(
+                              "p-2 rounded-lg transition-all border border-[var(--border-subtle)]",
+                              job.state === "running" || runningJobIds.has(job.id)
+                                ? "bg-amber-50 text-amber-600 border-amber-200 cursor-not-allowed"
+                                : "bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:bg-green-50 hover:text-green-600"
+                            )}
+                            title={job.state === "running" || runningJobIds.has(job.id) ? "Running..." : "Run Now"}
                           >
-                            <Play className="w-4 h-4 fill-current" />
+                            {job.state === "running" || runningJobIds.has(job.id) ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Play className="w-4 h-4 fill-current" />
+                            )}
                           </button>
                           <button
                             onClick={() => openEdit(job)}
