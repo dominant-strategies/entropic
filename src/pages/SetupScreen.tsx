@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open } from "@tauri-apps/plugin-shell";
 import { Loader2, CheckCircle2, XCircle, AlertTriangle, Copy } from "lucide-react";
 import entropicLogo from "../assets/entropic-logo.png";
 import quaiLogo from "../assets/quai-logo.svg";
@@ -210,25 +211,21 @@ export function SetupScreen({ onComplete }: Props) {
               />
               <span className="text-sm text-gray-600 leading-relaxed">
                 I have read and agree to the{" "}
-                <a
-                  href="https://entropic.qu.ai/terms"
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  type="button"
                   className="text-violet-600 hover:text-violet-800 underline font-medium"
-                  onClick={(e) => e.stopPropagation()}
+                  onClick={(e) => { e.stopPropagation(); open("https://entropic.qu.ai/terms"); }}
                 >
                   Terms of Service
-                </a>
+                </button>
                 {" "}and{" "}
-                <a
-                  href="https://entropic.qu.ai/privacy"
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  type="button"
                   className="text-violet-600 hover:text-violet-800 underline font-medium"
-                  onClick={(e) => e.stopPropagation()}
+                  onClick={(e) => { e.stopPropagation(); open("https://entropic.qu.ai/privacy"); }}
                 >
                   Privacy Policy
-                </a>.
+                </button>.
               </span>
             </label>
             <button

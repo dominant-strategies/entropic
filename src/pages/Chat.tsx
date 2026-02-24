@@ -4382,9 +4382,9 @@ export function Chat({
 
             <p className="text-xs text-center text-gray-400 mt-6 pt-4 border-t border-gray-100 leading-relaxed">
               By continuing, you agree to the{" "}
-              <a href="https://entropic.qu.ai/terms" target="_blank" rel="noopener noreferrer" className="underline text-gray-500 hover:text-gray-700">Terms of Service</a>
+              <button type="button" onClick={() => open("https://entropic.qu.ai/terms")} className="underline text-gray-500 hover:text-gray-700">Terms of Service</button>
               {" "}and{" "}
-              <a href="https://entropic.qu.ai/privacy" target="_blank" rel="noopener noreferrer" className="underline text-gray-500 hover:text-gray-700">Privacy Policy</a>.
+              <button type="button" onClick={() => open("https://entropic.qu.ai/privacy")} className="underline text-gray-500 hover:text-gray-700">Privacy Policy</button>.
             </p>
           </div>
         </div>
