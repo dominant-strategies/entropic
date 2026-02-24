@@ -2,6 +2,7 @@ use crate::runtime::{
     entropic_colima_home_path, macos_docker_socket_candidates, Platform, Runtime, RuntimeStatus,
     ENTROPIC_QEMU_PROFILE, ENTROPIC_VZ_PROFILE, LEGACY_NOVA_QEMU_PROFILE, LEGACY_NOVA_VZ_PROFILE,
 };
+use crate::windows_runtime_manager;
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine as _,
@@ -383,6 +384,78 @@ fn get_docker_host() -> Option<String> {
     }
 }
 
+fn env_var_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn windows_managed_wsl_runtime_enabled() -> bool {
+    env_var_truthy("ENTROPIC_WINDOWS_MANAGED_WSL")
+}
+
+fn windows_shared_docker_fallback_allowed() -> bool {
+    env_var_truthy("ENTROPIC_RUNTIME_ALLOW_SHARED_DOCKER")
+}
+
+fn windows_runtime_mode() -> &'static str {
+    if let Ok(mode) = std::env::var("ENTROPIC_RUNTIME_MODE") {
+        let lowered = mode.trim().to_ascii_lowercase();
+        if lowered == "dev" {
+            return "dev";
+        }
+        if lowered == "prod" {
+            return "prod";
+        }
+    }
+
+    if cfg!(debug_assertions) {
+        "dev"
+    } else {
+        "prod"
+    }
+}
+
+fn windows_use_managed_wsl_docker() -> bool {
+    matches!(Platform::detect(), Platform::Windows)
+        && windows_managed_wsl_runtime_enabled()
+        && !windows_shared_docker_fallback_allowed()
+}
+
+fn windows_path_to_wsl(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    let normalized = raw
+        .strip_prefix("//?/")
+        .map(|value| value.to_string())
+        .unwrap_or(raw);
+
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let mut tail = normalized[2..].to_string();
+        if !tail.starts_with('/') {
+            tail.insert(0, '/');
+        }
+        return format!("/mnt/{}{}", drive, tail);
+    }
+
+    normalized
+}
+
+fn docker_host_path_for_command(path: &Path) -> String {
+    if windows_use_managed_wsl_docker() {
+        windows_path_to_wsl(path)
+    } else {
+        path.display().to_string()
+    }
+}
+
 fn docker_binary_usable(candidate: &str) -> bool {
     Command::new(candidate)
         .arg("--version")
@@ -543,6 +616,21 @@ fn find_docker_binary() -> String {
 
 /// Create a Docker command with the correct DOCKER_HOST set
 fn docker_command() -> Command {
+    if windows_use_managed_wsl_docker() {
+        if let Some(cmd) = windows_runtime_manager::docker_dispatch_command(windows_runtime_mode())
+        {
+            return cmd;
+        }
+
+        // Fail closed if the manager dispatch shim cannot be resolved.
+        let mut cmd = Command::new("cmd");
+        cmd.args([
+            "/C",
+            "echo [Entropic] runtime-manager dispatch unavailable>&2 & exit /b 126",
+        ]);
+        return cmd;
+    }
+
     let docker = find_docker_binary();
     let mut cmd = Command::new(docker);
     if let Some(host) = get_docker_host() {
@@ -1510,8 +1598,8 @@ CMD ["skill-scanner-api", "--host", "0.0.0.0", "--port", "8000"]
             &scanner_image,
             "-f",
         ])
-        .arg(&dockerfile)
-        .arg(&build_root)
+        .arg(docker_host_path_for_command(&dockerfile))
+        .arg(docker_host_path_for_command(&build_root))
         .output()
         .map_err(|e| format!("Failed to build scanner image: {}", e))?;
 
@@ -1776,7 +1864,7 @@ fn load_runtime_from_tar(tar_path: &Path) -> Result<bool, String> {
     );
     let load = docker_command()
         .args(["load", "-i"])
-        .arg(tar_path)
+        .arg(docker_host_path_for_command(tar_path))
         .output()
         .map_err(|e| format!("docker load failed: {}", e))?;
     if load.status.success() {
@@ -1795,7 +1883,7 @@ fn load_scanner_from_tar(tar_path: &Path) -> Result<bool, String> {
     );
     let load = docker_command()
         .args(["load", "-i"])
-        .arg(tar_path)
+        .arg(docker_host_path_for_command(tar_path))
         .output()
         .map_err(|e| format!("docker load failed: {}", e))?;
     if load.status.success() {
@@ -1834,7 +1922,7 @@ fn download_scanner_tar_from_release(scanner_image: &str) -> Result<(), String> 
     println!("[Entropic] Loading scanner image from downloaded tar...");
     let load = docker_command()
         .args(["load", "-i"])
-        .arg(&temp_tar)
+        .arg(docker_host_path_for_command(&temp_tar))
         .output()
         .map_err(|e| format!("docker load failed: {}", e))?;
 
@@ -5088,8 +5176,9 @@ fn append_entropic_skills_mount(docker_args: &mut Vec<String>) {
 
     if let Some(host_path) = path {
         println!("[Entropic] Mounting entropic-skills from: {}", host_path);
+        let mount_source = docker_host_path_for_command(Path::new(host_path.as_str()));
         docker_args.push("-v".to_string());
-        docker_args.push(format!("{}:/data/entropic-skills:ro", host_path));
+        docker_args.push(format!("{}:/data/entropic-skills:ro", mount_source));
         docker_args.push("-e".to_string());
         docker_args.push("ENTROPIC_SKILLS_PATH=/data/entropic-skills".to_string());
     }
@@ -8390,9 +8479,31 @@ pub async fn ensure_runtime(app: AppHandle) -> Result<RuntimeStatus, String> {
         }
     }
 
+    if matches!(Platform::detect(), Platform::Windows)
+        && windows_use_managed_wsl_docker()
+        && !status.docker_ready
+    {
+        runtime
+            .ensure_windows_runtime()
+            .map_err(|e| format!("Failed to prepare WSL2 runtime: {}", e))?;
+        status = runtime.check_status();
+    }
+
     if !status.docker_ready {
         if !status.docker_installed {
+            if matches!(Platform::detect(), Platform::Windows) && windows_use_managed_wsl_docker() {
+                return Err(
+                    "WSL2 runtime is not installed yet. Complete first-time setup to bootstrap it."
+                        .to_string(),
+                );
+            }
             return Err("Docker is not installed. Please install Docker to continue.".to_string());
+        }
+        if matches!(Platform::detect(), Platform::Windows) && windows_use_managed_wsl_docker() {
+            return Err(
+                "WSL2 runtime is not ready. If installation just completed, restart Windows and retry."
+                    .to_string(),
+            );
         }
         return Err(append_colima_runtime_hint(
             "Docker is not running. Please ensure Docker is started.".to_string(),
@@ -8513,9 +8624,20 @@ pub async fn start_gateway(
 
     // Ensure runtime is running on macOS (Colima or Docker Desktop)
     let runtime = get_runtime(&app);
-    let status = runtime.check_status();
+    let mut status = runtime.check_status();
     if !status.docker_ready {
-        if matches!(Platform::detect(), Platform::MacOS)
+        if matches!(Platform::detect(), Platform::Windows) && windows_use_managed_wsl_docker() {
+            runtime
+                .ensure_windows_runtime()
+                .map_err(|e| format!("Failed to prepare WSL2 runtime: {}", e))?;
+            status = runtime.check_status();
+            if !status.docker_ready {
+                return Err(
+                    "WSL2 runtime is not ready. If installation just completed, restart Windows and retry."
+                        .to_string(),
+                );
+            }
+        } else if matches!(Platform::detect(), Platform::MacOS)
             && status.colima_installed
             && !status.vm_running
         {
@@ -8527,7 +8649,13 @@ pub async fn start_gateway(
             let install_msg = match Platform::detect() {
                 Platform::Linux => "Docker is not installed. Please install Docker Engine: sudo apt install docker.io",
                 Platform::MacOS => "Docker is not installed. Please install Docker Desktop for development.",
-                Platform::Windows => "Docker is not installed. Please install Docker Desktop for Windows.",
+                Platform::Windows => {
+                    if windows_use_managed_wsl_docker() {
+                        "WSL2 runtime is not initialized. Run first-time setup to bootstrap Entropic's managed runtime."
+                    } else {
+                        "Docker is not installed. Please install Docker Desktop for Windows."
+                    }
+                }
             };
             return Err(install_msg.to_string());
         } else {
@@ -8781,7 +8909,7 @@ pub async fn start_gateway(
     }
 
     let env_file = gateway_env_file(&env_entries)?;
-    let env_file_path = env_file.path.to_string_lossy().to_string();
+    let env_file_path = docker_host_path_for_command(&env_file.path);
 
     let mut docker_args = vec![
         "run".to_string(),
@@ -8833,11 +8961,13 @@ pub async fn start_gateway(
 
     // Dev-only: bind-mount local OpenClaw dist/extensions to avoid image rebuilds
     if let Ok(source) = std::env::var("ENTROPIC_DEV_OPENCLAW_SOURCE") {
-        if !source.trim().is_empty() {
+        let trimmed = source.trim();
+        if !trimmed.is_empty() {
+            let mount_source = docker_host_path_for_command(Path::new(trimmed));
             docker_args.push("-v".to_string());
-            docker_args.push(format!("{}/dist:/app/dist:ro", source));
+            docker_args.push(format!("{}/dist:/app/dist:ro", mount_source));
             docker_args.push("-v".to_string());
-            docker_args.push(format!("{}/extensions:/app/extensions:ro", source));
+            docker_args.push(format!("{}/extensions:/app/extensions:ro", mount_source));
         }
     }
 
@@ -8949,9 +9079,20 @@ pub async fn start_gateway_with_proxy(
     let docker_proxy_api_url = resolve_container_openai_base(&resolved_proxy_url);
     // Ensure runtime (Colima) is running on macOS
     let runtime = get_runtime(&app);
-    let status = runtime.check_status();
+    let mut status = runtime.check_status();
     if !status.docker_ready {
-        if matches!(Platform::detect(), Platform::MacOS)
+        if matches!(Platform::detect(), Platform::Windows) && windows_use_managed_wsl_docker() {
+            runtime
+                .ensure_windows_runtime()
+                .map_err(|e| format!("Failed to prepare WSL2 runtime: {}", e))?;
+            status = runtime.check_status();
+            if !status.docker_ready {
+                return Err(
+                    "WSL2 runtime is not ready. If installation just completed, restart Windows and retry."
+                        .to_string(),
+                );
+            }
+        } else if matches!(Platform::detect(), Platform::MacOS)
             && status.colima_installed
             && !status.vm_running
         {
@@ -8959,6 +9100,12 @@ pub async fn start_gateway_with_proxy(
                 append_colima_runtime_hint(format!("Failed to start Colima: {}", e))
             })?;
         } else if !status.docker_installed {
+            if matches!(Platform::detect(), Platform::Windows) && windows_use_managed_wsl_docker() {
+                return Err(
+                    "WSL2 runtime is not initialized. Run first-time setup to bootstrap Entropic's managed runtime."
+                        .to_string(),
+                );
+            }
             return Err("Docker is not installed. Please install Docker to continue.".to_string());
         } else {
             return Err(append_colima_runtime_hint(
@@ -9023,7 +9170,7 @@ pub async fn start_gateway_with_proxy(
             }
         }
         let env_file = gateway_env_file(&env_entries)?;
-        let env_file_path = env_file.path.to_string_lossy().to_string();
+        let env_file_path = docker_host_path_for_command(&env_file.path);
 
         let mut docker_args = vec![
             "run".to_string(),
@@ -9078,16 +9225,18 @@ pub async fn start_gateway_with_proxy(
         }
 
         if let Ok(source) = std::env::var("ENTROPIC_DEV_OPENCLAW_SOURCE") {
-            if !source.trim().is_empty() {
+            let trimmed = source.trim();
+            if !trimmed.is_empty() {
+                let mount_source = docker_host_path_for_command(Path::new(trimmed));
                 docker_args.insert(docker_args.len() - 1, "-v".to_string());
                 docker_args.insert(
                     docker_args.len() - 1,
-                    format!("{}/dist:/app/dist:ro", source),
+                    format!("{}/dist:/app/dist:ro", mount_source),
                 );
                 docker_args.insert(docker_args.len() - 1, "-v".to_string());
                 docker_args.insert(
                     docker_args.len() - 1,
-                    format!("{}/extensions:/app/extensions:ro", source),
+                    format!("{}/extensions:/app/extensions:ro", mount_source),
                 );
             }
         }
@@ -12163,6 +12312,32 @@ async fn run_first_time_setup_internal(
         }
     }
 
+    if matches!(Platform::detect(), Platform::Windows) && windows_use_managed_wsl_docker() {
+        {
+            let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
+            *progress = SetupProgress {
+                stage: "wsl".to_string(),
+                message: "Preparing WSL2 runtime...".to_string(),
+                percent: 35,
+                complete: false,
+                error: None,
+            };
+        }
+
+        if let Err(e) = runtime.ensure_windows_runtime() {
+            let msg = format!("{}", e);
+            let mut progress = state.setup_progress.lock().map_err(|err| err.to_string())?;
+            *progress = SetupProgress {
+                stage: "error".to_string(),
+                message: "Windows runtime setup failed".to_string(),
+                percent: 0,
+                complete: false,
+                error: Some(msg.clone()),
+            };
+            return Err(msg);
+        }
+    }
+
     // Update progress: Checking Docker
     {
         let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
@@ -12179,13 +12354,16 @@ async fn run_first_time_setup_internal(
     status = runtime.check_status();
 
     if !status.docker_ready {
-        let error_msg = if matches!(Platform::detect(), Platform::MacOS) {
-            append_colima_runtime_hint(
+        let error_msg = match Platform::detect() {
+            Platform::MacOS => append_colima_runtime_hint(
                 "Docker connection failed. The container runtime may still be starting - try again in a moment."
                     .to_string(),
-            )
-        } else {
-            "Please install Docker and ensure the daemon is running.".to_string()
+            ),
+            Platform::Windows if windows_use_managed_wsl_docker() => {
+                "WSL2 runtime is not ready yet. If WSL was just installed, restart Windows and run setup again."
+                    .to_string()
+            }
+            _ => "Please install Docker and ensure the daemon is running.".to_string(),
         };
         let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
         *progress = SetupProgress {
