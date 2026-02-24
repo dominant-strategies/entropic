@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
 use thiserror::Error;
@@ -72,7 +74,27 @@ pub(crate) const ENTROPIC_VZ_PROFILE: &str = "entropic-vz";
 pub(crate) const ENTROPIC_QEMU_PROFILE: &str = "entropic-qemu";
 pub(crate) const LEGACY_NOVA_VZ_PROFILE: &str = "nova-vz";
 pub(crate) const LEGACY_NOVA_QEMU_PROFILE: &str = "nova-qemu";
+pub(crate) const ENTROPIC_WSL_DEV_DISTRO: &str = "entropic-dev";
+pub(crate) const ENTROPIC_WSL_PROD_DISTRO: &str = "entropic-prod";
 const COLIMA_RETRY_DELAY_SECS: u64 = 2;
+const WINDOWS_BOOTSTRAP_STATE_FILE: &str = "bootstrap-state.json";
+const WINDOWS_BOOTSTRAP_STAGE_PREFLIGHT: &str = "preflight";
+const WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL: &str = "wsl-install";
+const WINDOWS_BOOTSTRAP_STAGE_WSL_DEFAULT_VERSION: &str = "wsl-default-version";
+const WINDOWS_BOOTSTRAP_STAGE_IMPORT_DEV: &str = "import-dev";
+const WINDOWS_BOOTSTRAP_STAGE_IMPORT_PROD: &str = "import-prod";
+const WINDOWS_BOOTSTRAP_STAGE_DOCKER_DEV: &str = "docker-dev";
+const WINDOWS_BOOTSTRAP_STAGE_DOCKER_PROD: &str = "docker-prod";
+const WINDOWS_BOOTSTRAP_STAGE_READY: &str = "ready";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct WindowsBootstrapState {
+    stage: String,
+    pending_reboot: bool,
+    #[serde(default)]
+    error: Option<String>,
+    updated_at_unix: u64,
+}
 
 fn fallback_colima_home_path() -> PathBuf {
     let shared_base = PathBuf::from("/Users/Shared/entropic");
@@ -236,6 +258,68 @@ fn env_var_truthy(name: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn windows_managed_wsl_runtime_enabled() -> bool {
+    env_var_truthy("ENTROPIC_WINDOWS_MANAGED_WSL")
+}
+
+fn windows_shared_docker_fallback_allowed() -> bool {
+    env_var_truthy("ENTROPIC_RUNTIME_ALLOW_SHARED_DOCKER")
+}
+
+fn windows_runtime_mode() -> &'static str {
+    if let Ok(mode) = std::env::var("ENTROPIC_RUNTIME_MODE") {
+        let lowered = mode.trim().to_ascii_lowercase();
+        if lowered == "dev" {
+            return "dev";
+        }
+        if lowered == "prod" {
+            return "prod";
+        }
+    }
+
+    if cfg!(debug_assertions) {
+        "dev"
+    } else {
+        "prod"
+    }
+}
+
+fn windows_active_distro_name() -> &'static str {
+    if windows_runtime_mode() == "dev" {
+        ENTROPIC_WSL_DEV_DISTRO
+    } else {
+        ENTROPIC_WSL_PROD_DISTRO
+    }
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn normalize_sha256_hex(value: &str) -> Option<String> {
+    let lowered = value.trim().to_ascii_lowercase();
+    if lowered.len() != 64 {
+        return None;
+    }
+    if lowered.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(lowered)
+    } else {
+        None
+    }
+}
+
+fn parse_sha256_text(value: &str) -> Option<String> {
+    for token in value.split_whitespace() {
+        if let Some(hash) = normalize_sha256_hex(token) {
+            return Some(hash);
+        }
+    }
+    normalize_sha256_hex(value)
 }
 
 /// Emergency-only escape hatch for local debugging.
@@ -700,7 +784,10 @@ impl Runtime {
     }
 
     pub fn reset_isolated_runtime_state(&self) -> Result<(), RuntimeError> {
-        self.reset_isolated_colima_runtime()
+        match Platform::detect() {
+            Platform::Windows => self.stop_windows_runtime(),
+            _ => self.reset_isolated_colima_runtime(),
+        }
     }
 
     fn is_docker_ready_on_socket(&self, socket_path: &std::path::Path) -> bool {
@@ -816,6 +903,728 @@ impl Runtime {
         unreachable!()
     }
 
+    fn command_output_summary(output: &std::process::Output) -> String {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => "<no output>".to_string(),
+            (false, true) => format!("stdout: {}", stdout),
+            (true, false) => format!("stderr: {}", stderr),
+            (false, false) => format!("stdout: {} | stderr: {}", stdout, stderr),
+        }
+    }
+
+    fn wsl_command(&self) -> Command {
+        Command::new("wsl.exe")
+    }
+
+    fn run_wsl(&self, args: &[&str]) -> Result<std::process::Output, std::io::Error> {
+        let mut cmd = self.wsl_command();
+        cmd.args(args);
+        let output = cmd.output()?;
+        debug_log(&format!(
+            "wsl.exe {} => code {:?} ({})",
+            args.join(" "),
+            output.status.code(),
+            Self::command_output_summary(&output)
+        ));
+        Ok(output)
+    }
+
+    fn windows_runtime_root(&self) -> PathBuf {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let trimmed = local.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed).join("Entropic").join("runtime");
+            }
+        }
+        self.runtime_home()
+            .join(".entropic")
+            .join("windows-runtime")
+    }
+
+    fn windows_bootstrap_state_path(&self) -> PathBuf {
+        self.windows_runtime_root()
+            .join(WINDOWS_BOOTSTRAP_STATE_FILE)
+    }
+
+    fn load_windows_bootstrap_state(&self) -> Option<WindowsBootstrapState> {
+        let path = self.windows_bootstrap_state_path();
+        let raw = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str::<WindowsBootstrapState>(&raw).ok()
+    }
+
+    fn save_windows_bootstrap_state(
+        &self,
+        stage: &str,
+        pending_reboot: bool,
+        error: Option<String>,
+    ) {
+        let path = self.windows_bootstrap_state_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let payload = WindowsBootstrapState {
+            stage: stage.to_string(),
+            pending_reboot,
+            error,
+            updated_at_unix: unix_now_secs(),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&payload) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    fn clear_windows_bootstrap_state(&self) {
+        let path = self.windows_bootstrap_state_path();
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn save_windows_bootstrap_error(&self, stage: &str, err: &RuntimeError) {
+        self.save_windows_bootstrap_state(stage, false, Some(err.to_string()));
+    }
+
+    fn windows_distro_location(&self, distro: &str) -> PathBuf {
+        self.windows_runtime_root().join("wsl").join(distro)
+    }
+
+    fn windows_distro_artifact_candidates(&self, distro: &str) -> Vec<PathBuf> {
+        let mode = if distro == ENTROPIC_WSL_DEV_DISTRO {
+            "dev"
+        } else {
+            "prod"
+        };
+        let mut candidates: Vec<PathBuf> = Vec::new();
+
+        let mode_key = format!("ENTROPIC_WSL_{}_DISTRO_ARTIFACT", mode.to_ascii_uppercase());
+        if let Ok(value) = std::env::var(&mode_key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                candidates.push(PathBuf::from(trimmed));
+            }
+        }
+        if let Ok(value) = std::env::var("ENTROPIC_WSL_DISTRO_ARTIFACT") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                candidates.push(PathBuf::from(trimmed));
+            }
+        }
+
+        let resources_runtime = self.resources_dir.join("resources").join("runtime");
+        let resources_root = self.resources_dir.join("resources");
+        for base in [resources_runtime, resources_root] {
+            candidates.push(base.join(format!("entropic-runtime-{}.wsl", mode)));
+            candidates.push(base.join(format!("entropic-runtime-{}.tar", mode)));
+            candidates.push(base.join("entropic-runtime.wsl"));
+            candidates.push(base.join("entropic-runtime.tar"));
+        }
+
+        candidates
+    }
+
+    fn windows_find_distro_artifact(&self, distro: &str) -> Option<PathBuf> {
+        self.windows_distro_artifact_candidates(distro)
+            .into_iter()
+            .find(|path| path.exists())
+    }
+
+    fn windows_expected_distro_sha256(
+        &self,
+        distro: &str,
+        artifact: &std::path::Path,
+    ) -> Option<String> {
+        let mode = if distro == ENTROPIC_WSL_DEV_DISTRO {
+            "DEV"
+        } else {
+            "PROD"
+        };
+        let env_keys = [
+            format!("ENTROPIC_WSL_{}_DISTRO_SHA256", mode),
+            "ENTROPIC_WSL_DISTRO_SHA256".to_string(),
+        ];
+        for key in env_keys {
+            if let Ok(value) = std::env::var(&key) {
+                if let Some(hash) = parse_sha256_text(&value) {
+                    return Some(hash);
+                }
+            }
+        }
+
+        let mut sidecars = vec![PathBuf::from(format!("{}.sha256", artifact.display()))];
+        let resources_runtime = self.resources_dir.join("resources").join("runtime");
+        if distro == ENTROPIC_WSL_DEV_DISTRO {
+            sidecars.push(resources_runtime.join("entropic-runtime-dev.sha256"));
+        } else {
+            sidecars.push(resources_runtime.join("entropic-runtime-prod.sha256"));
+        }
+        sidecars.push(resources_runtime.join("entropic-runtime.sha256"));
+
+        for sidecar in sidecars {
+            let Ok(contents) = std::fs::read_to_string(&sidecar) else {
+                continue;
+            };
+            if let Some(hash) = parse_sha256_text(&contents) {
+                return Some(hash);
+            }
+        }
+
+        None
+    }
+
+    fn sha256_for_file(path: &std::path::Path) -> Result<String, RuntimeError> {
+        let mut file = std::fs::File::open(path).map_err(|e| {
+            RuntimeError::CommandFailed(format!(
+                "Failed to open artifact {} for SHA-256 verification: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buf).map_err(|e| {
+                RuntimeError::CommandFailed(format!(
+                    "Failed while reading artifact {}: {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buf[..read]);
+        }
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    fn verify_windows_distro_artifact_hash(
+        &self,
+        distro: &str,
+        artifact: &std::path::Path,
+    ) -> Result<(), RuntimeError> {
+        let expected = self.windows_expected_distro_sha256(distro, artifact);
+        if expected.is_none() {
+            if cfg!(debug_assertions) {
+                debug_log(&format!(
+                    "Skipping WSL artifact hash verification for {} in debug mode (no expected hash configured)",
+                    artifact.display()
+                ));
+                return Ok(());
+            }
+            return Err(RuntimeError::CommandFailed(format!(
+                "Missing required SHA-256 for WSL artifact {} (mode {}).",
+                artifact.display(),
+                if distro == ENTROPIC_WSL_DEV_DISTRO {
+                    "dev"
+                } else {
+                    "prod"
+                }
+            )));
+        }
+
+        let expected = expected.expect("checked is_some");
+        let actual = Self::sha256_for_file(artifact)?;
+        if actual != expected {
+            return Err(RuntimeError::CommandFailed(format!(
+                "WSL artifact hash mismatch for {}. expected={} actual={}",
+                artifact.display(),
+                expected,
+                actual
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn windows_wsl_available(&self) -> bool {
+        if let Ok(out) = self.run_wsl(&["--version"]) {
+            if out.status.success() {
+                return true;
+            }
+        }
+        self.run_wsl(&["--status"])
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
+    fn windows_distro_registered(&self, distro: &str) -> bool {
+        let output = match self.run_wsl(&["--list", "--quiet"]) {
+            Ok(out) => out,
+            Err(err) => {
+                debug_log(&format!(
+                    "Failed to list WSL distros while checking {}: {}",
+                    distro, err
+                ));
+                return false;
+            }
+        };
+        if !output.status.success() {
+            debug_log(&format!(
+                "Failed to list WSL distros while checking {}: {}",
+                distro,
+                Self::command_output_summary(&output)
+            ));
+            return false;
+        }
+        let listing = String::from_utf8_lossy(&output.stdout);
+        listing.lines().any(|line| line.trim() == distro)
+    }
+
+    fn output_mentions_reboot(output: &std::process::Output) -> bool {
+        let combined = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .to_ascii_lowercase();
+        combined.contains("restart")
+            || combined.contains("reboot")
+            || combined.contains("required reboot")
+    }
+
+    fn ensure_windows_wsl_platform(&self) -> Result<(), RuntimeError> {
+        if self.windows_wsl_available() {
+            return Ok(());
+        }
+
+        self.save_windows_bootstrap_state(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, false, None);
+
+        let direct = self
+            .run_wsl(&["--install", "--no-distribution"])
+            .map_err(|e| {
+                RuntimeError::CommandFailed(format!("Failed to invoke wsl --install: {}", e))
+            })?;
+
+        if !direct.status.success() {
+            let combined = Self::command_output_summary(&direct);
+            let lower = combined.to_ascii_lowercase();
+            let needs_elevation = lower.contains("elevation")
+                || lower.contains("administrator")
+                || lower.contains("access is denied")
+                || lower.contains("requested operation requires elevation");
+
+            if needs_elevation {
+                let elevated = Command::new("powershell")
+                    .args([
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        "Start-Process -FilePath wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
+                    ])
+                    .output()
+                    .map_err(|e| {
+                        RuntimeError::CommandFailed(format!(
+                            "Failed to request elevated WSL install: {}",
+                            e
+                        ))
+                    })?;
+
+                debug_log(&format!(
+                    "elevated WSL install => code {:?} ({})",
+                    elevated.status.code(),
+                    Self::command_output_summary(&elevated)
+                ));
+
+                if !elevated.status.success() {
+                    let err = RuntimeError::CommandFailed(format!(
+                        "WSL install failed after elevation attempt: {}",
+                        Self::command_output_summary(&elevated)
+                    ));
+                    self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
+                    return Err(err);
+                }
+
+                if Self::output_mentions_reboot(&elevated) || !self.windows_wsl_available() {
+                    let message = "WSL platform installed. Restart Windows to finish setup, then reopen Entropic."
+                        .to_string();
+                    self.save_windows_bootstrap_state(
+                        WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL,
+                        true,
+                        Some(message.clone()),
+                    );
+                    return Err(RuntimeError::CommandFailed(message));
+                }
+                return Ok(());
+            }
+
+            if Self::output_mentions_reboot(&direct) {
+                let message =
+                    "WSL platform installed. Restart Windows to finish setup, then reopen Entropic."
+                        .to_string();
+                self.save_windows_bootstrap_state(
+                    WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL,
+                    true,
+                    Some(message.clone()),
+                );
+                return Err(RuntimeError::CommandFailed(message));
+            }
+
+            let err = RuntimeError::CommandFailed(format!("WSL install failed: {}", combined));
+            self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
+            return Err(err);
+        }
+
+        if Self::output_mentions_reboot(&direct) || !self.windows_wsl_available() {
+            let message =
+                "WSL platform installed. Restart Windows to finish setup, then reopen Entropic."
+                    .to_string();
+            self.save_windows_bootstrap_state(
+                WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL,
+                true,
+                Some(message.clone()),
+            );
+            return Err(RuntimeError::CommandFailed(message));
+        }
+
+        Ok(())
+    }
+
+    fn ensure_windows_wsl_default_version(&self) -> Result<(), RuntimeError> {
+        let output = self.run_wsl(&["--set-default-version", "2"]).map_err(|e| {
+            RuntimeError::CommandFailed(format!("Failed to set WSL2 default: {}", e))
+        })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(RuntimeError::CommandFailed(format!(
+            "Failed to set WSL default version to 2: {}",
+            Self::command_output_summary(&output)
+        )))
+    }
+
+    fn ensure_windows_distro_imported(&self, distro: &str) -> Result<(), RuntimeError> {
+        if self.windows_distro_registered(distro) {
+            return Ok(());
+        }
+
+        let location = self.windows_distro_location(distro);
+        if location.exists() {
+            let _ = std::fs::remove_dir_all(&location);
+        }
+        std::fs::create_dir_all(
+            location
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        )
+        .map_err(|e| {
+            RuntimeError::CommandFailed(format!(
+                "Failed to prepare runtime directory {}: {}",
+                location.display(),
+                e
+            ))
+        })?;
+
+        let artifact = self.windows_find_distro_artifact(distro).ok_or_else(|| {
+            RuntimeError::CommandFailed(format!(
+                "Missing bundled WSL rootfs for {}. Provide ENTROPIC_WSL_DISTRO_ARTIFACT or bundle resources/runtime/entropic-runtime(.wsl|.tar).",
+                distro
+            ))
+        })?;
+        self.verify_windows_distro_artifact_hash(distro, &artifact)?;
+        debug_log(&format!(
+            "verified SHA-256 for {} artifact {}",
+            distro,
+            artifact.display()
+        ));
+
+        let ext = artifact
+            .extension()
+            .and_then(|v| v.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        if ext == "wsl" {
+            let install = self
+                .wsl_command()
+                .arg("--install")
+                .arg("--from-file")
+                .arg(&artifact)
+                .arg("--name")
+                .arg(distro)
+                .arg("--location")
+                .arg(&location)
+                .output()
+                .map_err(|e| {
+                    RuntimeError::CommandFailed(format!(
+                        "Failed to import {} from .wsl artifact: {}",
+                        distro, e
+                    ))
+                })?;
+            debug_log(&format!(
+                "wsl --install --from-file ({}) => code {:?} ({})",
+                distro,
+                install.status.code(),
+                Self::command_output_summary(&install)
+            ));
+            if install.status.success() && self.windows_distro_registered(distro) {
+                return Ok(());
+            }
+        }
+
+        let import = self
+            .wsl_command()
+            .arg("--import")
+            .arg(distro)
+            .arg(&location)
+            .arg(&artifact)
+            .arg("--version")
+            .arg("2")
+            .output()
+            .map_err(|e| {
+                RuntimeError::CommandFailed(format!(
+                    "Failed to import {} from {}: {}",
+                    distro,
+                    artifact.display(),
+                    e
+                ))
+            })?;
+
+        if !import.status.success() {
+            return Err(RuntimeError::CommandFailed(format!(
+                "Failed to import {} distro: {}",
+                distro,
+                Self::command_output_summary(&import)
+            )));
+        }
+
+        if !self.windows_distro_registered(distro) {
+            return Err(RuntimeError::CommandFailed(format!(
+                "WSL reported successful import for {}, but distro is still unavailable.",
+                distro
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn ensure_windows_distro_docker_ready(&self, distro: &str) -> Result<(), RuntimeError> {
+        let script = r#"set -eu
+if ! command -v docker >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y docker.io
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y docker
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y docker
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm docker
+  else
+    echo "Unsupported Linux package manager for docker install" >&2
+    exit 31
+  fi
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl enable docker >/dev/null 2>&1 || true
+  systemctl start docker >/dev/null 2>&1 || true
+fi
+
+if command -v service >/dev/null 2>&1; then
+  service docker start >/dev/null 2>&1 || true
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  if command -v dockerd >/dev/null 2>&1; then
+    nohup dockerd >/var/log/dockerd.log 2>&1 &
+    sleep 3
+  fi
+fi
+
+docker info >/dev/null 2>&1
+"#;
+
+        let output = self
+            .wsl_command()
+            .arg("--distribution")
+            .arg(distro)
+            .arg("--user")
+            .arg("root")
+            .arg("--exec")
+            .arg("sh")
+            .arg("-lc")
+            .arg(script)
+            .output()
+            .map_err(|e| {
+                RuntimeError::CommandFailed(format!(
+                    "Failed to initialize Docker in {}: {}",
+                    distro, e
+                ))
+            })?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        Err(RuntimeError::CommandFailed(format!(
+            "Docker engine is not ready in {}: {}",
+            distro,
+            Self::command_output_summary(&output)
+        )))
+    }
+
+    fn windows_docker_ready_for_distro(&self, distro: &str) -> bool {
+        let output = self
+            .wsl_command()
+            .arg("--distribution")
+            .arg(distro)
+            .arg("--user")
+            .arg("root")
+            .arg("--exec")
+            .arg("sh")
+            .arg("-lc")
+            .arg("docker info >/dev/null 2>&1")
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => true,
+            Ok(out) => {
+                debug_log(&format!(
+                    "docker info in {} failed: {}",
+                    distro,
+                    Self::command_output_summary(&out)
+                ));
+                false
+            }
+            Err(err) => {
+                debug_log(&format!(
+                    "docker info probe in {} failed to execute: {}",
+                    distro, err
+                ));
+                false
+            }
+        }
+    }
+
+    fn ensure_windows_runtime_internal(&self, force_windows: bool) -> Result<(), RuntimeError> {
+        if !force_windows && !matches!(Platform::detect(), Platform::Windows) {
+            return Ok(());
+        }
+        if !windows_managed_wsl_runtime_enabled() || windows_shared_docker_fallback_allowed() {
+            return Ok(());
+        }
+
+        let prior_state = self.load_windows_bootstrap_state();
+        if let Some(state) = prior_state.as_ref() {
+            debug_log(&format!(
+                "resuming persisted Windows bootstrap stage={} pending_reboot={} updated_at={}",
+                state.stage, state.pending_reboot, state.updated_at_unix
+            ));
+            if state.pending_reboot && !self.windows_wsl_available() {
+                let message = format!(
+                    "WSL platform installation is waiting for Windows restart (stage: {}). Restart Windows and reopen Entropic.",
+                    state.stage
+                );
+                self.save_windows_bootstrap_state(&state.stage, true, Some(message.clone()));
+                return Err(RuntimeError::CommandFailed(message));
+            }
+        }
+
+        self.save_windows_bootstrap_state(WINDOWS_BOOTSTRAP_STAGE_PREFLIGHT, false, None);
+
+        self.ensure_windows_wsl_platform().map_err(|err| {
+            if self
+                .load_windows_bootstrap_state()
+                .map(|state| state.pending_reboot)
+                .unwrap_or(false)
+            {
+                return err;
+            }
+            self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
+            err
+        })?;
+
+        self.save_windows_bootstrap_state(WINDOWS_BOOTSTRAP_STAGE_WSL_DEFAULT_VERSION, false, None);
+        self.ensure_windows_wsl_default_version().map_err(|err| {
+            self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_DEFAULT_VERSION, &err);
+            err
+        })?;
+
+        let runtime_root = self.windows_runtime_root();
+        std::fs::create_dir_all(runtime_root.join("dev")).map_err(|e| {
+            RuntimeError::CommandFailed(format!("Failed to prepare dev runtime root: {}", e))
+        })?;
+        std::fs::create_dir_all(runtime_root.join("prod")).map_err(|e| {
+            RuntimeError::CommandFailed(format!("Failed to prepare prod runtime root: {}", e))
+        })?;
+
+        self.save_windows_bootstrap_state(WINDOWS_BOOTSTRAP_STAGE_IMPORT_DEV, false, None);
+        self.ensure_windows_distro_imported(ENTROPIC_WSL_DEV_DISTRO)
+            .map_err(|err| {
+                self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_IMPORT_DEV, &err);
+                err
+            })?;
+        self.save_windows_bootstrap_state(WINDOWS_BOOTSTRAP_STAGE_IMPORT_PROD, false, None);
+        self.ensure_windows_distro_imported(ENTROPIC_WSL_PROD_DISTRO)
+            .map_err(|err| {
+                self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_IMPORT_PROD, &err);
+                err
+            })?;
+
+        let active = windows_active_distro_name();
+        let docker_stage = if active == ENTROPIC_WSL_DEV_DISTRO {
+            WINDOWS_BOOTSTRAP_STAGE_DOCKER_DEV
+        } else {
+            WINDOWS_BOOTSTRAP_STAGE_DOCKER_PROD
+        };
+        self.save_windows_bootstrap_state(docker_stage, false, None);
+        self.ensure_windows_distro_docker_ready(active)
+            .map_err(|err| {
+                self.save_windows_bootstrap_error(docker_stage, &err);
+                err
+            })?;
+
+        if !self.windows_docker_ready_for_distro(active) {
+            let err = RuntimeError::CommandFailed(format!(
+                "Docker daemon is still not reachable inside {} after bootstrap.",
+                active
+            ));
+            self.save_windows_bootstrap_error(docker_stage, &err);
+            return Err(err);
+        }
+
+        self.save_windows_bootstrap_state(WINDOWS_BOOTSTRAP_STAGE_READY, false, None);
+        self.clear_windows_bootstrap_state();
+        Ok(())
+    }
+
+    pub fn ensure_windows_runtime(&self) -> Result<(), RuntimeError> {
+        self.ensure_windows_runtime_internal(false)
+    }
+
+    #[cfg(test)]
+    fn ensure_windows_runtime_for_tests(&self) -> Result<(), RuntimeError> {
+        self.ensure_windows_runtime_internal(true)
+    }
+
+    fn stop_windows_runtime(&self) -> Result<(), RuntimeError> {
+        let mut failures: Vec<String> = Vec::new();
+        for distro in [ENTROPIC_WSL_DEV_DISTRO, ENTROPIC_WSL_PROD_DISTRO] {
+            if !self.windows_distro_registered(distro) {
+                continue;
+            }
+            match self.run_wsl(&["--terminate", distro]) {
+                Ok(out) if out.status.success() => {}
+                Ok(out) => {
+                    let summary = Self::command_output_summary(&out);
+                    let lower = summary.to_ascii_lowercase();
+                    if !lower.contains("there is no running instance") {
+                        failures.push(format!("{}: {}", distro, summary));
+                    }
+                }
+                Err(err) => failures.push(format!("{}: {}", distro, err)),
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(RuntimeError::CommandFailed(failures.join(" | ")))
+        }
+    }
+
     pub fn check_status(&self) -> RuntimeStatus {
         let platform = Platform::detect();
         debug_log(&format!(
@@ -902,7 +1711,21 @@ impl Runtime {
     }
 
     fn check_status_windows(&self) -> RuntimeStatus {
-        // Windows uses Docker Desktop or WSL2
+        if windows_managed_wsl_runtime_enabled() && !windows_shared_docker_fallback_allowed() {
+            let wsl_available = self.windows_wsl_available();
+            let active_distro = windows_active_distro_name();
+            let distro_ready = wsl_available && self.windows_distro_registered(active_distro);
+            let docker_ready = distro_ready && self.windows_docker_ready_for_distro(active_distro);
+
+            return RuntimeStatus {
+                colima_installed: wsl_available,
+                docker_installed: distro_ready,
+                vm_running: distro_ready,
+                docker_ready,
+            };
+        }
+
+        // Fallback path: use native Docker Desktop state.
         let docker_installed = self.docker_path().is_some();
         let docker_ready = if docker_installed {
             self.is_docker_ready_native()
@@ -913,7 +1736,7 @@ impl Runtime {
         RuntimeStatus {
             colima_installed: false,
             docker_installed,
-            vm_running: docker_ready, // Assume VM is running if Docker works
+            vm_running: docker_ready,
             docker_ready,
         }
     }
@@ -1354,10 +2177,17 @@ impl Runtime {
     }
 
     pub fn start_colima(&self) -> Result<(), RuntimeError> {
-        self.start_colima_internal(true)
+        match Platform::detect() {
+            Platform::Windows => self.ensure_windows_runtime(),
+            _ => self.start_colima_internal(true),
+        }
     }
 
     pub fn stop_colima(&self) -> Result<(), RuntimeError> {
+        if matches!(Platform::detect(), Platform::Windows) {
+            return self.stop_windows_runtime();
+        }
+
         let mut failures: Vec<String> = Vec::new();
 
         for (profile, _) in self.colima_profiles() {
@@ -1407,5 +2237,471 @@ impl Runtime {
             }
             Platform::Windows => "npipe:////./pipe/docker_engine".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_lock() -> &'static Mutex<()> {
+        TEST_ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "entropic-windows-bootstrap-test-{}-{}-{}",
+            label,
+            std::process::id(),
+            ts
+        ))
+    }
+
+    fn write_executable(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("failed to create executable parent dir");
+        }
+        fs::write(path, contents).expect("failed to write executable file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(path)
+                .expect("failed to stat executable")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(path, perms).expect("failed to chmod executable");
+        }
+    }
+
+    fn fake_wsl_script() -> &'static str {
+        r#"#!/bin/sh
+set -eu
+
+STATE_FILE="${ENTROPIC_TEST_WSL_STATE_FILE:-}"
+if [ -z "$STATE_FILE" ]; then
+  echo "missing ENTROPIC_TEST_WSL_STATE_FILE" >&2
+  exit 98
+fi
+
+installed=0
+reboot_pending=0
+distros=""
+if [ -f "$STATE_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$STATE_FILE"
+fi
+
+save_state() {
+  mkdir -p "$(dirname "$STATE_FILE")"
+  {
+    echo "installed=$installed"
+    echo "reboot_pending=$reboot_pending"
+    echo "distros=\"$distros\""
+  } > "$STATE_FILE"
+}
+
+has_distro() {
+  case ",$distros," in
+    *,"$1",*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+add_distro() {
+  if has_distro "$1"; then
+    return 0
+  fi
+  if [ -z "$distros" ]; then
+    distros="$1"
+  else
+    distros="$distros,$1"
+  fi
+}
+
+if [ "$#" -ge 1 ] && { [ "$1" = "--version" ] || [ "$1" = "--status" ]; }; then
+  if [ "$installed" = "1" ] && [ "$reboot_pending" = "0" ]; then
+    echo "WSL version 2.1.0"
+    exit 0
+  fi
+  echo "WSL not ready" >&2
+  exit 1
+fi
+
+if [ "$#" -ge 2 ] && [ "$1" = "--install" ] && [ "$2" = "--no-distribution" ]; then
+  installed=1
+  if [ "${ENTROPIC_TEST_WSL_INSTALL_REBOOT:-0}" = "1" ]; then
+    reboot_pending=1
+    save_state
+    echo "Restart required to complete installation"
+    exit 0
+  fi
+  reboot_pending=0
+  save_state
+  echo "Installed WSL"
+  exit 0
+fi
+
+if [ "$#" -ge 2 ] && [ "$1" = "--set-default-version" ] && [ "$2" = "2" ]; then
+  if [ "$installed" = "1" ] && [ "$reboot_pending" = "0" ]; then
+    exit 0
+  fi
+  echo "WSL not available" >&2
+  exit 1
+fi
+
+if [ "$#" -ge 2 ] && [ "$1" = "--list" ] && [ "$2" = "--quiet" ]; then
+  OLDIFS=$IFS
+  IFS=','
+  for entry in $distros; do
+    if [ -n "$entry" ]; then
+      echo "$entry"
+    fi
+  done
+  IFS=$OLDIFS
+  exit 0
+fi
+
+if [ "$#" -ge 1 ] && [ "$1" = "--install" ]; then
+  name=""
+  location=""
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --name)
+        name="${2:-}"
+        shift 2
+        ;;
+      --location)
+        location="${2:-}"
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  if [ -z "$name" ]; then
+    echo "missing distro name" >&2
+    exit 1
+  fi
+  add_distro "$name"
+  if [ -n "$location" ]; then
+    mkdir -p "$location"
+  fi
+  save_state
+  exit 0
+fi
+
+if [ "$#" -ge 1 ] && [ "$1" = "--import" ]; then
+  name="${2:-}"
+  location="${3:-}"
+  if [ -z "$name" ]; then
+    echo "missing distro name" >&2
+    exit 1
+  fi
+  add_distro "$name"
+  if [ -n "$location" ]; then
+    mkdir -p "$location"
+  fi
+  save_state
+  exit 0
+fi
+
+if [ "$#" -ge 1 ] && [ "$1" = "--distribution" ]; then
+  distro="${2:-}"
+  if ! has_distro "$distro"; then
+    echo "distro not found: $distro" >&2
+    exit 1
+  fi
+  if [ "${ENTROPIC_TEST_WSL_DOCKER_FAIL:-0}" = "1" ]; then
+    echo "docker failed" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+if [ "$#" -ge 1 ] && [ "$1" = "--terminate" ]; then
+  exit 0
+fi
+
+echo "unsupported fake wsl args: $*" >&2
+exit 1
+"#
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
+    }
+
+    struct EnvGuard {
+        previous: HashMap<String, Option<String>>,
+    }
+
+    impl EnvGuard {
+        fn new(keys: &[&str]) -> Self {
+            let mut previous = HashMap::new();
+            for key in keys {
+                previous.insert((*key).to_string(), std::env::var(key).ok());
+            }
+            Self { previous }
+        }
+
+        fn set<K: AsRef<str>, V: AsRef<str>>(&self, key: K, value: V) {
+            std::env::set_var(key.as_ref(), value.as_ref());
+        }
+
+        fn remove<K: AsRef<str>>(&self, key: K) {
+            std::env::remove_var(key.as_ref());
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.previous.iter() {
+                if let Some(v) = value {
+                    std::env::set_var(key, v);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
+
+    struct WindowsBootstrapFixture {
+        root_dir: PathBuf,
+        local_app_data: PathBuf,
+        wsl_state_file: PathBuf,
+        bootstrap_state_file: PathBuf,
+        runtime: Runtime,
+        _env_guard: EnvGuard,
+    }
+
+    impl Drop for WindowsBootstrapFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root_dir);
+        }
+    }
+
+    impl WindowsBootstrapFixture {
+        fn new(label: &str, install_requires_reboot: bool) -> Self {
+            let root_dir = unique_test_dir(label);
+            let fake_bin_dir = root_dir.join("fake-bin");
+            let local_app_data = root_dir.join("localappdata");
+            let resources_root = root_dir.join("resources-root");
+            let runtime_resources = resources_root.join("resources").join("runtime");
+            fs::create_dir_all(&runtime_resources).expect("failed to create runtime resources");
+
+            let dev_artifact = runtime_resources.join("entropic-runtime-dev.wsl");
+            let prod_artifact = runtime_resources.join("entropic-runtime-prod.wsl");
+            let dev_contents = b"dev-artifact-bytes";
+            let prod_contents = b"prod-artifact-bytes";
+            fs::write(&dev_artifact, dev_contents).expect("failed to write dev artifact");
+            fs::write(&prod_artifact, prod_contents).expect("failed to write prod artifact");
+
+            write_executable(&fake_bin_dir.join("wsl.exe"), fake_wsl_script());
+            let wsl_state_file = root_dir.join("fake-wsl-state.env");
+
+            let env_guard = EnvGuard::new(&[
+                "PATH",
+                "LOCALAPPDATA",
+                "ENTROPIC_WINDOWS_MANAGED_WSL",
+                "ENTROPIC_RUNTIME_ALLOW_SHARED_DOCKER",
+                "ENTROPIC_RUNTIME_MODE",
+                "ENTROPIC_WSL_DEV_DISTRO_SHA256",
+                "ENTROPIC_WSL_PROD_DISTRO_SHA256",
+                "ENTROPIC_WSL_DISTRO_SHA256",
+                "ENTROPIC_TEST_WSL_STATE_FILE",
+                "ENTROPIC_TEST_WSL_INSTALL_REBOOT",
+                "ENTROPIC_TEST_WSL_DOCKER_FAIL",
+            ]);
+
+            let path_sep = if cfg!(windows) { ";" } else { ":" };
+            let previous_path = std::env::var("PATH").unwrap_or_default();
+            let merged_path = if previous_path.trim().is_empty() {
+                fake_bin_dir.display().to_string()
+            } else {
+                format!("{}{}{}", fake_bin_dir.display(), path_sep, previous_path)
+            };
+            env_guard.set("PATH", merged_path);
+            env_guard.set("LOCALAPPDATA", local_app_data.display().to_string());
+            env_guard.set("ENTROPIC_WINDOWS_MANAGED_WSL", "1");
+            env_guard.set("ENTROPIC_RUNTIME_ALLOW_SHARED_DOCKER", "0");
+            env_guard.set("ENTROPIC_RUNTIME_MODE", "dev");
+            env_guard.set(
+                "ENTROPIC_TEST_WSL_STATE_FILE",
+                wsl_state_file.display().to_string(),
+            );
+            env_guard.set(
+                "ENTROPIC_TEST_WSL_INSTALL_REBOOT",
+                if install_requires_reboot { "1" } else { "0" },
+            );
+            env_guard.remove("ENTROPIC_TEST_WSL_DOCKER_FAIL");
+            env_guard.set("ENTROPIC_WSL_DEV_DISTRO_SHA256", sha256_hex(dev_contents));
+            env_guard.set("ENTROPIC_WSL_PROD_DISTRO_SHA256", sha256_hex(prod_contents));
+            env_guard.remove("ENTROPIC_WSL_DISTRO_SHA256");
+
+            let bootstrap_state_file = local_app_data
+                .join("Entropic")
+                .join("runtime")
+                .join(WINDOWS_BOOTSTRAP_STATE_FILE);
+            let runtime = Runtime::new(resources_root.clone());
+
+            Self {
+                root_dir,
+                local_app_data,
+                wsl_state_file,
+                bootstrap_state_file,
+                runtime,
+                _env_guard: env_guard,
+            }
+        }
+
+        fn read_wsl_state(&self) -> String {
+            fs::read_to_string(&self.wsl_state_file).unwrap_or_default()
+        }
+
+        fn read_bootstrap_state(&self) -> WindowsBootstrapState {
+            let raw = fs::read_to_string(&self.bootstrap_state_file)
+                .expect("bootstrap state file should exist");
+            serde_json::from_str(&raw).expect("bootstrap state should be valid json")
+        }
+
+        fn mark_reboot_complete(&self) {
+            let raw = self.read_wsl_state();
+            let updated = raw.replace("reboot_pending=1", "reboot_pending=0");
+            fs::write(&self.wsl_state_file, updated).expect("failed to update fake wsl state");
+        }
+    }
+
+    #[test]
+    fn windows_bootstrap_clean_machine_flow_succeeds() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let fixture = WindowsBootstrapFixture::new("clean-machine", false);
+
+        fixture
+            .runtime
+            .ensure_windows_runtime_for_tests()
+            .expect("bootstrap should succeed");
+
+        assert!(
+            !fixture.bootstrap_state_file.exists(),
+            "bootstrap-state.json should be cleared after successful setup"
+        );
+        let wsl_state = fixture.read_wsl_state();
+        assert!(
+            wsl_state.contains("entropic-dev"),
+            "dev distro should be imported"
+        );
+        assert!(
+            wsl_state.contains("entropic-prod"),
+            "prod distro should be imported"
+        );
+        assert!(
+            fixture
+                .local_app_data
+                .join("Entropic")
+                .join("runtime")
+                .join("dev")
+                .exists(),
+            "managed runtime dev root should exist"
+        );
+        assert!(
+            fixture
+                .local_app_data
+                .join("Entropic")
+                .join("runtime")
+                .join("prod")
+                .exists(),
+            "managed runtime prod root should exist"
+        );
+    }
+
+    #[test]
+    fn windows_bootstrap_reboot_resume_flow_persists_and_recovers() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let fixture = WindowsBootstrapFixture::new("reboot-resume", true);
+
+        let first_err = fixture
+            .runtime
+            .ensure_windows_runtime_for_tests()
+            .expect_err("first bootstrap should require reboot");
+        let first_err_text = first_err.to_string();
+        assert!(
+            first_err_text.contains("Restart Windows"),
+            "expected reboot-required error, got: {}",
+            first_err_text
+        );
+        assert!(
+            fixture.bootstrap_state_file.exists(),
+            "bootstrap state should persist across reboot-required boundary"
+        );
+        let state = fixture.read_bootstrap_state();
+        assert!(
+            state.pending_reboot,
+            "bootstrap state should record pending_reboot=true"
+        );
+        assert_eq!(state.stage, WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL);
+
+        fixture.mark_reboot_complete();
+        std::env::set_var("ENTROPIC_TEST_WSL_INSTALL_REBOOT", "0");
+
+        fixture
+            .runtime
+            .ensure_windows_runtime_for_tests()
+            .expect("bootstrap should resume successfully after reboot");
+        assert!(
+            !fixture.bootstrap_state_file.exists(),
+            "bootstrap-state.json should be cleared once resumed flow completes"
+        );
+        let wsl_state = fixture.read_wsl_state();
+        assert!(
+            wsl_state.contains("entropic-dev"),
+            "dev distro should be present after resumed setup"
+        );
+        assert!(
+            wsl_state.contains("entropic-prod"),
+            "prod distro should be present after resumed setup"
+        );
+    }
+
+    #[test]
+    fn windows_bootstrap_rejects_mismatched_artifact_hash() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let fixture = WindowsBootstrapFixture::new("hash-mismatch", false);
+        std::env::set_var(
+            "ENTROPIC_WSL_DEV_DISTRO_SHA256",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+
+        let err = fixture
+            .runtime
+            .ensure_windows_runtime_for_tests()
+            .expect_err("bootstrap should fail when artifact hash mismatches");
+        let text = err.to_string();
+        assert!(
+            text.contains("hash mismatch"),
+            "expected hash mismatch error, got: {}",
+            text
+        );
+        let state = fixture.read_bootstrap_state();
+        assert_eq!(state.stage, WINDOWS_BOOTSTRAP_STAGE_IMPORT_DEV);
+        assert!(
+            !state.pending_reboot,
+            "hash mismatch should fail closed without pending reboot state"
+        );
     }
 }

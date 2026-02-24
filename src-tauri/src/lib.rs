@@ -1,5 +1,6 @@
 mod commands;
 mod runtime;
+mod windows_runtime_manager;
 
 use rand::RngCore;
 use std::fs;
@@ -63,6 +64,10 @@ fn install_startup_panic_logger() {
         append_startup_log(&msg);
         previous(info);
     }));
+}
+
+pub fn maybe_handle_cli_mode() -> Option<i32> {
+    windows_runtime_manager::maybe_handle_runtime_manager_cli()
 }
 
 pub fn run() {
