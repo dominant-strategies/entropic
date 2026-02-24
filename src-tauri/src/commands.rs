@@ -6891,6 +6891,7 @@ fn ensure_config_path(cfg: &mut serde_json::Value, path: &[&str]) {
 fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
     let paths: &[&[&str]] = &[
         &["agents", "defaults"],
+        &["tools", "fs"],
         &["tools", "web", "search", "perplexity"],
         &["gateway", "controlUi"],
         &["gateway", "reload"],
@@ -6914,6 +6915,13 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
     {
         set_openclaw_config_value(cfg, &["plugins", "load", "paths"], serde_json::json!([]));
     }
+
+    // Keep filesystem tools constrained to the workspace root.
+    set_openclaw_config_value(
+        cfg,
+        &["tools", "fs", "workspaceOnly"],
+        serde_json::json!(true),
+    );
 
     // Docker bridge requests can present a non-loopback source IP.
     // Allow token-authenticated Control UI access in local desktop mode.
