@@ -2462,6 +2462,9 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                               <span className={clsx("px-2.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide border", badge.className)}>
                                 {badge.label}
                               </span>
+                              {isManuallyRunning && (
+                                <span className="text-[10px] text-amber-500 font-medium">Results will open when done</span>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -2497,32 +2500,37 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                             onClick={() => handleRun(job)}
                             disabled={job.state === "running" || runningJobIds.has(job.id)}
                             className={clsx(
-                              "p-2 rounded-lg transition-all border border-[var(--border-subtle)]",
+                              "px-3 py-1.5 rounded-lg transition-all border border-[var(--border-subtle)] inline-flex items-center gap-1.5 text-xs font-medium",
                               job.state === "running" || runningJobIds.has(job.id)
                                 ? "bg-amber-50 text-amber-600 border-amber-200 cursor-not-allowed"
                                 : "bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:bg-green-50 hover:text-green-600"
                             )}
-                            title={job.state === "running" || runningJobIds.has(job.id) ? "Running..." : "Run Now"}
                           >
                             {job.state === "running" || runningJobIds.has(job.id) ? (
-                              <Loader2 className="w-4 h-4 animate-spin" />
+                              <>
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                Running
+                              </>
                             ) : (
-                              <Play className="w-4 h-4 fill-current" />
+                              <>
+                                <Play className="w-3.5 h-3.5 fill-current" />
+                                Run
+                              </>
                             )}
                           </button>
                           <button
                             onClick={() => openEdit(job)}
-                            className="p-2 rounded-lg bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:bg-blue-50 hover:text-blue-600 transition-all border border-[var(--border-subtle)]"
-                            title="Edit Job"
+                            className="px-3 py-1.5 rounded-lg bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:bg-blue-50 hover:text-blue-600 transition-all border border-[var(--border-subtle)] inline-flex items-center gap-1.5 text-xs font-medium"
                           >
-                            <Pencil className="w-4 h-4" />
+                            <Pencil className="w-3.5 h-3.5" />
+                            Edit
                           </button>
                           <button
                             onClick={() => openHistory(job)}
-                            className="p-2 rounded-lg bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-5)] hover:text-[var(--text-primary)] transition-all border border-[var(--border-subtle)]"
-                            title="History"
+                            className="px-3 py-1.5 rounded-lg bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-5)] hover:text-[var(--text-primary)] transition-all border border-[var(--border-subtle)] inline-flex items-center gap-1.5 text-xs font-medium"
                           >
-                            <History className="w-4 h-4" />
+                            <History className="w-3.5 h-3.5" />
+                            History
                           </button>
                         </div>
                         <button

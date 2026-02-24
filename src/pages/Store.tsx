@@ -1142,15 +1142,13 @@ export function Store({
                       All skills on ClawHub are automatically audited for security and behavioral risks by Cisco's industry-leading scanner.
                     </p>
                   </div>
-                  <a
-                    href="https://github.com/cisco-ai-defense/skill-scanner"
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <button
+                    onClick={() => open("https://github.com/cisco-ai-defense/skill-scanner")}
                     className="px-4 py-2 bg-white rounded-lg text-xs font-semibold border border-[var(--border-default)] hover:bg-[var(--system-gray-6)] transition-all flex items-center gap-2 shrink-0"
                   >
                     <Info className="w-4 h-4 text-[var(--system-blue)]" />
                     Scanner Specs
-                  </a>
+                  </button>
                 </div>
               </div>
 
@@ -1357,7 +1355,7 @@ export function Store({
                 ) : activeClawhubInstalled ? (
                   "Installed"
                 ) : (
-                  "Scan + Install"
+                  "Security Scan + Install"
                 )}
               </button>
             </div>
