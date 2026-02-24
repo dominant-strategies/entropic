@@ -170,7 +170,12 @@ export async function connectIntegration(
       body: JSON.stringify({ redirect_uri: INTEGRATIONS_REDIRECT_URL }),
     });
     if (result?.url) {
-      await open(result.url);
+      // Try to open browser but always return the URL so the retry button works
+      try {
+        await open(result.url);
+      } catch (err) {
+        console.warn("Failed to open browser for X auth:", err);
+      }
       return { oauthUrl: result.url };
     }
     return {};
