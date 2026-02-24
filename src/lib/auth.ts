@@ -12,6 +12,12 @@ const RAW_API_URL = (import.meta as any).env?.VITE_API_URL || "";
 const API_URL = RAW_API_URL || ((import.meta as any).env?.DEV ? "/api" : "");
 const AUTH_REDIRECT_URL =
   (import.meta as any).env?.VITE_AUTH_REDIRECT_URL || "entropic://auth/callback";
+const BILLING_SUCCESS_REDIRECT_URL =
+  (import.meta as any).env?.VITE_BILLING_SUCCESS_REDIRECT_URL ||
+  ((import.meta as any).env?.DEV ? "entropic-dev://billing/success" : "entropic://billing/success");
+const BILLING_CANCEL_REDIRECT_URL =
+  (import.meta as any).env?.VITE_BILLING_CANCEL_REDIRECT_URL ||
+  ((import.meta as any).env?.DEV ? "entropic-dev://billing/cancel" : "entropic://billing/cancel");
 const AUTH_STORE_NAME =
   (import.meta as any).env?.VITE_AUTH_STORE_NAME || "entropic-auth.json";
 const AUTH_USE_LOCALHOST =
@@ -561,7 +567,11 @@ export async function createCheckout(
 ): Promise<CheckoutResponse> {
   return apiRequest<CheckoutResponse>("/create-checkout", {
     method: "POST",
-    body: JSON.stringify({ amount_cents: amountCents }),
+    body: JSON.stringify({
+      amount_cents: amountCents,
+      app_redirect_success_url: BILLING_SUCCESS_REDIRECT_URL,
+      app_redirect_cancel_url: BILLING_CANCEL_REDIRECT_URL,
+    }),
   });
 }
 
