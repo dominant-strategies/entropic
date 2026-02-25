@@ -912,7 +912,9 @@ function extractMessageText(message: GatewayMessage): { text: string; hasText: b
 function isChannelOrSystemSessionKey(rawKey: string | null | undefined): boolean {
   const key = (rawKey || "").trim().toLowerCase();
   if (!key) return true;
-  // agent:main:* are user chat sessions — don't filter them out
+  // agent:main:main is the gateway's internal primary session — never show it in the UI.
+  if (key === "agent:main:main") return true;
+  // Other agent:main:* keys are user chat sessions — don't filter them out.
   if (key.startsWith("agent:main:")) return false;
   if (key.startsWith("agent:") || key.startsWith("cron:") || key.startsWith("system:")) {
     return true;
