@@ -441,10 +441,22 @@ function isBillingIssueMessage(raw?: string | null): boolean {
   );
 }
 
+function isPolicyMessageRemovedError(raw?: string | null): boolean {
+  if (!raw) return false;
+  const text = raw.toLowerCase();
+  return (
+    text.includes("all messages were removed by policy") ||
+    text.includes("messages were removed by policy")
+  );
+}
+
 function formatAssistantErrorTextForUi(raw?: string | null): string {
   const message = sanitizeGatewayErrorMessage(raw || "");
   if (isBillingIssueMessage(message)) {
     return `${BILLING_RECOVERY_MESSAGE} Open Billing to add funds.`;
+  }
+  if (isPolicyMessageRemovedError(raw)) {
+    return "The conversation context was cleared by the provider. Starting fresh — please resend your message.";
   }
   if (/^connection error\.?$/i.test(message)) {
     return "The AI provider connection failed. Check your network, auth, and billing setup, then retry.";
@@ -2729,7 +2741,8 @@ export function Chat({
         }
       }
     } else if (event.state === "error") {
-      const errorMessage = formatAssistantErrorTextForUi(event.errorMessage || "Chat error");
+      const rawErrorMessage = event.errorMessage || "Chat error";
+      const errorMessage = formatAssistantErrorTextForUi(rawErrorMessage);
       setError(errorMessage);
       if (isBillingIssueMessage(errorMessage)) {
         setShowOutOfCreditsModal(true);
@@ -2741,7 +2754,18 @@ export function Chat({
       if (eventRunId) {
         delete runSessionKeyRef.current[eventRunId];
       }
-      addDiag(`chat error: ${event.errorMessage || "unknown"}`);
+      addDiag(`chat error: ${rawErrorMessage}`);
+      if (isPolicyMessageRemovedError(rawErrorMessage)) {
+        // The provider stripped all messages (e.g. internal-only history). Reset
+        // the session context on the gateway so the next send starts clean.
+        const sessionToReset = event.sessionKey || currentSessionRef.current;
+        if (sessionToReset && clientRef.current) {
+          addDiag(`policy message removal — resetting session context: ${sessionToReset}`);
+          clientRef.current.resetSession(sessionToReset).catch((err: unknown) => {
+            addDiag(`session reset failed: ${String(err)}`);
+          });
+        }
+      }
       if (isProxyAuthFailure(errorMessage)) {
         triggerProxyAuthRecovery("chat error event");
       }
@@ -3353,6 +3377,10 @@ export function Chat({
           (providers) => addDiag(`integrations synced: ${providers.length ? providers.join(", ") : "none"}`),
           (err: unknown) => addDiag(`integrations sync failed: ${String(err)}`),
         );
+      }
+      if (!outboundMessageContent.trim() && attachmentsPayload.length === 0) {
+        addDiag("send blocked: outbound message is empty after transformations");
+        throw new Error("Message content is empty. Please type a message before sending.");
       }
       addDiag(
         `send -> session=${sendSession} len=${outboundMessageContent.length} attachments=${attachmentsPayload.length}`
