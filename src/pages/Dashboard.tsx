@@ -879,6 +879,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         await invoke("stop_gateway");
         console.log("[Entropic] Gateway stopped successfully");
         gatewayHealthFailureStreakRef.current = 0;
+        autoStartAttemptedRef.current = false;
         setGatewayRunning(false);
       } else {
         console.log("[Entropic] Starting gateway...");
@@ -1136,6 +1137,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             onModelChange={handleModelChange}
             useLocalKeys={useLocalKeys}
             onUseLocalKeysChange={async (value) => {
+              // Reset the auto-start guard and block the effect from running
+              // until we're fully done stopping/saving. This must happen before
+              // any awaits so the effect can't race ahead and see a stale guard.
+              autoStartAttemptedRef.current = false;
+              setIsTogglingGateway(true);
               setUseLocalKeys(value);
 
               // Reset model if current selection doesn't exist in the target mode
@@ -1157,9 +1163,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
               }
 
               // Stop existing container — the auto-start effect will restart
-              // in the correct mode once React commits the state update.
-              // We can't call startGatewayProxyFlow directly because it reads
-              // useLocalKeys from the closure (still the old value).
+              // in the correct mode once isTogglingGateway is cleared.
               if (gatewayRunning) {
                 try {
                   await invoke("stop_gateway");
@@ -1168,8 +1172,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
                 }
                 setGatewayRunning(false);
               }
-              // Reset auto-start guard so the effect fires again
-              autoStartAttemptedRef.current = false;
+
+              // Unblock the auto-start effect — it will now re-run with the
+              // new useLocalKeys value and autoStartAttemptedRef = false.
+              setIsTogglingGateway(false);
             }}
             codeModel={codeModel}
             imageModel={imageModel}

@@ -280,6 +280,53 @@ export function Channels() {
     }
   }
 
+  async function disconnectTelegram() {
+    setSavingSetup(true);
+    setSaveMessage(null);
+    setSaveError(null);
+    try {
+      await invoke("set_channels_config", {
+        discordEnabled: false,
+        discordToken: "",
+        telegramEnabled: false,
+        telegramToken: "",
+        telegramDmPolicy,
+        telegramGroupPolicy,
+        telegramConfigWrites,
+        telegramRequireMention,
+        telegramReplyToMode,
+        telegramLinkPreview,
+        slackEnabled: false,
+        slackBotToken: "",
+        slackAppToken: "",
+        googlechatEnabled: false,
+        googlechatServiceAccount: "",
+        googlechatAudienceType: "app-url",
+        googlechatAudience: "",
+        whatsappEnabled: false,
+        whatsappAllowFrom: "",
+      });
+      setTelegramEnabled(false);
+      setTelegramToken("");
+      setTelegramTokenSaved(false);
+      setTelegramConnected(false);
+      setSaveMessage("Telegram disconnected.");
+      const running = await refreshGatewayRunningStatus();
+      if (running) {
+        try {
+          await invoke("restart_gateway_in_place");
+        } catch {
+          setRestartPending(true);
+        }
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setSaveError(`Failed to disconnect Telegram: ${detail}`);
+    } finally {
+      setSavingSetup(false);
+    }
+  }
+
   async function saveMessagingSetup(target: TelegramSaveTarget = "token") {
     console.log("[Channels] saveMessagingSetup called");
     console.log("[Channels] telegramEnabled:", telegramEnabled);
@@ -593,18 +640,44 @@ export function Channels() {
                       </button>
                     </div>
                     {telegramPairingStatus && <p className="text-xs text-[var(--text-tertiary)]">{telegramPairingStatus}</p>}
+                    <button
+                      onClick={disconnectTelegram}
+                      disabled={savingSetup}
+                      className="text-xs text-red-500 hover:text-red-700 transition-colors disabled:opacity-50 text-left"
+                    >
+                      Remove bot token
+                    </button>
                   </div>
                 )}
 
                 {telegramTokenSaved && telegramConnected && (
                   <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <CheckCircle2 className="w-4 h-4 text-green-700" />
-                      <p className="text-xs font-medium text-green-800">
-                        Telegram bot is connected and ready to receive messages
-                      </p>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-green-700" />
+                        <p className="text-xs font-medium text-green-800">
+                          Telegram bot is connected and ready to receive messages
+                        </p>
+                      </div>
+                      <button
+                        onClick={disconnectTelegram}
+                        disabled={savingSetup}
+                        className="px-3 py-1.5 text-xs font-medium rounded-lg text-red-600 hover:bg-red-100 transition-colors disabled:opacity-50 whitespace-nowrap"
+                      >
+                        Disconnect
+                      </button>
                     </div>
                   </div>
+                )}
+
+                {telegramTokenSaved && !telegramConnected && (
+                  <button
+                    onClick={disconnectTelegram}
+                    disabled={savingSetup}
+                    className="text-xs text-red-500 hover:text-red-700 transition-colors disabled:opacity-50"
+                  >
+                    Remove bot token
+                  </button>
                 )}
 
                 {telegramConnected && (

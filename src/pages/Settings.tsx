@@ -379,10 +379,17 @@ export function Settings({
         setAnthropicCodePending(false);
         setAnthropicCodeInput("");
       }
-      const status = await invoke<Record<string, string>>("get_oauth_status");
+      const [status, state] = await Promise.all([
+        invoke<Record<string, string>>("get_oauth_status"),
+        invoke<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>("get_auth_state"),
+      ]);
       setOauthStatus(status);
-      const state = await invoke<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>("get_auth_state");
       setAuthState(state);
+      // If no provider keys remain, switch back to proxy (managed) mode.
+      const anyKeyRemaining = state.providers.some((p) => p.has_key);
+      if (!anyKeyRemaining && useLocalKeys) {
+        await onUseLocalKeysChange(false);
+      }
     } catch (e) {
       console.error(`[Entropic] OAuth disconnect failed for ${provider}:`, e);
     }
