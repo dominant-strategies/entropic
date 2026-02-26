@@ -292,6 +292,7 @@ export function Store({
   const [setupError, setSetupError] = useState<string | null>(null);
   const [setupVerifying, setSetupVerifying] = useState(false);
   const [setupUrlCopied, setSetupUrlCopied] = useState(false);
+  const [setupSessionExpired, setSetupSessionExpired] = useState(false);
   const [scanModalOpen, setScanModalOpen] = useState(false);
   const [scanPluginId, setScanPluginId] = useState<string | null>(null);
   const [scanResult, setScanResult] = useState<PluginScanResult | null>(null);
@@ -640,6 +641,7 @@ export function Store({
     setSetupTimedOut(false);
     setSetupLaunchUrl(null);
     setSetupError(null);
+    setSetupSessionExpired(false);
     try {
       const result = await connectIntegration(provider);
       if (provider === "x") {
@@ -657,7 +659,14 @@ export function Store({
     } catch (err) {
       console.error("Failed to start OAuth:", err);
       const message = err instanceof Error ? err.message : String(err);
-      setSetupError(message);
+      // "Not authenticated" means the local Supabase session is missing/expired —
+      // it's not an X OAuth problem. Flag it separately so the UI can show a sign-in prompt.
+      if (message === "Not authenticated") {
+        setSetupSessionExpired(true);
+        setSetupError("Your session has expired. Sign out and sign back in, then try again.");
+      } else {
+        setSetupError(message);
+      }
       setSetupTimedOut(true);
     } finally {
       setConnecting(null);
@@ -1414,14 +1423,20 @@ export function Store({
                 </div>
               )}
               {setupProvider === "x" && !setupLaunchUrl && (setupTimedOut || setupError) && (
-                <button
-                  className="w-full py-2.5 mb-3 bg-blue-600 text-white rounded-2xl text-[13px] font-bold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
-                  onClick={() => { void handleConnectIntegration("x"); }}
-                  disabled={!!connecting || setupVerifying}
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  {connecting === "x" ? "Opening..." : "Try Again"}
-                </button>
+                setupSessionExpired ? (
+                  <p className="text-xs text-gray-500 mb-3 w-full text-center">
+                    Go to <strong>Settings → Account</strong> to sign out, then sign back in and try again.
+                  </p>
+                ) : (
+                  <button
+                    className="w-full py-2.5 mb-3 bg-blue-600 text-white rounded-2xl text-[13px] font-bold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+                    onClick={() => { void handleConnectIntegration("x"); }}
+                    disabled={!!connecting || setupVerifying}
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    {connecting === "x" ? "Opening..." : "Try Again"}
+                  </button>
+                )
               )}
               <button
                 className="w-full py-2.5 mb-3 bg-white border border-gray-200 text-gray-900 rounded-2xl text-[13px] font-bold hover:bg-gray-50 transition-colors"
@@ -1441,6 +1456,7 @@ export function Store({
                   setSetupError(null);
                   setSetupVerifying(false);
                   setSetupUrlCopied(false);
+                  setSetupSessionExpired(false);
                 }}
                 disabled={setupVerifying}
               >
