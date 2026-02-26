@@ -1389,15 +1389,27 @@ export function Store({
                 </p>
               )}
               {setupProvider === "x" && setupLaunchUrl && (
-                <button
-                  className="w-full py-2.5 mb-3 bg-blue-600 text-white rounded-2xl text-[13px] font-bold hover:bg-blue-700 transition-colors"
-                  onClick={() => {
-                    void reopenSetupLaunchUrl();
-                  }}
-                  disabled={setupVerifying}
-                >
-                  Open Authorization Again
-                </button>
+                <div className="w-full mb-3 flex flex-col gap-2">
+                  <button
+                    className="w-full py-2.5 bg-blue-600 text-white rounded-2xl text-[13px] font-bold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+                    onClick={() => {
+                      void reopenSetupLaunchUrl();
+                    }}
+                    disabled={setupVerifying}
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Open in Browser
+                  </button>
+                  <button
+                    className="w-full py-2 bg-gray-50 border border-gray-200 text-gray-600 rounded-2xl text-[12px] font-medium hover:bg-gray-100 transition-colors truncate px-3"
+                    title={setupLaunchUrl}
+                    onClick={() => {
+                      void navigator.clipboard.writeText(setupLaunchUrl);
+                    }}
+                  >
+                    Copy link to open manually
+                  </button>
+                </div>
               )}
               <button
                 className="w-full py-2.5 mb-3 bg-white border border-gray-200 text-gray-900 rounded-2xl text-[13px] font-bold hover:bg-gray-50 transition-colors"
