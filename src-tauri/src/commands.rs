@@ -5195,6 +5195,45 @@ Use it for durable decisions, preferences, and facts that should persist across 
         &["plugins", "entries", "telegram", "enabled"],
         serde_json::json!(settings.telegram_enabled),
     );
+    // Add Telegram plugin path to plugins.load.paths so the gateway can find it.
+    // This mirrors the X plugin block above.
+    if settings.telegram_enabled {
+        let telegram_plugin_id = "telegram";
+        let mut telegram_plugin_path: Option<String> = None;
+        if let Some(skills_root) = read_container_env("ENTROPIC_SKILLS_PATH") {
+            let base = format!(
+                "{}/{}",
+                skills_root.trim_end_matches('/'),
+                telegram_plugin_id
+            );
+            let current = format!("{}/current", base);
+            let candidate = if container_path_exists(&current) {
+                current
+            } else {
+                base
+            };
+            if container_path_exists(&candidate) {
+                telegram_plugin_path = Some(candidate);
+            }
+        }
+        if let Some(path) = telegram_plugin_path {
+            let load_paths = cfg
+                .pointer_mut("/plugins/load/paths")
+                .and_then(|v| v.as_array_mut());
+            if let Some(list) = load_paths {
+                let exists = list.iter().any(|v| v.as_str() == Some(&path));
+                if !exists {
+                    list.push(serde_json::json!(path));
+                }
+            } else {
+                set_openclaw_config_value(
+                    &mut cfg,
+                    &["plugins", "load", "paths"],
+                    serde_json::json!([path]),
+                );
+            }
+        }
+    }
 
     // Only suppress Telegram once bridge has at least one paired device.
     // A stale bridge_enabled flag alone should not disable Telegram on gateway restarts.
@@ -8937,6 +8976,38 @@ pub async fn set_channels_config(
     eprintln!("[set_channels_config] Writing OpenClaw config...");
     write_openclaw_config(&cfg)?;
     eprintln!("[set_channels_config] OpenClaw config written successfully");
+
+    // When Telegram is being disabled/disconnected, clear the persistent pairing
+    // allowFrom credential files from the container. Without this, the next
+    // connection attempt skips the pairing code flow because the gateway still
+    // sees authorised chat IDs from the previous session.
+    if !telegram_enabled && telegram_token.is_empty() {
+        let container = if named_gateway_container_exists(OPENCLAW_CONTAINER, true) {
+            Some(OPENCLAW_CONTAINER)
+        } else if named_gateway_container_exists(LEGACY_OPENCLAW_CONTAINER, true) {
+            Some(LEGACY_OPENCLAW_CONTAINER)
+        } else {
+            None
+        };
+        if let Some(container) = container {
+            let clear_script = r#"
+const fs = require('fs');
+const paths = [
+  '/data/credentials/telegram-default-allowFrom.json',
+  '/data/credentials/telegram-allowFrom.json',
+];
+for (const p of paths) {
+  try { fs.unlinkSync(p); } catch {}
+}
+process.stdout.write('ok');
+"#;
+            let args = ["exec", container, "node", "-e", clear_script];
+            match docker_exec_output(&args) {
+                Ok(_) => eprintln!("[set_channels_config] Cleared Telegram allowFrom credential files"),
+                Err(e) => eprintln!("[set_channels_config] Failed to clear Telegram allowFrom files (non-fatal): {}", e),
+            }
+        }
+    }
 
     eprintln!("[set_channels_config] Loading agent settings...");
     let mut settings = load_agent_settings(&app);
