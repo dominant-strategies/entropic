@@ -670,16 +670,6 @@ export function Channels() {
                   </div>
                 )}
 
-                {telegramTokenSaved && !telegramConnected && (
-                  <button
-                    onClick={disconnectTelegram}
-                    disabled={savingSetup}
-                    className="text-xs text-red-500 hover:text-red-700 transition-colors disabled:opacity-50"
-                  >
-                    Remove bot token
-                  </button>
-                )}
-
                 {telegramConnected && (
                   <details className="rounded-lg border border-[var(--border-subtle)] bg-[var(--system-gray-6)]/60">
                     <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold text-[var(--text-primary)]">
