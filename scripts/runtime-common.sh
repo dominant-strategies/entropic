@@ -200,10 +200,15 @@ entropic_resolve_mode_docker_host() {
 }
 
 entropic_runtime_path_for_colima() {
-    local project_root="${1:-}"
+    local colima_bin="$1"
+    local project_root="${2:-}"
     local path_prefix
     path_prefix="$PATH"
-    if [ -n "$project_root" ]; then
+    # Only prepend bundled bin dirs when using a bundled colima binary.
+    # If the system colima is used, prepending bundled paths would cause
+    # system colima to find Gatekeeper-killed limactl/lima instead of the
+    # system-installed ones, resulting in "signal: killed" errors.
+    if [ -n "$project_root" ] && [[ "$colima_bin" == "$project_root/"* ]]; then
         path_prefix="$project_root/src-tauri/target/debug/resources/bin:$project_root/src-tauri/resources/bin:$path_prefix"
     fi
     printf '%s\n' "$path_prefix"
@@ -217,7 +222,7 @@ entropic_run_colima() {
 
     COLIMA_HOME="$colima_home" \
     LIMA_HOME="$colima_home/_lima" \
-    PATH="$(entropic_runtime_path_for_colima "$project_root")" \
+    PATH="$(entropic_runtime_path_for_colima "$colima_bin" "$project_root")" \
     "$colima_bin" "$@"
 }
 
