@@ -255,7 +255,7 @@ entropic_start_colima_for_mode() {
             entropic_run_colima "$colima_bin" "$colima_home" "$project_root" --profile "$profile" stop --force >/dev/null 2>&1 || true
         fi
 
-        if entropic_run_colima "$colima_bin" "$colima_home" "$project_root" --profile "$profile" start --vm-type "$vm_type" 2>&1; then
+        if entropic_run_colima "$colima_bin" "$colima_home" "$project_root" --profile "$profile" start --vm-type "$vm_type" >&2; then
             attempts_left=30
             while [ "$attempts_left" -gt 0 ]; do
                 if host="$(entropic_docker_host_for_profile "$docker_bin" "$colima_home" "$profile")"; then
