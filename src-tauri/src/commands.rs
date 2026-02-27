@@ -6550,8 +6550,8 @@ Use it for durable decisions, preferences, and facts that should persist across 
     );
     write_openclaw_config(&cfg)?;
 
-    // Write OpenAI Codex OAuth credentials to auth-profiles.json if available
-    // (env vars don't work for Codex OAuth — OpenClaw needs auth-profiles.json)
+    // Write OAuth credentials to auth-profiles.json so OpenClaw can autonomously
+    // refresh tokens when they expire.
     // OpenClaw reads auth-profiles.json from: $STATE_DIR/agents/main/agent/auth-profiles.json
     //
     // IMPORTANT: Before writing, read the container's current auth-profiles.json.
