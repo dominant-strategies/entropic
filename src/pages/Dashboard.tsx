@@ -42,7 +42,7 @@ type Props = {
 const DEFAULT_PROXY_MODEL = "openai/gpt-5.2";
 const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
 const GATEWAY_FAILURE_THRESHOLD = 3;
-const FEEDBACK_DISCORD_URL = "https://discord.gg/quai";
+const FEEDBACK_FORM_URL = "https://entropic.qu.ai/feedback";
 const SANDBOX_STARTUP_FACTS = [
   "Secure Execution: Entropic runs all shell commands in an isolated sandbox to protect your local system.",
   "Custom Providers: Add your own API keys in Settings for direct access to the latest models.",
@@ -96,7 +96,14 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const gatewayHealthFailureStreakRef = useRef(0);
 
   async function openFeedbackPage() {
-    await open(FEEDBACK_DISCORD_URL);
+    const url = new URL(FEEDBACK_FORM_URL);
+    if (!url.searchParams.get("source")) {
+      url.searchParams.set("source", "desktop_sidebar");
+    }
+    if (!url.searchParams.get("app")) {
+      url.searchParams.set("app", "desktop");
+    }
+    await open(url.toString());
   }
 
   function requestSignIn() {
