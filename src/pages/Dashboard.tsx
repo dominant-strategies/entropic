@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-shell";
 import { Loader2, CheckCircle2 } from "lucide-react";
 import { Layout, Page } from "../components/Layout";
 import { Chat, type ChatSession, type ChatSessionActionRequest } from "./Chat";
@@ -41,6 +42,7 @@ type Props = {
 const DEFAULT_PROXY_MODEL = "openai/gpt-5.2";
 const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
 const GATEWAY_FAILURE_THRESHOLD = 3;
+const FEEDBACK_DISCORD_URL = "https://discord.gg/quai";
 const SANDBOX_STARTUP_FACTS = [
   "Secure Execution: Entropic runs all shell commands in an isolated sandbox to protect your local system.",
   "Custom Providers: Add your own API keys in Settings for direct access to the latest models.",
@@ -92,6 +94,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     newModel: string;
   } | null>(null);
   const gatewayHealthFailureStreakRef = useRef(0);
+
+  async function openFeedbackPage() {
+    await open(FEEDBACK_DISCORD_URL);
+  }
 
   function requestSignIn() {
     window.dispatchEvent(
@@ -1241,6 +1247,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     <Layout
       currentPage={currentPage}
       onNavigate={setCurrentPage}
+      onOpenFeedback={() => {
+        void openFeedbackPage();
+      }}
       gatewayRunning={gatewayRunning}
       experimentalDesktop={experimentalDesktop}
       integrationsSyncing={integrationsSyncing}

@@ -52,6 +52,7 @@ export type Page =
 type Props = {
   currentPage: Page;
   onNavigate: (page: Page) => void;
+  onOpenFeedback?: () => void;
   children: ReactNode;
   gatewayRunning: boolean;
   experimentalDesktop?: boolean;
@@ -96,6 +97,7 @@ function sessionTitle(s: ChatSession): string {
 export function Layout({
   currentPage,
   onNavigate,
+  onOpenFeedback,
   children,
   gatewayRunning,
   experimentalDesktop = false,
@@ -388,6 +390,26 @@ export function Layout({
               </div>
             );
           })}
+          {onOpenFeedback && (
+            <button
+              onClick={onOpenFeedback}
+              className={clsx(
+                "w-full flex items-center rounded-md text-[13px] font-medium transition-all duration-200 text-black/70 hover:bg-[rgba(0,0,0,0.03)] hover:text-black",
+                sidebarCollapsed ? "justify-center px-1.5 py-2 relative group mt-2" : "gap-3 px-3 py-2 mt-2"
+              )}
+              aria-label="Feedback"
+            >
+              <div className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors bg-black/5">
+                <MessageSquare className="w-5 h-5 text-[var(--text-tertiary)]" />
+              </div>
+              {!sidebarCollapsed && "Feedback"}
+              {sidebarCollapsed && (
+                <div className="absolute left-full ml-2 px-2.5 py-1 rounded-md bg-gray-900 text-white text-xs font-medium whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
+                  Feedback
+                </div>
+              )}
+            </button>
+          )}
         </nav>
 
         {/* User / Gateway Status Footer */}
