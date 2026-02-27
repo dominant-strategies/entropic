@@ -28,6 +28,15 @@ echo ""
 echo "Starting cleanup..."
 echo ""
 
+# Kill any running Nova/Entropic processes so their open file handles
+# don't block directory removal with "permission denied".
+echo "→ Stopping any running Entropic/Nova processes..."
+pkill -9 -f "[Ee]ntropic" 2>/dev/null || true
+pkill -9 -f "[Nn]ova\.app" 2>/dev/null || true
+sleep 1
+echo "  ✓ Done"
+echo ""
+
 # Find Docker binary
 DOCKER_BIN=""
 if command -v docker >/dev/null 2>&1; then
@@ -102,10 +111,12 @@ echo "→ Removing all app data and caches..."
 for dir in \
     "$HOME/Library/Application Support/ai.openclaw.entropic" \
     "$HOME/Library/Application Support/ai.openclaw.entropic.dev" \
+    "$HOME/Library/Application Support/ai.openclaw.nova" \
     "$HOME/Library/Caches/entropic" \
     "$HOME/Library/Caches/entropic-dev" \
     "$HOME/.cache/entropic"; do
     if [ -d "$dir" ]; then
+        chmod -R u+w "$dir" 2>/dev/null || true
         rm -rf "$dir"
         echo "  ✓ Removed $dir"
     else

@@ -123,6 +123,7 @@ for app_data_dir in \
 do
     if [ -e "$app_data_dir" ]; then
         echo "  → Removing $app_data_dir"
+        chmod -R u+w "$app_data_dir" 2>/dev/null || true
         rm -rf "$app_data_dir"
     fi
 done

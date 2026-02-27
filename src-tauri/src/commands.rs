@@ -7288,6 +7288,20 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
         }
         cleanup_log.push("Colima VMs deleted".to_string());
 
+        // Remove Docker contexts left behind by old installs
+        cleanup_log.push("Cleaning up Docker contexts...".to_string());
+        for context in &[
+            "colima-nova-vz",
+            "colima-nova-qemu",
+            "colima-entropic-vz",
+            "colima-entropic-qemu",
+        ] {
+            let _ = std::process::Command::new(&docker_bin)
+                .args(&["context", "rm", "-f", context])
+                .output();
+        }
+        cleanup_log.push("Docker contexts cleaned".to_string());
+
         // Remove runtime state directories from both naming eras.
         for runtime_dir in [home_dir.join(".nova"), home_dir.join(".entropic")] {
             if runtime_dir.exists() {
@@ -7310,10 +7324,18 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
     //                  ~/.cache/entropic
     cleanup_log.push("Cleaning up all app data and caches...".to_string());
     let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
+    // Kill any legacy Nova processes that may be holding open file handles
+    // in the old app data directory, which would cause "permission denied" on removal.
+    let _ = std::process::Command::new("pkill")
+        .args(&["-9", "-f", "Nova.app"])
+        .output();
+
     let dirs_to_remove = vec![
         // App data (Tauri stores: chat history, settings, auth)
         home_dir.join("Library/Application Support/ai.openclaw.entropic"),
         home_dir.join("Library/Application Support/ai.openclaw.entropic.dev"),
+        // Legacy nova app data (older installs may have permission-locked files here)
+        home_dir.join("Library/Application Support/ai.openclaw.nova"),
         // App caches
         home_dir.join("Library/Caches/entropic"),
         home_dir.join("Library/Caches/entropic-dev"),
@@ -7321,6 +7343,10 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
     ];
     for dir in &dirs_to_remove {
         if dir.exists() {
+            // Fix permissions before removal — older installs may have locked files
+            let _ = std::process::Command::new("chmod")
+                .args(&["-R", "u+w", &dir.to_string_lossy().to_string()])
+                .output();
             if let Err(e) = fs::remove_dir_all(dir) {
                 cleanup_log.push(format!(
                     "Warning: Failed to remove {}: {}", dir.display(), e
