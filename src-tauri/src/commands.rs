@@ -10051,12 +10051,94 @@ pub async fn get_clawhub_catalog(
     let query = query.unwrap_or_default().trim().to_string();
     let query_lower = query.to_lowercase();
     let max_results = limit.unwrap_or(40).clamp(1, 200);
-    let fetch_limit = if query_lower.is_empty() {
-        max_results
-    } else {
-        200
-    };
-    let fetch_limit_str = fetch_limit.to_string();
+
+    // When a search query is present, use `clawhub search` (vector search) which
+    // finds skills by semantic relevance regardless of popularity ranking.
+    // `clawhub explore` only returns popular/trending skills, so low-star skills
+    // like newly published ones are invisible when using explore + local filter.
+    if !query_lower.is_empty() {
+        let search_limit = max_results.to_string();
+        let raw = match clawhub_exec_output(&[
+            "search",
+            query.as_str(),
+            "--limit",
+            search_limit.as_str(),
+        ]) {
+            Ok(r) => r,
+            Err(e) => {
+                if e.to_lowercase().contains("rate limit") {
+                    let cache = CLAWHUB_CATALOG_CACHE
+                        .get_or_init(|| Mutex::new(None))
+                        .lock()
+                        .unwrap();
+                    if let Some((cached, ts)) = cache.as_ref() {
+                        if ts.elapsed() < Duration::from_secs(300) {
+                            return Ok(cached.clone());
+                        }
+                    }
+                    return Ok(featured_clawhub_skills());
+                }
+                return Err(e);
+            }
+        };
+
+        // `clawhub search` output is plain text: one result per line in the form
+        //   <slug>  <displayName>  (<score>)
+        // with a leading spinner line "- Searching" that we skip.
+        let mut out = Vec::new();
+        for line in raw.lines() {
+            let line = line.trim();
+            // Skip spinner / status lines
+            if line.is_empty() || line.starts_with('-') || line.starts_with('✔') || line.starts_with('✖') {
+                continue;
+            }
+            // Split on two-or-more spaces to separate columns
+            let cols: Vec<&str> = line.splitn(3, "  ").collect();
+            let slug = cols.first().unwrap_or(&"").trim().to_string();
+            if slug.is_empty() || !is_safe_slug(&slug) {
+                continue;
+            }
+            let display_name = cols.get(1).unwrap_or(&slug.as_str()).trim().to_string();
+            // Hydrate with full metadata via inspect so we have summary, version, stats
+            let (summary, latest_version, downloads, installs_all_time, stars, updated_at) =
+                match clawhub_exec_output(&["inspect", slug.as_str(), "--json"]) {
+                    Ok(inspect_raw) => {
+                        if let Ok(payload) = parse_clawhub_json::<serde_json::Value>(&inspect_raw) {
+                            let skill = payload.get("skill").cloned().unwrap_or(serde_json::Value::Null);
+                            let lv = payload.get("latestVersion").cloned().unwrap_or(serde_json::Value::Null);
+                            let summary = skill.get("summary").and_then(|v| v.as_str()).unwrap_or("ClawHub skill").trim().to_string();
+                            let latest_version = lv.get("version").and_then(|v| v.as_str())
+                                .or_else(|| skill.get("tags").and_then(|v| v.get("latest")).and_then(|v| v.as_str()))
+                                .map(|v| v.to_string());
+                            let stats = skill.get("stats").cloned().unwrap_or(serde_json::Value::Null);
+                            let downloads = stats.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let installs_all_time = stats.get("installsAllTime").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let stars = stats.get("stars").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let updated_at = skill.get("updatedAt").and_then(|v| v.as_u64());
+                            (summary, latest_version, downloads, installs_all_time, stars, updated_at)
+                        } else {
+                            (display_name.clone(), None, 0u64, 0u64, 0u64, None)
+                        }
+                    }
+                    Err(_) => (display_name.clone(), None, 0u64, 0u64, 0u64, None),
+                };
+            out.push(ClawhubCatalogSkill {
+                slug,
+                display_name,
+                summary,
+                latest_version,
+                downloads,
+                installs_all_time,
+                stars,
+                updated_at,
+                is_fallback: false,
+            });
+        }
+        return Ok(out);
+    }
+
+    // No query — browse via explore (trending/popular listing)
+    let fetch_limit_str = max_results.to_string();
     let normalized_sort = match sort.as_deref().map(|v| v.trim()).unwrap_or("trending") {
         "newest" => "newest".to_string(),
         "downloads" => "downloads".to_string(),
@@ -10147,13 +10229,6 @@ pub async fn get_clawhub_catalog(
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let updated_at = item.get("updatedAt").and_then(|v| v.as_u64());
-
-        if !query_lower.is_empty() {
-            let haystack = format!("{} {} {}", slug, display_name, summary).to_lowercase();
-            if !haystack.contains(&query_lower) {
-                continue;
-            }
-        }
 
         out.push(ClawhubCatalogSkill {
             slug,

@@ -8,15 +8,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
+    python3 \
+    python3-pip \
+    python3-venv \
     sqlite3 \
     unzip && \
     rm -rf /var/lib/apt/lists/* && \
-    mkdir -p /data /home/node/.openclaw /home/node/.bun /home/node/.cache/qmd && \
+    # Make `python` resolve to python3 so skills can call either name
+    ln -sfn /usr/bin/python3 /usr/local/bin/python && \
+    mkdir -p /data /data/python-envs /home/node/.openclaw /home/node/.bun /home/node/.cache/qmd && \
     ln -sfn /data/qmd-models /home/node/.cache/qmd/models && \
     chown -R node:node /data /home/node/.openclaw /home/node/.bun /home/node/.cache
 
 ENV BUN_INSTALL=/data/.bun
-ENV PATH="/data/.bun/bin:${PATH}"
+# Python user installs land in /data/.local so they survive container restarts
+# (the node user's HOME is /home/node but /data is the persistent volume)
+ENV PYTHONUSERBASE=/data/.local
+ENV PATH="/data/.bun/bin:/data/.local/bin:${PATH}"
 
 WORKDIR /app
 

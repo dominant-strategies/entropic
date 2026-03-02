@@ -58,6 +58,9 @@ mkdir -p /data/workspace
 mkdir -p /data/skills
 mkdir -p /data/skill-manifests
 mkdir -p /data/.cache/qmd
+# Python user package install target — persisted across restarts so skills
+# don't need to reinstall their pip dependencies every container start.
+mkdir -p /data/.local/bin /data/.local/lib
 mkdir -p /data/.config
 mkdir -p /data/.npm
 mkdir -p /data/.bun
