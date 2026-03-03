@@ -1,0 +1,358 @@
+name: Release macOS (Sandbox)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v0.1.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  NODE_VERSION: '22'
+
+jobs:
+  # ──────────────────────────────────────────────
+  # macOS (Apple Silicon)
+  # ──────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest-xlarge
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: npm install -g pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Bundle runtime (Colima + Lima + Docker CLI)
+        run: ./scripts/bundle-runtime.sh
+
+      - name: Download runtime image from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUNTIME_RELEASE_TAG: runtime-latest
+          RUNTIME_RELEASE_REPO: dominant-strategies/entropic-releases-sandbox
+        run: |
+          set -euo pipefail
+          RESOURCES_DIR="src-tauri/resources"
+          mkdir -p "$RESOURCES_DIR"
+
+          echo "Downloading runtime image from $RUNTIME_RELEASE_REPO release $RUNTIME_RELEASE_TAG..."
+
+          # Download openclaw-runtime.tar.gz
+          gh release download "$RUNTIME_RELEASE_TAG" \
+            --repo "$RUNTIME_RELEASE_REPO" \
+            --pattern "openclaw-runtime.tar.gz" \
+            --dir "$RESOURCES_DIR"
+
+          # Scanner will be downloaded on-demand from runtime release (not bundled in app)
+
+          echo "Runtime image downloaded:"
+          ls -lh "$RESOURCES_DIR"/*.tar.gz
+
+      - name: Import Apple signing certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          security create-keychain -p "" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "" "$KEYCHAIN_PATH"
+          security import certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          IDENTITIES_OUTPUT="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")"
+          echo "$IDENTITIES_OUTPUT"
+
+          IDENTITY_COUNT="$(printf '%s\n' "$IDENTITIES_OUTPUT" \
+            | awk '/[0-9]+\) [0-9A-F]{40} / {count++} END {print count+0}')"
+
+          if [ "$IDENTITY_COUNT" -eq 0 ]; then
+            echo "No code signing identities were imported from APPLE_CERTIFICATE."
+            exit 1
+          elif [ "$IDENTITY_COUNT" -eq 1 ]; then
+            SIGNING_SHA1="$(printf '%s\n' "$IDENTITIES_OUTPUT" \
+              | awk '/[0-9]+\) [0-9A-F]{40} / {print $2; exit}')"
+          else
+            SIGNING_SHA1="$(printf '%s\n' "$IDENTITIES_OUTPUT" \
+              | awk -v identity="$APPLE_SIGNING_IDENTITY" 'index($0, "\"" identity "\"") {print $2; exit}')"
+            if [ -z "$SIGNING_SHA1" ]; then
+              echo "Multiple identities found; APPLE_SIGNING_IDENTITY did not match any imported identity."
+              echo "Set APPLE_SIGNING_IDENTITY to the exact certificate label shown above."
+              exit 1
+            fi
+          fi
+
+          echo "APPLE_SIGNING_IDENTITY_SHA1=$SIGNING_SHA1" >> "$GITHUB_ENV"
+          rm certificate.p12
+
+      - name: Build Tauri app
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+          VITE_AUTH_REDIRECT_URL: "entropic://auth/callback"
+          ENTROPIC_GOOGLE_CLIENT_ID: ${{ secrets.ENTROPIC_GOOGLE_CLIENT_ID }}
+          ENTROPIC_GOOGLE_CLIENT_SECRET: ${{ secrets.ENTROPIC_GOOGLE_CLIENT_SECRET }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY_SHA1 }}
+        run: pnpm tauri build
+
+      - name: Sign bundled binaries
+        env:
+          CERT: ${{ env.APPLE_SIGNING_IDENTITY_SHA1 }}
+        run: |
+          APP_PATH="src-tauri/target/release/bundle/macos/Entropic.app"
+          ENTITLEMENTS="src-tauri/entitlements.plist"
+
+          # docker only needs basic signature (no special entitlements)
+          if [ -f "$APP_PATH/Contents/Resources/resources/bin/docker" ]; then
+            codesign --force --options runtime --timestamp --sign "$CERT" \
+              "$APP_PATH/Contents/Resources/resources/bin/docker"
+          fi
+
+          # limactl needs virtualization entitlement - it calls Virtualization.framework
+          # colima also needs it as it invokes limactl which creates VZ VMs
+          for bin in colima limactl; do
+            if [ -f "$APP_PATH/Contents/Resources/resources/bin/$bin" ]; then
+              codesign --force --options runtime --timestamp --sign "$CERT" \
+                --entitlements "$ENTITLEMENTS" \
+                "$APP_PATH/Contents/Resources/resources/bin/$bin"
+            fi
+          done
+
+          codesign --force --options runtime --timestamp --sign "$CERT" \
+            --entitlements "$ENTITLEMENTS" --deep "$APP_PATH"
+
+      - name: Create and sign DMG
+        run: |
+          APP_PATH="src-tauri/target/release/bundle/macos/Entropic.app"
+          DMG_NAME="Entropic-${{ steps.version.outputs.tag }}-mac-arm64.dmg"
+
+          # Detach any mounted "Entropic" volumes to avoid "Resource busy"
+          for vol in /Volumes/Entropic*; do
+            [ -d "$vol" ] && hdiutil detach "$vol" -force 2>/dev/null || true
+          done
+
+          # Remove stale DMG from previous run
+          rm -f "$DMG_NAME"
+          ./scripts/create-macos-dmg.sh "$APP_PATH" "$DMG_NAME" "Entropic" "src-tauri/icons/dmg-background.png"
+          codesign --force --timestamp --sign "${{ env.APPLE_SIGNING_IDENTITY_SHA1 }}" "$DMG_NAME"
+          echo "dmg_name=$DMG_NAME" >> "$GITHUB_ENV"
+
+      - name: Notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "Submitting ${{ env.dmg_name }} for notarization..."
+          SUBMIT_JSON="$(mktemp)"
+          xcrun notarytool submit "${{ env.dmg_name }}" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APP_PASSWORD" \
+            --output-format json \
+            --wait > "$SUBMIT_JSON"
+          cat "$SUBMIT_JSON"
+
+          STATUS="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('status','unknown'))" "$SUBMIT_JSON" 2>/dev/null || echo "unknown")"
+          SUBMISSION_ID="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('id',''))" "$SUBMIT_JSON" 2>/dev/null || echo "")"
+
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "::error::Notarization status: $STATUS (expected 'Accepted')"
+            if [ -n "$SUBMISSION_ID" ]; then
+              echo "Fetching notarization log for submission $SUBMISSION_ID..."
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --team-id "$APPLE_TEAM_ID" \
+                --password "$APP_PASSWORD" || true
+            fi
+            exit 1
+          fi
+
+          echo "Notarization accepted (id: $SUBMISSION_ID). Stapling..."
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if xcrun stapler staple -v "${{ env.dmg_name }}"; then
+              echo "Stapled successfully on attempt $attempt."
+              xcrun stapler validate -v "${{ env.dmg_name }}"
+              spctl -a -vv --type open "${{ env.dmg_name }}" || true
+              exit 0
+            fi
+            echo "Staple attempt $attempt failed. Waiting 30s for CloudKit propagation..."
+            sleep 30
+          done
+
+          echo "::error::Stapling failed after 8 attempts."
+          exit 1
+
+      - name: Prepare updater artifacts
+        id: updater
+        run: |
+          BUNDLE_DIR="src-tauri/target/release/bundle/macos"
+          UPDATER_TAR="$BUNDLE_DIR/Entropic.app.tar.gz"
+          UPDATER_SIG="$BUNDLE_DIR/Entropic.app.tar.gz.sig"
+
+          if [ -f "$UPDATER_SIG" ]; then
+            echo "sig=$(cat "$UPDATER_SIG")" >> "$GITHUB_OUTPUT"
+            echo "has_updater=true" >> "$GITHUB_OUTPUT"
+            cp "$UPDATER_TAR" "Entropic-${{ steps.version.outputs.tag }}-mac-arm64-updater.tar.gz"
+          else
+            echo "has_updater=false" >> "$GITHUB_OUTPUT"
+            echo "WARNING: No updater signature found. Set TAURI_SIGNING_PRIVATE_KEY to enable auto-updates."
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: entropic-mac-arm64
+          path: |
+            ${{ env.dmg_name }}
+            Entropic-${{ steps.version.outputs.tag }}-mac-arm64-updater.tar.gz
+
+      - name: Save updater metadata
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          cat > updater-mac.json << METAEOF
+          {
+            "platform": "darwin-aarch64",
+            "url": "https://github.com/dominant-strategies/entropic-releases-sandbox/releases/download/${VERSION}/Entropic-${VERSION}-mac-arm64-updater.tar.gz",
+            "signature": "${{ steps.updater.outputs.sig }}",
+            "has_updater": "${{ steps.updater.outputs.has_updater }}"
+          }
+          METAEOF
+
+      - name: Upload updater metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-mac
+          path: updater-mac.json
+
+  # ──────────────────────────────────────────────
+  # Publish macOS assets
+  # ──────────────────────────────────────────────
+  publish-macos:
+    needs: [build-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: entropic-sandbox-release-publish-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Generate merged latest.json (macOS)
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          SEMVER="${VERSION#v}"
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          REPO="dominant-strategies/entropic-releases-sandbox"
+          REPO_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+          LATEST_PATH="artifacts/latest.json"
+
+          MAC_SIG=""
+          if [ -f artifacts/updater-mac/updater-mac.json ]; then
+            MAC_SIG="$(python3 -c "import json; d=json.load(open('artifacts/updater-mac/updater-mac.json')); print(d.get('signature',''))")"
+          fi
+
+          if gh release view "$VERSION" --repo "$REPO" &>/dev/null; then
+            TMP_DIR="$(mktemp -d)"
+            if gh release download "$VERSION" --repo "$REPO" --pattern latest.json --dir "$TMP_DIR" &>/dev/null; then
+              cp "$TMP_DIR/latest.json" "$LATEST_PATH"
+            fi
+            rm -rf "$TMP_DIR"
+          fi
+
+          VERSION="$VERSION" SEMVER="$SEMVER" PUB_DATE="$PUB_DATE" REPO_URL="$REPO_URL" MAC_SIG="$MAC_SIG" \
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          latest_path = Path("artifacts/latest.json")
+          if latest_path.exists():
+              data = json.loads(latest_path.read_text())
+          else:
+              data = {}
+
+          data["version"] = os.environ["SEMVER"]
+          data["notes"] = f"Entropic {os.environ['VERSION']}"
+          data["pub_date"] = os.environ["PUB_DATE"]
+          platforms = data.get("platforms") or {}
+          platforms["darwin-aarch64"] = {
+              "url": f"{os.environ['REPO_URL']}/Entropic-{os.environ['VERSION']}-mac-arm64-updater.tar.gz",
+              "signature": os.environ.get("MAC_SIG", "")
+          }
+          data["platforms"] = platforms
+          latest_path.write_text(json.dumps(data, indent=2) + "\n")
+          PY
+
+          cat "$LATEST_PATH"
+
+      - name: Create or update public release (macOS assets)
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          REPO="dominant-strategies/entropic-releases-sandbox"
+
+          FILES=()
+          for f in artifacts/entropic-mac-arm64/*; do
+            [ -f "$f" ] && FILES+=("$f")
+          done
+          [ -f artifacts/updater-mac/updater-mac.json ] && FILES+=("artifacts/updater-mac/updater-mac.json")
+          FILES+=("artifacts/latest.json")
+
+          if gh release view "$VERSION" --repo "$REPO" &>/dev/null; then
+            gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
+          else
+            if ! gh release create "$VERSION" "${FILES[@]}" \
+              --repo "$REPO" \
+              --title "Entropic $VERSION" \
+              --notes "macOS assets uploaded by Release macOS (Sandbox) workflow."; then
+              gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
+            fi
+          fi
