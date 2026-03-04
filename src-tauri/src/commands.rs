@@ -3311,6 +3311,20 @@ fn command_output_error(output: &Output) -> String {
 }
 
 fn clawhub_exec(args: &[&str]) -> Result<Output, String> {
+    // Build a shell command that ensures clawhub is installed globally in
+    // the persistent /data/.local prefix (already in PATH) before running it.
+    // This avoids the fragile `npx -y` approach which re-downloads every time
+    // and is prone to npm cache corruption (ENOTEMPTY errors).
+    let mut shell_cmd = String::from(
+        "command -v clawhub >/dev/null 2>&1 || npm install -g --prefix /data/.local clawhub@0.7.0 >/dev/null 2>&1; exec clawhub",
+    );
+    for arg in args {
+        shell_cmd.push(' ');
+        shell_cmd.push('\'');
+        shell_cmd.push_str(&arg.replace('\'', "'\\''"));
+        shell_cmd.push('\'');
+    }
+
     let mut cmd = docker_command();
     cmd.args([
         "exec",
@@ -3322,11 +3336,10 @@ fn clawhub_exec(args: &[&str]) -> Result<Output, String> {
         "XDG_CACHE_HOME=/data/.cache",
         "npm_config_cache=/data/.npm",
         "PLAYWRIGHT_BROWSERS_PATH=/data/playwright",
-        "npx",
-        "-y",
-        "clawhub@0.7.0",
+        "sh",
+        "-c",
+        &shell_cmd,
     ]);
-    cmd.args(args);
     cmd.output()
         .map_err(|e| format!("Failed to run ClawHub command: {}", e))
 }
