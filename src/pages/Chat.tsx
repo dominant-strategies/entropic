@@ -179,7 +179,7 @@ function XLogo({ className }: { className?: string }) {
 // ── Local chat persistence ─────────────────────────────────────
 const CHAT_STORE_FILE = "entropic-chat-history.json";
 const MAX_PERSISTED_SESSIONS = 50;
-const MAX_PERSISTED_MESSAGES = 200;
+const MAX_PERSISTED_MESSAGES = 1000;
 
 type PersistedChatData = {
   sessions: ChatSession[];
@@ -1512,7 +1512,9 @@ export function Chat({
   // Local persistence: cache messages per session key
   const sessionMessagesRef = useRef<Record<string, Message[]>>({});
   const persistTimerRef = useRef<number | null>(null);
+  const streamPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restoredFromCacheRef = useRef(false);
+  const cacheLoadedRef = useRef(false);
   const activeRunIdRef = useRef<string | null>(null);
   const activeRunSessionRef = useRef<string | null>(null);
   const activeRunTimeoutRef = useRef<number | null>(null);
@@ -1870,7 +1872,10 @@ export function Chat({
     if (restoredFromCacheRef.current) return;
     restoredFromCacheRef.current = true;
     loadPersistedChatData().then((cached) => {
-      if (!cached) return;
+      if (!cached) {
+        cacheLoadedRef.current = true;
+        return;
+      }
       if (cached.sessions.length > 0) {
         sessionMessagesRef.current = cached.messages || {};
         for (const [sessionKey, msgs] of Object.entries(sessionMessagesRef.current)) {
@@ -1886,6 +1891,7 @@ export function Chat({
         setMessages(restoredMsgs);
         if (restoredMsgs.length > 0) setShowWelcome(false);
       }
+      cacheLoadedRef.current = true;
     });
   }, [applySessionTitles]);
 
@@ -2027,6 +2033,7 @@ export function Chat({
   useEffect(() => {
     return () => {
       if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current);
+      if (streamPersistTimerRef.current) clearTimeout(streamPersistTimerRef.current);
       clearActiveRunTracking();
       const sessionsSnap = sessionsRef.current;
       const currentSnap = currentSessionRef.current;
@@ -2715,6 +2722,14 @@ export function Chat({
             addDiag(`timing tool_result runId=${eventRunId} t=${timings.toolSeenAt - timings.startedAt}ms`);
           }
         }
+        // Throttled persist during streaming: save every 5s so partial responses
+        // survive app crashes or network drops mid-stream.
+        if (event.state === "delta" && !streamPersistTimerRef.current) {
+          streamPersistTimerRef.current = setTimeout(() => {
+            streamPersistTimerRef.current = null;
+            schedulePersist();
+          }, 5000);
+        }
       } else if (event.state === "final" && eventRunId && knownSessionKey) {
         addDiag(`final event missing payload runId=${eventRunId}; attempting history recovery`);
         void recoverFinalRunFromHistory(eventRunId, knownSessionKey);
@@ -2744,6 +2759,11 @@ export function Chat({
         delete runRevertModelRef.current[eventRunId];
         delete runSessionKeyRef.current[eventRunId];
 
+        // Clear streaming persist timer — final persist below supersedes it
+        if (streamPersistTimerRef.current) {
+          clearTimeout(streamPersistTimerRef.current);
+          streamPersistTimerRef.current = null;
+        }
         // Persist the full conversation after assistant response completes
         if (currentSessionRef.current) {
           // Refresh session list from gateway to get derived titles
@@ -2816,6 +2836,11 @@ export function Chat({
   }
 
   async function loadSessions() {
+    // Wait for local cache to load before merging with gateway sessions.
+    // Without this, sessionMessagesRef is empty and local-only sessions are dropped.
+    for (let i = 0; i < 20 && !cacheLoadedRef.current; i++) {
+      await new Promise(r => setTimeout(r, 100));
+    }
     const gatewayAllSessions = await clientRef.current?.listSessions() || [];
     const gatewaySessions = gatewayAllSessions.filter((session) =>
       shouldDisplayGatewaySession(session.key),
@@ -2971,7 +2996,9 @@ export function Chat({
       const parsedHistory = history
         .map((m: any, i: number) => normalizeGatewayMessage(m as GatewayMessage, `h-${i}`))
         .filter((m: Message | null): m is Message => !!m && m.content.trim().length > 0);
-      msgs = parsedHistory.length > 0 ? parsedHistory : cachedMsgs;
+      // Keep whichever source has more messages to avoid data loss from
+      // normalizeGatewayMessage filtering out tool-only or system messages.
+      msgs = parsedHistory.length >= cachedMsgs.length ? parsedHistory : cachedMsgs;
     } else {
       // Fall back to locally cached messages
       msgs = cachedMsgs;

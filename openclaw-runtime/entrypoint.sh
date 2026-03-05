@@ -70,6 +70,8 @@ mkdir -p /data/browser/profile
 mkdir -p /data/tmp
 mkdir -p /data/qmd-models
 mkdir -p /data/telegram
+mkdir -p /data/sessions
+mkdir -p /data/canvas
 
 # Keep OpenClaw's expected ~/.openclaw path mapped to tmpfs-backed state
 # even when HOME points at /data for durable tool caches.
@@ -93,6 +95,27 @@ if [ -d /home/node/.openclaw/telegram ] && [ ! -L /home/node/.openclaw/telegram 
   rm -rf /home/node/.openclaw/telegram
 fi
 ln -sfn /data/telegram /home/node/.openclaw/telegram
+
+# Persist chat sessions (transcripts + registry) across container restarts.
+# Without this, all chat history is lost when the container recreates (tmpfs wipe).
+SESSIONS_DIR="/home/node/.openclaw/agents/main/sessions"
+mkdir -p "$(dirname "$SESSIONS_DIR")"
+if [ -d "$SESSIONS_DIR" ] && [ ! -L "$SESSIONS_DIR" ]; then
+  if [ -n "$(ls -A "$SESSIONS_DIR" 2>/dev/null)" ] && [ -z "$(ls -A /data/sessions 2>/dev/null)" ]; then
+    cp -a "$SESSIONS_DIR/." /data/sessions/ 2>/dev/null || true
+  fi
+  rm -rf "$SESSIONS_DIR"
+fi
+ln -sfn /data/sessions "$SESSIONS_DIR"
+
+# Persist canvas files across container restarts.
+if [ -d /home/node/.openclaw/canvas ] && [ ! -L /home/node/.openclaw/canvas ]; then
+  if [ -n "$(ls -A /home/node/.openclaw/canvas 2>/dev/null)" ] && [ -z "$(ls -A /data/canvas 2>/dev/null)" ]; then
+    cp -a /home/node/.openclaw/canvas/. /data/canvas/ 2>/dev/null || true
+  fi
+  rm -rf /home/node/.openclaw/canvas
+fi
+ln -sfn /data/canvas /home/node/.openclaw/canvas
 
 # Persist credentials (pairing data, etc.) in durable storage by overriding OPENCLAW_OAUTH_DIR
 # This environment variable tells OpenClaw to store credentials directly in /data/credentials
@@ -254,6 +277,9 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
   },
   "cron": {
     "store": "/data/cron/jobs.json"
+  },
+  "session": {
+    "store": "/data/sessions/sessions.json"
   },
   "gateway": {
     "controlUi": {
