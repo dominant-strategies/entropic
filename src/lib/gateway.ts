@@ -103,6 +103,8 @@ export class GatewayClient {
     }
   >();
   private listeners: Partial<{ [K in keyof GatewayEvents]: GatewayEvents[K][] }> = {};
+  private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  private static KEEPALIVE_INTERVAL_MS = 30_000;
 
   private shouldLog() {
     if (typeof window === "undefined") {
@@ -220,6 +222,7 @@ export class GatewayClient {
 
       this.ws.onclose = (event) => {
         this.log("WebSocket closed", `code=${event.code}`, `reason=${event.reason || "(none)"}`);
+        this.stopKeepalive();
         this.failPendingRequests("ws.closed", "closed", `code=${event.code} reason=${event.reason || "(none)"}`);
         if (!this.authenticated) {
           rejectOnce(
@@ -262,6 +265,7 @@ export class GatewayClient {
           });
           this.log("Connected successfully");
           this.authenticated = true;
+          this.startKeepalive();
           this.emit("connected");
           connectResolve?.();
         } catch (e) {
@@ -359,7 +363,28 @@ export class GatewayClient {
     });
   }
 
+  private startKeepalive() {
+    this.stopKeepalive();
+    this.keepaliveTimer = setInterval(() => {
+      if (!this.isConnected()) {
+        this.stopKeepalive();
+        return;
+      }
+      this.rpc("health").catch((e) => {
+        this.log("Keepalive ping failed:", e);
+      });
+    }, GatewayClient.KEEPALIVE_INTERVAL_MS);
+  }
+
+  private stopKeepalive() {
+    if (this.keepaliveTimer) {
+      clearInterval(this.keepaliveTimer);
+      this.keepaliveTimer = null;
+    }
+  }
+
   disconnect() {
+    this.stopKeepalive();
     if (this.ws) {
       this.ws.close();
       this.ws = null;

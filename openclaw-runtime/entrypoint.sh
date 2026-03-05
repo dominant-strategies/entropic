@@ -195,6 +195,13 @@ if [ -n "$MEMORY_CONFIG" ]; then
     PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, ${MEMORY_CONFIG}"
 fi
 
+GATEWAY_AUTH_BLOCK=""
+if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+    OPENCLAW_GATEWAY_TOKEN_ESC="$(json_escape "${OPENCLAW_GATEWAY_TOKEN}")"
+    GATEWAY_AUTH_BLOCK=",
+    \"auth\": { \"token\": \"${OPENCLAW_GATEWAY_TOKEN_ESC}\" }"
+fi
+
 if [ -n "${OPENCLAW_MODEL:-}" ]; then
     OPENCLAW_MODEL_ESC="$(json_escape "${OPENCLAW_MODEL}")"
     IMAGE_MODEL_BLOCK=""
@@ -284,8 +291,9 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
   "gateway": {
     "controlUi": {
       "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": false
-    }
+      "dangerouslyDisableDeviceAuth": false,
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    }${GATEWAY_AUTH_BLOCK}
   },
   "plugins": {
     "slots": {
