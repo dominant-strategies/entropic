@@ -11,7 +11,7 @@ use base64::{
 use futures_util::{SinkExt, StreamExt};
 use http;
 use rand::RngCore;
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
@@ -41,6 +41,23 @@ const ENTROPIC_PROXY_ALLOWED_HOSTS: &[&str] = &[
 const MAX_BRIDGE_DEVICES: usize = 10;
 const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const CLIENT_LOG_READ_MAX_BYTES: usize = 512 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeApiRequest {
+    method: String,
+    url: String,
+    access_token: Option<String>,
+    body: Option<serde_json::Value>,
+    device_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeApiResponse {
+    status: u16,
+    body: serde_json::Value,
+}
 
 fn client_log_path() -> PathBuf {
     dirs::home_dir()
@@ -89,6 +106,72 @@ fn read_client_log_text(max_bytes: Option<usize>) -> Result<String, String> {
     };
 
     Ok(String::from_utf8_lossy(clipped).to_string())
+}
+
+fn validate_native_api_url(url: &str) -> Result<Url, String> {
+    let parsed = Url::parse(url).map_err(|e| format!("Invalid API URL: {}", e))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "API URL is missing a host".to_string())?;
+    if !ENTROPIC_PROXY_ALLOWED_HOSTS
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(host))
+    {
+        return Err(format!("API host is not allowlisted: {}", host));
+    }
+    match parsed.scheme() {
+        "https" => Ok(parsed),
+        "http" if host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" => Ok(parsed),
+        scheme => Err(format!("Unsupported API URL scheme: {}", scheme)),
+    }
+}
+
+#[tauri::command]
+pub async fn entropic_api_request_native(
+    request: NativeApiRequest,
+) -> Result<NativeApiResponse, String> {
+    let url = validate_native_api_url(&request.url)?;
+    let method = reqwest::Method::from_bytes(request.method.as_bytes())
+        .map_err(|e| format!("Invalid HTTP method: {}", e))?;
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|e| format!("Failed to build API client: {}", e))?;
+    let mut req = client.request(method, url);
+
+    if let Some(access_token) = request.access_token.as_deref() {
+        if !access_token.trim().is_empty() {
+            req = req.bearer_auth(access_token);
+        }
+    }
+    if let Some(device_fingerprint) = request.device_fingerprint.as_deref() {
+        if !device_fingerprint.trim().is_empty() {
+            req = req.header("X-Entropic-Device-Fingerprint", device_fingerprint);
+        }
+    }
+    if request.body.is_some() {
+        req = req.header("Content-Type", "application/json");
+    }
+    if let Some(body) = request.body {
+        req = req.json(&body);
+    }
+
+    let response = req
+        .send()
+        .await
+        .map_err(|e| format!("Network request failed: {}", e))?;
+    let status = response.status().as_u16();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed reading API response body: {}", e))?;
+    let body = if text.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str::<serde_json::Value>(&text)
+            .unwrap_or_else(|_| serde_json::json!({ "raw": text }))
+    };
+
+    Ok(NativeApiResponse { status, body })
 }
 
 fn default_client_log_export_path() -> Result<PathBuf, String> {
@@ -2050,12 +2133,12 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
         .body(())
         .map_err(|e| format!("Failed to build request: {}", e))?;
 
-    let connect = timeout(Duration::from_millis(1200), connect_async(request))
+    let connect = timeout(Duration::from_millis(3000), connect_async(request))
         .await
         .map_err(|_| "WebSocket connect timeout".to_string())?;
     let (mut ws, _) = connect.map_err(|e| format!("WebSocket connect failed: {}", e))?;
 
-    let result = timeout(Duration::from_millis(1800), async {
+    let result = timeout(Duration::from_millis(5000), async {
         let mut sent_connect = false;
         let mut sent_health = false;
         loop {
@@ -6168,7 +6251,8 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
     // Includes:
     // - "null" for native WebSocket clients (Rust health checks)
     // - http/https localhost for direct browser access
-    // - tauri://localhost for Tauri webview (production builds)
+    // - tauri://localhost for older Tauri custom protocol builds
+    // - http/https tauri.localhost for current Windows Tauri/Wry webviews
     // - http://localhost:5174 for Vite dev server
     set_openclaw_config_value(
         cfg,
@@ -6180,6 +6264,8 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
             "https://localhost",
             "https://127.0.0.1",
             "tauri://localhost",
+            "http://tauri.localhost",
+            "https://tauri.localhost",
             "http://localhost:5174"
         ]),
     );
@@ -7028,6 +7114,9 @@ fn finish_health_wait_or_tolerate_starting(err: String, context: &str) -> Result
     // Tolerate normal startup transients: container still warming up, or WS not ready yet
     if err.contains("container health=starting")
         || err.contains("Handshake not finished")
+        || err.contains("gateway closed before response")
+        || err.contains("gateway health timeout")
+        || err.contains("WebSocket connect timeout")
         || err.contains("WebSocket connect failed")
         || err.contains("WebSocket protocol error")
     {
