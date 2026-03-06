@@ -1,0 +1,229 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v0.1.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  NODE_VERSION: '22'
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            "tag=${{ github.event.inputs.version }}" >> $env:GITHUB_OUTPUT
+          } else {
+            "tag=$($env:GITHUB_REF -replace '^refs/tags/', '')" >> $env:GITHUB_OUTPUT
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install pnpm
+        shell: pwsh
+        run: npm install -g pnpm
+
+      - name: Install dependencies
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri app
+        shell: pwsh
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+          VITE_AUTH_REDIRECT_URL: "entropic://auth/callback"
+          ENTROPIC_GOOGLE_CLIENT_ID: ${{ secrets.ENTROPIC_GOOGLE_CLIENT_ID }}
+          ENTROPIC_GOOGLE_CLIENT_SECRET: ${{ secrets.ENTROPIC_GOOGLE_CLIENT_SECRET }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm.cmd tauri build --bundles nsis
+
+      - name: Prepare artifacts
+        id: artifacts
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.tag }}'
+          $bundleDir = Join-Path $PWD 'src-tauri\target\release\bundle\nsis'
+          if (-not (Test-Path $bundleDir)) {
+            throw "NSIS bundle directory not found: $bundleDir"
+          }
+
+          $installer = Get-ChildItem -Path $bundleDir -Filter '*.exe' -File |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if (-not $installer) {
+            throw "No NSIS installer found in $bundleDir"
+          }
+
+          $signature = Get-ChildItem -Path $bundleDir -Filter '*.sig' -File |
+            Where-Object { $_.BaseName -eq $installer.Name } |
+            Select-Object -First 1
+          if (-not $signature) {
+            throw "No updater signature found for $($installer.Name). Configure TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD in GitHub Actions secrets."
+          }
+
+          $releaseInstaller = "Entropic-$version-windows-x86_64-setup.exe"
+          $releaseSignature = "$releaseInstaller.sig"
+          Copy-Item -Path $installer.FullName -Destination $releaseInstaller -Force
+          Copy-Item -Path $signature.FullName -Destination $releaseSignature -Force
+
+          $signatureValue = (Get-Content -Path $releaseSignature -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($signatureValue)) {
+            throw "Updater signature file is empty: $releaseSignature"
+          }
+
+          "installer_name=$releaseInstaller" >> $env:GITHUB_OUTPUT
+          "installer_sig_name=$releaseSignature" >> $env:GITHUB_OUTPUT
+          "installer_sig_value=$signatureValue" >> $env:GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: entropic-windows-x86_64
+          path: |
+            ${{ steps.artifacts.outputs.installer_name }}
+            ${{ steps.artifacts.outputs.installer_sig_name }}
+
+      - name: Save updater metadata
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.tag }}'
+          @"
+          {
+            "platform": "windows-x86_64",
+            "url": "https://github.com/dominant-strategies/entropic-releases/releases/download/$version/Entropic-$version-windows-x86_64-setup.exe",
+            "signature": "${{ steps.artifacts.outputs.installer_sig_value }}"
+          }
+          "@ | Set-Content -Path updater-windows.json -Encoding UTF8
+
+      - name: Upload updater metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-windows
+          path: updater-windows.json
+
+  publish-windows:
+    needs: [build-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    concurrency:
+      group: entropic-release-publish-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Generate merged latest.json (Windows)
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          SEMVER="${VERSION#v}"
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          REPO="dominant-strategies/entropic-releases"
+          REPO_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+          LATEST_PATH="artifacts/latest.json"
+
+          WINDOWS_SIG=""
+          if [ -f artifacts/updater-windows/updater-windows.json ]; then
+            WINDOWS_SIG="$(python3 -c "import json; d=json.load(open('artifacts/updater-windows/updater-windows.json')); print(d.get('signature',''))")"
+          fi
+
+          if gh release view "$VERSION" --repo "$REPO" &>/dev/null; then
+            TMP_DIR="$(mktemp -d)"
+            if gh release download "$VERSION" --repo "$REPO" --pattern latest.json --dir "$TMP_DIR" &>/dev/null; then
+              cp "$TMP_DIR/latest.json" "$LATEST_PATH"
+            fi
+            rm -rf "$TMP_DIR"
+          fi
+
+          VERSION="$VERSION" SEMVER="$SEMVER" PUB_DATE="$PUB_DATE" REPO_URL="$REPO_URL" WINDOWS_SIG="$WINDOWS_SIG" \
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          latest_path = Path("artifacts/latest.json")
+          if latest_path.exists():
+              data = json.loads(latest_path.read_text())
+          else:
+              data = {}
+
+          data["version"] = os.environ["SEMVER"]
+          data["notes"] = f"Entropic {os.environ['VERSION']}"
+          data["pub_date"] = os.environ["PUB_DATE"]
+          platforms = data.get("platforms") or {}
+          platforms["windows-x86_64"] = {
+              "url": f"{os.environ['REPO_URL']}/Entropic-{os.environ['VERSION']}-windows-x86_64-setup.exe",
+              "signature": os.environ.get("WINDOWS_SIG", ""),
+          }
+          data["platforms"] = platforms
+          latest_path.write_text(json.dumps(data, indent=2) + "\n")
+          PY
+
+          cat "$LATEST_PATH"
+
+      - name: Create or update public release (Windows assets)
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          REPO="dominant-strategies/entropic-releases"
+
+          FILES=()
+          for f in artifacts/entropic-windows-x86_64/*; do
+            [ -f "$f" ] && FILES+=("$f")
+          done
+          [ -f artifacts/updater-windows/updater-windows.json ] && FILES+=("artifacts/updater-windows/updater-windows.json")
+          FILES+=("artifacts/latest.json")
+
+          if gh release view "$VERSION" --repo "$REPO" &>/dev/null; then
+            gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
+          else
+            if ! gh release create "$VERSION" "${FILES[@]}" \
+              --repo "$REPO" \
+              --title "Entropic $VERSION" \
+              --notes "Windows assets uploaded by Release Windows workflow."; then
+              gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
+            fi
+          fi
