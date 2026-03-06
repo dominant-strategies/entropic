@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
+import { nativeApiRequest, shouldUseNativeApiTransport } from "./nativeApi";
 
 const RAW_API_URL = (import.meta as any).env?.VITE_API_URL || "";
 const API_URL = RAW_API_URL || ((import.meta as any).env?.DEV ? "/api" : "");
+const USE_NATIVE_API_TRANSPORT = shouldUseNativeApiTransport(API_URL);
 
 const FINGERPRINT_HEADER = "X-Entropic-Device-Fingerprint";
 const FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/i;
@@ -96,6 +98,26 @@ async function getTrialHeaders(): Promise<Record<string, string>> {
 
 async function trialRequest<T>(path: string): Promise<T> {
   const headers = await getTrialHeaders();
+  if (USE_NATIVE_API_TRANSPORT) {
+    const response = await nativeApiRequest({
+      method: "GET",
+      url: apiPath(path),
+      deviceFingerprint: headers[FINGERPRINT_HEADER],
+    });
+    if (response.status < 200 || response.status >= 300) {
+      const serverMessage = response.body?.error?.message;
+      const rawMessage = response.body?.raw;
+      throw new Error(
+        typeof serverMessage === "string" && serverMessage.trim()
+          ? serverMessage
+          : typeof rawMessage === "string" && rawMessage.trim()
+            ? rawMessage
+            : `Trial API error: ${response.status}`
+      );
+    }
+    return response.body as T;
+  }
+
   const response = await fetch(apiPath(path), {
     method: "GET",
     headers,
