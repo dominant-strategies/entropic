@@ -110,6 +110,9 @@ type LocalhostAuthStart = { redirect_url: string };
 async function shouldUseLocalhostOAuth(): Promise<boolean> {
   if (AUTH_FORCE_DEEPLINK) return false;
   if (AUTH_USE_LOCALHOST) return true;
+  // Standard tauri dev builds set DEV=true. If someone runs a non-standard
+  // desktop dev environment without that flag, they can still opt in with
+  // VITE_AUTH_USE_LOCALHOST=1 instead of relying on deep-link callbacks.
   if (!(import.meta as any).env?.DEV) return false;
   try {
     const os = await platform();
