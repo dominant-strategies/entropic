@@ -646,6 +646,26 @@ struct RuntimeReleaseManifest {
     url: String,
     sha256: String,
     #[serde(default)]
+    scanner_url: Option<String>,
+    #[serde(default)]
+    scanner_sha256: Option<String>,
+    #[serde(default)]
+    runtime_linux_x86_64_url: Option<String>,
+    #[serde(default)]
+    runtime_linux_x86_64_sha256: Option<String>,
+    #[serde(default)]
+    runtime_linux_aarch64_url: Option<String>,
+    #[serde(default)]
+    runtime_linux_aarch64_sha256: Option<String>,
+    #[serde(default)]
+    scanner_linux_x86_64_url: Option<String>,
+    #[serde(default)]
+    scanner_linux_x86_64_sha256: Option<String>,
+    #[serde(default)]
+    scanner_linux_aarch64_url: Option<String>,
+    #[serde(default)]
+    scanner_linux_aarch64_sha256: Option<String>,
+    #[serde(default)]
     openclaw_commit: Option<String>,
     #[serde(default)]
     entropic_skills_commit: Option<String>,
@@ -725,6 +745,28 @@ fn runtime_manifest_url() -> String {
     )
 }
 
+fn runtime_asset_arch() -> Option<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" | "amd64" => Some("x86_64"),
+        "aarch64" | "arm64" => Some("aarch64"),
+        _ => None,
+    }
+}
+
+fn runtime_release_tar_asset_name() -> String {
+    if let Some(arch) = runtime_asset_arch() {
+        return format!("openclaw-runtime-linux-{}.tar.gz", arch);
+    }
+    "openclaw-runtime.tar.gz".to_string()
+}
+
+fn scanner_release_tar_asset_name() -> String {
+    if let Some(arch) = runtime_asset_arch() {
+        return format!("entropic-skill-scanner-linux-{}.tar.gz", arch);
+    }
+    "entropic-skill-scanner.tar.gz".to_string()
+}
+
 fn runtime_release_tar_url() -> String {
     if let Some(val) = option_env!("OPENCLAW_RUNTIME_TAR_URL") {
         let trimmed = val.trim();
@@ -739,9 +781,10 @@ fn runtime_release_tar_url() -> String {
         }
     }
     format!(
-        "https://github.com/{}/releases/download/{}/openclaw-runtime.tar.gz",
+        "https://github.com/{}/releases/download/{}/{}",
         runtime_release_repo(),
-        runtime_release_tag()
+        runtime_release_tag(),
+        runtime_release_tar_asset_name()
     )
 }
 
@@ -758,10 +801,16 @@ fn scanner_release_tar_url() -> String {
             return trimmed.to_string();
         }
     }
+    if let Some(manifest) = read_cached_runtime_manifest() {
+        if let Some(url) = manifest.selected_scanner_url() {
+            return url;
+        }
+    }
     format!(
-        "https://github.com/{}/releases/download/{}/entropic-skill-scanner.tar.gz",
+        "https://github.com/{}/releases/download/{}/{}",
         runtime_release_repo(),
-        runtime_release_tag()
+        runtime_release_tag(),
+        scanner_release_tar_asset_name()
     )
 }
 
@@ -916,19 +965,72 @@ fn download_url_to_path(
     }
 }
 
+impl RuntimeReleaseManifest {
+    fn apply_arch_overrides(&mut self) {
+        match runtime_asset_arch() {
+            Some("x86_64") => {
+                if let (Some(url), Some(sha)) = (
+                    self.runtime_linux_x86_64_url.as_deref(),
+                    self.runtime_linux_x86_64_sha256.as_deref(),
+                ) {
+                    if !url.trim().is_empty() && !sha.trim().is_empty() {
+                        self.url = url.trim().to_string();
+                        self.sha256 = sha.trim().to_string();
+                    }
+                }
+            }
+            Some("aarch64") => {
+                if let (Some(url), Some(sha)) = (
+                    self.runtime_linux_aarch64_url.as_deref(),
+                    self.runtime_linux_aarch64_sha256.as_deref(),
+                ) {
+                    if !url.trim().is_empty() && !sha.trim().is_empty() {
+                        self.url = url.trim().to_string();
+                        self.sha256 = sha.trim().to_string();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn selected_scanner_url(&self) -> Option<String> {
+        let selected = match runtime_asset_arch() {
+            Some("x86_64") => self.scanner_linux_x86_64_url.as_deref(),
+            Some("aarch64") => self.scanner_linux_aarch64_url.as_deref(),
+            _ => None,
+        };
+
+        if let Some(url) = selected {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+
+        self.scanner_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+}
+
 fn normalize_runtime_manifest(
     mut manifest: RuntimeReleaseManifest,
 ) -> Result<RuntimeReleaseManifest, String> {
-    let version = manifest.version.trim();
+    manifest.apply_arch_overrides();
+
+    let version = manifest.version.trim().to_string();
     if version.is_empty() {
         return Err("manifest.version is empty".to_string());
     }
 
-    let url = manifest.url.trim();
+    let url = manifest.url.trim().to_string();
     if url.is_empty() {
         return Err("manifest.url is empty".to_string());
     }
-    let parsed_url = Url::parse(url).map_err(|e| format!("manifest.url is invalid: {}", e))?;
+    let parsed_url = Url::parse(&url).map_err(|e| format!("manifest.url is invalid: {}", e))?;
     if parsed_url.scheme() != "https" {
         return Err("manifest.url must use https".to_string());
     }
@@ -938,8 +1040,8 @@ fn normalize_runtime_manifest(
         return Err("manifest.sha256 must be a 64-character hex digest".to_string());
     }
 
-    manifest.version = version.to_string();
-    manifest.url = url.to_string();
+    manifest.version = version;
+    manifest.url = url;
     manifest.sha256 = sha;
     Ok(manifest)
 }
@@ -1724,11 +1826,16 @@ fn find_local_runtime_tar() -> Option<PathBuf> {
 
     // Dev mode: .../target/debug/entropic → .../target/debug/resources/
     search_dirs.push(exe_dir.join("resources"));
-    // Also check src-tauri/resources/ (when running from project root)
     search_dirs.push(exe_dir.join("..").join("..").join("resources"));
 
+    let mut names = vec![runtime_release_tar_asset_name()];
+    names.extend([
+        "openclaw-runtime.tar.gz".to_string(),
+        "openclaw-runtime.tar".to_string(),
+    ]);
+
     for dir in search_dirs {
-        for name in &["openclaw-runtime.tar.gz", "openclaw-runtime.tar"] {
+        for name in &names {
             let tar_path = dir.join(name);
             if tar_path.is_file() {
                 return Some(tar_path);
@@ -1786,16 +1893,18 @@ fn find_scanner_tar() -> Option<PathBuf> {
 
     // Dev mode: .../target/debug/entropic → .../target/debug/resources/
     search_dirs.push(exe_dir.join("resources"));
-    // Also check src-tauri/resources/ (when running from project root)
     search_dirs.push(exe_dir.join("..").join("..").join("resources"));
 
+    let mut names = vec![scanner_release_tar_asset_name()];
+    names.extend([
+        "entropic-skill-scanner.tar.gz".to_string(),
+        "entropic-skill-scanner.tar".to_string(),
+        "skill-scanner.tar.gz".to_string(),
+        "skill-scanner.tar".to_string(),
+    ]);
+
     for dir in search_dirs {
-        for name in &[
-            "entropic-skill-scanner.tar.gz",
-            "entropic-skill-scanner.tar",
-            "skill-scanner.tar.gz",
-            "skill-scanner.tar",
-        ] {
+        for name in &names {
             let tar_path = dir.join(name);
             if tar_path.exists() {
                 return Some(tar_path);
