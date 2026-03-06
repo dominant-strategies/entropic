@@ -1,6 +1,7 @@
 param(
     [switch]$SkipRuntimeTarBuild,
-    [switch]$SkipFrontendBuild
+    [switch]$SkipFrontendBuild,
+    [switch]$NoBundle
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,6 +27,30 @@ function Test-FileNonEmpty([string]$Path) {
         return $false
     }
     return (Get-Item -Path $Path).Length -gt 0
+}
+
+function Get-RuntimeTarInputPaths {
+    return @(
+        (Join-Path $ProjectRoot "openclaw-runtime\entrypoint.sh"),
+        (Join-Path $ProjectRoot "openclaw-runtime\Dockerfile"),
+        (Join-Path $ProjectRoot "scripts\build-openclaw-runtime.sh"),
+        (Join-Path $ProjectRoot "scripts\bundle-runtime-image.sh")
+    )
+}
+
+function Test-RuntimeTarFresh([string]$RuntimeTarPath) {
+    if (-not (Test-FileNonEmpty $RuntimeTarPath)) {
+        return $false
+    }
+
+    $tarWriteTime = (Get-Item -Path $RuntimeTarPath).LastWriteTimeUtc
+    foreach ($path in Get-RuntimeTarInputPaths) {
+        if ((Test-Path -Path $path -PathType Leaf) -and ((Get-Item -Path $path).LastWriteTimeUtc -gt $tarWriteTime)) {
+            return $false
+        }
+    }
+
+    return $true
 }
 
 function Get-WslBaseDistroName {
@@ -88,6 +113,35 @@ function Write-WslArtifactHashes([string]$ArtifactPath) {
     Set-Content -Path (Join-Path $RuntimeDir "entropic-runtime.sha256") -Value $hash -NoNewline
 }
 
+function Stage-ReleaseBinaryResources([string]$RuntimeTarPath) {
+    $releaseResourcesDir = Join-Path $ProjectRoot "src-tauri/target/release/resources"
+    New-Item -ItemType Directory -Force -Path $releaseResourcesDir | Out-Null
+
+    $releaseRuntimeDir = Join-Path $releaseResourcesDir "runtime"
+    New-Item -ItemType Directory -Force -Path $releaseRuntimeDir | Out-Null
+
+    if (Test-Path -Path $RuntimeDir) {
+        Copy-Item -Path (Join-Path $RuntimeDir "*") -Destination $releaseRuntimeDir -Recurse -Force
+    }
+
+    if (Test-FileNonEmpty $RuntimeTarPath) {
+        $dest = Join-Path $releaseResourcesDir "openclaw-runtime.tar.gz"
+        Copy-Item -Path $RuntimeTarPath -Destination $dest -Force
+    }
+}
+
+function Stop-StaleReleaseEntropicProcess {
+    $staleProcesses = Get-Process entropic -ErrorAction SilentlyContinue
+
+    foreach ($process in $staleProcesses) {
+        Stop-Process -Id $process.Id -Force
+    }
+
+    if ($staleProcesses) {
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 function Ensure-WslRuntimeArtifacts {
     $artifact = Join-Path $RuntimeDir "entropic-runtime.tar"
     $hashPath = Join-Path $RuntimeDir "entropic-runtime.sha256"
@@ -126,6 +180,7 @@ function Convert-ToWslPath([string]$WindowsPath) {
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $ScriptDir ".."))
 Set-Location $ProjectRoot
+Stop-StaleReleaseEntropicProcess
 
 $RuntimeTar = Join-Path $ProjectRoot "src-tauri/resources/openclaw-runtime.tar.gz"
 $RuntimeDir = Join-Path $ProjectRoot "src-tauri/resources/runtime"
@@ -157,30 +212,32 @@ if (-not (Test-Path "node_modules")) {
 
 Ensure-WslRuntimeArtifacts
 
-if (-not (Test-FileNonEmpty $RuntimeTar)) {
-    if ($SkipRuntimeTarBuild) {
+if (-not (Test-RuntimeTarFresh $RuntimeTar)) {
+    if ($SkipRuntimeTarBuild -and (Test-FileNonEmpty $RuntimeTar)) {
+        Write-Host "Runtime tar is stale; rebuilding because runtime source files changed."
+    } elseif ($SkipRuntimeTarBuild) {
         throw "Missing or empty runtime tar: $RuntimeTar. Re-run without -SkipRuntimeTarBuild to generate a valid runtime image tar."
-    } else {
-        Write-Step "Building runtime image tar via WSL (this can take a while)"
+    }
 
-        $OpenClawDist = Join-Path $ProjectRoot "..\openclaw\dist"
-        if (-not (Test-Path $OpenClawDist)) {
-            throw "OpenClaw dist missing at $OpenClawDist. Build openclaw first."
-        }
+    Write-Step "Building runtime image tar via WSL (this can take a while)"
 
-        Invoke-DevWslHelper -Command "start" -Mode "dev"
-        $ProjectRootWsl = Convert-ToWslPath $ProjectRoot
-        $BashCommand = @(
-            "set -euo pipefail"
-            "cd '$ProjectRootWsl'"
-            "ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 ./scripts/build-openclaw-runtime.sh"
-            "ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 ./scripts/bundle-runtime-image.sh"
-        ) -join "; "
+    $OpenClawDist = Join-Path $ProjectRoot "..\openclaw\dist"
+    if (-not (Test-Path $OpenClawDist)) {
+        throw "OpenClaw dist missing at $OpenClawDist. Build openclaw first."
+    }
 
-        & wsl -d entropic-dev -- bash -lc $BashCommand
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed generating runtime tar in WSL (entropic-dev)."
-        }
+    Invoke-DevWslHelper -Command "start" -Mode "dev"
+    $ProjectRootWsl = Convert-ToWslPath $ProjectRoot
+    $BashCommand = @(
+        "set -euo pipefail"
+        "cd '$ProjectRootWsl'"
+        "ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 ./scripts/build-openclaw-runtime.sh"
+        "ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 ./scripts/bundle-runtime-image.sh"
+    ) -join "; "
+
+    & wsl -d entropic-dev -- bash -lc $BashCommand
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed generating runtime tar in WSL (entropic-dev)."
     }
 }
 
@@ -222,7 +279,6 @@ $config.build.frontendDist = "../dist"
 if ($config.bundle) {
     $config.bundle.createUpdaterArtifacts = $false
     $config.bundle.resources = @(
-        "resources/openclaw-runtime.tar.gz",
         "resources/runtime/*"
     )
 }
@@ -232,12 +288,21 @@ if ($config.plugins -and $config.plugins.updater) {
 
 $config | ConvertTo-Json -Depth 100 | Set-Content -Path $UserTestConfigPath -Encoding UTF8
 
-Write-Step "Building Windows NSIS installer"
-# Use production config and build installer artifact users can install.
-& pnpm.cmd tauri build --config src-tauri/tauri.conf.windows-user-test.json --bundles nsis
+if ($NoBundle) {
+    Write-Step "Building Windows release binary without installer"
+    & pnpm.cmd tauri build --config src-tauri/tauri.conf.windows-user-test.json --no-bundle
+} else {
+    Write-Step "Building Windows NSIS installer"
+    # Do not bundle the runtime image tar into NSIS. The combined runtime payload exceeds
+    # the practical NSIS limit on Windows; direct release-binary runs still get the tar.
+    & pnpm.cmd tauri build --config src-tauri/tauri.conf.windows-user-test.json --bundles nsis
+}
 if ($LASTEXITCODE -ne 0) {
     throw "tauri build failed"
 }
+
+Write-Step "Staging runtime resources for direct release-binary runs"
+Stage-ReleaseBinaryResources -RuntimeTarPath $RuntimeTar
 
 $BundleRoot = Join-Path $ProjectRoot "src-tauri/target/release/bundle"
 $NsisArtifacts = @()
@@ -249,7 +314,9 @@ Write-Step "Build output"
 Write-Host "Runtime tar: $RuntimeTar"
 Write-Host "Managed WSL rootfs: $RuntimeRootfsArtifact"
 Write-Host "Bundle dir: $BundleRoot"
-if ($NsisArtifacts.Count -gt 0) {
+if ($NoBundle) {
+    Write-Host "Release binary: $(Join-Path $ProjectRoot "src-tauri\target\release\entropic.exe")"
+} elseif ($NsisArtifacts.Count -gt 0) {
     Write-Host "NSIS installer(s):"
     foreach ($artifact in $NsisArtifacts) {
         Write-Host "  $($artifact.FullName)"

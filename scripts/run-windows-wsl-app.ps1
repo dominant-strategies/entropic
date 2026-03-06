@@ -12,6 +12,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $ScriptDir ".."))
 $RuntimeTar = Join-Path $ProjectRoot "src-tauri\resources\openclaw-runtime.tar.gz"
 $DebugBinaryPath = Join-Path $ProjectRoot "src-tauri\target\debug\entropic.exe"
+$ReleaseBinaryPath = Join-Path $ProjectRoot "src-tauri\target\release\entropic.exe"
 
 function Test-FileNonEmpty([string]$Path) {
     if (-not (Test-Path -Path $Path -PathType Leaf)) {
@@ -98,8 +99,17 @@ function Ensure-DevRuntimeTar {
 }
 
 function Stop-StaleDebugEntropicProcess {
+    Stop-StaleEntropicProcessByPath -BinaryPath $DebugBinaryPath
+
+}
+
+function Stop-StaleReleaseEntropicProcess {
+    Stop-StaleEntropicProcessByPath -BinaryPath $ReleaseBinaryPath
+}
+
+function Stop-StaleEntropicProcessByPath([string]$BinaryPath) {
     $staleProcesses = Get-Process entropic -ErrorAction SilentlyContinue | Where-Object {
-        $_.Path -eq $DebugBinaryPath
+        $_.Path -eq $BinaryPath
     }
 
     foreach ($process in $staleProcesses) {
@@ -125,6 +135,7 @@ $env:ENTROPIC_RUNTIME_MODE = $Mode
 
 if ($ReleaseBinary) {
     $binaryPath = Resolve-ReleaseBinaryPath
+    Stop-StaleReleaseEntropicProcess
     & $binaryPath
 } else {
     if ($Mode -eq "dev") {

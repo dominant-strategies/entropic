@@ -44,8 +44,7 @@
     ],
     "resources": [
       "resources/bin/*",
-      "resources/share/**/*",
-      "resources/runtime/*"
+      "resources/share/**/*"
     ],
     "category": "DeveloperTool",
     "shortDescription": "AI assistant with secure sandboxing",
