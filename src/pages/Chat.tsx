@@ -82,7 +82,6 @@ import {
   signUpWithEmail,
   createCheckout,
   getBalance,
-  type LocalModelConfig,
 } from "../lib/auth";
 import entropicLogo from "../assets/entropic-logo.png";
 import type { Page } from "../components/Layout";
@@ -681,62 +680,6 @@ function summarizeGatewayMessageForDiag(message: GatewayMessage | null | undefin
   }
 }
 
-const SILENT_REPLY_PATTERN = /^\s*NO_REPLY\s*$/i;
-
-function isSilentReplyText(value: string): boolean {
-  return SILENT_REPLY_PATTERN.test(value);
-}
-
-function normalizeLocalBaseUrl(raw: string): string {
-  const trimmed = raw.trim().replace(/\/+$/, "");
-  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
-}
-
-type LocalChatMessage = {
-  role: "system" | "user" | "assistant";
-  content: string;
-};
-
-async function sendDirectLocalChat(params: {
-  config: LocalModelConfig;
-  messages: LocalChatMessage[];
-}): Promise<string> {
-  const response = await fetch(`${normalizeLocalBaseUrl(params.config.baseUrl)}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(params.config.apiKey.trim()
-        ? { Authorization: `Bearer ${params.config.apiKey.trim()}` }
-        : {}),
-    },
-    body: JSON.stringify({
-      model: params.config.modelName.trim(),
-      messages: params.messages,
-      stream: false,
-    }),
-  });
-
-  if (!response.ok) {
-    let detail = "";
-    try {
-      detail = await response.text();
-    } catch {
-      // ignore
-    }
-    const suffix = detail ? ` ${detail}` : "";
-    throw new Error(`Local model request failed: HTTP ${response.status}.${suffix}`.trim());
-  }
-
-  const data = await response.json();
-  const content =
-    data?.choices?.[0]?.message?.content ??
-    data?.message?.content ??
-    data?.response ??
-    data?.output_text ??
-    "";
-  return typeof content === "string" ? content.trim() : "";
-}
-
 const PROVIDERS: Provider[] = [
   { id: "anthropic", name: "Anthropic", icon: "A", placeholder: "sk-ant-...", keyUrl: "https://console.anthropic.com/settings/keys" },
   { id: "openai", name: "OpenAI", icon: "O", placeholder: "sk-...", keyUrl: "https://platform.openai.com/api-keys" },
@@ -1117,7 +1060,6 @@ export function Chat({
   onRecoverProxyAuth,
   useLocalKeys,
   selectedModel,
-  localModelConfig,
   onModelChange: _onModelChange,
   imageModel: _imageModel,
   imageGenerationModel,
@@ -1137,7 +1079,6 @@ export function Chat({
   onRecoverProxyAuth?: () => Promise<boolean> | boolean;
   useLocalKeys: boolean;
   selectedModel: string;
-  localModelConfig?: LocalModelConfig;
   onModelChange?: (model: string) => void;
   imageModel: string;
   imageGenerationModel: string;
@@ -1182,9 +1123,6 @@ export function Chat({
   const [showEmailAuth, setShowEmailAuth] = useState(false);
   const [emailAuthMode, setEmailAuthMode] = useState<"signin" | "signup">("signin");
   const [authEmail, setAuthEmail] = useState("");
-  const isDirectLocalModel =
-    selectedModel.startsWith("local/") &&
-    Boolean(localModelConfig?.enabled && localModelConfig.baseUrl.trim() && localModelConfig.modelName.trim());
   const [authPassword, setAuthPassword] = useState("");
   const [showOwnProviderOptions, setShowOwnProviderOptions] = useState(false);
   const [providerStatus, setProviderStatus] = useState<AuthState["providers"]>([]);
@@ -4143,7 +4081,7 @@ export function Chat({
     const liveClient = clientRef.current;
     const shouldQueueForReconnect =
       gatewayStarting || isConnecting || connectInFlightRef.current || gatewayRunning;
-    if (!isDirectLocalModel && (!liveClient || !liveClient.isConnected()) && !shouldQueueForReconnect) {
+    if ((!liveClient || !liveClient.isConnected()) && !shouldQueueForReconnect) {
       if (!connectInFlightRef.current) {
         void connectToGateway();
       }
@@ -4313,56 +4251,6 @@ export function Chat({
     setThinkingStatus("Thinking");
     setError(null);
     try {
-      if (isDirectLocalModel && localModelConfig) {
-        addDiag(
-          `send -> local-direct session=${sendSession} len=${outboundMessageContent.length} attachments=${attachmentsPayload.length}`
-        );
-        const priorMessages = (sessionMessagesRef.current[sendSession] || [])
-          .filter((message) => message.id !== userMessage.id)
-          .filter((message) => message.role === "user" || message.role === "assistant")
-          .map((message) => ({
-            role: message.role,
-            content: message.content,
-          })) as Array<{ role: "user" | "assistant"; content: string }>;
-        const assistantText = await sendDirectLocalChat({
-          config: localModelConfig,
-          messages: [
-            ...priorMessages,
-            { role: "user", content: outboundMessageContent },
-          ],
-        });
-        const normalizedAssistantText =
-          assistantText && !isSilentReplyText(assistantText)
-            ? assistantText
-            : "Assistant returned no visible response.";
-        const assistantMessage: Message = {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: normalizedAssistantText,
-          sentAt: Date.now(),
-        };
-        if (currentSessionRef.current === sendSession) {
-          visibleMessagesSessionRef.current = sendSession;
-          setMessages((prev) => [...prev, assistantMessage]);
-        }
-        const cachedMsgs = sessionMessagesRef.current[sendSession] || [];
-        sessionMessagesRef.current[sendSession] = [...cachedMsgs, assistantMessage];
-        setSessions((prev) =>
-          applySessionTitles(
-            normalizeSessionsList(
-              prev.some((s) => s.key === sendSession)
-                ? prev.map((s) => (s.key === sendSession ? { ...s, updatedAt: Date.now() } : s))
-                : [{ key: sendSession, updatedAt: Date.now() }, ...prev],
-            ),
-          ),
-        );
-        setIsLoading(false);
-        setThinkingStatus(null);
-        setPendingAttachments([]);
-        schedulePersist();
-        addDiag(`local-direct ok session=${sendSession} textLen=${assistantText.length}`);
-        return;
-      }
       await dispatchPendingSend(pendingSend);
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : "Send failed";

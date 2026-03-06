@@ -7210,12 +7210,11 @@ Use it for durable decisions, preferences, and facts that should persist across 
             );
         }
     } else {
-        // Non-proxy mode: check if local model is configured (also uses openrouter provider name)
+        // Non-proxy mode: check if a local Ollama-compatible model is configured.
         let local_base_url = read_container_env("ENTROPIC_LOCAL_MODEL_BASE_URL");
         let local_model_name = read_container_env("ENTROPIC_LOCAL_MODEL_NAME");
         if let (Some(base_url), Some(model_name)) = (&local_base_url, &local_model_name) {
             if !model_name.is_empty() && !base_url.is_empty() {
-                // Use 'openrouter' as provider name — OpenClaw only recognizes built-in providers
                 set_openclaw_config_value(
                     &mut cfg,
                     &["models", "providers", "ollama"],

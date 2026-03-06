@@ -2229,7 +2229,6 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         onRecoverProxyAuth={recoverProxyAuthFromChat}
         useLocalKeys={useLocalKeys}
         selectedModel={selectedModel}
-        localModelConfig={localModelConfig}
         onModelChange={handleModelChange}
         imageModel={imageModel}
         imageGenerationModel={imageGenerationModel}
