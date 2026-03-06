@@ -37,6 +37,23 @@ run_docker() {
     fi
 }
 
+resolve_buildkit_setting() {
+    local requested="${DOCKER_BUILDKIT:-1}"
+    if [ "$requested" != "1" ]; then
+        export DOCKER_BUILDKIT="$requested"
+        return 0
+    fi
+
+    if run_docker buildx version >/dev/null 2>&1; then
+        export DOCKER_BUILDKIT=1
+        return 0
+    fi
+
+    echo "WARNING: docker buildx is unavailable in the selected Docker context."
+    echo "Falling back to the classic docker builder (DOCKER_BUILDKIT=0)."
+    export DOCKER_BUILDKIT=0
+}
+
 ensure_docker_ready_for_mode() {
     DOCKER_BIN="$(entropic_find_docker_binary "$PROJECT_ROOT" || true)"
     COLIMA_BIN="$(entropic_find_colima_binary "$PROJECT_ROOT" || true)"
@@ -82,6 +99,54 @@ echo "Mode: $(entropic_runtime_mode)"
 echo "Colima home: $ENTROPIC_COLIMA_HOME"
 echo ""
 
+default_build_root() {
+    if [ -f /proc/version ] \
+        && grep -qi microsoft /proc/version 2>/dev/null \
+        && [[ "$PROJECT_ROOT" == /mnt/* ]]; then
+        local cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/entropic-build"
+        local build_key
+        build_key="$(basename "$PROJECT_ROOT")"
+        if command -v sha256sum >/dev/null 2>&1; then
+            build_key="${build_key}-$(printf '%s' "$PROJECT_ROOT" | sha256sum | cut -c1-12)"
+        fi
+        printf '%s\n' "$cache_root/$build_key"
+        return 0
+    fi
+
+    printf '%s\n' "$PROJECT_ROOT/.build"
+}
+
+normalize_lf_file() {
+    local path="$1"
+    [ -f "$path" ] || return 0
+    perl -0pi -e 's/\r\n/\n/g' "$path"
+}
+
+assert_no_crlf_file() {
+    local path="$1"
+    [ -f "$path" ] || return 0
+    if LC_ALL=C grep -q $'\r' "$path"; then
+        echo "ERROR: CRLF line endings detected in $path after normalization" >&2
+        return 1
+    fi
+}
+
+normalize_tree_permissions() {
+    local root="$1"
+    [ -d "$root" ] || return 0
+
+    find "$root" -type d -exec chmod 755 {} +
+    find "$root" -type f -print0 | while IFS= read -r -d '' file; do
+        local mode
+        mode="$(stat -c '%a' "$file" 2>/dev/null || echo 644)"
+        if [ $((8#$mode & 0111)) -ne 0 ]; then
+            chmod 755 "$file"
+        else
+            chmod 644 "$file"
+        fi
+    done
+}
+
 # Check if OpenClaw source exists
 if [ ! -d "$OPENCLAW_SOURCE/dist" ]; then
     echo "ERROR: OpenClaw dist not found at $OPENCLAW_SOURCE/dist"
@@ -89,14 +154,18 @@ if [ ! -d "$OPENCLAW_SOURCE/dist" ]; then
     exit 1
 fi
 
-STAGING_DIR="$PROJECT_ROOT/.build/openclaw-runtime"
+BUILD_ROOT="${ENTROPIC_BUILD_ROOT:-$(default_build_root)}"
+STAGING_DIR="$BUILD_ROOT/openclaw-runtime"
 mkdir -p "$STAGING_DIR"
+echo "Build root: $BUILD_ROOT"
 
 echo "Staging OpenClaw files..."
 
 # Copy Dockerfile and entrypoint
 rsync -a "$RUNTIME_DIR/Dockerfile" "$STAGING_DIR/Dockerfile"
 rsync -a "$RUNTIME_DIR/entrypoint.sh" "$STAGING_DIR/entrypoint.sh"
+normalize_lf_file "$STAGING_DIR/entrypoint.sh"
+assert_no_crlf_file "$STAGING_DIR/entrypoint.sh"
 
 # Copy dist
 rsync -a --delete "$OPENCLAW_SOURCE/dist/" "$STAGING_DIR/dist/"
@@ -178,36 +247,56 @@ else
     echo "No Entropic skills directory found at $ENTROPIC_SKILLS_SOURCE (skipping)."
 fi
 
+normalize_tree_permissions "$STAGING_DIR/extensions"
+
 # Materialize production-only node_modules for runtime packaging.
 # Prefer pnpm deploy for deterministic prod dependency closure. If that fails
 # (for example offline local builds), fall back to staged prune.
 echo "Materializing production node_modules..."
 mkdir -p "$STAGING_DIR/node_modules"
 
-PROD_DEPLOY_DIR="$PROJECT_ROOT/.build/openclaw-runtime-prod"
+PROD_DEPLOY_DIR="$BUILD_ROOT/openclaw-runtime-prod"
 rm -rf "$PROD_DEPLOY_DIR"
 
 copy_source_node_modules() {
-    rsync -a --delete \
+    copy_filtered_node_modules "$OPENCLAW_SOURCE/node_modules" "$STAGING_DIR/node_modules"
+}
+
+copy_filtered_node_modules() {
+    local source_dir="$1"
+    local dest_dir="$2"
+
+    rm -rf "$dest_dir"
+    mkdir -p "$dest_dir"
+
+    if rsync -a --delete \
         --exclude='.cache' \
         --exclude='*.map' \
         --exclude='test' \
         --exclude='tests' \
         --exclude='.git' \
-        "$OPENCLAW_SOURCE/node_modules/" "$STAGING_DIR/node_modules/"
+        "$source_dir/" "$dest_dir/"; then
+        return 0
+    fi
+
+    echo "WARNING: rsync copy failed for $source_dir. Retrying with tar stream..."
+    rm -rf "$dest_dir"
+    mkdir -p "$dest_dir"
+
+    tar -C "$source_dir" \
+        --exclude='.cache' \
+        --exclude='*.map' \
+        --exclude='test' \
+        --exclude='tests' \
+        --exclude='.git' \
+        -cf - . | tar -C "$dest_dir" -xf -
 }
 
 if command -v pnpm >/dev/null 2>&1; then
     if pnpm --dir "$OPENCLAW_SOURCE" --filter openclaw deploy --prod --legacy "$PROD_DEPLOY_DIR"; then
         if [ -d "$PROD_DEPLOY_DIR/node_modules" ]; then
             echo "Using prod-only node_modules from pnpm deploy."
-            rsync -a --delete \
-                --exclude='.cache' \
-                --exclude='*.map' \
-                --exclude='test' \
-                --exclude='tests' \
-                --exclude='.git' \
-                "$PROD_DEPLOY_DIR/node_modules/" "$STAGING_DIR/node_modules/"
+            copy_filtered_node_modules "$PROD_DEPLOY_DIR/node_modules" "$STAGING_DIR/node_modules"
         else
             echo "WARNING: pnpm deploy succeeded but node_modules was missing. Falling back to staged prune."
             copy_source_node_modules
@@ -311,7 +400,7 @@ else
     echo "Using default Docker context."
 fi
 
-export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
+resolve_buildkit_setting
 run_docker build \
     --cache-from openclaw-runtime:latest \
     -t openclaw-runtime:latest \
