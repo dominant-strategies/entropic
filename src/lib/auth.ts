@@ -4,6 +4,7 @@ import { Store } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
 import { platform } from "@tauri-apps/plugin-os";
 import { getDeviceFingerprintHash } from "./localCredits";
+import { nativeApiRequest, shouldUseNativeApiTransport } from "./nativeApi";
 
 // These should be set via environment variables
 const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL || "";
@@ -28,6 +29,7 @@ const AUTH_FORCE_DEEPLINK =
 const AUTH_DEBUG =
   (import.meta as any).env?.VITE_AUTH_DEBUG === "1" ||
   (import.meta as any).env?.DEV;
+const USE_NATIVE_API_TRANSPORT = shouldUseNativeApiTransport(API_URL);
 
 function authDebug(message: string, data?: Record<string, unknown>) {
   if (!AUTH_DEBUG) return;
@@ -456,6 +458,17 @@ export class ApiRequestError extends Error {
   }
 }
 
+function extractApiErrorMessage(body: any, fallback: string): string {
+  const serverMessage = body?.error?.message;
+  if (typeof serverMessage === "string" && serverMessage.trim()) {
+    return serverMessage;
+  }
+  if (typeof body?.raw === "string" && body.raw.trim()) {
+    return body.raw;
+  }
+  return fallback;
+}
+
 export async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -466,28 +479,63 @@ export async function apiRequest<T>(
     throw new ApiRequestError("Not authenticated", { status: 401, kind: "http" });
   }
 
+  const requestUrl = `${API_URL}${endpoint}`;
+  let deviceFingerprint: string | undefined;
+  try {
+    deviceFingerprint = await getDeviceFingerprintHash();
+  } catch (error: any) {
+    authDebug("apiRequest fingerprint unavailable", {
+      endpoint,
+      message: error?.message || String(error),
+    });
+  }
+
+  authDebug("apiRequest", {
+    method: options.method || "GET",
+    url: requestUrl,
+    hasToken: Boolean(token),
+    bodyLength: options.body ? String(options.body).length : 0,
+    native: USE_NATIVE_API_TRANSPORT,
+  });
+
+  if (USE_NATIVE_API_TRANSPORT) {
+    try {
+      const nativeResponse = await nativeApiRequest({
+        method: options.method || "GET",
+        url: requestUrl,
+        accessToken: token,
+        body: typeof options.body === "string" && options.body.length > 0
+          ? JSON.parse(options.body)
+          : undefined,
+        deviceFingerprint,
+      });
+      if (nativeResponse.status < 200 || nativeResponse.status >= 300) {
+        throw new ApiRequestError(
+          extractApiErrorMessage(nativeResponse.body, `API error: ${nativeResponse.status}`),
+          { status: nativeResponse.status, data: nativeResponse.body, kind: "http" }
+        );
+      }
+      return nativeResponse.body as T;
+    } catch (error: any) {
+      if (error instanceof ApiRequestError) throw error;
+      authDebug("apiRequest failed", {
+        message: error?.message || String(error),
+        name: error?.name,
+      });
+      throw new ApiRequestError("Network request failed", { kind: "network", data: error });
+    }
+  }
+
   let response: Response;
   try {
-    const requestUrl = `${API_URL}${endpoint}`;
     const requestHeaders: Record<string, string> = {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     };
-    try {
-      requestHeaders["X-Entropic-Device-Fingerprint"] = await getDeviceFingerprintHash();
-    } catch (error: any) {
-      authDebug("apiRequest fingerprint unavailable", {
-        endpoint,
-        message: error?.message || String(error),
-      });
+    if (deviceFingerprint) {
+      requestHeaders["X-Entropic-Device-Fingerprint"] = deviceFingerprint;
     }
-    authDebug("apiRequest", {
-      method: options.method || "GET",
-      url: requestUrl,
-      hasToken: Boolean(token),
-      bodyLength: options.body ? String(options.body).length : 0,
-    });
-    response = await fetch(`${API_URL}${endpoint}`, {
+    response = await fetch(requestUrl, {
       ...options,
       headers: {
         ...requestHeaders,
@@ -539,7 +587,7 @@ export async function apiRequest<T>(
       );
     }
     throw new ApiRequestError(
-      errorBody?.error?.message || `API error: ${response.status}`,
+      extractApiErrorMessage(errorBody, `API error: ${response.status}`),
       { status: response.status, data: errorBody, kind: "http" }
     );
   }
@@ -581,8 +629,23 @@ export async function createCheckout(
  * Get available models
  */
 export async function getModels(): Promise<Model[]> {
-  const response = await fetch(`${API_URL}/v1/models`);
-  const data = await response.json();
+  let data: any;
+  if (USE_NATIVE_API_TRANSPORT) {
+    const nativeResponse = await nativeApiRequest({
+      method: "GET",
+      url: `${API_URL}/v1/models`,
+    });
+    if (nativeResponse.status < 200 || nativeResponse.status >= 300) {
+      throw new ApiRequestError(
+        extractApiErrorMessage(nativeResponse.body, `API error: ${nativeResponse.status}`),
+        { status: nativeResponse.status, data: nativeResponse.body, kind: "http" }
+      );
+    }
+    data = nativeResponse.body;
+  } else {
+    const response = await fetch(`${API_URL}/v1/models`);
+    data = await response.json();
+  }
   return data.data || [];
 }
 
@@ -620,6 +683,28 @@ export async function createGatewayToken(opts?: {
     throw new ApiRequestError("Not authenticated", { status: 401, kind: "http" });
   }
 
+  if (USE_NATIVE_API_TRANSPORT) {
+    try {
+      const nativeResponse = await nativeApiRequest({
+        method: "POST",
+        url: `${API_URL}/create-gateway-token`,
+        accessToken: accessToken || undefined,
+        body: {},
+        deviceFingerprint: headers["X-Entropic-Device-Fingerprint"],
+      });
+      if (nativeResponse.status < 200 || nativeResponse.status >= 300) {
+        throw new ApiRequestError(
+          extractApiErrorMessage(nativeResponse.body, `API error: ${nativeResponse.status}`),
+          { status: nativeResponse.status, data: nativeResponse.body, kind: "http" }
+        );
+      }
+      return nativeResponse.body as GatewayTokenResponse;
+    } catch (error: any) {
+      if (error instanceof ApiRequestError) throw error;
+      throw new ApiRequestError("Network request failed", { kind: "network", data: error });
+    }
+  }
+
   let response: Response;
   try {
     response = await fetch(`${API_URL}/create-gateway-token`, {
@@ -643,7 +728,7 @@ export async function createGatewayToken(opts?: {
       }
     }
     throw new ApiRequestError(
-      errorBody?.error?.message || `API error: ${response.status}`,
+      extractApiErrorMessage(errorBody, `API error: ${response.status}`),
       { status: response.status, data: errorBody, kind: "http" }
     );
   }

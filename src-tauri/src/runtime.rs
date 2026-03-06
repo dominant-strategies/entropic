@@ -87,6 +87,10 @@ pub(crate) const ENTROPIC_WSL_DEV_DISTRO: &str = "entropic-dev";
 pub(crate) const ENTROPIC_WSL_PROD_DISTRO: &str = "entropic-prod";
 const COLIMA_RETRY_DELAY_SECS: u64 = 2;
 const WINDOWS_BOOTSTRAP_STATE_FILE: &str = "bootstrap-state.json";
+const WINDOWS_RUNTIME_RELEASE_REPO: &str = "dominant-strategies/entropic-releases";
+const WINDOWS_RUNTIME_RELEASE_TAG: &str = "runtime-latest";
+const WINDOWS_RUNTIME_MANIFEST_NAME: &str = "runtime-manifest.json";
+const WINDOWS_RUNTIME_ROOTFS_ASSET_NAME: &str = "entropic-runtime-windows-x86_64.tar";
 const WINDOWS_BOOTSTRAP_STAGE_PREFLIGHT: &str = "preflight";
 const WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL: &str = "wsl-install";
 const WINDOWS_BOOTSTRAP_STAGE_WSL_DEFAULT_VERSION: &str = "wsl-default-version";
@@ -103,6 +107,16 @@ struct WindowsBootstrapState {
     #[serde(default)]
     error: Option<String>,
     updated_at_unix: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct WindowsRuntimeReleaseManifest {
+    #[allow(dead_code)]
+    version: String,
+    #[serde(default)]
+    windows_wsl_rootfs_url: Option<String>,
+    #[serde(default)]
+    windows_wsl_rootfs_sha256: Option<String>,
 }
 
 fn fallback_colima_home_path() -> PathBuf {
@@ -1045,6 +1059,8 @@ impl Runtime {
             candidates.push(base.join("entropic-runtime.tar"));
         }
 
+        candidates.push(self.windows_cached_distro_artifact_path(distro));
+
         candidates
     }
 
@@ -1052,6 +1068,200 @@ impl Runtime {
         self.windows_distro_artifact_candidates(distro)
             .into_iter()
             .find(|path| path.exists())
+    }
+
+    fn windows_runtime_release_repo(&self) -> String {
+        std::env::var("OPENCLAW_RUNTIME_RELEASE_REPO")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| WINDOWS_RUNTIME_RELEASE_REPO.to_string())
+    }
+
+    fn windows_runtime_release_tag(&self) -> String {
+        std::env::var("OPENCLAW_RUNTIME_RELEASE_TAG")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| WINDOWS_RUNTIME_RELEASE_TAG.to_string())
+    }
+
+    fn windows_runtime_cache_dir(&self) -> PathBuf {
+        self.windows_runtime_root().join("cache")
+    }
+
+    fn windows_cached_distro_artifact_path(&self, distro: &str) -> PathBuf {
+        let mode = if distro == ENTROPIC_WSL_DEV_DISTRO {
+            "dev"
+        } else {
+            "prod"
+        };
+        self.windows_runtime_cache_dir()
+            .join(format!("entropic-runtime-{}.tar", mode))
+    }
+
+    fn windows_cached_runtime_manifest_path(&self) -> PathBuf {
+        self.windows_runtime_cache_dir()
+            .join(WINDOWS_RUNTIME_MANIFEST_NAME)
+    }
+
+    fn windows_runtime_manifest_url(&self) -> String {
+        format!(
+            "https://github.com/{}/releases/download/{}/{}",
+            self.windows_runtime_release_repo(),
+            self.windows_runtime_release_tag(),
+            WINDOWS_RUNTIME_MANIFEST_NAME
+        )
+    }
+
+    fn windows_default_distro_artifact_url(&self) -> String {
+        format!(
+            "https://github.com/{}/releases/download/{}/{}",
+            self.windows_runtime_release_repo(),
+            self.windows_runtime_release_tag(),
+            WINDOWS_RUNTIME_ROOTFS_ASSET_NAME
+        )
+    }
+
+    fn windows_download_url_to_path(
+        &self,
+        url: &str,
+        output_path: &std::path::Path,
+    ) -> Result<(), RuntimeError> {
+        let parent = output_path.parent().ok_or_else(|| {
+            RuntimeError::CommandFailed(format!(
+                "Invalid download destination without parent: {}",
+                output_path.display()
+            ))
+        })?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            RuntimeError::CommandFailed(format!(
+                "Failed to create runtime cache directory {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
+
+        let partial_path = output_path.with_extension("partial");
+        let _ = std::fs::remove_file(&partial_path);
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(600))
+            .build()
+            .map_err(|e| RuntimeError::CommandFailed(format!("Failed to build HTTP client: {}", e)))?;
+        let mut response = client
+            .get(url)
+            .send()
+            .map_err(|e| RuntimeError::CommandFailed(format!("Failed downloading {}: {}", url, e)))?;
+
+        if !response.status().is_success() {
+            return Err(RuntimeError::CommandFailed(format!(
+                "Failed downloading {}: HTTP {}",
+                url,
+                response.status()
+            )));
+        }
+
+        let mut file = std::fs::File::create(&partial_path).map_err(|e| {
+            RuntimeError::CommandFailed(format!(
+                "Failed creating {}: {}",
+                partial_path.display(),
+                e
+            ))
+        })?;
+        std::io::copy(&mut response, &mut file).map_err(|e| {
+            RuntimeError::CommandFailed(format!(
+                "Failed writing {}: {}",
+                partial_path.display(),
+                e
+            ))
+        })?;
+        std::fs::rename(&partial_path, output_path).map_err(|e| {
+            RuntimeError::CommandFailed(format!(
+                "Failed moving {} to {}: {}",
+                partial_path.display(),
+                output_path.display(),
+                e
+            ))
+        })?;
+        Ok(())
+    }
+
+    fn windows_fetch_runtime_manifest(&self) -> Result<WindowsRuntimeReleaseManifest, RuntimeError> {
+        let manifest_url = self.windows_runtime_manifest_url();
+        let manifest_path = self.windows_cached_runtime_manifest_path();
+        self.windows_download_url_to_path(&manifest_url, &manifest_path)?;
+        let raw = std::fs::read_to_string(&manifest_path).map_err(|e| {
+            RuntimeError::CommandFailed(format!(
+                "Failed reading runtime manifest {}: {}",
+                manifest_path.display(),
+                e
+            ))
+        })?;
+        serde_json::from_str::<WindowsRuntimeReleaseManifest>(&raw).map_err(|e| {
+            RuntimeError::CommandFailed(format!(
+                "Invalid runtime manifest at {}: {}",
+                manifest_url, e
+            ))
+        })
+    }
+
+    fn windows_download_distro_artifact_to_cache(
+        &self,
+        distro: &str,
+    ) -> Result<PathBuf, RuntimeError> {
+        let cache_dir = self.windows_runtime_cache_dir();
+        std::fs::create_dir_all(&cache_dir).map_err(|e| {
+            RuntimeError::CommandFailed(format!(
+                "Failed to create Windows runtime cache directory {}: {}",
+                cache_dir.display(),
+                e
+            ))
+        })?;
+
+        let artifact_path = self.windows_cached_distro_artifact_path(distro);
+        let manifest = self.windows_fetch_runtime_manifest()?;
+        let artifact_url = manifest
+            .windows_wsl_rootfs_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| self.windows_default_distro_artifact_url());
+        let expected_hash = manifest
+            .windows_wsl_rootfs_sha256
+            .as_deref()
+            .and_then(parse_sha256_text)
+            .ok_or_else(|| {
+                RuntimeError::CommandFailed(format!(
+                    "Runtime manifest is missing windows_wsl_rootfs_sha256: {}",
+                    self.windows_runtime_manifest_url()
+                ))
+            })?;
+
+        debug_log(&format!(
+            "downloading Windows WSL rootfs for {} from {}",
+            distro, artifact_url
+        ));
+        self.windows_download_url_to_path(&artifact_url, &artifact_path)?;
+        let actual_hash = Self::sha256_for_file(&artifact_path)?;
+        if actual_hash != expected_hash {
+            return Err(RuntimeError::CommandFailed(format!(
+                "Downloaded Windows rootfs hash mismatch for {}: expected {}, got {}",
+                distro, expected_hash, actual_hash
+            )));
+        }
+
+        let sidecar = artifact_path.with_extension("tar.sha256");
+        std::fs::write(&sidecar, format!("{}\n", expected_hash)).map_err(|e| {
+            RuntimeError::CommandFailed(format!(
+                "Failed writing SHA-256 sidecar {}: {}",
+                sidecar.display(),
+                e
+            ))
+        })?;
+
+        Ok(artifact_path)
     }
 
     fn windows_expected_distro_sha256(
@@ -1341,12 +1551,15 @@ impl Runtime {
             ))
         })?;
 
-        let artifact = self.windows_find_distro_artifact(distro).ok_or_else(|| {
-            RuntimeError::CommandFailed(format!(
-                "Missing bundled WSL rootfs for {}. Provide ENTROPIC_WSL_DISTRO_ARTIFACT or bundle resources/runtime/entropic-runtime(.wsl|.tar).",
-                distro
-            ))
-        })?;
+        let artifact = match self.windows_find_distro_artifact(distro) {
+            Some(path) => path,
+            None => self.windows_download_distro_artifact_to_cache(distro).map_err(|err| {
+                RuntimeError::CommandFailed(format!(
+                    "Missing bundled WSL rootfs for {} and failed downloading runtime release artifact: {}",
+                    distro, err
+                ))
+            })?,
+        };
         self.verify_windows_distro_artifact_hash(distro, &artifact)?;
         debug_log(&format!(
             "verified SHA-256 for {} artifact {}",
@@ -1426,11 +1639,29 @@ impl Runtime {
 
     fn ensure_windows_distro_docker_ready(&self, distro: &str) -> Result<(), RuntimeError> {
         let script = r#"set -eu
-docker_local() {
-  env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock docker "$@"
+docker_bin() {
+  if [ -x /usr/bin/docker ]; then
+    printf '%s\n' /usr/bin/docker
+    return 0
+  fi
+  command -v docker 2>/dev/null || return 1
 }
 
-if ! command -v docker >/dev/null 2>&1; then
+dockerd_bin() {
+  if [ -x /usr/bin/dockerd ]; then
+    printf '%s\n' /usr/bin/dockerd
+    return 0
+  fi
+  command -v dockerd 2>/dev/null || return 1
+}
+
+docker_local() {
+  local docker_path
+  docker_path="$(docker_bin)"
+  env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock "$docker_path" "$@"
+}
+
+install_native_docker() {
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
@@ -1445,6 +1676,10 @@ if ! command -v docker >/dev/null 2>&1; then
     echo "Unsupported Linux package manager for docker install" >&2
     exit 31
   fi
+}
+
+if ! docker_bin >/dev/null 2>&1 || ! dockerd_bin >/dev/null 2>&1; then
+  install_native_docker
 fi
 
 if command -v systemctl >/dev/null 2>&1; then
@@ -1457,8 +1692,14 @@ if command -v service >/dev/null 2>&1; then
 fi
 
 if ! docker_local info >/dev/null 2>&1; then
-  if command -v dockerd >/dev/null 2>&1; then
-    nohup dockerd >/var/log/dockerd.log 2>&1 &
+  if ! dockerd_bin >/dev/null 2>&1; then
+    install_native_docker
+  fi
+fi
+
+if ! docker_local info >/dev/null 2>&1; then
+  if dockerd_bin >/dev/null 2>&1; then
+    nohup "$(dockerd_bin)" >/var/log/dockerd.log 2>&1 &
     sleep 5
   fi
 fi
