@@ -48,6 +48,14 @@ jobs:
         shell: pwsh
         run: pnpm install --frozen-lockfile
 
+      - name: Prepare Windows release resources
+        shell: pwsh
+        env:
+          OPENCLAW_RUNTIME_RELEASE_REPO: dominant-strategies/entropic-releases
+          OPENCLAW_RUNTIME_RELEASE_TAG: runtime-latest
+        run: |
+          & .\scripts\prepare-windows-release-resources.ps1 -DownloadFromRuntimeRelease
+
       - name: Build Tauri app
         shell: pwsh
         env:
