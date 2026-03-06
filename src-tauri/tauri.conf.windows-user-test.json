@@ -1,0 +1,79 @@
+﻿{
+    "$schema":  "https://schema.tauri.app/config/2",
+    "productName":  "Entropic",
+    "version":  "0.1.0",
+    "identifier":  "ai.openclaw.entropic",
+    "build":  {
+                  "beforeDevCommand":  "pnpm dev",
+                  "devUrl":  "http://localhost:5174",
+                  "beforeBuildCommand":  "cmd /c exit 0",
+                  "frontendDist":  "../dist"
+              },
+    "app":  {
+                "withGlobalTauri":  true,
+                "macOSPrivateApi":  true,
+                "windows":  [
+                                {
+                                    "title":  "Entropic",
+                                    "width":  900,
+                                    "height":  700,
+                                    "minWidth":  600,
+                                    "minHeight":  500,
+                                    "resizable":  true,
+                                    "fullscreen":  false,
+                                    "decorations":  true,
+                                    "transparent":  false,
+                                    "titleBarStyle":  "Overlay",
+                                    "hiddenTitle":  true
+                                }
+                            ],
+                "security":  {
+                                 "csp":  "default-src \u0027self\u0027; connect-src \u0027self\u0027 http://localhost:* ws://localhost:* ws://127.0.0.1:* https://*.supabase.co https://*.workers.dev https://openrouter.ai https://api.anthropic.com https://api.openai.com https://console.anthropic.com https://claude.ai https://platform.claude.com https://auth.openai.com https://entropic.qu.ai https://*.qu.ai; img-src \u0027self\u0027 data: blob: https:; style-src \u0027self\u0027 \u0027unsafe-inline\u0027"
+                             }
+            },
+    "bundle":  {
+                   "active":  true,
+                   "createUpdaterArtifacts":  false,
+                   "targets":  [
+                                   "app"
+                               ],
+                   "icon":  [
+                                "icons/32x32.png",
+                                "icons/128x128.png",
+                                "icons/128x128@2x.png",
+                                "icons/icon.png",
+                                "icons/icon.ico"
+                            ],
+                   "resources":  [
+                                     "resources/openclaw-runtime.tar.gz",
+                                     "resources/runtime/*"
+                                 ],
+                   "category":  "DeveloperTool",
+                   "shortDescription":  "AI assistant with secure sandboxing",
+                   "longDescription":  "Entropic brings OpenClaw to your desktop with a beautiful interface and secure container-based sandboxing for AI-generated commands.",
+                   "macOS":  {
+                                 "entitlements":  "entitlements.plist",
+                                 "exceptionDomain":  null,
+                                 "frameworks":  [
+
+                                                ],
+                                 "minimumSystemVersion":  "12.0",
+                                 "signingIdentity":  null
+                             }
+               },
+    "plugins":  {
+                    "shell":  {
+                                  "open":  true
+                              },
+                    "deep-link":  {
+                                      "mobile":  [
+
+                                                 ],
+                                      "desktop":  {
+                                                      "schemes":  [
+                                                                      "entropic"
+                                                                  ]
+                                                  }
+                                  }
+                }
+}

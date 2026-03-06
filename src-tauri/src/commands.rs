@@ -1,6 +1,7 @@
 use crate::runtime::{
     entropic_colima_home_path, macos_docker_socket_candidates, Platform, Runtime, RuntimeStatus,
-    ENTROPIC_QEMU_PROFILE, ENTROPIC_VZ_PROFILE, LEGACY_NOVA_QEMU_PROFILE, LEGACY_NOVA_VZ_PROFILE,
+    ENTROPIC_QEMU_PROFILE, ENTROPIC_VZ_PROFILE, ENTROPIC_WSL_DEV_DISTRO,
+    ENTROPIC_WSL_PROD_DISTRO, LEGACY_NOVA_QEMU_PROFILE, LEGACY_NOVA_VZ_PROFILE,
 };
 use crate::windows_runtime_manager;
 use base64::{
@@ -166,8 +167,19 @@ fn env_var_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn env_var_bool(name: &str) -> Option<bool> {
+    std::env::var(name).ok().and_then(|value| {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        }
+    })
+}
+
 fn windows_managed_wsl_runtime_enabled() -> bool {
-    env_var_truthy("ENTROPIC_WINDOWS_MANAGED_WSL")
+    matches!(Platform::detect(), Platform::Windows)
+        && env_var_bool("ENTROPIC_WINDOWS_MANAGED_WSL").unwrap_or(true)
 }
 
 fn windows_shared_docker_fallback_allowed() -> bool {
@@ -196,6 +208,51 @@ fn windows_use_managed_wsl_docker() -> bool {
     matches!(Platform::detect(), Platform::Windows)
         && windows_managed_wsl_runtime_enabled()
         && !windows_shared_docker_fallback_allowed()
+}
+
+fn windows_runtime_distro_name() -> &'static str {
+    if windows_runtime_mode() == "dev" {
+        ENTROPIC_WSL_DEV_DISTRO
+    } else {
+        ENTROPIC_WSL_PROD_DISTRO
+    }
+}
+
+fn windows_managed_wsl_host_ip() -> Option<String> {
+    if !windows_use_managed_wsl_docker() {
+        return None;
+    }
+
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args([
+        "--distribution",
+        windows_runtime_distro_name(),
+        "--user",
+        "root",
+        "--exec",
+        "sh",
+        "-lc",
+        "ip route show default | awk '/^default / {print $3; exit}'",
+    ]);
+    apply_windows_no_window(&mut cmd);
+
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<std::net::Ipv4Addr>().ok())
+        .map(|ip| ip.to_string())
+}
+
+fn docker_host_alias_arg() -> String {
+    if let Some(ip) = windows_managed_wsl_host_ip() {
+        return format!("host.docker.internal:{}", ip);
+    }
+    "host.docker.internal:host-gateway".to_string()
 }
 
 fn windows_path_to_wsl(path: &Path) -> String {
@@ -385,10 +442,21 @@ fn find_docker_binary() -> String {
 }
 
 /// Create a Docker command with the correct DOCKER_HOST set
+fn apply_windows_no_window(cmd: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 fn docker_command() -> Command {
     if windows_use_managed_wsl_docker() {
-        if let Some(cmd) = windows_runtime_manager::docker_dispatch_command(windows_runtime_mode())
+        if let Some(mut cmd) =
+            windows_runtime_manager::docker_dispatch_command(windows_runtime_mode())
         {
+            apply_windows_no_window(&mut cmd);
             return cmd;
         }
 
@@ -398,6 +466,7 @@ fn docker_command() -> Command {
             "/C",
             "echo [Entropic] runtime-manager dispatch unavailable>&2 & exit /b 126",
         ]);
+        apply_windows_no_window(&mut cmd);
         return cmd;
     }
 
@@ -406,6 +475,7 @@ fn docker_command() -> Command {
     if let Some(host) = get_docker_host() {
         cmd.env("DOCKER_HOST", host);
     }
+    apply_windows_no_window(&mut cmd);
     cmd
 }
 
@@ -1390,9 +1460,20 @@ CMD ["skill-scanner-api", "--host", "0.0.0.0", "--port", "8000"]
 /// 3. Try pulling from the configured registry.
 /// 4. Return a descriptive Err if nothing works.
 fn bundled_runtime_signature_from_manifest(tar_path: &Path) -> Result<String, String> {
+    let metadata = std::fs::metadata(tar_path)
+        .map_err(|e| format!("failed to stat {}: {}", tar_path.display(), e))?;
+    if metadata.len() == 0 {
+        return Err(format!("bundled runtime tar {} is empty", tar_path.display()));
+    }
+
     let tar_path = tar_path.to_string_lossy();
+    let tar_flag = if tar_path.ends_with(".tar.gz") || tar_path.ends_with(".tgz") {
+        "-xOzf"
+    } else {
+        "-xOf"
+    };
     let output = Command::new("tar")
-        .args(["-xOf", tar_path.as_ref(), "manifest.json"])
+        .args([tar_flag, tar_path.as_ref(), "manifest.json"])
         .output()
         .map_err(|e| format!("failed to read manifest from {}: {}", tar_path, e))?;
     if !output.status.success() {
@@ -7810,7 +7891,7 @@ pub async fn start_gateway(
         "--user".to_string(),
         "1000:1000".to_string(),
         "--add-host".to_string(),
-        "host.docker.internal:host-gateway".to_string(),
+        docker_host_alias_arg(),
         "--cap-drop=ALL".to_string(),
         "--security-opt".to_string(),
         "no-new-privileges".to_string(),
@@ -8040,7 +8121,7 @@ pub async fn start_gateway_with_proxy(
             "--user".to_string(),
             "1000:1000".to_string(),
             "--add-host".to_string(),
-            "host.docker.internal:host-gateway".to_string(),
+            docker_host_alias_arg(),
             "--cap-drop=ALL".to_string(),
             "--security-opt".to_string(),
             "no-new-privileges".to_string(),
@@ -11315,6 +11396,25 @@ pub async fn upload_workspace_file(
 const AUTH_LOCALHOST_PORT_ENV: &str = "ENTROPIC_AUTH_LOCALHOST_PORT";
 const AUTH_LOCALHOST_DEFAULT_PORT: u16 = 27100;
 
+#[derive(Debug, Clone)]
+struct PendingLocalhostAuth {
+    redirect_url: String,
+    port: u16,
+    started_at_secs: u64,
+}
+
+fn localhost_auth_state() -> &'static Mutex<Option<PendingLocalhostAuth>> {
+    static STATE: OnceLock<Mutex<Option<PendingLocalhostAuth>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn unix_timestamp_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
@@ -11780,14 +11880,71 @@ pub async fn start_auth_localhost(app: AppHandle) -> Result<LocalhostAuthStart, 
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(AUTH_LOCALHOST_DEFAULT_PORT);
     let addr = format!("127.0.0.1:{}", port);
-    let listener = TcpListener::bind(&addr)
-        .await
-        .map_err(|e| format!("Failed to bind localhost OAuth server on {}: {}", addr, e))?;
-
     let redirect_url = format!("http://{}/auth/callback", addr);
+    {
+        let mut state = localhost_auth_state()
+            .lock()
+            .map_err(|e| format!("Failed to access localhost OAuth state: {}", e))?;
+        if let Some(existing) = state.as_ref() {
+            let age_secs = unix_timestamp_secs().saturating_sub(existing.started_at_secs);
+            if existing.port == port && age_secs < 300 {
+                return Ok(LocalhostAuthStart {
+                    redirect_url: existing.redirect_url.clone(),
+                });
+            }
+        }
+        *state = None;
+    }
+
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            let state = localhost_auth_state()
+                .lock()
+                .map_err(|lock_err| {
+                    format!("Failed to access localhost OAuth state: {}", lock_err)
+                })?;
+            if let Some(existing) = state.as_ref() {
+                let age_secs = unix_timestamp_secs().saturating_sub(existing.started_at_secs);
+                if existing.port == port && age_secs < 300 {
+                    return Ok(LocalhostAuthStart {
+                        redirect_url: existing.redirect_url.clone(),
+                    });
+                }
+            }
+            return Err(format!(
+                "Failed to bind localhost OAuth server on {}: {}",
+                addr, e
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "Failed to bind localhost OAuth server on {}: {}",
+                addr, e
+            ));
+        }
+    };
+
+    {
+        let mut state = localhost_auth_state()
+            .lock()
+            .map_err(|e| format!("Failed to access localhost OAuth state: {}", e))?;
+        *state = Some(PendingLocalhostAuth {
+            redirect_url: redirect_url.clone(),
+            port,
+            started_at_secs: unix_timestamp_secs(),
+        });
+    }
+
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(err) = wait_for_localhost_auth_callback(listener, app_handle, port).await {
+        let result = wait_for_localhost_auth_callback(listener, app_handle, port).await;
+        if let Ok(mut state) = localhost_auth_state().lock() {
+            if state.as_ref().map(|entry| entry.port) == Some(port) {
+                *state = None;
+            }
+        }
+        if let Err(err) = result {
             eprintln!("[Entropic] Localhost OAuth error: {}", err);
         }
     });
