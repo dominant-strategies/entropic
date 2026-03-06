@@ -256,6 +256,7 @@ pub fn run() {
                 #[cfg(not(target_os = "macos"))]
                 {
                     println!("[Entropic] Window close requested — preserving containers...");
+                    let _ = (&app_handle, &label, &api);
                     commands::cleanup_on_exit();
                 }
             }

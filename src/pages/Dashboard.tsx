@@ -601,10 +601,18 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       const isApiError = error instanceof ApiRequestError;
       const status = isApiError ? error.status : undefined;
       const message = extractGatewayStartError(error);
+      const normalizedMessage =
+        typeof message === "string" ? message.toLowerCase() : "";
+      const hasFetchNetworkSignal =
+        normalizedMessage.includes("failed to fetch") ||
+        normalizedMessage.includes("network request failed") ||
+        normalizedMessage.includes("networkerror when attempting to fetch resource") ||
+        normalizedMessage.includes("fetch failed") ||
+        normalizedMessage.includes("load failed") ||
+        normalizedMessage.includes("net::");
       const isNetwork =
         (isApiError && error.kind === "network") ||
-        (typeof message === "string" &&
-          /load failed|failed to fetch|network/i.test(message));
+        hasFetchNetworkSignal;
 
       if (status === 402) {
         setStartupError(buildOutOfCreditsStartupError());

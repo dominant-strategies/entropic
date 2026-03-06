@@ -24,6 +24,15 @@ fn debug_log(msg: &str) {
     }
 }
 
+fn apply_windows_no_window(cmd: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum RuntimeError {
     #[error("Colima not found in resources")]
@@ -269,8 +278,19 @@ fn env_var_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn env_var_bool(name: &str) -> Option<bool> {
+    std::env::var(name).ok().and_then(|value| {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        }
+    })
+}
+
 fn windows_managed_wsl_runtime_enabled() -> bool {
-    env_var_truthy("ENTROPIC_WINDOWS_MANAGED_WSL")
+    matches!(Platform::detect(), Platform::Windows)
+        && env_var_bool("ENTROPIC_WINDOWS_MANAGED_WSL").unwrap_or(true)
 }
 
 fn windows_shared_docker_fallback_allowed() -> bool {
@@ -925,8 +945,8 @@ impl Runtime {
     }
 
     fn command_output_summary(output: &std::process::Output) -> String {
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = Self::sanitize_command_output(&output.stdout);
+        let stderr = Self::sanitize_command_output(&output.stderr);
         match (stdout.is_empty(), stderr.is_empty()) {
             (true, true) => "<no output>".to_string(),
             (false, true) => format!("stdout: {}", stdout),
@@ -935,8 +955,14 @@ impl Runtime {
         }
     }
 
+    fn sanitize_command_output(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).replace('\0', "").trim().to_string()
+    }
+
     fn wsl_command(&self) -> Command {
-        Command::new("wsl.exe")
+        let mut cmd = Command::new("wsl.exe");
+        apply_windows_no_window(&mut cmd);
+        cmd
     }
 
     fn run_wsl(&self, args: &[&str]) -> Result<std::process::Output, std::io::Error> {
@@ -1187,15 +1213,15 @@ impl Runtime {
             ));
             return false;
         }
-        let listing = String::from_utf8_lossy(&output.stdout);
+        let listing = Self::sanitize_command_output(&output.stdout);
         listing.lines().any(|line| line.trim() == distro)
     }
 
     fn output_mentions_reboot(output: &std::process::Output) -> bool {
         let combined = format!(
             "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            Self::sanitize_command_output(&output.stdout),
+            Self::sanitize_command_output(&output.stderr)
         )
         .to_ascii_lowercase();
         combined.contains("restart")
@@ -1421,6 +1447,10 @@ impl Runtime {
 
     fn ensure_windows_distro_docker_ready(&self, distro: &str) -> Result<(), RuntimeError> {
         let script = r#"set -eu
+docker_local() {
+  env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock docker "$@"
+}
+
 if ! command -v docker >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
@@ -1447,17 +1477,27 @@ if command -v service >/dev/null 2>&1; then
   service docker start >/dev/null 2>&1 || true
 fi
 
-if ! docker info >/dev/null 2>&1; then
+if ! docker_local info >/dev/null 2>&1; then
   if command -v dockerd >/dev/null 2>&1; then
     nohup dockerd >/var/log/dockerd.log 2>&1 &
-    sleep 3
+    sleep 5
   fi
 fi
 
-docker info >/dev/null 2>&1
+if ! docker_local info >/dev/null 2>&1; then
+  echo "docker info probe failed" >&2
+  docker_local info >&2 || true
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl status docker --no-pager -l >&2 || true
+  fi
+  if [ -f /var/log/dockerd.log ]; then
+    tail -n 120 /var/log/dockerd.log >&2 || true
+  fi
+  exit 1
+fi
 "#;
 
-        let output = self
+        let mut output = self
             .wsl_command()
             .arg("--distribution")
             .arg(distro)
@@ -1479,6 +1519,38 @@ docker info >/dev/null 2>&1
             return Ok(());
         }
 
+        debug_log(&format!(
+            "Docker bootstrap in {} failed on first attempt; restarting distro and retrying: {}",
+            distro,
+            Self::command_output_summary(&output)
+        ));
+        self.windows_restart_distro(distro)?;
+        output = self
+            .wsl_command()
+            .arg("--distribution")
+            .arg(distro)
+            .arg("--user")
+            .arg("root")
+            .arg("--exec")
+            .arg("sh")
+            .arg("-lc")
+            .arg(script)
+            .output()
+            .map_err(|e| {
+                RuntimeError::CommandFailed(format!(
+                    "Failed to re-initialize Docker in {} after distro restart: {}",
+                    distro, e
+                ))
+            })?;
+
+        if output.status.success() {
+            debug_log(&format!(
+                "Docker bootstrap in {} recovered after distro restart",
+                distro
+            ));
+            return Ok(());
+        }
+
         Err(RuntimeError::CommandFailed(format!(
             "Docker engine is not ready in {}: {}",
             distro,
@@ -1496,7 +1568,7 @@ docker info >/dev/null 2>&1
             .arg("--exec")
             .arg("sh")
             .arg("-lc")
-            .arg("docker info >/dev/null 2>&1")
+            .arg("env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock docker info >/dev/null 2>&1")
             .output();
 
         match output {
@@ -1517,6 +1589,52 @@ docker info >/dev/null 2>&1
                 false
             }
         }
+    }
+
+    fn windows_start_distro(&self, distro: &str) -> Result<(), RuntimeError> {
+        let output = self
+            .run_wsl(&["-d", distro, "--user", "root", "--exec", "sh", "-lc", "true"])
+            .map_err(|e| {
+                RuntimeError::CommandFailed(format!("Failed to start {}: {}", distro, e))
+            })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(RuntimeError::CommandFailed(format!(
+            "Failed to start {}: {}",
+            distro,
+            Self::command_output_summary(&output)
+        )))
+    }
+
+    fn windows_terminate_distro(&self, distro: &str) -> Result<(), RuntimeError> {
+        match self.run_wsl(&["--terminate", distro]) {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => {
+                let summary = Self::command_output_summary(&out);
+                if summary
+                    .to_ascii_lowercase()
+                    .contains("there is no running instance")
+                {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::CommandFailed(format!(
+                        "Failed to terminate {}: {}",
+                        distro, summary
+                    )))
+                }
+            }
+            Err(err) => Err(RuntimeError::CommandFailed(format!(
+                "Failed to terminate {}: {}",
+                distro, err
+            ))),
+        }
+    }
+
+    fn windows_restart_distro(&self, distro: &str) -> Result<(), RuntimeError> {
+        self.windows_terminate_distro(distro)?;
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        self.windows_start_distro(distro)
     }
 
     fn ensure_windows_runtime_internal(&self, force_windows: bool) -> Result<(), RuntimeError> {
@@ -1803,10 +1921,9 @@ docker info >/dev/null 2>&1
         if let Ok(host) = std::env::var("DOCKER_HOST") {
             if !host.trim().is_empty() {
                 debug_log(&format!("Trying DOCKER_HOST={}", host));
-                let output = Command::new(&docker)
-                    .args(["info"])
-                    .env("DOCKER_HOST", host)
-                    .output();
+                let mut cmd = Command::new(&docker);
+                apply_windows_no_window(&mut cmd);
+                let output = cmd.args(["info"]).env("DOCKER_HOST", host).output();
                 match output {
                     Ok(out) if out.status.success() => {
                         debug_log("Docker info succeeded with DOCKER_HOST");
@@ -1846,10 +1963,9 @@ docker info >/dev/null 2>&1
             }
             let host = format!("unix://{}", socket.display());
             debug_log(&format!("Trying socket: {}", host));
-            let output = Command::new(&docker)
-                .args(["info"])
-                .env("DOCKER_HOST", host)
-                .output();
+            let mut cmd = Command::new(&docker);
+            apply_windows_no_window(&mut cmd);
+            let output = cmd.args(["info"]).env("DOCKER_HOST", host).output();
             match output {
                 Ok(out) if out.status.success() => {
                     debug_log("Docker info succeeded with socket");
@@ -1869,7 +1985,9 @@ docker info >/dev/null 2>&1
 
         // Fall back to default docker context.
         debug_log("Trying default docker info");
-        let output = Command::new(&docker).args(["info"]).output();
+        let mut cmd = Command::new(&docker);
+        apply_windows_no_window(&mut cmd);
+        let output = cmd.args(["info"]).output();
         match output {
             Ok(out) if out.status.success() => {
                 debug_log("Docker info succeeded (default)");
@@ -1933,16 +2051,19 @@ docker info >/dev/null 2>&1
 
     /// Ensure bundled binaries are executable (Tauri bundle may lose +x)
     fn ensure_executable(&self) -> Result<(), RuntimeError> {
-        use std::os::unix::fs::PermissionsExt;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
 
-        for binary in ["colima", "limactl", "lima", "docker"] {
-            let path = self.bin_dir().join(binary);
-            if path.exists() {
-                if let Ok(metadata) = std::fs::metadata(&path) {
-                    let mut perms = metadata.permissions();
-                    // Set executable bit (0o755)
-                    perms.set_mode(0o755);
-                    let _ = std::fs::set_permissions(&path, perms);
+            for binary in ["colima", "limactl", "lima", "docker"] {
+                let path = self.bin_dir().join(binary);
+                if path.exists() {
+                    if let Ok(metadata) = std::fs::metadata(&path) {
+                        let mut perms = metadata.permissions();
+                        // Set executable bit (0o755)
+                        perms.set_mode(0o755);
+                        let _ = std::fs::set_permissions(&path, perms);
+                    }
                 }
             }
         }
