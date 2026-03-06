@@ -3074,15 +3074,15 @@ export function Chat({
         sessionsRef.current.filter((session) => session.key !== action.key),
       );
 
+      sessionsRef.current = applySessionTitles(remaining);
+      const nextDrafts = { ...draftsRef.current };
+      delete nextDrafts[action.key];
+      draftsRef.current = nextDrafts;
       setSessions(applySessionTitles(remaining));
       const nextMessages = { ...sessionMessagesRef.current };
       delete nextMessages[action.key];
       sessionMessagesRef.current = nextMessages;
-      setDraftsBySession((prev) => {
-        const next = { ...prev };
-        delete next[action.key];
-        return next;
-      });
+      setDraftsBySession(nextDrafts);
       setIntegrationSetupBySession((prev) => {
         if (!prev[action.key]) return prev;
         const next = { ...prev };
@@ -3120,12 +3120,16 @@ export function Chat({
         addDiag(`delete failed key=${action.key}: ${message}${suffix}`);
         setError(`Failed to delete chat: ${message}${suffix}`);
         if (snapshotSession) {
-          setSessions((prev) => applySessionTitles(normalizeSessionsList([...prev, snapshotSession])));
+          const restoredSessions = applySessionTitles(normalizeSessionsList([...sessionsRef.current, snapshotSession]));
+          sessionsRef.current = restoredSessions;
+          setSessions(restoredSessions);
           if (snapshotMessages.length > 0) {
             sessionMessagesRef.current[action.key] = snapshotMessages;
           }
           if (snapshotDraft) {
-            setDraftsBySession((prev) => ({ ...prev, [action.key]: snapshotDraft }));
+            const restoredDrafts = { ...draftsRef.current, [action.key]: snapshotDraft };
+            draftsRef.current = restoredDrafts;
+            setDraftsBySession(restoredDrafts);
           }
           if (snapshotIntegrationSetup) {
             setIntegrationSetupBySession((prev) => ({ ...prev, [action.key]: snapshotIntegrationSetup }));
