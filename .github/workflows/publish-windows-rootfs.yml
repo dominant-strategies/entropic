@@ -1,0 +1,137 @@
+name: Publish Windows WSL Rootfs
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag in dominant-strategies/entropic-releases'
+        required: true
+        default: 'runtime-latest'
+      release_repo:
+        description: 'Target repo for release assets'
+        required: true
+        default: 'dominant-strategies/entropic-releases'
+      rootfs_image:
+        description: 'Base container image to export as the Windows WSL rootfs'
+        required: true
+        default: 'ubuntu:24.04'
+
+env:
+  ROOTFS_PLATFORM: 'linux/amd64'
+
+jobs:
+  publish-rootfs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    concurrency:
+      group: windows-rootfs-publish-${{ github.event.inputs.release_repo }}-${{ github.event.inputs.release_tag }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout Entropic
+        uses: actions/checkout@v4
+        with:
+          path: entropic
+
+      - name: Build Windows WSL rootfs artifact
+        working-directory: entropic
+        env:
+          ENTROPIC_WINDOWS_WSL_ROOTFS_IMAGE: ${{ github.event.inputs.rootfs_image }}
+          ENTROPIC_WINDOWS_WSL_ROOTFS_PLATFORM: ${{ env.ROOTFS_PLATFORM }}
+        run: bash ./scripts/build-windows-wsl-rootfs.sh
+
+      - name: Prepare rootfs assets and merged runtime manifest
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.event.inputs.release_tag }}"
+          REPO="${{ github.event.inputs.release_repo }}"
+          ROOTFS_IMAGE="${{ github.event.inputs.rootfs_image }}"
+
+          cp entropic/src-tauri/resources/runtime/entropic-runtime.tar entropic-runtime-windows-x86_64.tar
+          sha256sum entropic-runtime-windows-x86_64.tar > entropic-runtime-windows-x86_64.tar.sha256
+          ROOTFS_SHA="$(awk '{print $1}' entropic-runtime-windows-x86_64.tar.sha256)"
+          ROOTFS_URL="https://github.com/${REPO}/releases/download/${VERSION}/entropic-runtime-windows-x86_64.tar"
+
+          TMP_DIR="$(mktemp -d)"
+          if gh release view "$VERSION" --repo "$REPO" &>/dev/null; then
+            gh release download "$VERSION" \
+              --repo "$REPO" \
+              --pattern runtime-manifest.json \
+              --dir "$TMP_DIR" >/dev/null 2>&1 || true
+          fi
+
+          export EXISTING_RUNTIME_MANIFEST="$TMP_DIR/runtime-manifest.json"
+          export ROOTFS_SHA
+          export ROOTFS_URL
+          export ROOTFS_IMAGE
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          existing_manifest = {}
+          existing_path = Path(os.environ["EXISTING_RUNTIME_MANIFEST"])
+          if existing_path.exists():
+              existing_manifest = json.loads(existing_path.read_text())
+
+          existing_manifest["windows_wsl_rootfs_url"] = os.environ["ROOTFS_URL"]
+          existing_manifest["windows_wsl_rootfs_sha256"] = os.environ["ROOTFS_SHA"]
+          existing_manifest["windows_wsl_rootfs_image"] = os.environ["ROOTFS_IMAGE"]
+
+          Path("runtime-manifest.json").write_text(
+              json.dumps(existing_manifest, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          cat > windows-rootfs-metadata.json << METAEOF
+          {
+            "windows_wsl_rootfs_tar": "entropic-runtime-windows-x86_64.tar",
+            "release_tag": "${VERSION}",
+            "release_repo": "${REPO}",
+            "windows_wsl_rootfs_image": "${ROOTFS_IMAGE}",
+            "entropic_repo": "${{ github.repository }}",
+            "entropic_commit": "${{ github.sha }}",
+            "built_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          METAEOF
+
+          rm -rf "$TMP_DIR"
+
+      - name: Upload rootfs artifact (workflow)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-wsl-rootfs
+          path: |
+            entropic-runtime-windows-x86_64.tar
+            entropic-runtime-windows-x86_64.tar.sha256
+            runtime-manifest.json
+            windows-rootfs-metadata.json
+
+      - name: Publish rootfs assets to release
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.release_tag }}"
+          REPO="${{ github.event.inputs.release_repo }}"
+          FILES=(
+            "entropic-runtime-windows-x86_64.tar"
+            "entropic-runtime-windows-x86_64.tar.sha256"
+            "runtime-manifest.json"
+            "windows-rootfs-metadata.json"
+          )
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${FILES[@]}" --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" "${FILES[@]}" \
+              --repo "$REPO" \
+              --title "Runtime $TAG" \
+              --notes "Windows WSL rootfs assets published by Publish Windows WSL Rootfs workflow."
+          fi

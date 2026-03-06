@@ -138,6 +138,8 @@ jobs:
         run: ./scripts/bundle-scanner-image.sh
 
       - name: Prepare runtime release assets
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           cp entropic/src-tauri/resources/openclaw-runtime.tar.gz openclaw-runtime.tar.gz
@@ -152,9 +154,23 @@ jobs:
           export SKILLS_COMMIT="${{ steps.refs.outputs.skills_commit }}"
           export RUNTIME_SHA256
           export SCANNER_SHA256
+          TMP_DIR="$(mktemp -d)"
+          if gh release view "$RUNTIME_VERSION" --repo "$RUNTIME_RELEASE_REPO" &>/dev/null; then
+            gh release download "$RUNTIME_VERSION" \
+              --repo "$RUNTIME_RELEASE_REPO" \
+              --pattern runtime-manifest.json \
+              --dir "$TMP_DIR" >/dev/null 2>&1 || true
+          fi
+          export EXISTING_RUNTIME_MANIFEST="$TMP_DIR/runtime-manifest.json"
           python3 - <<'PY'
           import json
           import os
+          from pathlib import Path
+
+          existing_manifest = {}
+          existing_path = Path(os.environ["EXISTING_RUNTIME_MANIFEST"])
+          if existing_path.exists():
+              existing_manifest = json.loads(existing_path.read_text())
 
           manifest = {
               "version": os.environ["RUNTIME_VERSION"],
@@ -171,10 +187,18 @@ jobs:
               "openclaw_commit": os.environ["OPENCLAW_COMMIT"],
               "entropic_skills_commit": os.environ["SKILLS_COMMIT"],
           }
+          for key in (
+              "windows_wsl_rootfs_url",
+              "windows_wsl_rootfs_sha256",
+              "windows_wsl_rootfs_image",
+          ):
+              if key in existing_manifest:
+                  manifest[key] = existing_manifest[key]
           with open("runtime-manifest.json", "w", encoding="utf-8") as f:
               json.dump(manifest, f, indent=2)
               f.write("\n")
           PY
+          rm -rf "$TMP_DIR"
 
           cat > openclaw-runtime-metadata.json << METAEOF
           {
