@@ -177,6 +177,11 @@ function Convert-ToWslPath([string]$WindowsPath) {
     throw "Cannot convert path to WSL form: $WindowsPath"
 }
 
+function Invoke-WslProjectBash([string]$Command) {
+    $projectRootWsl = Convert-ToWslPath $ProjectRoot
+    & wsl -d entropic-dev --cd $projectRootWsl -- bash -lc $Command
+}
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $ScriptDir ".."))
 Set-Location $ProjectRoot
@@ -227,15 +232,9 @@ if (-not (Test-RuntimeTarFresh $RuntimeTar)) {
     }
 
     Invoke-DevWslHelper -Command "start" -Mode "dev"
-    $ProjectRootWsl = Convert-ToWslPath $ProjectRoot
-    $BashCommand = @(
-        "set -euo pipefail"
-        "cd '$ProjectRootWsl'"
-        "ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 ./scripts/build-openclaw-runtime.sh"
-        "ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 ./scripts/bundle-runtime-image.sh"
-    ) -join "; "
+    $BashCommand = "set -euo pipefail; ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 ./scripts/build-openclaw-runtime.sh; ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 ./scripts/bundle-runtime-image.sh"
 
-    & wsl -d entropic-dev -- bash -lc $BashCommand
+    Invoke-WslProjectBash -Command $BashCommand
     if ($LASTEXITCODE -ne 0) {
         throw "Failed generating runtime tar in WSL (entropic-dev)."
     }
@@ -257,8 +256,7 @@ if (-not $SkipFrontendBuild) {
     if (-not $frontendBuilt) {
         Write-Host "Windows frontend build failed. Falling back to WSL build..."
         Invoke-DevWslHelper -Command "start" -Mode "dev"
-        $ProjectRootWsl = Convert-ToWslPath $ProjectRoot
-        & wsl -d entropic-dev -- bash -lc "cd '$ProjectRootWsl' && pnpm build"
+        Invoke-WslProjectBash -Command "pnpm build"
         if ($LASTEXITCODE -ne 0) {
             throw "Frontend build failed on both Windows and WSL."
         }

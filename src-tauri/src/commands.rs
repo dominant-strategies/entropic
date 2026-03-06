@@ -38,6 +38,8 @@ const ENTROPIC_PROXY_ALLOWED_HOSTS: &[&str] = &[
     "localhost",
     "127.0.0.1",
 ];
+const ENTROPIC_NATIVE_API_ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1"];
+const ENTROPIC_NATIVE_API_ALLOWED_DOMAINS: &[&str] = &["entropic.qu.ai"];
 const MAX_BRIDGE_DEVICES: usize = 10;
 const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const CLIENT_LOG_READ_MAX_BYTES: usize = 512 * 1024;
@@ -108,15 +110,34 @@ fn read_client_log_text(max_bytes: Option<usize>) -> Result<String, String> {
     Ok(String::from_utf8_lossy(clipped).to_string())
 }
 
+fn host_matches_exact_allowlist(host: &str, allowlist: &[&str]) -> bool {
+    allowlist
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(host))
+}
+
+fn host_matches_domain_or_subdomain(host: &str, domain: &str) -> bool {
+    host.eq_ignore_ascii_case(domain)
+        || host
+            .to_ascii_lowercase()
+            .strip_suffix(&domain.to_ascii_lowercase())
+            .map(|prefix| prefix.ends_with('.'))
+            .unwrap_or(false)
+}
+
+fn host_matches_native_api_allowlist(host: &str) -> bool {
+    host_matches_exact_allowlist(host, ENTROPIC_NATIVE_API_ALLOWED_HOSTS)
+        || ENTROPIC_NATIVE_API_ALLOWED_DOMAINS
+            .iter()
+            .any(|domain| host_matches_domain_or_subdomain(host, domain))
+}
+
 fn validate_native_api_url(url: &str) -> Result<Url, String> {
     let parsed = Url::parse(url).map_err(|e| format!("Invalid API URL: {}", e))?;
     let host = parsed
         .host_str()
         .ok_or_else(|| "API URL is missing a host".to_string())?;
-    if !ENTROPIC_PROXY_ALLOWED_HOSTS
-        .iter()
-        .any(|allowed| allowed.eq_ignore_ascii_case(host))
-    {
+    if !host_matches_native_api_allowlist(host) {
         return Err(format!("API host is not allowlisted: {}", host));
     }
     match parsed.scheme() {
@@ -445,7 +466,7 @@ fn resolve_container_proxy_base(proxy_url: &str) -> Result<String, String> {
     let host = url
         .host_str()
         .ok_or_else(|| "Invalid proxy URL: missing host.".to_string())?;
-    if !ENTROPIC_PROXY_ALLOWED_HOSTS.contains(&host) {
+    if !host_matches_exact_allowlist(host, ENTROPIC_PROXY_ALLOWED_HOSTS) {
         return Err(format!(
             "Proxy host '{}' is not allowed. Configure ENTROPIC_PROXY_BASE_URL with an allowed host.",
             host
