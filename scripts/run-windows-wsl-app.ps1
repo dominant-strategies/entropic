@@ -55,6 +55,11 @@ function Convert-ToWslPath([string]$WindowsPath) {
     throw "Cannot convert path to WSL form: $WindowsPath"
 }
 
+function Invoke-WslProjectBash([string]$Command) {
+    $projectRootWsl = Convert-ToWslPath $ProjectRoot
+    & wsl -d entropic-dev --cd $projectRootWsl -- bash -lc $Command
+}
+
 function Resolve-ReleaseBinaryPath {
     $candidates = @(
         (Join-Path $ProjectRoot "src-tauri\target\release\entropic.exe"),
@@ -84,15 +89,9 @@ function Ensure-DevRuntimeTar {
         throw "OpenClaw dist missing at $openClawDist. Build openclaw first."
     }
 
-    $projectRootWsl = Convert-ToWslPath $ProjectRoot
-    $bashCommand = @(
-        "set -euo pipefail"
-        "cd '$projectRootWsl'"
-        "ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 ./scripts/build-openclaw-runtime.sh"
-        "ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 ./scripts/bundle-runtime-image.sh"
-    ) -join "; "
+    $bashCommand = "set -euo pipefail; ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 ./scripts/build-openclaw-runtime.sh; ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 ./scripts/bundle-runtime-image.sh"
 
-    & wsl -d entropic-dev -- bash -lc $bashCommand
+    Invoke-WslProjectBash -Command $bashCommand
     if ($LASTEXITCODE -ne 0 -or -not (Test-FileNonEmpty $RuntimeTar)) {
         throw "Failed generating runtime tar for Windows dev mode."
     }
