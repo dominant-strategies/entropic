@@ -47,6 +47,8 @@
     "user-test:build:win:fast": "powershell -ExecutionPolicy Bypass -File ./scripts/build-for-user-test-windows.ps1 -SkipRuntimeTarBuild",
     "user-test:build:win:prebuilt": "powershell -ExecutionPolicy Bypass -File ./scripts/build-for-user-test-windows.ps1 -SkipFrontendBuild",
     "user-test:build:win:prebuilt:fast": "powershell -ExecutionPolicy Bypass -File ./scripts/build-for-user-test-windows.ps1 -SkipFrontendBuild -SkipRuntimeTarBuild",
+    "user-test:build:win:bin": "powershell -ExecutionPolicy Bypass -File ./scripts/build-for-user-test-windows.ps1 -NoBundle",
+    "user-test:build:win:bin:fast": "powershell -ExecutionPolicy Bypass -File ./scripts/build-for-user-test-windows.ps1 -NoBundle -SkipFrontendBuild -SkipRuntimeTarBuild",
     "user-test:run:win": "powershell -ExecutionPolicy Bypass -File ./scripts/run-windows-wsl-app.ps1 -Mode prod -ReleaseBinary",
     "bundle:colima": "./scripts/bundle-colima.sh",
     "bundle:docker": "./scripts/bundle-docker.sh",

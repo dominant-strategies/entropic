@@ -70,6 +70,52 @@ To use a custom dev path intentionally:
 ENTROPIC_COLIMA_HOME=$HOME/.entropic/colima-dev-pilot pnpm dev:runtime:up
 ```
 
+### Windows WSL Runtime Helpers
+
+For Windows development, use the WSL runtime helper to manage isolated distros
+(`entropic-dev` and `entropic-prod`) similarly to Colima profiles. The default
+`dev:wsl:*` commands now target `entropic-dev`; use explicit `:prod` or `:all`
+variants when you need them:
+
+```powershell
+pnpm dev:wsl:status
+pnpm dev:wsl:start
+pnpm dev:wsl:up
+pnpm dev:wsl:status:prod
+pnpm dev:wsl:start:prod
+pnpm dev:wsl:status:all
+pnpm dev:wsl:ensure:all
+pnpm dev:wsl:stop
+pnpm dev:wsl:prune
+pnpm dev:wsl:shell:dev
+pnpm dev:wsl:shell:prod
+```
+
+`pnpm dev:wsl:up` starts the managed WSL dev runtime, forces the app into
+managed-WSL mode, and launches `pnpm tauri:dev`.
+
+Optional overrides:
+- `ENTROPIC_WSL_BASE_DISTRO` (default `Ubuntu`)
+- `ENTROPIC_WSL_DEV_DISTRO` (default `entropic-dev`)
+- `ENTROPIC_WSL_PROD_DISTRO` (default `entropic-prod`)
+
+Windows user-test bundle (local `.exe` + NSIS installer):
+```powershell
+pnpm user-test:build:win
+# Faster rebuild that reuses an existing non-empty runtime tar:
+pnpm user-test:build:win:fast
+# Use when frontend dist is prebuilt (for example built in WSL):
+pnpm user-test:build:win:prebuilt
+pnpm user-test:build:win:prebuilt:fast
+pnpm user-test:run:win
+```
+
+`pnpm user-test:build:win` now prepares the managed WSL base artifact
+(`resources/runtime/entropic-runtime.tar`) plus the bundled
+`openclaw-runtime.tar.gz` image tar. `pnpm user-test:run:win` launches the built
+release binary in managed-WSL `prod` mode to mimic the installer/runtime path
+without reinstalling first.
+
 ### User-Test Production Pipeline
 
 ```bash
