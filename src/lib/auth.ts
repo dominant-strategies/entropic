@@ -10,14 +10,15 @@ const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL || "";
 const SUPABASE_ANON_KEY = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || "";
 const RAW_API_URL = (import.meta as any).env?.VITE_API_URL || "";
 const API_URL = RAW_API_URL || ((import.meta as any).env?.DEV ? "/api" : "");
+const APP_SCHEME = (import.meta as any).env?.DEV ? "entropic-dev" : "entropic";
 const AUTH_REDIRECT_URL =
-  (import.meta as any).env?.VITE_AUTH_REDIRECT_URL || "entropic://auth/callback";
+  (import.meta as any).env?.VITE_AUTH_REDIRECT_URL || `${APP_SCHEME}://auth/callback`;
 const BILLING_SUCCESS_REDIRECT_URL =
   (import.meta as any).env?.VITE_BILLING_SUCCESS_REDIRECT_URL ||
-  ((import.meta as any).env?.DEV ? "entropic-dev://billing/success" : "entropic://billing/success");
+  `${APP_SCHEME}://billing/success`;
 const BILLING_CANCEL_REDIRECT_URL =
   (import.meta as any).env?.VITE_BILLING_CANCEL_REDIRECT_URL ||
-  ((import.meta as any).env?.DEV ? "entropic-dev://billing/cancel" : "entropic://billing/cancel");
+  `${APP_SCHEME}://billing/cancel`;
 const AUTH_STORE_NAME =
   (import.meta as any).env?.VITE_AUTH_STORE_NAME || "entropic-auth.json";
 const AUTH_USE_LOCALHOST =
@@ -107,12 +108,13 @@ type LocalhostAuthStart = { redirect_url: string };
 async function shouldUseLocalhostOAuth(): Promise<boolean> {
   if (AUTH_FORCE_DEEPLINK) return false;
   if (AUTH_USE_LOCALHOST) return true;
+  if (!(import.meta as any).env?.DEV) return false;
   try {
     const os = await platform();
-    // On macOS, always prefer localhost OAuth – deep-link (entropic://) redirects
-    // are unreliable for OAuth callbacks and can end up re-opening the Google
-    // login page instead of handing the code back to the app.
-    return os === "macos";
+    // In tauri dev on desktop, prefer localhost OAuth. The debug app is not a
+    // normal installed bundle, so deep-link callbacks are less reliable than in
+    // packaged builds.
+    return os === "macos" || os === "windows";
   } catch {
     return false;
   }

@@ -6,6 +6,8 @@ pub(crate) const RUNTIME_MANAGER_SERVER_FLAG: &str = "--entropic-runtime-manager
 pub fn docker_dispatch_command(mode: &str) -> Option<Command> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let normalized = normalize_mode(mode);
         let exe = std::env::current_exe().ok()?;
         let mut cmd = Command::new(exe);
@@ -13,6 +15,7 @@ pub fn docker_dispatch_command(mode: &str) -> Option<Command> {
         cmd.arg("--mode");
         cmd.arg(normalized);
         cmd.arg("--");
+        cmd.creation_flags(CREATE_NO_WINDOW);
         return Some(cmd);
     }
 
@@ -49,7 +52,7 @@ mod windows {
     use rand::RngCore;
     use serde::{Deserialize, Serialize};
     use std::collections::HashSet;
-    use std::io::{Read, Write};
+    use std::io::{ErrorKind, Read, Write};
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::time::Duration;
@@ -159,9 +162,11 @@ mod windows {
                         last_error = err.to_string();
                         if first_connect_attempt {
                             first_connect_attempt = false;
-                            if let Err(spawn_err) = spawn_manager_for_mode(&mode) {
-                                last_error =
-                                    format!("{} | spawn failed: {}", last_error, spawn_err);
+                            if err.raw_os_error() != Some(231) {
+                                if let Err(spawn_err) = spawn_manager_for_mode(&mode) {
+                                    last_error =
+                                        format!("{} | spawn failed: {}", last_error, spawn_err);
+                                }
                             }
                         }
                         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -371,7 +376,7 @@ mod windows {
         let redacted = redacted_docker_args(docker_args);
         let rendered = redacted.join(" ");
         append_runtime_manager_audit_line(&format!(
-            "allowlisted invoke: wsl.exe --distribution {} --user root --exec docker {}",
+            "allowlisted invoke: wsl.exe --distribution {} --user root --exec env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock docker {}",
             distro, rendered
         ));
     }
@@ -472,9 +477,28 @@ mod windows {
         pipe: &str,
         request: &RuntimeManagerRequest,
     ) -> std::io::Result<RuntimeManagerResponse> {
-        let mut client = ClientOptions::new().open(pipe)?;
-        write_frame_json(&mut client, request).await?;
-        read_frame_json(&mut client).await
+        let mut connect_attempts = 0usize;
+
+        loop {
+            match ClientOptions::new().open(pipe) {
+                Ok(mut client) => {
+                    write_frame_json(&mut client, request).await?;
+                    return read_frame_json(&mut client).await;
+                }
+                Err(err)
+                    if err.raw_os_error() == Some(231)
+                        || err.kind() == ErrorKind::NotFound
+                        || err.kind() == ErrorKind::ConnectionRefused =>
+                {
+                    connect_attempts += 1;
+                    if connect_attempts >= 40 {
+                        return Err(err);
+                    }
+                    tokio::time::sleep(Duration::from_millis(75)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     async fn handle_client(
@@ -549,12 +573,22 @@ mod windows {
             .arg("--user")
             .arg("root")
             .arg("--exec")
+            .arg("env")
+            .arg("-u")
+            .arg("DOCKER_CONTEXT")
+            .arg("DOCKER_HOST=unix:///var/run/docker.sock")
             .arg("docker");
         cmd.args(docker_args);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         if stdin.is_some() {
             cmd.stdin(Stdio::piped());
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
         }
 
         let mut child = cmd
