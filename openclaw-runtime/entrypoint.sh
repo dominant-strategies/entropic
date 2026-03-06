@@ -290,6 +290,17 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
   },
   "gateway": {
     "controlUi": {
+      "allowedOrigins": [
+        "null",
+        "http://localhost",
+        "http://127.0.0.1",
+        "https://localhost",
+        "https://127.0.0.1",
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+        "http://localhost:5174"
+      ],
       "allowInsecureAuth": true,
       "dangerouslyDisableDeviceAuth": false,
       "dangerouslyAllowHostHeaderOriginFallback": true
