@@ -21,6 +21,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   NODE_VERSION: '22'
+  WINDOWS_WSL_ROOTFS_IMAGE: 'ubuntu:24.04'
 
 jobs:
   publish-runtime:
@@ -137,6 +138,13 @@ jobs:
           ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
         run: ./scripts/bundle-scanner-image.sh
 
+      - name: Build Windows WSL rootfs artifact
+        working-directory: entropic
+        env:
+          ENTROPIC_WINDOWS_WSL_ROOTFS_IMAGE: ${{ env.WINDOWS_WSL_ROOTFS_IMAGE }}
+          ENTROPIC_WINDOWS_WSL_ROOTFS_PLATFORM: linux/amd64
+        run: bash ./scripts/build-windows-wsl-rootfs.sh
+
       - name: Prepare runtime release assets
         env:
           GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
@@ -148,6 +156,9 @@ jobs:
           cp entropic/src-tauri/resources/entropic-skill-scanner.tar.gz entropic-skill-scanner.tar.gz
           sha256sum entropic-skill-scanner.tar.gz > entropic-skill-scanner.tar.gz.sha256
           SCANNER_SHA256="$(awk '{print $1}' entropic-skill-scanner.tar.gz.sha256)"
+          cp entropic/src-tauri/resources/runtime/entropic-runtime.tar entropic-runtime-windows-x86_64.tar
+          sha256sum entropic-runtime-windows-x86_64.tar > entropic-runtime-windows-x86_64.tar.sha256
+          WINDOWS_WSL_ROOTFS_SHA256="$(awk '{print $1}' entropic-runtime-windows-x86_64.tar.sha256)"
           export RUNTIME_VERSION="${{ github.event.inputs.release_tag }}"
           export RUNTIME_RELEASE_REPO="${{ github.event.inputs.release_repo }}"
           export OPENCLAW_COMMIT="${{ steps.refs.outputs.openclaw_commit }}"
@@ -184,6 +195,12 @@ jobs:
                   os.environ["RUNTIME_VERSION"],
               ),
               "scanner_sha256": os.environ["SCANNER_SHA256"],
+              "windows_wsl_rootfs_url": "https://github.com/{}/releases/download/{}/entropic-runtime-windows-x86_64.tar".format(
+                  os.environ["RUNTIME_RELEASE_REPO"],
+                  os.environ["RUNTIME_VERSION"],
+              ),
+              "windows_wsl_rootfs_sha256": os.environ["WINDOWS_WSL_ROOTFS_SHA256"],
+              "windows_wsl_rootfs_image": os.environ["WINDOWS_WSL_ROOTFS_IMAGE"],
               "openclaw_commit": os.environ["OPENCLAW_COMMIT"],
               "entropic_skills_commit": os.environ["SKILLS_COMMIT"],
           }
@@ -203,12 +220,14 @@ jobs:
           cat > openclaw-runtime-metadata.json << METAEOF
           {
             "runtime_image_tar": "openclaw-runtime.tar.gz",
+            "windows_wsl_rootfs_tar": "entropic-runtime-windows-x86_64.tar",
             "release_tag": "${{ github.event.inputs.release_tag }}",
             "release_repo": "${{ github.event.inputs.release_repo }}",
             "openclaw_ref": "${{ github.event.inputs.openclaw_ref }}",
             "openclaw_commit": "${{ steps.refs.outputs.openclaw_commit }}",
             "entropic_skills_ref": "${{ github.event.inputs.entropic_skills_ref }}",
             "entropic_skills_commit": "${{ steps.refs.outputs.skills_commit }}",
+            "windows_wsl_rootfs_image": "${{ env.WINDOWS_WSL_ROOTFS_IMAGE }}",
             "entropic_repo": "${{ github.repository }}",
             "entropic_commit": "${{ github.sha }}",
             "built_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -224,6 +243,8 @@ jobs:
             openclaw-runtime.tar.gz.sha256
             entropic-skill-scanner.tar.gz
             entropic-skill-scanner.tar.gz.sha256
+            entropic-runtime-windows-x86_64.tar
+            entropic-runtime-windows-x86_64.tar.sha256
             runtime-manifest.json
             openclaw-runtime-metadata.json
 
@@ -239,6 +260,8 @@ jobs:
             "openclaw-runtime.tar.gz.sha256"
             "entropic-skill-scanner.tar.gz"
             "entropic-skill-scanner.tar.gz.sha256"
+            "entropic-runtime-windows-x86_64.tar"
+            "entropic-runtime-windows-x86_64.tar.sha256"
             "runtime-manifest.json"
             "openclaw-runtime-metadata.json"
           )

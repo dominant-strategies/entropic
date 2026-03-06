@@ -136,6 +136,7 @@ pub fn run() {
             commands::read_client_log,
             commands::clear_client_log,
             commands::export_client_log,
+            commands::entropic_api_request_native,
             commands::start_runtime,
             commands::stop_runtime,
             commands::cleanup_app_data,
