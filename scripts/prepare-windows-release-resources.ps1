@@ -176,7 +176,7 @@ function Ensure-WslRuntimeArtifacts {
                 $expectedHash = Get-Sha256FromText -Text "$($manifest.windows_wsl_rootfs_sha256)"
             }
         } catch {
-            Write-Warning "Failed to read runtime manifest at $manifestUrl: $($_.Exception.Message). Falling back to default Windows rootfs asset name."
+            Write-Warning "Failed to read runtime manifest at ${manifestUrl}: $($_.Exception.Message). Falling back to default Windows rootfs asset name."
         }
 
         if ([string]::IsNullOrWhiteSpace($assetUrl)) {
