@@ -302,7 +302,7 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
         "http://localhost:5174"
       ],
       "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": false
+      "dangerouslyDisableDeviceAuth": true
     }${GATEWAY_AUTH_BLOCK}
   },
   "plugins": {

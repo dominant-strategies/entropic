@@ -6414,8 +6414,10 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         serde_json::json!(true),
     );
 
-    // Docker bridge requests can present a non-loopback source IP.
-    // Allow token-authenticated Control UI access in local desktop mode.
+    // Keep the Control UI permissive for local desktop sessions.
+    // Current OpenClaw builds still require the stronger device-auth bypass
+    // below for http://tauri.localhost sessions, but we keep this enabled too
+    // so localhost HTTP/browser cases remain explicitly allowed.
     set_openclaw_config_value(
         cfg,
         &["gateway", "controlUi", "allowInsecureAuth"],
@@ -6444,12 +6446,11 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
             "http://localhost:5174"
         ]),
     );
-    // In the local Docker desktop setup, connections arrive from the Docker bridge
-    // IP (172.17.x.x), not loopback, so isLocalClient is always false even though
-    // allowInsecureAuth is true. dangerouslyDisableDeviceAuth bypasses the
-    // device-identity requirement for Control UI, which is safe here because
-    // the gateway is only reachable via 127.0.0.1:19789 on the host machine
-    // and is protected by the gateway token.
+    // In the local desktop setup, http://tauri.localhost arrives as a bridged
+    // non-loopback client. OpenClaw therefore still enforces device identity
+    // unless this explicit Control UI bypass is enabled. This is safe here
+    // because the gateway is only exposed via 127.0.0.1:19789 on the host and
+    // remains protected by the gateway token.
     set_openclaw_config_value(
         cfg,
         &["gateway", "controlUi", "dangerouslyDisableDeviceAuth"],
