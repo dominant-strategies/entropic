@@ -1,6 +1,12 @@
+use crate::operational::{self, IncidentRecord};
 use crate::runtime::{
     entropic_colima_home_path, macos_docker_socket_candidates, Platform, Runtime, RuntimeStatus,
     ENTROPIC_QEMU_PROFILE, ENTROPIC_VZ_PROFILE, LEGACY_NOVA_QEMU_PROFILE, LEGACY_NOVA_VZ_PROFILE,
+};
+use crate::runtime_supervisor::RuntimeSupervisor;
+use crate::watchdog::{self, DesiredGatewayState, WatchdogStatusSnapshot};
+use crate::workspace_service::{
+    sanitize_filename, WorkspaceFileEntry, WorkspaceRunner, WorkspaceService,
 };
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -16,7 +22,7 @@ use std::fs;
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -2069,6 +2075,44 @@ pub struct GatewayConfigHealth {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct OperationalBundleStatus {
+    pub resources_dir: String,
+    pub bin_dir_exists: bool,
+    pub share_dir_exists: bool,
+    pub colima_binary: bool,
+    pub limactl_binary: bool,
+    pub docker_binary: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OperationalHealthSnapshot {
+    pub runtime: RuntimeStatus,
+    pub gateway_running: bool,
+    pub gateway_container_health: Option<String>,
+    pub gateway_instance_id: Option<String>,
+    pub watchdog: WatchdogStatusSnapshot,
+    pub bundle: OperationalBundleStatus,
+    pub recent_incidents: Vec<IncidentRecord>,
+    pub recent_warn_count: usize,
+    pub recent_error_count: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OperationalDoctorFinding {
+    pub severity: String,
+    pub title: String,
+    pub detail: String,
+    pub recommendation: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OperationalDoctorReport {
+    pub status: String,
+    pub summary: String,
+    pub findings: Vec<OperationalDoctorFinding>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentProfileState {
     pub soul: String,
     pub identity_name: String,
@@ -2511,6 +2555,59 @@ fn get_runtime(app: &AppHandle) -> Runtime {
     Runtime::new(resource_dir)
 }
 
+fn operational_bundle_status(app: &AppHandle) -> OperationalBundleStatus {
+    let resources_dir = app.path().resource_dir().unwrap_or_default();
+    let bundle_root = resources_dir.join("resources");
+    let bin_dir = bundle_root.join("bin");
+    let share_dir = bundle_root.join("share");
+    OperationalBundleStatus {
+        resources_dir: resources_dir.display().to_string(),
+        bin_dir_exists: bin_dir.exists(),
+        share_dir_exists: share_dir.exists(),
+        colima_binary: bin_dir.join("colima").exists(),
+        limactl_binary: bin_dir.join("limactl").exists(),
+        docker_binary: bin_dir.join("docker").exists(),
+    }
+}
+
+fn build_operational_health_snapshot(app: &AppHandle) -> Result<OperationalHealthSnapshot, String> {
+    let runtime = RuntimeSupervisor::new(app).check_status();
+    let desired = watchdog::load_desired_state(app)?;
+    watchdog::sync_status_with_desired(&desired);
+    let gateway_running = gateway_container_exists(true);
+    let gateway_container_health = if gateway_running {
+        container_health_status()
+    } else {
+        None
+    };
+    let gateway_instance_id = if gateway_running {
+        container_instance_id()
+    } else {
+        None
+    };
+    let recent_incidents = operational::read_recent_incidents(app, Some(25))?;
+    let recent_warn_count = recent_incidents
+        .iter()
+        .filter(|entry| entry.level == "warn")
+        .count();
+    let recent_error_count = recent_incidents
+        .iter()
+        .filter(|entry| entry.level == "error")
+        .count();
+
+    Ok(OperationalHealthSnapshot {
+        runtime,
+        gateway_running,
+        gateway_container_health,
+        gateway_instance_id,
+        watchdog: watchdog::current_status(),
+        bundle: operational_bundle_status(app),
+        recent_incidents,
+        recent_warn_count,
+        recent_error_count,
+    })
+}
+
 const OPENCLAW_CONTAINER: &str = "entropic-openclaw";
 const LEGACY_OPENCLAW_CONTAINER: &str = "nova-openclaw";
 const OPENCLAW_NETWORK: &str = "entropic-net";
@@ -2521,6 +2618,10 @@ const SCANNER_CONTAINER: &str = "entropic-skill-scanner";
 const SCANNER_HOST_PORT: &str = "19791";
 const ENTROPIC_GATEWAY_SCHEMA_VERSION: &str = "2026-02-13";
 const OPENCLAW_STATE_ROOT: &str = "/home/node/.openclaw";
+const WATCHDOG_RECONCILE_INTERVAL_MS: u64 = 5_000;
+const WATCHDOG_EXPECTED_RESTART_WINDOW_MS: u64 = 30_000;
+const WATCHDOG_BASE_BACKOFF_MS: u64 = 5_000;
+const WATCHDOG_MAX_BACKOFF_MS: u64 = 60_000;
 const ATTACHMENT_TMP_ROOT: &str = "/home/node/.openclaw/uploads/tmp";
 const ATTACHMENT_SAVE_ROOT: &str = "/data/uploads";
 const ATTACHMENT_ID_RANDOM_BYTES: usize = 18;
@@ -2556,6 +2657,339 @@ fn clear_applied_agent_settings_fingerprint() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     *cache = None;
     Ok(())
+}
+
+fn watchdog_backoff_ms(failures: u32) -> u64 {
+    let exponent = failures.saturating_sub(1).min(4);
+    let factor = 1u64 << exponent;
+    (WATCHDOG_BASE_BACKOFF_MS.saturating_mul(factor)).min(WATCHDOG_MAX_BACKOFF_MS)
+}
+
+fn set_desired_gateway_state(app: &AppHandle, desired: DesiredGatewayState) -> Result<(), String> {
+    watchdog::save_desired_state(app, &desired)?;
+    watchdog::sync_status_with_desired(&desired);
+    Ok(())
+}
+
+fn clear_desired_gateway_state(app: &AppHandle) -> Result<(), String> {
+    set_desired_gateway_state(
+        app,
+        watchdog::desired_state_with_mode("stopped", None, None, None, None),
+    )?;
+    watchdog::clear_expected_restart();
+    Ok(())
+}
+
+fn desired_state_requires_proxy_fields(desired: &DesiredGatewayState) -> bool {
+    desired.mode == "proxy"
+        && desired
+            .proxy_token
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        && desired
+            .proxy_url
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+}
+
+fn desired_base_model(desired: &DesiredGatewayState) -> Option<String> {
+    desired.model.as_ref().map(|model| {
+        model
+            .split_once(':')
+            .map(|(base, _)| base.to_string())
+            .unwrap_or_else(|| model.to_string())
+    })
+}
+
+fn gateway_matches_desired_state(app: &AppHandle, desired: &DesiredGatewayState) -> bool {
+    if !gateway_container_exists(true) {
+        return false;
+    }
+
+    let current_gateway_token = read_container_env("OPENCLAW_GATEWAY_TOKEN");
+    let expected_gateway_token = effective_gateway_token(app).ok();
+    if current_gateway_token != expected_gateway_token {
+        return false;
+    }
+
+    let current_model = read_container_env("OPENCLAW_MODEL");
+    if let Some(expected_model) = desired_base_model(desired) {
+        if current_model.as_deref() != Some(expected_model.as_str()) {
+            return false;
+        }
+    }
+
+    match desired.mode.as_str() {
+        "local" => {
+            let current_proxy_mode = read_container_env("ENTROPIC_PROXY_MODE");
+            let legacy_proxy_mode = read_container_env("NOVA_PROXY_MODE");
+            current_proxy_mode.as_deref() != Some("1") && legacy_proxy_mode.as_deref() != Some("1")
+        }
+        "proxy" => {
+            let current_proxy_mode = read_container_env("ENTROPIC_PROXY_MODE");
+            if current_proxy_mode.as_deref() != Some("1") {
+                return false;
+            }
+
+            let expected_proxy_url = desired
+                .proxy_url
+                .as_deref()
+                .and_then(|url| resolve_container_proxy_base(url).ok())
+                .map(|resolved| resolve_container_openai_base(&resolved));
+            if let Some(expected_proxy_url) = expected_proxy_url {
+                if read_container_env("ENTROPIC_PROXY_BASE_URL").as_deref()
+                    != Some(expected_proxy_url.as_str())
+                {
+                    return false;
+                }
+            }
+
+            if let Some(expected_proxy_token) = desired.proxy_token.as_deref() {
+                if read_container_env("OPENROUTER_API_KEY").as_deref() != Some(expected_proxy_token)
+                {
+                    return false;
+                }
+            }
+
+            if let Some(expected_image_model) = desired.image_model.as_deref() {
+                if !expected_image_model.trim().is_empty()
+                    && read_container_env("OPENCLAW_IMAGE_MODEL").as_deref()
+                        != Some(expected_image_model)
+                {
+                    return false;
+                }
+            }
+
+            true
+        }
+        _ => false,
+    }
+}
+
+fn has_any_local_provider_key(app: &AppHandle) -> Result<bool, String> {
+    let state = app.state::<AppState>();
+    let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
+    Ok(
+        keys.contains_key("anthropic")
+            || keys.contains_key("openai")
+            || keys.contains_key("google"),
+    )
+}
+
+async fn reconcile_watchdog(app: &AppHandle) -> Result<(), String> {
+    let desired = match watchdog::load_desired_state(app) {
+        Ok(desired) => desired,
+        Err(error) => {
+            watchdog::update_status(|status| {
+                status.state = "error".to_string();
+                status.last_error = Some(error.clone());
+                status.last_check_at_ms = now_ms_u64();
+            });
+            operational::record_incident(
+                app,
+                "error",
+                "watchdog",
+                "state_load_failed",
+                "Failed to load watchdog desired state",
+                Some(&error),
+            );
+            return Ok(());
+        }
+    };
+    watchdog::sync_status_with_desired(&desired);
+
+    let now = now_ms_u64();
+    let gateway_running = gateway_container_exists(true);
+    let gateway_health = if gateway_running {
+        container_health_status()
+    } else {
+        None
+    };
+    watchdog::update_status(|status| {
+        status.last_check_at_ms = now;
+        status.actual_gateway_running = gateway_running;
+        status.actual_gateway_health = gateway_health.clone();
+    });
+
+    if !watchdog::desired_gateway_running(&desired.mode) {
+        return Ok(());
+    }
+
+    let snapshot = watchdog::current_status();
+    if snapshot.expected_restart_until_ms > now {
+        watchdog::update_status(|status| {
+            status.state = "expected_restart".to_string();
+        });
+        return Ok(());
+    }
+
+    if snapshot.cooldown_until_ms > now {
+        watchdog::update_status(|status| {
+            status.state = "cooldown".to_string();
+        });
+        return Ok(());
+    }
+
+    if desired.mode == "local" && !has_any_local_provider_key(app)? {
+        watchdog::update_status(|status| {
+            status.state = "waiting_for_local_secrets".to_string();
+            status.last_error = Some(
+                "Desired state expects local-key mode, but provider keys have not been hydrated into the backend yet."
+                    .to_string(),
+            );
+            status.last_reason = Some("local_keys_missing".to_string());
+        });
+        return Ok(());
+    }
+
+    if desired.mode == "proxy" && !desired_state_requires_proxy_fields(&desired) {
+        watchdog::update_status(|status| {
+            status.state = "missing_proxy_config".to_string();
+            status.last_error = Some(
+                "Desired proxy mode is missing its restart token or proxy base URL.".to_string(),
+            );
+            status.last_reason = Some("proxy_config_missing".to_string());
+        });
+        return Ok(());
+    }
+
+    let gateway_healthy = gateway_running
+        && gateway_matches_desired_state(app, &desired)
+        && get_gateway_status_internal(app).await.unwrap_or(false);
+    if gateway_healthy {
+        watchdog::update_status(|status| {
+            status.state = "monitoring".to_string();
+            status.consecutive_failures = 0;
+            status.cooldown_until_ms = 0;
+            status.expected_restart_until_ms = 0;
+            status.last_error = None;
+            status.last_reason = None;
+        });
+        return Ok(());
+    }
+
+    let reason = if !gateway_running {
+        "gateway_missing".to_string()
+    } else if !gateway_matches_desired_state(app, &desired) {
+        "gateway_drifted_from_desired_state".to_string()
+    } else {
+        gateway_health
+            .clone()
+            .map(|value| format!("gateway_unhealthy:{value}"))
+            .unwrap_or_else(|| "gateway_unhealthy".to_string())
+    };
+
+    operational::record_incident(
+        app,
+        "warn",
+        "watchdog",
+        "reconcile_requested",
+        "Watchdog is reconciling the desired gateway state",
+        Some(&reason),
+    );
+    watchdog::mark_expected_restart(WATCHDOG_EXPECTED_RESTART_WINDOW_MS);
+    watchdog::update_status(|status| {
+        status.state = "reconciling".to_string();
+        status.last_reason = Some(reason.clone());
+        status.last_action_at_ms = now;
+    });
+
+    let result = match desired.mode.as_str() {
+        "local" => {
+            start_gateway_internal(app, desired.model.clone(), "watchdog_start_requested").await
+        }
+        "proxy" => {
+            start_gateway_with_proxy_internal(
+                app,
+                desired.proxy_token.clone().unwrap_or_default(),
+                desired.proxy_url.clone().unwrap_or_default(),
+                desired
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "openai/gpt-5.1".to_string()),
+                desired.image_model.clone(),
+                "watchdog_proxy_start_requested",
+            )
+            .await
+        }
+        _ => Ok(()),
+    };
+
+    match result {
+        Ok(()) => {
+            operational::record_incident(
+                app,
+                "info",
+                "watchdog",
+                "reconcile_succeeded",
+                "Watchdog restored the desired gateway state",
+                Some(&desired.mode),
+            );
+            watchdog::update_status(|status| {
+                status.state = "monitoring".to_string();
+                status.consecutive_failures = 0;
+                status.cooldown_until_ms = 0;
+                status.expected_restart_until_ms = 0;
+                status.last_error = None;
+            });
+        }
+        Err(error) => {
+            watchdog::clear_expected_restart();
+            let failures = snapshot.consecutive_failures.saturating_add(1);
+            let backoff_ms = watchdog_backoff_ms(failures);
+            let cooldown_until = now.saturating_add(backoff_ms);
+            operational::record_incident(
+                app,
+                "error",
+                "watchdog",
+                "reconcile_failed",
+                "Watchdog failed to restore the desired gateway state",
+                Some(&error),
+            );
+            watchdog::update_status(|status| {
+                status.state = "cooldown".to_string();
+                status.consecutive_failures = failures;
+                status.cooldown_until_ms = cooldown_until;
+                status.last_error = Some(error);
+                status.last_action_at_ms = now;
+            });
+        }
+    }
+
+    Ok(())
+}
+
+pub fn start_watchdog_loop(app: AppHandle) {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+
+    let desired = watchdog::current_desired_state(&app);
+    watchdog::sync_status_with_desired(&desired);
+
+    tokio::spawn(async move {
+        loop {
+            if let Err(error) = reconcile_watchdog(&app).await {
+                watchdog::update_status(|status| {
+                    status.state = "error".to_string();
+                    status.last_error = Some(error.clone());
+                    status.last_check_at_ms = now_ms_u64();
+                });
+                operational::record_incident(
+                    &app,
+                    "error",
+                    "watchdog",
+                    "loop_failed",
+                    "Watchdog reconcile loop failed",
+                    Some(&error),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(WATCHDOG_RECONCILE_INTERVAL_MS)).await;
+        }
+    });
 }
 
 fn gateway_health_error_suggests_control_ui_auth(error: &str) -> bool {
@@ -3215,12 +3649,14 @@ fn start_scanner_sidecar() {
             "--security-opt",
             "no-new-privileges",
             "--read-only",
+            "--pids-limit",
+            "128",
+            "--memory",
+            "512m",
+            "--cpus",
+            "1.0",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,nodev,size=200m",
-            "--volumes-from",
-            &format!("{}:ro", OPENCLAW_CONTAINER),
-            "--network",
-            OPENCLAW_NETWORK,
             "-p",
             &format!("127.0.0.1:{}:8000", SCANNER_HOST_PORT),
             expected_image.as_str(),
@@ -3257,6 +3693,40 @@ fn docker_exec_output(args: &[&str]) -> Result<String, String> {
         return Err(stderr.to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+struct DockerWorkspaceRunner;
+
+impl WorkspaceRunner for DockerWorkspaceRunner {
+    fn exec_output(&self, args: &[&str]) -> Result<String, String> {
+        docker_exec_output(args)
+    }
+
+    fn write_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        let mut child = docker_command()
+            .args(["exec", "-i", OPENCLAW_CONTAINER, "tee", "--", path])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Failed to write file: {}", e))?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            use std::io::Write;
+            stdin
+                .write_all(bytes)
+                .map_err(|e| format!("Failed to write file: {}", e))?;
+        }
+        let status = child
+            .wait()
+            .map_err(|e| format!("Failed to finalize write: {}", e))?;
+        if !status.success() {
+            return Err("Failed to write file in container".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn workspace_service() -> WorkspaceService<DockerWorkspaceRunner> {
+    WorkspaceService::new(DockerWorkspaceRunner, OPENCLAW_CONTAINER, WORKSPACE_ROOT)
 }
 
 fn ensure_qmd_runtime_dependencies() -> Result<(), String> {
@@ -3783,7 +4253,8 @@ async fn scan_directory_with_scanner(scanner_dir: &str) -> Result<PluginScanResu
             }
             Err(e) => {
                 last_err = format!("{}", e);
-                let is_connect = e.is_connect() || e.is_request()
+                let is_connect = e.is_connect()
+                    || e.is_request()
                     || last_err.contains("connection closed")
                     || last_err.contains("Connection refused");
                 if !is_connect {
@@ -3793,7 +4264,10 @@ async fn scan_directory_with_scanner(scanner_dir: &str) -> Result<PluginScanResu
         }
     }
     let res = res_ok.ok_or_else(|| {
-        format!("Scan request failed after retries (scanner may not be ready): {}", last_err)
+        format!(
+            "Scan request failed after retries (scanner may not be ready): {}",
+            last_err
+        )
     })?;
 
     if !res.status().is_success() {
@@ -4566,51 +5040,6 @@ fn config_allows_plugin(cfg: &serde_json::Value, id: &str) -> bool {
     true
 }
 
-fn sanitize_filename(name: &str) -> String {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return "file".to_string();
-    }
-    let mut out = String::with_capacity(trimmed.len());
-    for ch in trimmed.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
-            out.push(ch);
-        } else if ch.is_whitespace() {
-            out.push('_');
-        }
-    }
-    if out.is_empty() {
-        "file".to_string()
-    } else {
-        out
-    }
-}
-
-fn sanitize_directory_name(name: &str) -> Result<String, String> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return Err("Folder name is required".to_string());
-    }
-
-    if trimmed == "." || trimmed == ".." {
-        return Err("Invalid folder name".to_string());
-    }
-
-    let mut out = String::with_capacity(trimmed.len());
-    for ch in trimmed.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' || ch == ' ' {
-            out.push(ch);
-        }
-    }
-
-    let normalized = out.trim();
-    if normalized.is_empty() {
-        return Err("Folder name contains no valid characters".to_string());
-    }
-
-    Ok(normalized.to_string())
-}
-
 fn generate_attachment_id() -> String {
     let mut bytes = [0u8; ATTACHMENT_ID_RANDOM_BYTES];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -4673,29 +5102,6 @@ fn prune_pending_attachments(pending: &mut HashMap<String, PendingAttachmentReco
     for (id, _) in oldest.into_iter().take(remove_count) {
         pending.remove(&id);
     }
-}
-
-fn sanitize_workspace_path(path: &str) -> Result<String, String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Ok(String::new());
-    }
-    let mut parts = Vec::new();
-    for component in Path::new(trimmed).components() {
-        match component {
-            Component::Normal(os) => {
-                let part = os.to_string_lossy();
-                if !part.is_empty() {
-                    parts.push(part.to_string());
-                }
-            }
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err("Invalid path".to_string());
-            }
-        }
-    }
-    Ok(parts.join("/"))
 }
 
 fn unique_id() -> String {
@@ -6908,7 +7314,6 @@ async fn recover_gateway_health(
     docker_args: &[String],
     label: &str,
     app: &AppHandle,
-    state: &AppState,
 ) -> Result<(), String> {
     if let Err(initial) = wait_for_gateway_health_strict(token, 12).await {
         let mut initial_error = initial;
@@ -6921,7 +7326,8 @@ async fn recover_gateway_health(
                 label, initial_error
             );
             clear_applied_agent_settings_fingerprint()?;
-            if let Err(apply_err) = apply_agent_settings(app, state) {
+            let state = app.state::<AppState>();
+            if let Err(apply_err) = apply_agent_settings(app, &state) {
                 println!(
                     "[Entropic] {} config self-heal write failed: {}",
                     label, apply_err
@@ -7023,7 +7429,8 @@ async fn recover_gateway_health(
                     )));
                 }
             }
-            apply_agent_settings(app, state)?;
+            let state = app.state::<AppState>();
+            apply_agent_settings(app, &state)?;
             if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
                 finish_health_wait_or_tolerate_starting(
                     e,
@@ -7187,8 +7594,7 @@ pub fn get_runtime_version_info() -> Result<RuntimeVersionInfo, String> {
 
 #[tauri::command]
 pub async fn check_runtime_status(app: AppHandle) -> Result<RuntimeStatus, String> {
-    let runtime = get_runtime(&app);
-    Ok(runtime.check_status())
+    Ok(RuntimeSupervisor::new(&app).check_status())
 }
 
 #[tauri::command]
@@ -7238,17 +7644,34 @@ pub async fn export_client_log() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn list_operational_incidents(
+    app: AppHandle,
+    limit: Option<usize>,
+) -> Result<Vec<IncidentRecord>, String> {
+    operational::read_recent_incidents(&app, limit)
+}
+
+#[tauri::command]
+pub async fn clear_operational_incidents(app: AppHandle) -> Result<(), String> {
+    operational::clear_incidents(&app)
+}
+
+#[tauri::command]
+pub async fn get_operational_health(app: AppHandle) -> Result<OperationalHealthSnapshot, String> {
+    build_operational_health_snapshot(&app)
+}
+
+#[tauri::command]
 pub async fn start_runtime(app: AppHandle) -> Result<(), String> {
-    let runtime = get_runtime(&app);
-    runtime
-        .start_colima()
-        .map_err(|e| append_colima_runtime_hint(e.to_string()))
+    RuntimeSupervisor::new(&app)
+        .start()
+        .map_err(append_colima_runtime_hint)
 }
 
 #[tauri::command]
 pub async fn stop_runtime(app: AppHandle) -> Result<(), String> {
-    let runtime = get_runtime(&app);
-    runtime.stop_colima().map_err(|e| e.to_string())
+    clear_desired_gateway_state(&app)?;
+    RuntimeSupervisor::new(&app).stop()
 }
 
 #[tauri::command]
@@ -7407,7 +7830,9 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
                 .output();
             if let Err(e) = fs::remove_dir_all(dir) {
                 cleanup_log.push(format!(
-                    "Warning: Failed to remove {}: {}", dir.display(), e
+                    "Warning: Failed to remove {}: {}",
+                    dir.display(),
+                    e
                 ));
             } else {
                 cleanup_log.push(format!("Removed {}", dir.display()));
@@ -7425,34 +7850,67 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
 /// Returns the current status after any auto-start attempts.
 #[tauri::command]
 pub async fn ensure_runtime(app: AppHandle) -> Result<RuntimeStatus, String> {
-    let runtime = get_runtime(&app);
-    let mut status = runtime.check_status();
+    RuntimeSupervisor::new(&app)
+        .ensure_ready()
+        .map_err(append_colima_runtime_hint)
+}
 
-    // On macOS, auto-start Colima if it's installed but not running (skip if Docker Desktop is ready)
-    if matches!(Platform::detect(), Platform::MacOS) {
-        if status.colima_installed && !status.vm_running && !status.docker_ready {
-            // Try to start Colima
-            if let Err(e) = runtime.start_colima() {
-                return Err(append_colima_runtime_hint(format!(
-                    "Failed to start Colima: {}",
-                    e
-                )));
+#[tauri::command]
+pub async fn get_provider_secrets_snapshot(
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, String>, String> {
+    let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
+    Ok(keys.clone())
+}
+
+#[tauri::command]
+pub async fn hydrate_provider_secrets(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    secrets: HashMap<String, String>,
+) -> Result<(), String> {
+    let normalized = secrets
+        .into_iter()
+        .filter_map(|(provider, secret)| {
+            let provider = provider.trim().to_string();
+            let secret = secret.trim().to_string();
+            if provider.is_empty() || secret.is_empty() {
+                None
+            } else {
+                Some((provider, secret))
             }
-            // Re-check status after starting
-            status = runtime.check_status();
-        }
+        })
+        .collect::<HashMap<_, _>>();
+
+    {
+        let mut keys = state.api_keys.lock().map_err(|e| e.to_string())?;
+        *keys = normalized.clone();
     }
 
-    if !status.docker_ready {
-        if !status.docker_installed {
-            return Err("Docker is not installed. Please install Docker to continue.".to_string());
-        }
-        return Err(append_colima_runtime_hint(
-            "Docker is not running. Please ensure Docker is started.".to_string(),
-        ));
+    let mut active = state.active_provider.lock().map_err(|e| e.to_string())?;
+    let active_missing = active
+        .as_ref()
+        .map(|provider| !normalized.contains_key(provider))
+        .unwrap_or(true);
+    if active_missing {
+        *active = normalized.keys().next().cloned();
     }
 
-    Ok(status)
+    let mut stored = load_auth(&app);
+    stored.keys.clear();
+    stored.active_provider = active.clone();
+    save_auth(&app, &stored)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clear_persisted_provider_secrets(app: AppHandle) -> Result<(), String> {
+    let mut stored = load_auth(&app);
+    if stored.keys.is_empty() {
+        return Ok(());
+    }
+    stored.keys.clear();
+    save_auth(&app, &stored)
 }
 
 #[tauri::command]
@@ -7472,9 +7930,11 @@ pub async fn set_api_key(
     let mut active = state.active_provider.lock().map_err(|e| e.to_string())?;
     if !is_empty {
         *active = Some(provider.clone());
+    } else if active.as_deref() == Some(provider.as_str()) {
+        *active = keys.keys().next().cloned();
     }
     let mut stored = load_auth(&app);
-    stored.keys = keys.clone();
+    stored.keys.remove(&provider);
     stored.active_provider = active.clone();
     if is_empty {
         stored.oauth_metadata.remove(&provider);
@@ -7496,9 +7956,8 @@ pub async fn set_active_provider(
     drop(keys);
     let mut active = state.active_provider.lock().map_err(|e| e.to_string())?;
     *active = Some(provider.clone());
-    let keys = state.api_keys.lock().map_err(|e| e.to_string())?.clone();
     let mut stored = load_auth(&app);
-    stored.keys = keys;
+    stored.keys.remove(&provider);
     stored.active_provider = active.clone();
     save_auth(&app, &stored)?;
     Ok(())
@@ -7531,22 +7990,31 @@ pub async fn get_auth_state(state: State<'_, AppState>) -> Result<AuthState, Str
     })
 }
 
-#[tauri::command]
-pub async fn start_gateway(
-    app: AppHandle,
-    state: State<'_, AppState>,
+async fn start_gateway_internal(
+    app: &AppHandle,
     model: Option<String>,
+    incident_action: &str,
 ) -> Result<(), String> {
     let startup_started = Instant::now();
     let _start_guard = gateway_start_lock().lock().await;
+    operational::record_incident(
+        app,
+        "info",
+        "gateway",
+        incident_action,
+        "Starting local gateway",
+        model.as_deref(),
+    );
     // Get API keys from state
+    let state = app.state::<AppState>();
     let api_keys = state.api_keys.lock().map_err(|e| e.to_string())?.clone();
     let active_provider = state
         .active_provider
         .lock()
         .map_err(|e| e.to_string())?
         .clone();
-    let settings = load_agent_settings(&app);
+    drop(state);
+    let settings = load_agent_settings(app);
     if settings.bridge_enabled && has_paired_bridge_devices(&settings) {
         println!(
             "[Entropic] Bridge mode requested in settings but disabled for security; binding gateway to localhost only.",
@@ -7564,37 +8032,15 @@ pub async fn start_gateway(
         memory_slot = "memory-core";
     }
 
-    // Ensure runtime is running on macOS (Colima or Docker Desktop)
-    let runtime = get_runtime(&app);
-    let status = runtime.check_status();
-    if !status.docker_ready {
-        if matches!(Platform::detect(), Platform::MacOS)
-            && status.colima_installed
-            && !status.vm_running
-        {
-            // Auto-start Colima on macOS if installed
-            runtime.start_colima().map_err(|e| {
-                append_colima_runtime_hint(format!("Failed to start Colima: {}", e))
-            })?;
-        } else if !status.docker_installed {
-            let install_msg = match Platform::detect() {
-                Platform::Linux => "Docker is not installed. Please install Docker Engine: sudo apt install docker.io",
-                Platform::MacOS => "Docker is not installed. Please install Docker Desktop for development.",
-                Platform::Windows => "Docker is not installed. Please install Docker Desktop for Windows.",
-            };
-            return Err(install_msg.to_string());
-        } else {
-            return Err(append_colima_runtime_hint(
-                "Docker is not running. Please start Docker and try again.".to_string(),
-            ));
-        }
-    }
+    RuntimeSupervisor::new(app)
+        .ensure_ready()
+        .map_err(append_colima_runtime_hint)?;
     println!(
         "[Entropic] Startup timing: runtime_ready={}ms",
         startup_started.elapsed().as_millis()
     );
 
-    let gateway_token = expected_gateway_token(&app)?;
+    let gateway_token = expected_gateway_token(app)?;
 
     let has_any_local_api_key = api_keys.contains_key("anthropic")
         || api_keys.contains_key("openai")
@@ -7675,7 +8121,8 @@ pub async fn start_gateway(
             && current_schema.as_deref() == Some(ENTROPIC_GATEWAY_SCHEMA_VERSION)
             && current_model.as_deref() == Some(base_model)
         {
-            apply_agent_settings(&app, &state)?;
+            let state = app.state::<AppState>();
+            apply_agent_settings(app, &state)?;
             match wait_for_gateway_health_strict(&gateway_token, 6).await {
                 Ok(()) => return Ok(()),
                 Err(err) => {
@@ -7868,19 +8315,21 @@ pub async fn start_gateway(
 
     // Apply persisted settings to the fresh container
     let settings_started = Instant::now();
-    apply_agent_settings(&app, &state)?;
+    let state = app.state::<AppState>();
+    apply_agent_settings(app, &state)?;
     println!(
         "[Entropic] Startup timing: post_launch_config={}ms",
         settings_started.elapsed().as_millis()
     );
 
     let health_started = Instant::now();
-    recover_gateway_health(&gateway_token, &docker_args, "Gateway", &app, &state).await?;
+    recover_gateway_health(&gateway_token, &docker_args, "Gateway", app).await?;
     // Re-apply settings AFTER health check passes.
     // OpenClaw's initialization may overwrite files we wrote earlier (e.g., auth-profiles.json
     // and config fields like thinkingDefault). Re-applying now ensures our settings stick.
     clear_applied_agent_settings_fingerprint()?;
-    apply_agent_settings(&app, &state)?;
+    let state = app.state::<AppState>();
+    apply_agent_settings(app, &state)?;
     // The first apply_agent_settings (before health check) may have written the
     // config before the gateway's file watcher was active.  The dedup in
     // write_openclaw_config means the second call above likely skipped writing
@@ -7893,12 +8342,45 @@ pub async fn start_gateway(
         health_started.elapsed().as_millis(),
         startup_started.elapsed().as_millis()
     );
+    operational::record_incident(
+        app,
+        "info",
+        "gateway",
+        "start_succeeded",
+        "Local gateway started successfully",
+        model.as_deref(),
+    );
 
     Ok(())
 }
 
 #[tauri::command]
-pub async fn stop_gateway() -> Result<(), String> {
+pub async fn start_gateway(
+    app: AppHandle,
+    _state: State<'_, AppState>,
+    model: Option<String>,
+) -> Result<(), String> {
+    let desired = watchdog::desired_state_with_mode("local", model.clone(), None, None, None);
+    set_desired_gateway_state(&app, desired)?;
+    watchdog::mark_expected_restart(WATCHDOG_EXPECTED_RESTART_WINDOW_MS);
+    if let Err(error) = start_gateway_internal(&app, model, "start_requested").await {
+        watchdog::clear_expected_restart();
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_gateway(app: AppHandle) -> Result<(), String> {
+    clear_desired_gateway_state(&app)?;
+    operational::record_incident(
+        &app,
+        "info",
+        "gateway",
+        "stop_requested",
+        "Stopping gateway containers",
+        None,
+    );
     stop_scanner_sidecar();
 
     for name in [OPENCLAW_CONTAINER, LEGACY_OPENCLAW_CONTAINER] {
@@ -7916,23 +8398,38 @@ pub async fn stop_gateway() -> Result<(), String> {
         }
     }
 
+    operational::record_incident(
+        &app,
+        "info",
+        "gateway",
+        "stop_succeeded",
+        "Gateway containers stopped",
+        None,
+    );
     Ok(())
 }
 
 /// Start gateway using the Entropic proxy (for users without their own API keys)
-#[tauri::command]
-pub async fn start_gateway_with_proxy(
-    app: AppHandle,
-    state: State<'_, AppState>,
+async fn start_gateway_with_proxy_internal(
+    app: &AppHandle,
     gateway_token: String,
     proxy_url: String,
     model: String,
     image_model: Option<String>,
+    incident_action: &str,
 ) -> Result<(), String> {
     let startup_started = Instant::now();
     let _start_guard = gateway_start_lock().lock().await;
+    operational::record_incident(
+        app,
+        "info",
+        "gateway",
+        incident_action,
+        "Starting proxy gateway",
+        Some(model.as_str()),
+    );
     cleanup_legacy_gateway_artifacts();
-    let settings = load_agent_settings(&app);
+    let settings = load_agent_settings(app);
     if settings.bridge_enabled && has_paired_bridge_devices(&settings) {
         println!(
             "[Entropic] Bridge mode requested in settings but disabled for security; binding proxy gateway to localhost only.",
@@ -7941,30 +8438,14 @@ pub async fn start_gateway_with_proxy(
     let gateway_bind = "127.0.0.1:19789:18789";
     let resolved_proxy_url = resolve_container_proxy_base(&proxy_url)?;
     let docker_proxy_api_url = resolve_container_openai_base(&resolved_proxy_url);
-    // Ensure runtime (Colima) is running on macOS
-    let runtime = get_runtime(&app);
-    let status = runtime.check_status();
-    if !status.docker_ready {
-        if matches!(Platform::detect(), Platform::MacOS)
-            && status.colima_installed
-            && !status.vm_running
-        {
-            runtime.start_colima().map_err(|e| {
-                append_colima_runtime_hint(format!("Failed to start Colima: {}", e))
-            })?;
-        } else if !status.docker_installed {
-            return Err("Docker is not installed. Please install Docker to continue.".to_string());
-        } else {
-            return Err(append_colima_runtime_hint(
-                "Docker is not running. Please start Docker and try again.".to_string(),
-            ));
-        }
-    }
+    RuntimeSupervisor::new(app)
+        .ensure_ready()
+        .map_err(append_colima_runtime_hint)?;
     println!(
         "[Entropic] Startup timing (proxy): runtime_ready={}ms",
         startup_started.elapsed().as_millis()
     );
-    let local_gateway_token = expected_gateway_token(&app)?;
+    let local_gateway_token = expected_gateway_token(app)?;
     let build_proxy_docker_args = || -> Result<(Vec<String>, GatewayEnvFile), String> {
         let mut env_entries: Vec<(&str, &str)> = vec![
             ("OPENCLAW_GATEWAY_TOKEN", local_gateway_token.as_str()),
@@ -8082,7 +8563,8 @@ pub async fn start_gateway_with_proxy(
         {
             println!("[Entropic] Proxy container already running with matching config. Reusing.");
             let reuse_prepare_started = Instant::now();
-            apply_agent_settings(&app, &state)?;
+            let state = app.state::<AppState>();
+            apply_agent_settings(app, &state)?;
             println!(
                 "[Entropic] Startup timing (proxy): reused_container_prepare={}ms",
                 reuse_prepare_started.elapsed().as_millis()
@@ -8093,8 +8575,7 @@ pub async fn start_gateway_with_proxy(
                 &local_gateway_token,
                 &reuse_docker_args,
                 "Proxy gateway",
-                &app,
-                &state,
+                app,
             )
             .await?;
             println!(
@@ -8207,26 +8688,21 @@ pub async fn start_gateway_with_proxy(
 
     // Apply persisted settings
     let settings_started = Instant::now();
-    apply_agent_settings(&app, &state)?;
+    let state = app.state::<AppState>();
+    apply_agent_settings(app, &state)?;
     println!(
         "[Entropic] Startup timing (proxy): post_launch_config={}ms",
         settings_started.elapsed().as_millis()
     );
 
     let health_started = Instant::now();
-    recover_gateway_health(
-        &local_gateway_token,
-        &docker_args,
-        "Proxy gateway",
-        &app,
-        &state,
-    )
-    .await?;
+    recover_gateway_health(&local_gateway_token, &docker_args, "Proxy gateway", app).await?;
     // Re-apply settings AFTER health check passes.
     // OpenClaw initialization can overwrite files written during startup
     // (including openclaw.json provider baseUrl), so apply again once healthy.
     clear_applied_agent_settings_fingerprint()?;
-    apply_agent_settings(&app, &state)?;
+    let state = app.state::<AppState>();
+    apply_agent_settings(app, &state)?;
     signal_gateway_config_reload();
     println!("[Entropic] Startup timing (proxy): post_health_config applied");
     println!(
@@ -8234,7 +8710,50 @@ pub async fn start_gateway_with_proxy(
         health_started.elapsed().as_millis(),
         startup_started.elapsed().as_millis()
     );
+    operational::record_incident(
+        app,
+        "info",
+        "gateway",
+        "proxy_start_succeeded",
+        "Proxy gateway started successfully",
+        Some(model.as_str()),
+    );
 
+    Ok(())
+}
+
+/// Start gateway using the Entropic proxy (for users without their own API keys)
+#[tauri::command]
+pub async fn start_gateway_with_proxy(
+    app: AppHandle,
+    _state: State<'_, AppState>,
+    gateway_token: String,
+    proxy_url: String,
+    model: String,
+    image_model: Option<String>,
+) -> Result<(), String> {
+    let desired = watchdog::desired_state_with_mode(
+        "proxy",
+        Some(model.clone()),
+        image_model.clone(),
+        Some(gateway_token.clone()),
+        Some(proxy_url.clone()),
+    );
+    set_desired_gateway_state(&app, desired)?;
+    watchdog::mark_expected_restart(WATCHDOG_EXPECTED_RESTART_WINDOW_MS);
+    if let Err(error) = start_gateway_with_proxy_internal(
+        &app,
+        gateway_token,
+        proxy_url,
+        model,
+        image_model,
+        "proxy_start_requested",
+    )
+    .await
+    {
+        watchdog::clear_expected_restart();
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -8289,9 +8808,12 @@ pub fn update_gateway_model(model: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn restart_gateway(
     app: AppHandle,
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     model: Option<String>,
 ) -> Result<(), String> {
+    let desired = watchdog::desired_state_with_mode("local", model.clone(), None, None, None);
+    set_desired_gateway_state(&app, desired)?;
+    watchdog::mark_expected_restart(WATCHDOG_EXPECTED_RESTART_WINDOW_MS);
     // Stop and remove existing container (to pick up new env vars)
     for name in [OPENCLAW_CONTAINER, LEGACY_OPENCLAW_CONTAINER] {
         let _ = docker_command().args(["stop", name]).output();
@@ -8299,11 +8821,14 @@ pub async fn restart_gateway(
     }
 
     // Start with current API keys
-    start_gateway(app, state, model).await
+    if let Err(error) = start_gateway_internal(&app, model, "restart_requested").await {
+        watchdog::clear_expected_restart();
+        return Err(error);
+    }
+    Ok(())
 }
 
-#[tauri::command]
-pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
+async fn get_gateway_status_internal(app: &AppHandle) -> Result<bool, String> {
     // Check if container is running
     if !gateway_container_exists(true) {
         println!("[Entropic] Container not running");
@@ -8362,6 +8887,11 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
         println!("[Entropic] {}", hint);
     }
     Ok(false)
+}
+
+#[tauri::command]
+pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
+    get_gateway_status_internal(&app).await
 }
 
 #[tauri::command]
@@ -9135,7 +9665,10 @@ process.stdout.write('ok');
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             match wait_for_gateway_health_strict(&token, 12).await {
                 Ok(()) => eprintln!("[set_channels_config] Gateway healthy after config update"),
-                Err(e) => eprintln!("[set_channels_config] Gateway health wait timed out (non-fatal): {}", e),
+                Err(e) => eprintln!(
+                    "[set_channels_config] Gateway health wait timed out (non-fatal): {}",
+                    e
+                ),
             }
         }
     }
@@ -9424,11 +9957,16 @@ pub async fn restart_gateway_in_place(
     // Wait for the gateway to come back healthy so callers (and the frontend)
     // don't see a jarring disconnect/error when navigating back to chat.
     if let Ok(token) = effective_gateway_token(&app) {
-        eprintln!("[Entropic] restart_gateway_in_place: waiting for gateway health after config apply...");
+        eprintln!(
+            "[Entropic] restart_gateway_in_place: waiting for gateway health after config apply..."
+        );
         tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
         match wait_for_gateway_health_strict(&token, 20).await {
             Ok(()) => eprintln!("[Entropic] restart_gateway_in_place: gateway healthy"),
-            Err(e) => eprintln!("[Entropic] restart_gateway_in_place: health wait timed out (non-fatal): {}", e),
+            Err(e) => eprintln!(
+                "[Entropic] restart_gateway_in_place: health wait timed out (non-fatal): {}",
+                e
+            ),
         }
     }
 
@@ -9665,6 +10203,203 @@ pub async fn get_gateway_config_health() -> Result<GatewayConfigHealth, String> 
         status: "ok".to_string(),
         summary,
         issues: Vec::new(),
+    })
+}
+
+#[tauri::command]
+pub async fn run_operational_doctor(app: AppHandle) -> Result<OperationalDoctorReport, String> {
+    let health = build_operational_health_snapshot(&app)?;
+    let config_health = get_gateway_config_health().await?;
+    let mut findings = Vec::<OperationalDoctorFinding>::new();
+
+    if !health.bundle.bin_dir_exists || !health.bundle.share_dir_exists {
+        findings.push(OperationalDoctorFinding {
+            severity: "error".to_string(),
+            title: "Bundled runtime assets are missing".to_string(),
+            detail: format!(
+                "Tauri resource directories are incomplete under {}.",
+                health.bundle.resources_dir
+            ),
+            recommendation: Some(
+                "Run the runtime bundle scripts before packaging, or provide the Colima/Lima assets expected by src-tauri/resources.".to_string(),
+            ),
+        });
+    } else {
+        let missing_bins = [
+            (!health.bundle.colima_binary, "colima"),
+            (!health.bundle.limactl_binary, "limactl"),
+            (!health.bundle.docker_binary, "docker"),
+        ]
+        .into_iter()
+        .filter_map(|(missing, name)| if missing { Some(name) } else { None })
+        .collect::<Vec<_>>();
+        if !missing_bins.is_empty() {
+            findings.push(OperationalDoctorFinding {
+                severity: "error".to_string(),
+                title: "Bundled runtime binaries are incomplete".to_string(),
+                detail: format!("Missing binaries: {}", missing_bins.join(", ")),
+                recommendation: Some(
+                    "Bundle the missing runtime binaries into src-tauri/resources/bin for packaged builds."
+                        .to_string(),
+                ),
+            });
+        }
+    }
+
+    if !health.runtime.docker_ready {
+        let detail = if !health.runtime.docker_installed {
+            "Docker is not installed or not visible to Entropic.".to_string()
+        } else if !health.runtime.vm_running {
+            "Colima is installed but the VM is not running.".to_string()
+        } else {
+            "Docker is installed, but the daemon is not ready.".to_string()
+        };
+        findings.push(OperationalDoctorFinding {
+            severity: "error".to_string(),
+            title: "Runtime is not ready".to_string(),
+            detail,
+            recommendation: Some(
+                "Start the runtime from Setup or Settings before launching the gateway."
+                    .to_string(),
+            ),
+        });
+    }
+
+    let desired_gateway_running = watchdog::desired_gateway_running(&health.watchdog.desired_mode);
+    if desired_gateway_running && !health.gateway_running {
+        findings.push(OperationalDoctorFinding {
+            severity: "warn".to_string(),
+            title: "Gateway is below its desired state".to_string(),
+            detail: format!(
+                "Desired mode is `{}`, but the OpenClaw gateway container is currently stopped.",
+                health.watchdog.desired_mode
+            ),
+            recommendation: Some(
+                "Leave the watchdog running to reconcile automatically, or review the watchdog status for the current block."
+                    .to_string(),
+            ),
+        });
+    } else if let Some(container_health) = health.gateway_container_health.as_deref() {
+        if container_health != "healthy" {
+            findings.push(OperationalDoctorFinding {
+                severity: "warn".to_string(),
+                title: "Gateway container is not healthy".to_string(),
+                detail: format!("Docker health status is `{}`.", container_health),
+                recommendation: Some(
+                    "Inspect local runtime logs and restart the gateway if the health status does not recover."
+                        .to_string(),
+                ),
+            });
+        }
+    }
+
+    match health.watchdog.state.as_str() {
+        "waiting_for_local_secrets" => findings.push(OperationalDoctorFinding {
+            severity: "warn".to_string(),
+            title: "Watchdog is waiting for local provider secrets".to_string(),
+            detail: health
+                .watchdog
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "Local-key desired state cannot be restored until provider secrets are hydrated into the backend.".to_string()),
+            recommendation: Some(
+                "Open the app UI so provider secrets can hydrate from Stronghold, then let the watchdog retry."
+                    .to_string(),
+            ),
+        }),
+        "missing_proxy_config" => findings.push(OperationalDoctorFinding {
+            severity: "error".to_string(),
+            title: "Watchdog is missing proxy restart configuration".to_string(),
+            detail: health
+                .watchdog
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "Proxy desired state is missing the token or proxy URL needed for restart.".to_string()),
+            recommendation: Some(
+                "Start the proxy gateway from the app again so the desired state can be refreshed."
+                    .to_string(),
+            ),
+        }),
+        "cooldown" => findings.push(OperationalDoctorFinding {
+            severity: "warn".to_string(),
+            title: "Watchdog restart backoff is active".to_string(),
+            detail: health
+                .watchdog
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "Recent restart attempts failed, so the watchdog entered cooldown.".to_string()),
+            recommendation: Some(
+                "Inspect the most recent incidents and fix the startup error before the next retry window."
+                    .to_string(),
+            ),
+        }),
+        _ => {}
+    }
+
+    if config_health.status == "invalid" {
+        findings.push(OperationalDoctorFinding {
+            severity: "error".to_string(),
+            title: "Gateway config is invalid".to_string(),
+            detail: config_health.summary.clone(),
+            recommendation: Some(
+                "Use Heal Config in Settings to run the OpenClaw doctor and restart the gateway."
+                    .to_string(),
+            ),
+        });
+    } else if config_health.status == "offline" && health.gateway_running {
+        findings.push(OperationalDoctorFinding {
+            severity: "warn".to_string(),
+            title: "Gateway config check ran offline".to_string(),
+            detail: config_health.summary.clone(),
+            recommendation: Some(
+                "If this persists while the gateway is running, inspect local runtime logs and container health."
+                    .to_string(),
+            ),
+        });
+    }
+
+    if health.recent_error_count > 0 {
+        findings.push(OperationalDoctorFinding {
+            severity: if health.recent_error_count >= 3 {
+                "error".to_string()
+            } else {
+                "warn".to_string()
+            },
+            title: "Recent operational incidents were recorded".to_string(),
+            detail: format!(
+                "{} error incident(s), {} warning incident(s) in the recent operational log.",
+                health.recent_error_count, health.recent_warn_count
+            ),
+            recommendation: Some(
+                "Review the incident log below to identify recurring runtime or gateway failures."
+                    .to_string(),
+            ),
+        });
+    }
+
+    let status = if findings.iter().any(|finding| finding.severity == "error") {
+        "critical"
+    } else if findings.is_empty() {
+        "healthy"
+    } else {
+        "degraded"
+    };
+    let summary = match status {
+        "healthy" => "Operational doctor found no blocking issues.".to_string(),
+        "critical" => format!(
+            "Operational doctor found {} issue(s) that need attention.",
+            findings.len()
+        ),
+        _ => format!(
+            "Operational doctor found {} issue(s), but the system is still partially functional.",
+            findings.len()
+        ),
+    };
+
+    Ok(OperationalDoctorReport {
+        status: status.to_string(),
+        summary,
+        findings,
     })
 }
 
@@ -10147,7 +10882,11 @@ pub async fn get_clawhub_catalog(
         for line in raw.lines() {
             let line = line.trim();
             // Skip spinner / status lines
-            if line.is_empty() || line.starts_with('-') || line.starts_with('✔') || line.starts_with('✖') {
+            if line.is_empty()
+                || line.starts_with('-')
+                || line.starts_with('✔')
+                || line.starts_with('✖')
+            {
                 continue;
             }
             // Split on two-or-more spaces to separate columns
@@ -10162,18 +10901,50 @@ pub async fn get_clawhub_catalog(
                 match clawhub_exec_output(&["inspect", slug.as_str(), "--json"]) {
                     Ok(inspect_raw) => {
                         if let Ok(payload) = parse_clawhub_json::<serde_json::Value>(&inspect_raw) {
-                            let skill = payload.get("skill").cloned().unwrap_or(serde_json::Value::Null);
-                            let lv = payload.get("latestVersion").cloned().unwrap_or(serde_json::Value::Null);
-                            let summary = skill.get("summary").and_then(|v| v.as_str()).unwrap_or("ClawHub skill").trim().to_string();
-                            let latest_version = lv.get("version").and_then(|v| v.as_str())
-                                .or_else(|| skill.get("tags").and_then(|v| v.get("latest")).and_then(|v| v.as_str()))
+                            let skill = payload
+                                .get("skill")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            let lv = payload
+                                .get("latestVersion")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            let summary = skill
+                                .get("summary")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("ClawHub skill")
+                                .trim()
+                                .to_string();
+                            let latest_version = lv
+                                .get("version")
+                                .and_then(|v| v.as_str())
+                                .or_else(|| {
+                                    skill
+                                        .get("tags")
+                                        .and_then(|v| v.get("latest"))
+                                        .and_then(|v| v.as_str())
+                                })
                                 .map(|v| v.to_string());
-                            let stats = skill.get("stats").cloned().unwrap_or(serde_json::Value::Null);
-                            let downloads = stats.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let installs_all_time = stats.get("installsAllTime").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let stats = skill
+                                .get("stats")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            let downloads =
+                                stats.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let installs_all_time = stats
+                                .get("installsAllTime")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
                             let stars = stats.get("stars").and_then(|v| v.as_u64()).unwrap_or(0);
                             let updated_at = skill.get("updatedAt").and_then(|v| v.as_u64());
-                            (summary, latest_version, downloads, installs_all_time, stars, updated_at)
+                            (
+                                summary,
+                                latest_version,
+                                downloads,
+                                installs_all_time,
+                                stars,
+                                updated_at,
+                            )
                         } else {
                             (display_name.clone(), None, 0u64, 0u64, 0u64, None)
                         }
@@ -11210,66 +11981,9 @@ pub async fn run_first_time_setup_with_cleanup(
 
 // ── Workspace File Commands ──────────────────────────────────────────
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct WorkspaceFileEntry {
-    pub name: String,
-    pub path: String,
-    pub is_directory: bool,
-    pub size: u64,
-    pub modified_at: u64,
-}
-
 #[tauri::command]
 pub async fn list_workspace_files(path: String) -> Result<Vec<WorkspaceFileEntry>, String> {
-    let sanitized = sanitize_workspace_path(&path)?;
-    let full_path = if sanitized.is_empty() {
-        WORKSPACE_ROOT.to_string()
-    } else {
-        format!("{}/{}", WORKSPACE_ROOT, sanitized)
-    };
-
-    // Ensure the directory exists
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", &full_path])?;
-
-    let output = docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "ls",
-        "-la",
-        "--time-style=+%s",
-        "--",
-        &full_path,
-    ])
-    .unwrap_or_default();
-
-    let mut entries = Vec::new();
-    for line in output.lines().skip(1) {
-        // skip the "total N" line
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 7 {
-            continue;
-        }
-        let name = parts[6..].join(" ");
-        if name == "." || name == ".." {
-            continue;
-        }
-        let is_directory = parts[0].starts_with('d');
-        let size: u64 = parts[4].parse().unwrap_or(0);
-        let modified_at: u64 = parts[5].parse().unwrap_or(0);
-        let entry_path = if sanitized.is_empty() {
-            name.clone()
-        } else {
-            format!("{}/{}", sanitized, name)
-        };
-        entries.push(WorkspaceFileEntry {
-            name,
-            path: entry_path,
-            is_directory,
-            size,
-            modified_at,
-        });
-    }
-    Ok(entries)
+    workspace_service().list_files(&path)
 }
 
 #[tauri::command]
@@ -11277,57 +11991,22 @@ pub async fn create_workspace_directory(
     parent_path: String,
     name: String,
 ) -> Result<WorkspaceFileEntry, String> {
-    let sanitized_parent = sanitize_workspace_path(&parent_path)?;
-    let sanitized_name = sanitize_directory_name(&name)?;
-    let relative_path = if sanitized_parent.is_empty() {
-        sanitized_name.clone()
-    } else {
-        format!("{}/{}", sanitized_parent, sanitized_name)
-    };
-    let full_path = format!("{}/{}", WORKSPACE_ROOT, relative_path);
-
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", &full_path])?;
-
-    Ok(WorkspaceFileEntry {
-        name: sanitized_name,
-        path: relative_path,
-        is_directory: true,
-        size: 0,
-        modified_at: 0,
-    })
+    workspace_service().create_directory(&parent_path, &name)
 }
 
 #[tauri::command]
 pub async fn read_workspace_file(path: String) -> Result<String, String> {
-    let sanitized = sanitize_workspace_path(&path)?;
-    if sanitized.is_empty() {
-        return Err("Invalid path".to_string());
-    }
-    let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
-    read_container_file(&full_path).ok_or_else(|| "File not found or unreadable".to_string())
+    workspace_service().read_text_file(&path)
 }
 
 #[tauri::command]
 pub async fn read_workspace_file_base64(path: String) -> Result<String, String> {
-    let sanitized = sanitize_workspace_path(&path)?;
-    if sanitized.is_empty() {
-        return Err("Invalid path".to_string());
-    }
-    let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
-    let raw = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "base64", "--", &full_path])
-        .map_err(|_| "File not found or unreadable".to_string())?;
-    Ok(raw.chars().filter(|c| *c != '\n' && *c != '\r').collect())
+    workspace_service().read_file_base64(&path)
 }
 
 #[tauri::command]
 pub async fn delete_workspace_file(path: String) -> Result<(), String> {
-    let sanitized = sanitize_workspace_path(&path)?;
-    if sanitized.is_empty() {
-        return Err("Cannot delete workspace root".to_string());
-    }
-    let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-rf", "--", &full_path])?;
-    Ok(())
+    workspace_service().delete_file(&path)
 }
 
 #[tauri::command]
@@ -11336,37 +12015,8 @@ pub async fn upload_workspace_file(
     base64: String,
     dest_path: String,
 ) -> Result<(), String> {
-    let sanitized_name = sanitize_filename(&file_name);
-    let sanitized_dest = sanitize_workspace_path(&dest_path)?;
-    let dir = if sanitized_dest.is_empty() {
-        WORKSPACE_ROOT.to_string()
-    } else {
-        format!("{}/{}", WORKSPACE_ROOT, sanitized_dest)
-    };
-    let full_path = format!("{}/{}", dir, sanitized_name);
-
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", &dir])?;
     let decoded = decode_base64_payload(&base64)?;
-
-    let mut child = docker_command()
-        .args(["exec", "-i", OPENCLAW_CONTAINER, "tee", "--", &full_path])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to upload file: {}", e))?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        stdin
-            .write_all(&decoded)
-            .map_err(|e| format!("Failed to write file data: {}", e))?;
-    }
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to finalize upload: {}", e))?;
-    if !status.success() {
-        return Err("Failed to upload file to container".to_string());
-    }
-    Ok(())
+    workspace_service().upload_file(&file_name, &decoded, &dest_path)
 }
 
 // =============================================================================
@@ -12255,14 +12905,14 @@ pub async fn complete_anthropic_oauth(
 
     let provider = "anthropic".to_string();
 
-    // Store the token as an API key and save OAuth metadata
+    // Keep the token in memory; only OAuth metadata persists on disk.
     {
         let mut keys = state.api_keys.lock().map_err(|e| e.to_string())?;
         keys.insert(provider.clone(), token_data.access_token.clone());
         let mut active = state.active_provider.lock().map_err(|e| e.to_string())?;
         *active = Some(provider.clone());
         let mut stored = load_auth(&app);
-        stored.keys = keys.clone();
+        stored.keys.remove(&provider);
         stored.active_provider = active.clone();
         stored.oauth_metadata.insert(
             provider.clone(),
@@ -12367,14 +13017,14 @@ pub async fn start_openai_oauth(
 
     let provider = "openai".to_string();
 
-    // Store the token as an API key and save OAuth metadata
+    // Keep the token in memory; only OAuth metadata persists on disk.
     {
         let mut keys = state.api_keys.lock().map_err(|e| e.to_string())?;
         keys.insert(provider.clone(), token_data.access_token.clone());
         let mut active = state.active_provider.lock().map_err(|e| e.to_string())?;
         *active = Some(provider.clone());
         let mut stored = load_auth(&app);
-        stored.keys = keys.clone();
+        stored.keys.remove(&provider);
         stored.active_provider = active.clone();
         stored.oauth_metadata.insert(
             provider.clone(),
@@ -12665,12 +13315,12 @@ pub async fn refresh_provider_token(
         .as_millis() as u64;
     let expires_at = now_ms.saturating_add(expires_in * 1000);
 
-    // Update stored key and metadata
+    // Keep the refreshed token in memory; only OAuth metadata persists on disk.
     {
         let mut keys = state.api_keys.lock().map_err(|e| e.to_string())?;
         keys.insert(provider.clone(), data.access_token.clone());
         let mut stored = load_auth(&app);
-        stored.keys = keys.clone();
+        stored.keys.remove(&provider);
         stored.oauth_metadata.insert(
             provider.clone(),
             OAuthKeyMeta {

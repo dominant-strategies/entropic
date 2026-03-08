@@ -62,6 +62,7 @@ import { appendDiagnosticLog } from "../lib/diagnostics";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { getLocalCreditBalance } from "../lib/localCredits";
 import { signInWithDiscord, signInWithEmail, signInWithGoogle, signUpWithEmail, createCheckout, getBalance } from "../lib/auth";
+import { saveProviderSecret } from "../lib/providerSecrets";
 import entropicLogo from "../assets/entropic-logo.png";
 import type { Page } from "../components/Layout";
 
@@ -4574,11 +4575,7 @@ export function Chat({
     if (!selectedProvider || !keyInput.trim()) return;
     try {
       const provider = selectedProvider.id;
-      await invoke("set_api_key", {
-        provider,
-        key: keyInput.trim(),
-      });
-      await invoke("set_active_provider", { provider });
+      await saveProviderSecret(provider, keyInput.trim());
       setConnectedProvider(provider);
       setKeyInput("");
       setShowKeyModal(false);
@@ -4606,7 +4603,8 @@ export function Chat({
         return;
       }
       // OpenAI: single-step localhost callback
-      await invoke<{ access_token: string; provider: string }>("start_openai_oauth");
+      const result = await invoke<{ access_token: string; provider: string }>("start_openai_oauth");
+      await saveProviderSecret(result.provider, result.access_token);
       setConnectedProvider(provider);
       if (gatewayRunning) {
         await invoke("restart_gateway", { model: selectedModel });
@@ -4626,9 +4624,10 @@ export function Chat({
     setOauthLoading("anthropic");
     setError(null);
     try {
-      await invoke<{ access_token: string; provider: string }>("complete_anthropic_oauth", {
+      const result = await invoke<{ access_token: string; provider: string }>("complete_anthropic_oauth", {
         codeState: anthropicCodeInput.trim(),
       });
+      await saveProviderSecret(result.provider, result.access_token);
       setAnthropicCodePending(false);
       setAnthropicCodeInput("");
       setConnectedProvider("anthropic");

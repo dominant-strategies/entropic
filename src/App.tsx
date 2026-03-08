@@ -18,6 +18,7 @@ import {
 import { clientLog } from "./lib/clientLog";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { getLocalCreditBalance } from "./lib/localCredits";
+import { bootstrapProviderSecrets } from "./lib/providerSecrets";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -184,6 +185,14 @@ function AppContent() {
         clientLog("app.trial_credits.preload.failed", { error: String(error) });
         // Continue anyway - non-blocking
       }
+    }
+
+    try {
+      await bootstrapProviderSecrets();
+      clientLog("app.provider_secrets.bootstrap.success");
+    } catch (error) {
+      console.warn("[App] Failed to bootstrap provider secrets:", error);
+      clientLog("app.provider_secrets.bootstrap.failed", { error: String(error) });
     }
 
     // Onboarding is complete, check runtime status

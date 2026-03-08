@@ -1,5 +1,9 @@
 mod commands;
+mod operational;
 mod runtime;
+mod runtime_supervisor;
+mod watchdog;
+mod workspace_service;
 
 use rand::RngCore;
 use std::fs;
@@ -75,7 +79,6 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             let urls: Vec<String> = args
@@ -121,6 +124,7 @@ pub fn run() {
 
             let state = commands::init_state(&app.handle());
             app.manage(state);
+            commands::start_watchdog_loop(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -131,6 +135,9 @@ pub fn run() {
             commands::read_client_log,
             commands::clear_client_log,
             commands::export_client_log,
+            commands::list_operational_incidents,
+            commands::clear_operational_incidents,
+            commands::get_operational_health,
             commands::start_runtime,
             commands::stop_runtime,
             commands::cleanup_app_data,
@@ -148,6 +155,9 @@ pub fn run() {
             commands::get_setup_progress,
             commands::run_first_time_setup,
             commands::run_first_time_setup_with_cleanup,
+            commands::get_provider_secrets_snapshot,
+            commands::hydrate_provider_secrets,
+            commands::clear_persisted_provider_secrets,
             commands::set_api_key,
             commands::set_active_provider,
             commands::get_auth_state,
@@ -171,6 +181,7 @@ pub fn run() {
             commands::restart_gateway_in_place,
             commands::heal_gateway_config,
             commands::get_gateway_config_health,
+            commands::run_operational_doctor,
             commands::upload_attachment,
             commands::save_attachment,
             commands::delete_attachment,

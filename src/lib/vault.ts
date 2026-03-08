@@ -6,6 +6,7 @@ const VAULT_FILE = "entropic-integrations.hold";
 const VAULT_CLIENT = "entropic-integrations";
 const VAULT_PASSWORD_KEY = "vaultPassword";
 const INDEX_KEY = "__integration_index__";
+const PROVIDER_INDEX_KEY = "__provider_secret_index__";
 const INTEGRATION_STORE = "entropic-integrations.json";
 const INDEX_CACHE_KEY = "integrationIndex";
 
@@ -121,14 +122,27 @@ async function getStrongholdSession(): Promise<StrongholdSession> {
   return sessionInitPromise;
 }
 
-async function loadIndex(store: StrongholdStore): Promise<string[]> {
-  const value = await store.get(INDEX_KEY);
+async function loadStringIndex(store: StrongholdStore, key: string): Promise<string[]> {
+  const value = await store.get(key);
   return decodeJson<string[]>(value, []);
 }
 
-async function saveIndex(store: StrongholdStore, stronghold: Stronghold, providers: string[]) {
-  await store.insert(INDEX_KEY, encodeJson(providers));
+async function saveStringIndex(
+  store: StrongholdStore,
+  stronghold: Stronghold,
+  key: string,
+  values: string[],
+) {
+  await store.insert(key, encodeJson(values));
   await stronghold.save();
+}
+
+async function loadIndex(store: StrongholdStore): Promise<string[]> {
+  return loadStringIndex(store, INDEX_KEY);
+}
+
+async function saveIndex(store: StrongholdStore, stronghold: Stronghold, providers: string[]) {
+  await saveStringIndex(store, stronghold, INDEX_KEY, providers);
 }
 
 export async function saveIntegrationSecret<T extends { provider: string }>(
@@ -217,4 +231,55 @@ export async function listIntegrationSecrets<T>(): Promise<T[]> {
 
 export async function listIntegrationIndexCache(): Promise<IntegrationIndexEntry[]> {
   return loadIntegrationIndexCache();
+}
+
+export async function saveProviderSecret(provider: string, secret: string): Promise<void> {
+  const normalizedProvider = provider.trim();
+  const normalizedSecret = secret.trim();
+  if (!normalizedProvider || !normalizedSecret) {
+    throw new Error("Provider secret requires non-empty provider and secret");
+  }
+
+  const { stronghold, store } = await getStrongholdSession();
+  await store.insert(`provider:${normalizedProvider}`, encodeJson(normalizedSecret));
+  const index = await loadStringIndex(store, PROVIDER_INDEX_KEY);
+  if (!index.includes(normalizedProvider)) {
+    index.push(normalizedProvider);
+    await saveStringIndex(store, stronghold, PROVIDER_INDEX_KEY, index);
+  } else {
+    await stronghold.save();
+  }
+}
+
+export async function loadProviderSecret(provider: string): Promise<string | null> {
+  const normalizedProvider = provider.trim();
+  if (!normalizedProvider) return null;
+  const { store } = await getStrongholdSession();
+  const value = await store.get(`provider:${normalizedProvider}`);
+  return decodeJson<string | null>(value, null);
+}
+
+export async function listProviderSecrets(): Promise<Record<string, string>> {
+  const { store } = await getStrongholdSession();
+  const providers = await loadStringIndex(store, PROVIDER_INDEX_KEY);
+  const secrets: Record<string, string> = {};
+  for (const provider of providers) {
+    const value = await store.get(`provider:${provider}`);
+    const parsed = decodeJson<string | null>(value, null);
+    if (parsed) {
+      secrets[provider] = parsed;
+    }
+  }
+  return secrets;
+}
+
+export async function removeProviderSecret(provider: string): Promise<void> {
+  const normalizedProvider = provider.trim();
+  if (!normalizedProvider) return;
+
+  const { stronghold, store } = await getStrongholdSession();
+  await store.remove(`provider:${normalizedProvider}`);
+  const index = await loadStringIndex(store, PROVIDER_INDEX_KEY);
+  const next = index.filter((entry) => entry !== normalizedProvider);
+  await saveStringIndex(store, stronghold, PROVIDER_INDEX_KEY, next);
 }

@@ -1,7 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
-import { ask } from "@tauri-apps/plugin-dialog";
 import { Key, Shield, Sparkles, Cpu, Image, ChevronRight, User, Palette, ChevronDown, ScrollText, LogIn, LogOut, Loader2, Trash2, AlertTriangle, Copy, Download } from "lucide-react";
 import clsx from "clsx";
 import {
@@ -18,6 +17,10 @@ import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallp
 import { getProxyUrl, signOut as authSignOut } from "../lib/auth";
 import { disconnectIntegration } from "../lib/integrations";
 import { Logs } from "./Logs";
+import {
+  removeProviderSecret,
+  saveProviderSecret,
+} from "../lib/providerSecrets";
 import {
   clearDiagnosticLogs,
   diagnosticsUpdatedEventName,
@@ -79,6 +82,73 @@ type RuntimeFetchResult = {
   runtime_openclaw_commit?: string | null;
   runtime_sha256: string;
   cache_path: string;
+};
+
+type RuntimeHealthState = {
+  colima_installed: boolean;
+  docker_installed: boolean;
+  vm_running: boolean;
+  docker_ready: boolean;
+};
+
+type IncidentRecord = {
+  ts_ms: number;
+  level: string;
+  component: string;
+  action: string;
+  message: string;
+  detail?: string | null;
+};
+
+type OperationalBundleStatus = {
+  resources_dir: string;
+  bin_dir_exists: boolean;
+  share_dir_exists: boolean;
+  colima_binary: boolean;
+  limactl_binary: boolean;
+  docker_binary: boolean;
+};
+
+type OperationalWatchdogStatus = {
+  state: string;
+  desired_mode: string;
+  desired_model?: string | null;
+  desired_image_model?: string | null;
+  desired_updated_at_ms: number;
+  last_check_at_ms: number;
+  last_action_at_ms: number;
+  expected_restart_until_ms: number;
+  cooldown_until_ms: number;
+  consecutive_failures: number;
+  last_error?: string | null;
+  last_reason?: string | null;
+  actual_gateway_running: boolean;
+  actual_gateway_health?: string | null;
+};
+
+type OperationalHealthSnapshot = {
+  runtime: RuntimeHealthState;
+  gateway_running: boolean;
+  gateway_container_health?: string | null;
+  gateway_instance_id?: string | null;
+  watchdog: OperationalWatchdogStatus;
+  bundle: OperationalBundleStatus;
+  recent_incidents: IncidentRecord[];
+  recent_warn_count: number;
+  recent_error_count: number;
+};
+
+type OperationalDoctorFinding = {
+  severity: string;
+  title: string;
+  detail: string;
+  recommendation?: string | null;
+};
+
+type OperationalDoctorReport = {
+  status: string;
+  summary: string;
+  findings: OperationalDoctorFinding[];
 };
 
 function SettingsGroup({ title, children }: { title?: string, children: React.ReactNode }) {
@@ -177,6 +247,13 @@ export function Settings({
   const [gatewayConfigNotice, setGatewayConfigNotice] = useState<string | null>(null);
   const [runtimeVersionInfo, setRuntimeVersionInfo] = useState<RuntimeVersionInfo | null>(null);
   const [runtimeFetchLoading, setRuntimeFetchLoading] = useState(false);
+  const [operationalExpanded, setOperationalExpanded] = useState(false);
+  const [operationalLoading, setOperationalLoading] = useState(false);
+  const [operationalDoctorLoading, setOperationalDoctorLoading] = useState(false);
+  const [operationalError, setOperationalError] = useState<string | null>(null);
+  const [operationalHealth, setOperationalHealth] = useState<OperationalHealthSnapshot | null>(null);
+  const [operationalDoctorReport, setOperationalDoctorReport] =
+    useState<OperationalDoctorReport | null>(null);
   const appliedRuntimeDigest =
     runtimeVersionInfo?.applied_runtime_image_id
       ?.replace(/^sha256:/, "")
@@ -252,9 +329,14 @@ export function Settings({
       setGatewayConfigHealth(null);
       setGatewayConfigError(null);
       setGatewayConfigNotice(null);
-      return;
+    } else {
+      void refreshGatewayConfigHealth();
     }
-    void refreshGatewayConfigHealth();
+  }, [gatewayRunning]);
+
+  useEffect(() => {
+    void refreshOperationalHealth();
+    void runOperationalDoctor();
   }, [gatewayRunning]);
 
   useEffect(() => {
@@ -332,7 +414,8 @@ export function Settings({
         return; // Don't clear loading state yet — wait for code paste
       }
       // OpenAI: single-step localhost callback flow
-      await invoke<{ access_token: string; provider: string }>("start_openai_oauth");
+      const result = await invoke<{ access_token: string; provider: string }>("start_openai_oauth");
+      await saveProviderSecret(result.provider, result.access_token);
       const status = await invoke<Record<string, string>>("get_oauth_status");
       setOauthStatus(status);
       const state = await invoke<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>("get_auth_state");
@@ -358,9 +441,10 @@ export function Settings({
     setOauthLoading("anthropic");
     setOauthError(null);
     try {
-      await invoke<{ access_token: string; provider: string }>("complete_anthropic_oauth", {
+      const result = await invoke<{ access_token: string; provider: string }>("complete_anthropic_oauth", {
         codeState: anthropicCodeInput.trim(),
       });
+      await saveProviderSecret(result.provider, result.access_token);
       setAnthropicCodePending(false);
       setAnthropicCodeInput("");
       const status = await invoke<Record<string, string>>("get_oauth_status");
@@ -384,7 +468,7 @@ export function Settings({
 
   async function handleOAuthDisconnect(provider: "anthropic" | "openai") {
     try {
-      await invoke("set_api_key", { provider, key: "" });
+      await removeProviderSecret(provider);
       if (provider === "anthropic") {
         setAnthropicCodePending(false);
         setAnthropicCodeInput("");
@@ -454,14 +538,8 @@ export function Settings({
   }
 
   async function healGatewayConfig() {
-    const confirmed = await ask(
-      "Run OpenClaw doctor --fix and restart the gateway now? This can briefly interrupt active gateway connections.",
-      {
-        title: "Heal Gateway Config",
-        kind: "warning",
-        okLabel: "Heal and Restart",
-        cancelLabel: "Cancel",
-      }
+    const confirmed = window.confirm(
+      "Run OpenClaw doctor --fix and restart the gateway now? This can briefly interrupt active gateway connections."
     );
     if (!confirmed) {
       return;
@@ -480,6 +558,68 @@ export function Settings({
     } finally {
       setGatewayConfigActionLoading(false);
     }
+  }
+
+  async function refreshOperationalHealth() {
+    setOperationalLoading(true);
+    setOperationalError(null);
+    try {
+      const result = await invoke<OperationalHealthSnapshot>("get_operational_health");
+      setOperationalHealth(result);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setOperationalError(`Failed to load operational health: ${detail}`);
+    } finally {
+      setOperationalLoading(false);
+    }
+  }
+
+  async function runOperationalDoctor() {
+    setOperationalDoctorLoading(true);
+    setOperationalError(null);
+    try {
+      const result = await invoke<OperationalDoctorReport>("run_operational_doctor");
+      setOperationalDoctorReport(result);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setOperationalError(`Failed to run operational doctor: ${detail}`);
+    } finally {
+      setOperationalDoctorLoading(false);
+    }
+  }
+
+  async function clearOperationalIncidents() {
+    try {
+      await invoke("clear_operational_incidents");
+      await refreshOperationalHealth();
+      await runOperationalDoctor();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setOperationalError(`Failed to clear operational incidents: ${detail}`);
+    }
+  }
+
+  function operationalSeverityTone(severity: string) {
+    if (severity === "error") return "bg-red-100 text-red-700";
+    if (severity === "warn") return "bg-amber-100 text-amber-700";
+    return "bg-blue-100 text-blue-700";
+  }
+
+  function operationalSummaryTone(status?: string | null) {
+    if (status === "critical") return "text-red-700";
+    if (status === "degraded") return "text-amber-700";
+    return "text-green-700";
+  }
+
+  function watchdogStateTone(state?: string | null) {
+    if (state === "cooldown" || state === "missing_proxy_config") return "text-red-700";
+    if (state === "waiting_for_local_secrets" || state === "expected_restart" || state === "reconciling") return "text-amber-700";
+    return "text-green-700";
+  }
+
+  function formatIncidentTs(tsMs: number) {
+    if (!tsMs) return "unknown time";
+    return new Date(tsMs).toLocaleString();
   }
 
   const gatewayConfigInvalid = gatewayConfigHealth?.status === "invalid";
@@ -1060,6 +1200,208 @@ export function Settings({
       <SettingsGroup title="Diagnostics">
         <div>
           <button
+            onClick={() => setOperationalExpanded((prev) => !prev)}
+            className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-7 h-7 rounded-md bg-[var(--system-gray-6)] text-[var(--text-tertiary)] flex items-center justify-center flex-shrink-0">
+                <Shield className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-[14px] font-medium text-[var(--text-primary)]">Operational Health</div>
+                <div className={clsx("text-[12px]", operationalSummaryTone(operationalDoctorReport?.status), !operationalDoctorReport?.summary && "text-[var(--text-secondary)]")}>
+                  {operationalDoctorReport?.summary || "Runtime, bundle, gateway, and incident health."}
+                </div>
+              </div>
+            </div>
+            <ChevronDown
+              className={clsx(
+                "w-4 h-4 text-[var(--text-tertiary)] transition-transform duration-200",
+                operationalExpanded ? "rotate-180" : "",
+              )}
+            />
+          </button>
+          {operationalExpanded && (
+            <div className="px-4 pb-4 space-y-4">
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  onClick={() => {
+                    void refreshOperationalHealth();
+                    void runOperationalDoctor();
+                  }}
+                  disabled={operationalLoading || operationalDoctorLoading}
+                  className="px-2 py-1 text-xs rounded-md border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50"
+                >
+                  {operationalLoading ? "Refreshing..." : "Refresh"}
+                </button>
+                <button
+                  onClick={() => void runOperationalDoctor()}
+                  disabled={operationalDoctorLoading}
+                  className="px-2 py-1 text-xs rounded-md border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50"
+                >
+                  {operationalDoctorLoading ? "Running Doctor..." : "Run Doctor"}
+                </button>
+                <button
+                  onClick={() => void clearOperationalIncidents()}
+                  disabled={!operationalHealth || operationalHealth.recent_incidents.length === 0}
+                  className="px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
+                >
+                  Clear Incidents
+                </button>
+              </div>
+
+              {operationalError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                  {operationalError}
+                </div>
+              )}
+
+              {operationalHealth && (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] p-3">
+                    <div className="text-[11px] uppercase tracking-wide text-[var(--text-tertiary)]">Runtime</div>
+                    <div className={clsx("mt-1 text-sm font-semibold", operationalHealth.runtime.docker_ready ? "text-green-700" : "text-red-700")}>
+                      {operationalHealth.runtime.docker_ready ? "Ready" : "Unavailable"}
+                    </div>
+                    <div className="mt-2 text-xs text-[var(--text-secondary)]">
+                      Docker installed: {operationalHealth.runtime.docker_installed ? "yes" : "no"}
+                    </div>
+                    <div className="text-xs text-[var(--text-secondary)]">
+                      Colima VM running: {operationalHealth.runtime.vm_running ? "yes" : "no"}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] p-3">
+                    <div className="text-[11px] uppercase tracking-wide text-[var(--text-tertiary)]">Gateway</div>
+                    <div className={clsx("mt-1 text-sm font-semibold", operationalHealth.gateway_running ? "text-green-700" : "text-amber-700")}>
+                      {operationalHealth.gateway_running ? "Running" : "Stopped"}
+                    </div>
+                    <div className="mt-2 text-xs text-[var(--text-secondary)]">
+                      Container health: {operationalHealth.gateway_container_health || "n/a"}
+                    </div>
+                    <div className="text-xs text-[var(--text-secondary)]">
+                      Container id: {operationalHealth.gateway_instance_id?.slice(0, 12) || "n/a"}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] p-3">
+                    <div className="text-[11px] uppercase tracking-wide text-[var(--text-tertiary)]">Watchdog</div>
+                    <div className={clsx("mt-1 text-sm font-semibold", watchdogStateTone(operationalHealth.watchdog.state))}>
+                      {operationalHealth.watchdog.state}
+                    </div>
+                    <div className="mt-2 text-xs text-[var(--text-secondary)]">
+                      Desired mode: {operationalHealth.watchdog.desired_mode}
+                    </div>
+                    <div className="text-xs text-[var(--text-secondary)] break-words">
+                      Desired model: {operationalHealth.watchdog.desired_model || "n/a"}
+                    </div>
+                    <div className="text-xs text-[var(--text-secondary)]">
+                      Failures: {operationalHealth.watchdog.consecutive_failures}
+                    </div>
+                    {operationalHealth.watchdog.cooldown_until_ms > Date.now() && (
+                      <div className="text-xs text-[var(--text-tertiary)]">
+                        Cooldown until: {formatIncidentTs(operationalHealth.watchdog.cooldown_until_ms)}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] p-3">
+                    <div className="text-[11px] uppercase tracking-wide text-[var(--text-tertiary)]">Bundle Assets</div>
+                    <div className={clsx("mt-1 text-sm font-semibold", operationalHealth.bundle.bin_dir_exists && operationalHealth.bundle.share_dir_exists ? "text-green-700" : "text-red-700")}>
+                      {operationalHealth.bundle.bin_dir_exists && operationalHealth.bundle.share_dir_exists ? "Present" : "Incomplete"}
+                    </div>
+                    <div className="mt-2 text-xs text-[var(--text-secondary)]">
+                      colima: {operationalHealth.bundle.colima_binary ? "yes" : "no"} | limactl: {operationalHealth.bundle.limactl_binary ? "yes" : "no"} | docker: {operationalHealth.bundle.docker_binary ? "yes" : "no"}
+                    </div>
+                    <div className="text-xs text-[var(--text-tertiary)] break-all">
+                      {operationalHealth.bundle.resources_dir}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] p-3">
+                    <div className="text-[11px] uppercase tracking-wide text-[var(--text-tertiary)]">Recent Incidents</div>
+                    <div className="mt-1 text-sm font-semibold text-[var(--text-primary)]">
+                      {operationalHealth.recent_incidents.length} total
+                    </div>
+                    <div className="mt-2 text-xs text-[var(--text-secondary)]">
+                      Errors: {operationalHealth.recent_error_count} | Warnings: {operationalHealth.recent_warn_count}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {operationalHealth?.watchdog.last_error && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  <span className="font-semibold">Watchdog detail:</span> {operationalHealth.watchdog.last_error}
+                </div>
+              )}
+
+              {operationalDoctorReport && (
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] p-3 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-[11px] uppercase tracking-wide text-[var(--text-tertiary)]">Doctor Report</div>
+                      <div className={clsx("text-sm font-semibold", operationalSummaryTone(operationalDoctorReport.status))}>
+                        {operationalDoctorReport.summary}
+                      </div>
+                    </div>
+                    <span className={clsx("px-2 py-1 rounded-md text-[10px] font-semibold uppercase", operationalSeverityTone(operationalDoctorReport.status === "critical" ? "error" : operationalDoctorReport.status === "degraded" ? "warn" : "info"))}>
+                      {operationalDoctorReport.status}
+                    </span>
+                  </div>
+
+                  {operationalDoctorReport.findings.length === 0 ? (
+                    <div className="text-xs text-[var(--text-secondary)]">No operational findings.</div>
+                  ) : (
+                    <div className="space-y-2">
+                      {operationalDoctorReport.findings.map((finding) => (
+                        <div key={`${finding.severity}-${finding.title}`} className="rounded-lg border border-[var(--border-subtle)] bg-white p-3">
+                          <div className="flex items-center gap-2">
+                            <span className={clsx("px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase", operationalSeverityTone(finding.severity))}>
+                              {finding.severity}
+                            </span>
+                            <div className="text-sm font-medium text-[var(--text-primary)]">{finding.title}</div>
+                          </div>
+                          <div className="mt-1 text-xs text-[var(--text-secondary)]">{finding.detail}</div>
+                          {finding.recommendation && (
+                            <div className="mt-2 text-xs text-[var(--text-primary)]">
+                              Recommended: {finding.recommendation}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] max-h-56 overflow-auto p-3 space-y-2 font-mono text-xs">
+                {!operationalHealth || operationalHealth.recent_incidents.length === 0 ? (
+                  <div className="text-[var(--text-tertiary)]">No operational incidents recorded.</div>
+                ) : (
+                  operationalHealth.recent_incidents.map((incident) => (
+                    <div key={`${incident.ts_ms}-${incident.component}-${incident.action}`} className="rounded-lg border border-[var(--border-subtle)] bg-white p-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[var(--text-tertiary)]">{formatIncidentTs(incident.ts_ms)}</span>
+                        <span className={clsx("px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase", operationalSeverityTone(incident.level))}>
+                          {incident.level}
+                        </span>
+                        <span className="text-[var(--text-secondary)]">{incident.component}:{incident.action}</span>
+                      </div>
+                      <div className="mt-1 text-[var(--text-primary)] break-words">{incident.message}</div>
+                      {incident.detail && (
+                        <div className="mt-1 text-[var(--text-tertiary)] break-words">{incident.detail}</div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div>
+          <button
             onClick={() => setGatewayDiagnosticsExpanded((prev) => !prev)}
             className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
           >
@@ -1261,14 +1603,8 @@ export function Settings({
 
               <button
                 onClick={async () => {
-                  const confirmed = await ask(
-                    "Import data from previous install, then fully reset runtime VMs/containers/volumes to fix Colima or Docker drift? Runtime workspace data may be removed, but imported auth/settings are kept.",
-                    {
-                      title: "Import + Runtime Reset",
-                      kind: "warning",
-                      okLabel: "Import and Reset",
-                      cancelLabel: "Cancel",
-                    }
+                  const confirmed = window.confirm(
+                    "Import data from previous install, then fully reset runtime VMs/containers/volumes to fix Colima or Docker drift? Runtime workspace data may be removed, but imported auth/settings are kept."
                   );
                   if (!confirmed) return;
                   setLegacyUpgradeLoading(true);
@@ -1309,12 +1645,9 @@ export function Settings({
               <button
                 onClick={async () => {
                   console.log("[Settings] Reset Application clicked");
-                  const confirmed = await ask("Are you sure you want to fully reset? This removes all chat history, settings, VMs, containers, and caches.", {
-                    title: "Reset Application",
-                    kind: "warning",
-                    okLabel: "Reset",
-                    cancelLabel: "Cancel"
-                  });
+                  const confirmed = window.confirm(
+                    "Are you sure you want to fully reset? This removes all chat history, settings, VMs, containers, and caches."
+                  );
                   console.log("[Settings] Confirmation result:", confirmed);
                   if (!confirmed) {
                     console.log("[Settings] Reset cancelled by user");
@@ -1378,12 +1711,9 @@ export function Settings({
                 <button
                   onClick={async () => {
                     console.log("[Settings] Cleanup and Quit clicked");
-                    const confirmed = await ask("Are you sure you want to completely uninstall Entropic?\n\nThis will delete all data including settings and quit the app. You can then move Entropic.app to trash.\n\nThis action cannot be undone.", {
-                      title: "Uninstall Entropic",
-                      kind: "warning",
-                      okLabel: "Uninstall",
-                      cancelLabel: "Cancel"
-                    });
+                    const confirmed = window.confirm(
+                      "Are you sure you want to completely uninstall Entropic?\n\nThis will delete all data including settings and quit the app. You can then move Entropic.app to trash.\n\nThis action cannot be undone."
+                    );
                     console.log("[Settings] Confirmation result:", confirmed);
                     if (!confirmed) {
                       console.log("[Settings] Uninstall cancelled by user");
