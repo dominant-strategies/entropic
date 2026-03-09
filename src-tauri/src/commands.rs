@@ -1684,8 +1684,10 @@ fn bundled_runtime_signature_from_manifest(tar_path: &Path) -> Result<String, St
     } else {
         "-xOf"
     };
-    let output = Command::new("tar")
-        .args([tar_flag, tar_path.as_ref(), "manifest.json"])
+    let mut cmd = Command::new("tar");
+    cmd.args([tar_flag, tar_path.as_ref(), "manifest.json"]);
+    apply_windows_no_window(&mut cmd);
+    let output = cmd
         .output()
         .map_err(|e| format!("failed to read manifest from {}: {}", tar_path, e))?;
     if !output.status.success() {
