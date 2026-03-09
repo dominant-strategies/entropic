@@ -6,10 +6,13 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine as _,
 };
+use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use http;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
@@ -6043,7 +6046,8 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
             "https://localhost",
             "https://127.0.0.1",
             "tauri://localhost",
-            "http://localhost:5174"
+            "http://localhost:5174",
+            "http://127.0.0.1:5174"
         ]),
     );
     // In the local Docker desktop setup, connections arrive from the Docker bridge
@@ -12576,6 +12580,75 @@ fn resolve_raw_device_identifier() -> String {
     )
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredGatewayDeviceIdentity {
+    version: u8,
+    device_id: String,
+    public_key: String,
+    private_key: String,
+    created_at_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GatewayDeviceIdentity {
+    pub device_id: String,
+    pub public_key: String,
+}
+
+fn gateway_device_identity_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
+    fs::create_dir_all(&app_dir)
+        .map_err(|e| format!("Failed to create app data dir: {}", e))?;
+    Ok(app_dir.join("gateway-device-identity.json"))
+}
+
+fn load_or_create_gateway_device_identity(
+    app: &AppHandle,
+) -> Result<StoredGatewayDeviceIdentity, String> {
+    let path = gateway_device_identity_path(app)?;
+    if path.exists() {
+        let raw = fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read gateway device identity: {}", e))?;
+        let parsed: StoredGatewayDeviceIdentity = serde_json::from_str(&raw)
+            .map_err(|e| format!("Failed to parse gateway device identity: {}", e))?;
+        if parsed.version == 1
+            && !parsed.device_id.trim().is_empty()
+            && !parsed.public_key.trim().is_empty()
+            && !parsed.private_key.trim().is_empty()
+        {
+            return Ok(parsed);
+        }
+    }
+
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let verifying_key = signing_key.verifying_key();
+    let public_key_bytes = verifying_key.to_bytes();
+    let mut hasher = Sha256::new();
+    hasher.update(public_key_bytes);
+    let device_id = format!("{:x}", hasher.finalize());
+    let created_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let identity = StoredGatewayDeviceIdentity {
+        version: 1,
+        device_id,
+        public_key: URL_SAFE_NO_PAD.encode(public_key_bytes),
+        private_key: URL_SAFE_NO_PAD.encode(signing_key.to_bytes()),
+        created_at_ms,
+    };
+
+    let serialized = serde_json::to_string(&identity)
+        .map_err(|e| format!("Failed to serialize gateway device identity: {}", e))?;
+    fs::write(&path, serialized)
+        .map_err(|e| format!("Failed to persist gateway device identity: {}", e))?;
+    Ok(identity)
+}
+
 #[tauri::command]
 pub async fn get_device_fingerprint_hash() -> Result<String, String> {
     let raw = resolve_raw_device_identifier();
@@ -12583,6 +12656,71 @@ pub async fn get_device_fingerprint_hash() -> Result<String, String> {
     hasher.update("entropic-device-fingerprint-v1:");
     hasher.update(raw.as_bytes());
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[tauri::command]
+pub async fn get_gateway_device_identity(app: AppHandle) -> Result<GatewayDeviceIdentity, String> {
+    let identity = load_or_create_gateway_device_identity(&app)?;
+    Ok(GatewayDeviceIdentity {
+        device_id: identity.device_id,
+        public_key: identity.public_key,
+    })
+}
+
+#[tauri::command]
+pub async fn sign_gateway_device_payload(
+    app: AppHandle,
+    payload: String,
+) -> Result<String, String> {
+    let identity = load_or_create_gateway_device_identity(&app)?;
+    let private_key_bytes = URL_SAFE_NO_PAD
+        .decode(identity.private_key.as_bytes())
+        .map_err(|e| format!("Failed to decode gateway device private key: {}", e))?;
+    let signing_key = SigningKey::from_bytes(
+        &private_key_bytes
+            .try_into()
+            .map_err(|_| "Invalid gateway device private key length".to_string())?,
+    );
+    let signature = signing_key.sign(payload.as_bytes());
+    Ok(URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+}
+
+#[tauri::command]
+pub async fn approve_gateway_device_pairing(request_id: String) -> Result<(), String> {
+    let trimmed = request_id.trim();
+    if trimmed.is_empty() {
+        return Err("Pairing request id is required".to_string());
+    }
+
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "Gateway container is not running. Start the sandbox first.".to_string())?;
+
+    let output = docker_command()
+        .args([
+            "exec",
+            container,
+            "node",
+            "/app/dist/index.js",
+            "devices",
+            "approve",
+            trimmed,
+            "--json",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to approve gateway device pairing: {}", e))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    Err(if detail.is_empty() {
+        "Failed to approve gateway device pairing".to_string()
+    } else {
+        format!("Failed to approve gateway device pairing: {}", detail)
+    })
 }
 
 #[tauri::command]

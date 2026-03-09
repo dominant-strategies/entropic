@@ -1,5 +1,7 @@
 // OpenClaw Gateway WebSocket Client
 
+import { invoke } from "@tauri-apps/api/core";
+
 type Frame = RequestFrame | ResponseFrame | EventFrame;
 
 type RequestFrame = {
@@ -14,17 +16,140 @@ type ResponseFrame = {
   id: string;
   ok: boolean;
   payload?: unknown;
-  error?: { code: string; message: string };
+  error?: { code: string; message: string; details?: unknown };
 };
 
 export class GatewayError extends Error {
   code?: string;
+  details?: unknown;
 
-  constructor(message: string, code?: string) {
+  constructor(message: string, code?: string, details?: unknown) {
     super(message);
     this.name = "GatewayError";
     this.code = code;
+    this.details = details;
   }
+}
+
+type GatewayDeviceIdentity = {
+  device_id: string;
+  public_key: string;
+};
+
+type StoredDeviceAuthEntry = {
+  token: string;
+  role: string;
+  scopes?: string[];
+  updatedAtMs?: number;
+};
+
+type StoredDeviceAuthStore = {
+  version: 1;
+  deviceId: string;
+  tokens: Record<string, StoredDeviceAuthEntry>;
+};
+
+const DEVICE_AUTH_STORAGE_KEY = "openclaw.device.auth.v1";
+
+function readDeviceAuthStore(): StoredDeviceAuthStore | null {
+  try {
+    const raw = window.localStorage.getItem(DEVICE_AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredDeviceAuthStore;
+    if (
+      parsed?.version !== 1 ||
+      typeof parsed.deviceId !== "string" ||
+      !parsed.tokens ||
+      typeof parsed.tokens !== "object"
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeDeviceAuthStore(store: StoredDeviceAuthStore) {
+  try {
+    window.localStorage.setItem(DEVICE_AUTH_STORAGE_KEY, JSON.stringify(store));
+  } catch {
+    // best-effort
+  }
+}
+
+function loadDeviceAuthToken(params: { deviceId: string; role: string }): StoredDeviceAuthEntry | null {
+  const store = readDeviceAuthStore();
+  if (!store || store.deviceId !== params.deviceId) return null;
+  return store.tokens[params.role] ?? null;
+}
+
+function storeDeviceAuthToken(params: {
+  deviceId: string;
+  role: string;
+  token: string;
+  scopes?: string[];
+}) {
+  const existing = readDeviceAuthStore();
+  const next: StoredDeviceAuthStore = {
+    version: 1,
+    deviceId: params.deviceId,
+    tokens:
+      existing && existing.deviceId === params.deviceId && existing.tokens
+        ? { ...existing.tokens }
+        : {},
+  };
+  next.tokens[params.role] = {
+    token: params.token,
+    role: params.role,
+    scopes: params.scopes,
+    updatedAtMs: Date.now(),
+  };
+  writeDeviceAuthStore(next);
+}
+
+function clearDeviceAuthToken(params: { deviceId: string; role: string }) {
+  const store = readDeviceAuthStore();
+  if (!store || store.deviceId !== params.deviceId) return;
+  if (!store.tokens[params.role]) return;
+  const next: StoredDeviceAuthStore = {
+    version: 1,
+    deviceId: store.deviceId,
+    tokens: { ...store.tokens },
+  };
+  delete next.tokens[params.role];
+  writeDeviceAuthStore(next);
+}
+
+function buildDeviceAuthPayload(params: {
+  deviceId: string;
+  clientId: string;
+  clientMode: string;
+  role: string;
+  scopes: string[];
+  signedAtMs: number;
+  token?: string | null;
+  nonce: string;
+}) {
+  return [
+    "v2",
+    params.deviceId,
+    params.clientId,
+    params.clientMode,
+    params.role,
+    params.scopes.join(","),
+    String(params.signedAtMs),
+    params.token ?? "",
+    params.nonce,
+  ].join("|");
+}
+
+async function loadGatewayDeviceIdentity(): Promise<GatewayDeviceIdentity> {
+  return invoke<GatewayDeviceIdentity>("get_gateway_device_identity");
+}
+
+async function signGatewayDevicePayload(payload: string): Promise<string> {
+  return invoke<string>("sign_gateway_device_payload", { payload });
 }
 
 type EventFrame = {
@@ -105,6 +230,8 @@ export class GatewayClient {
   private listeners: Partial<{ [K in keyof GatewayEvents]: GatewayEvents[K][] }> = {};
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
   private static KEEPALIVE_INTERVAL_MS = 30_000;
+  private connectNonce: string | null = null;
+  private pairingApprovalAttempts = new Set<string>();
 
   private shouldLog() {
     if (typeof window === "undefined") {
@@ -248,20 +375,75 @@ export class GatewayClient {
       if (frame.event === "connect.challenge") {
         // Respond with connect RPC
         this.log("Received challenge, authenticating...");
+        const role = "operator";
+        let deviceIdentity: GatewayDeviceIdentity | null = null;
+        let canFallbackToShared = false;
         try {
+          const clientId = "openclaw-control-ui";
+          const clientMode = "ui";
+          const scopes = ["operator.admin", "operator.approvals", "operator.pairing"];
+          const nonce =
+            frame.payload && typeof frame.payload === "object" && "nonce" in frame.payload
+              ? String((frame.payload as { nonce?: unknown }).nonce ?? "")
+              : "";
+          this.connectNonce = nonce;
+          const isSecureContext = typeof window !== "undefined" && window.isSecureContext;
+          let device: {
+            id: string;
+            publicKey: string;
+            signature: string;
+            signedAt: number;
+            nonce: string;
+          } | undefined;
+          let authToken = this.token;
+
+          if (isSecureContext) {
+            deviceIdentity = await loadGatewayDeviceIdentity();
+            const storedToken = loadDeviceAuthToken({
+              deviceId: deviceIdentity.device_id,
+              role,
+            })?.token;
+            authToken = storedToken ?? this.token;
+            canFallbackToShared = Boolean(storedToken && this.token);
+
+            const signedAtMs = Date.now();
+            const payload = buildDeviceAuthPayload({
+              deviceId: deviceIdentity.device_id,
+              clientId,
+              clientMode,
+              role,
+              scopes,
+              signedAtMs,
+              token: authToken ?? null,
+              nonce,
+            });
+            const signature = await signGatewayDevicePayload(payload);
+            device = {
+              id: deviceIdentity.device_id,
+              publicKey: deviceIdentity.public_key,
+              signature,
+              signedAt: signedAtMs,
+              nonce,
+            };
+          }
+
           await this.rpc("connect", {
             minProtocol: 3,
             maxProtocol: 3,
             client: {
-              id: "openclaw-control-ui",
+              id: clientId,
               displayName: "Entropic Desktop",
               version: "0.1.0",
               platform: "desktop",
-              mode: "ui",
+              mode: clientMode,
             },
-            role: "operator",
-            scopes: ["operator.read", "operator.write", "operator.admin"],
-            auth: { token: this.token },
+            role,
+            scopes,
+            auth: authToken ? { token: authToken } : undefined,
+            device,
+            caps: [],
+            userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "Entropic Desktop",
+            locale: typeof navigator !== "undefined" ? navigator.language : "en-US",
           });
           this.log("Connected successfully");
           this.authenticated = true;
@@ -269,6 +451,26 @@ export class GatewayClient {
           this.emit("connected");
           connectResolve?.();
         } catch (e) {
+          const pairingRequestId =
+            e instanceof GatewayError &&
+            e.code === "NOT_PAIRED" &&
+            e.details &&
+            typeof e.details === "object" &&
+            "requestId" in e.details
+              ? String((e.details as { requestId?: unknown }).requestId ?? "").trim()
+              : "";
+          if (pairingRequestId && !this.pairingApprovalAttempts.has(pairingRequestId)) {
+            this.pairingApprovalAttempts.add(pairingRequestId);
+            try {
+              await invoke("approve_gateway_device_pairing", { requestId: pairingRequestId });
+              this.log("Approved local gateway pairing request", pairingRequestId);
+            } catch (approveError) {
+              this.logError("Failed to auto-approve gateway pairing:", approveError);
+            }
+          }
+          if (e instanceof GatewayError && deviceIdentity && canFallbackToShared) {
+            clearDeviceAuthToken({ deviceId: deviceIdentity.device_id, role });
+          }
           this.logError("Auth failed:", e);
           connectReject?.(e as Error);
         }
@@ -300,9 +502,36 @@ export class GatewayClient {
           );
         }
         if (frame.ok) {
+          if (pending.method === "connect") {
+            const auth = (
+              frame.payload as {
+                auth?: { deviceToken?: string; role?: string; scopes?: string[] };
+              } | undefined
+            )?.auth;
+            const deviceToken = auth?.deviceToken?.trim();
+            if (deviceToken) {
+              try {
+                const identity = await loadGatewayDeviceIdentity();
+                storeDeviceAuthToken({
+                  deviceId: identity.device_id,
+                  role: auth?.role || "operator",
+                  token: deviceToken,
+                  scopes: auth?.scopes,
+                });
+              } catch (error) {
+                this.log("Failed to persist gateway device token", error);
+              }
+            }
+          }
           pending.resolve(frame.payload);
         } else {
-          pending.reject(new GatewayError(frame.error?.message || "RPC failed", frame.error?.code));
+          pending.reject(
+            new GatewayError(
+              frame.error?.message || "RPC failed",
+              frame.error?.code,
+              frame.error?.details,
+            ),
+          );
         }
       } else {
         this.log("res", "unmatched", `id=${frame.id}`);

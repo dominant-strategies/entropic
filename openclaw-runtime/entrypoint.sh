@@ -291,8 +291,18 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
   "gateway": {
     "controlUi": {
       "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": false,
-      "dangerouslyAllowHostHeaderOriginFallback": true
+      "dangerouslyDisableDeviceAuth": true,
+      "dangerouslyAllowHostHeaderOriginFallback": true,
+      "allowedOrigins": [
+        "null",
+        "http://localhost",
+        "http://127.0.0.1",
+        "https://localhost",
+        "https://127.0.0.1",
+        "tauri://localhost",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174"
+      ]
     }${GATEWAY_AUTH_BLOCK}
   },
   "plugins": {
