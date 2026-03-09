@@ -4960,19 +4960,16 @@ Use it for durable decisions, preferences, and facts that should persist across 
                 &["tools", "web", "search", "provider"],
                 serde_json::json!("perplexity"),
             );
-            if let Some(web_base_url) = &web_base_url {
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &["tools", "web", "search", "perplexity", "baseUrl"],
-                    serde_json::json!(web_base_url),
-                );
+            let web_search_base_url = if let Some(web_base_url) = &web_base_url {
+                resolve_container_openai_base(web_base_url)
             } else {
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &["tools", "web", "search", "perplexity", "baseUrl"],
-                    serde_json::json!(base_url),
-                );
-            }
+                base_url.clone()
+            };
+            set_openclaw_config_value(
+                &mut cfg,
+                &["tools", "web", "search", "perplexity", "baseUrl"],
+                serde_json::json!(web_search_base_url),
+            );
         }
     } else {
         // Non-proxy mode: remove openrouter config to avoid validation errors
