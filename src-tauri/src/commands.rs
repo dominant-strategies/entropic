@@ -11316,12 +11316,25 @@ async fn run_first_time_setup_internal(
 ) -> Result<(), String> {
     let runtime = get_runtime(&app);
 
-    if cleanup_before_start && matches!(Platform::detect(), Platform::MacOS) {
+    let supports_runtime_cleanup = matches!(Platform::detect(), Platform::MacOS)
+        || (matches!(Platform::detect(), Platform::Windows) && windows_use_managed_wsl_docker());
+
+    if cleanup_before_start && supports_runtime_cleanup {
+        let cleanup_message = if matches!(Platform::detect(), Platform::Windows) {
+            "Cleaning managed WSL runtime and retrying setup..."
+        } else {
+            "Cleaning Entropic isolated container runtime state..."
+        };
+        let cleanup_error = if matches!(Platform::detect(), Platform::Windows) {
+            "Entropic could not reset its managed Windows runtime"
+        } else {
+            "Entropic could not clean its isolated Colima runtime"
+        };
         {
             let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
             *progress = SetupProgress {
                 stage: "cleanup".to_string(),
-                message: "Cleaning Entropic isolated container runtime state...".to_string(),
+                message: cleanup_message.to_string(),
                 percent: 5,
                 complete: false,
                 error: None,
@@ -11335,10 +11348,7 @@ async fn run_first_time_setup_internal(
                 message: "Failed to clean isolated runtime".to_string(),
                 percent: 0,
                 complete: false,
-                error: Some(format!(
-                    "Entropic could not clean its isolated Colima runtime: {}",
-                    e
-                )),
+                error: Some(format!("{}: {}", cleanup_error, e)),
             };
             return Err(format!("Failed to clean isolated runtime: {}", e));
         }

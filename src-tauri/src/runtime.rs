@@ -821,7 +821,7 @@ impl Runtime {
 
     pub fn reset_isolated_runtime_state(&self) -> Result<(), RuntimeError> {
         match Platform::detect() {
-            Platform::Windows => self.stop_windows_runtime(),
+            Platform::Windows => self.reset_windows_runtime_state(),
             _ => self.reset_isolated_colima_runtime(),
         }
     }
@@ -1906,6 +1906,67 @@ fi
         self.windows_start_distro(distro)
     }
 
+    fn windows_unregister_distro(&self, distro: &str) -> Result<(), RuntimeError> {
+        match self.run_wsl(&["--unregister", distro]) {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => {
+                let summary = Self::command_output_summary(&out);
+                let lower = summary.to_ascii_lowercase();
+                if lower.contains("there is no distribution with the supplied name")
+                    || lower.contains("distribution was not found")
+                    || lower.contains("no installed distributions")
+                {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::CommandFailed(format!(
+                        "Failed to unregister {}: {}",
+                        distro, summary
+                    )))
+                }
+            }
+            Err(err) => Err(RuntimeError::CommandFailed(format!(
+                "Failed to unregister {}: {}",
+                distro, err
+            ))),
+        }
+    }
+
+    fn reset_windows_runtime_state(&self) -> Result<(), RuntimeError> {
+        debug_log("Resetting Entropic managed Windows runtime state");
+        self.clear_windows_bootstrap_state();
+
+        let mut failures: Vec<String> = Vec::new();
+        for distro in [ENTROPIC_WSL_DEV_DISTRO, ENTROPIC_WSL_PROD_DISTRO] {
+            if !self.windows_distro_registered(distro) {
+                continue;
+            }
+
+            if let Err(err) = self.windows_terminate_distro(distro) {
+                failures.push(err.to_string());
+            }
+            if let Err(err) = self.windows_unregister_distro(distro) {
+                failures.push(err.to_string());
+            }
+        }
+
+        let runtime_root = self.windows_runtime_root();
+        if runtime_root.exists() {
+            if let Err(err) = std::fs::remove_dir_all(&runtime_root) {
+                failures.push(format!(
+                    "Failed to remove Windows runtime root {}: {}",
+                    runtime_root.display(),
+                    err
+                ));
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(RuntimeError::CommandFailed(failures.join(" | ")))
+        }
+    }
+
     fn ensure_windows_runtime_internal(&self, force_windows: bool) -> Result<(), RuntimeError> {
         if !force_windows && !matches!(Platform::detect(), Platform::Windows) {
             return Ok(());
@@ -2856,6 +2917,29 @@ if [ "$#" -ge 1 ] && [ "$1" = "--terminate" ]; then
   exit 0
 fi
 
+if [ "$#" -ge 1 ] && [ "$1" = "--unregister" ]; then
+  name="${2:-}"
+  if ! has_distro "$name"; then
+    echo "There is no distribution with the supplied name." >&2
+    exit 1
+  fi
+  OLDIFS=$IFS
+  IFS=','
+  next_distros=""
+  for entry in $distros; do
+    [ "$entry" = "$name" ] && continue
+    if [ -z "$next_distros" ]; then
+      next_distros="$entry"
+    else
+      next_distros="$next_distros,$entry"
+    fi
+  done
+  IFS=$OLDIFS
+  distros="$next_distros"
+  save_state
+  exit 0
+fi
+
 echo "unsupported fake wsl args: $*" >&2
 exit 1
 "#
@@ -3020,6 +3104,17 @@ if ($args.Count -ge 1 -and $args[0] -eq "-d") {
 }
 
 if ($args.Count -ge 1 -and $args[0] -eq "--terminate") {
+  exit 0
+}
+
+if ($args.Count -ge 1 -and $args[0] -eq "--unregister") {
+  $name = if ($args.Count -ge 2) { $args[1] } else { "" }
+  if (-not (Has-Distro $name)) {
+    Write-Error "There is no distribution with the supplied name."
+    exit 1
+  }
+  $script:distros = @($distros | Where-Object { $_ -ne $name })
+  Save-State
   exit 0
 }
 
@@ -3333,6 +3428,40 @@ exit 1
         assert!(
             !state.pending_reboot,
             "docker bootstrap failures should not masquerade as reboot-required"
+        );
+    }
+
+    #[test]
+    fn windows_runtime_reset_unregisters_managed_distros() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let fixture = WindowsBootstrapFixture::new("windows-reset", false);
+
+        fixture
+            .runtime
+            .ensure_windows_runtime_for_tests()
+            .expect("bootstrap should succeed before reset");
+        assert!(
+            fixture.read_wsl_state().contains("entropic-prod"),
+            "expected prod distro to exist before reset"
+        );
+
+        fixture
+            .runtime
+            .reset_isolated_runtime_state()
+            .expect("reset should succeed");
+
+        let wsl_state = fixture.read_wsl_state();
+        assert!(
+            !wsl_state.contains("entropic-dev"),
+            "dev distro should be removed by reset"
+        );
+        assert!(
+            !wsl_state.contains("entropic-prod"),
+            "prod distro should be removed by reset"
+        );
+        assert!(
+            !fixture.local_app_data.join("Entropic").join("runtime").exists(),
+            "managed runtime root should be removed by reset"
         );
     }
 }
