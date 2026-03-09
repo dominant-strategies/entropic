@@ -139,6 +139,7 @@ pub fn run() {
             commands::entropic_api_request_native,
             commands::start_runtime,
             commands::stop_runtime,
+            commands::reset_isolated_runtime,
             commands::cleanup_app_data,
             commands::migrate_legacy_nova_data,
             commands::migrate_legacy_nova_install,
