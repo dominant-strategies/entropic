@@ -7687,6 +7687,12 @@ pub async fn stop_runtime(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn reset_isolated_runtime(app: AppHandle) -> Result<(), String> {
+    let runtime = get_runtime(&app);
+    runtime.reset_isolated_runtime_state().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<String, String> {
     use std::fs;
 
