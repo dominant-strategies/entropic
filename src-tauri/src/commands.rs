@@ -3,7 +3,6 @@ use crate::runtime::{
     ENTROPIC_QEMU_PROFILE, ENTROPIC_VZ_PROFILE, ENTROPIC_WSL_DEV_DISTRO,
     ENTROPIC_WSL_PROD_DISTRO, LEGACY_NOVA_QEMU_PROFILE, LEGACY_NOVA_VZ_PROFILE,
 };
-use crate::windows_runtime_manager;
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine as _,
@@ -558,23 +557,27 @@ fn apply_windows_no_window(cmd: &mut Command) {
     }
 }
 
+fn windows_managed_wsl_docker_command() -> Command {
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args([
+        "--distribution",
+        windows_runtime_distro_name(),
+        "--user",
+        "root",
+        "--exec",
+        "env",
+        "-u",
+        "DOCKER_CONTEXT",
+        "DOCKER_HOST=unix:///var/run/docker.sock",
+        "docker",
+    ]);
+    apply_windows_no_window(&mut cmd);
+    cmd
+}
+
 fn docker_command() -> Command {
     if windows_use_managed_wsl_docker() {
-        if let Some(mut cmd) =
-            windows_runtime_manager::docker_dispatch_command(windows_runtime_mode())
-        {
-            apply_windows_no_window(&mut cmd);
-            return cmd;
-        }
-
-        // Fail closed if the manager dispatch shim cannot be resolved.
-        let mut cmd = Command::new("cmd");
-        cmd.args([
-            "/C",
-            "echo [Entropic] runtime-manager dispatch unavailable>&2 & exit /b 126",
-        ]);
-        apply_windows_no_window(&mut cmd);
-        return cmd;
+        return windows_managed_wsl_docker_command();
     }
 
     let docker = find_docker_binary();
