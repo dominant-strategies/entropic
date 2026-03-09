@@ -339,6 +339,34 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
 EOF
 fi
 
+# Start the browser service in the background for desktop/browser bridge commands.
+BROWSER_SERVICE_PORT="${ENTROPIC_BROWSER_SERVICE_PORT:-19791}"
+export ENTROPIC_BROWSER_SERVICE_PORT="$BROWSER_SERVICE_PORT"
+if [ -f /app/browser-service/server.mjs ]; then
+    node /app/browser-service/server.mjs >/data/browser/browser-service.log 2>&1 &
+    browser_service_pid="$!"
+    browser_service_ready=0
+    browser_service_attempt=0
+    while [ "$browser_service_attempt" -lt 20 ]; do
+        if curl -fsS "http://127.0.0.1:${BROWSER_SERVICE_PORT}/health" >/dev/null 2>&1; then
+            browser_service_ready=1
+            break
+        fi
+        if ! kill -0 "$browser_service_pid" >/dev/null 2>&1; then
+            break
+        fi
+        browser_service_attempt=$((browser_service_attempt + 1))
+        sleep 0.3
+    done
+
+    if [ "$browser_service_ready" -ne 1 ]; then
+        echo "[entrypoint] Browser service failed to become ready on 127.0.0.1:${BROWSER_SERVICE_PORT}" >&2
+        if [ -f /data/browser/browser-service.log ]; then
+            tail -n 40 /data/browser/browser-service.log >&2 || true
+        fi
+    fi
+fi
+
 # Start the gateway
 PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
 TOKEN_PARAM=""

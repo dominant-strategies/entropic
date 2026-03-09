@@ -75,6 +75,7 @@ COPY --chown=node:node package.json ./package.json
 COPY --chown=node:node node_modules ./node_modules
 COPY --chown=node:node docs ./docs
 COPY --chown=node:node extensions ./extensions
+COPY --chown=node:node browser-service ./browser-service
 
 # Copy OpenClaw dist last (changes most often)
 COPY --chown=node:node dist ./dist
@@ -89,6 +90,10 @@ RUN for skill in /app/bundled-skills/*/; do \
         cd "$skill" && npm install --omit=dev && cd /; \
       fi; \
     done
+
+RUN if [ -f /app/browser-service/package.json ]; then \
+      cd /app/browser-service && npm install --omit=dev && cd /; \
+    fi
 
 # Fix clipboard module for ARM64 Linux (create stub)
 RUN echo "module.exports = { read: () => '', write: () => {}, readSync: () => '', writeSync: () => {}, clear: () => {}, clearSync: () => {} };" > /app/node_modules/.pnpm/@mariozechner+clipboard@0.3.0/node_modules/@mariozechner/clipboard/index.js || true

@@ -134,6 +134,20 @@ ensure_runtime_tars() {
   fi
 
   if [ ! -f "$runtime_tar" ]; then
+    should_bundle=1
+  else
+    local image_created image_created_epoch tar_mtime
+    image_created="$(run_docker image inspect openclaw-runtime:latest --format '{{.Created}}' 2>/dev/null || true)"
+    tar_mtime="$(stat -f %m "$runtime_tar" 2>/dev/null || stat -c %Y "$runtime_tar" 2>/dev/null || echo 0)"
+    if [ -n "$image_created" ]; then
+      image_created_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%S' "${image_created%%.*}" '+%s' 2>/dev/null || date -d "$image_created" '+%s' 2>/dev/null || echo 0)"
+      if [ "${image_created_epoch:-0}" -gt "${tar_mtime:-0}" ]; then
+        should_bundle=1
+      fi
+    fi
+  fi
+
+  if [ "$should_bundle" -eq 1 ]; then
     echo "[dev] Bundling runtime tar (openclaw-runtime:latest)..."
     ENTROPIC_RUNTIME_MODE=dev \
     ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \

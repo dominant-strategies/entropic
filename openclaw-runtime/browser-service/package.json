@@ -1,0 +1,8 @@
+{
+  "name": "entropic-browser-service",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "patchright": "^1.57.0"
+  }
+}

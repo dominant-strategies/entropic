@@ -39,6 +39,9 @@ const ENTROPIC_PROXY_ALLOWED_HOSTS: &[&str] = &[
     "localhost",
     "127.0.0.1",
 ];
+const BROWSER_SERVICE_PORT: &str = "19791";
+const BROWSER_SERVICE_PATH: &str = "/app/browser-service/server.mjs";
+const BROWSER_SERVICE_LOG_PATH: &str = "/data/browser/browser-service.log";
 const MAX_BRIDGE_DEVICES: usize = 10;
 const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const CLIENT_LOG_READ_MAX_BYTES: usize = 512 * 1024;
@@ -1650,6 +1653,15 @@ fn download_scanner_tar_from_release(scanner_image: &str) -> Result<(), String> 
 }
 
 fn ensure_runtime_image() -> Result<(), String> {
+    if cfg!(debug_assertions) {
+        if runtime_image_id()?.is_some() {
+            println!(
+                "[Entropic] Debug build detected; using local runtime image and skipping bundled runtime tar reload."
+            );
+            return Ok(());
+        }
+    }
+
     let local_runtime_tar = find_local_runtime_tar();
     let local_image_present = runtime_image_id()?.is_some();
     if local_runtime_tar.is_none() {
@@ -3879,6 +3891,147 @@ fn read_container_file(path: &str) -> Option<String> {
     }
 }
 
+fn container_file_exists(container: &str, path: &str) -> bool {
+    docker_command()
+        .args(["exec", container, "test", "-f", path])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn read_container_file_from(container: &str, path: &str) -> Option<String> {
+    let args = ["exec", container, "cat", "--", path];
+    match docker_exec_output(&args) {
+        Ok(s) => Some(s),
+        Err(_) => None,
+    }
+}
+
+fn clipped_tail(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let total_chars = trimmed.chars().count();
+    if total_chars <= max_chars {
+        return trimmed.to_string();
+    }
+    let tail: String = trimmed
+        .chars()
+        .skip(total_chars.saturating_sub(max_chars))
+        .collect();
+    format!("...\n{}", tail)
+}
+
+fn browser_service_failure_message(container: &str, base_error: &str) -> String {
+    if !container_file_exists(container, BROWSER_SERVICE_PATH) {
+        return "Browser service is not installed in the running sandbox image. Rebuild the openclaw runtime image and restart the sandbox."
+            .to_string();
+    }
+
+    let log_excerpt = read_container_file_from(container, BROWSER_SERVICE_LOG_PATH)
+        .map(|raw| clipped_tail(&raw, 2000))
+        .filter(|raw| !raw.trim().is_empty());
+
+    match log_excerpt {
+        Some(log) => format!(
+            "Browser service is unavailable.\n{}\n\nBrowser service log:\n{}",
+            base_error.trim(),
+            log
+        ),
+        None => format!(
+            "Browser service is unavailable.\n{}\n\nNo browser service log was found yet. The runtime may still be starting, or the sandbox image may be outdated.",
+            base_error.trim()
+        ),
+    }
+}
+
+fn wait_for_browser_service(container: &str) -> Result<(), String> {
+    let url = format!("http://127.0.0.1:{}/health", BROWSER_SERVICE_PORT);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut last_error = String::new();
+
+    while Instant::now() < deadline {
+        match docker_exec_output(&["exec", container, "curl", "-fsS", &url]) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                last_error = error;
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        }
+    }
+
+    Err(browser_service_failure_message(container, &last_error))
+}
+
+fn browser_service_exec(method: &str, path: &str, payload: Option<&str>) -> Result<String, String> {
+    let container = running_gateway_container_name().ok_or_else(|| {
+        "Gateway container is not running. Start the sandbox first.".to_string()
+    })?;
+
+    wait_for_browser_service(container)?;
+
+    let url = format!("http://127.0.0.1:{}{}", BROWSER_SERVICE_PORT, path);
+    if let Some(body) = payload {
+        let mut child = docker_command()
+            .args([
+                "exec",
+                "-i",
+                container,
+                "curl",
+                "-fsS",
+                "-X",
+                method,
+                "-H",
+                "Content-Type: application/json",
+                "--data-binary",
+                "@-",
+                &url,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to contact browser service: {}", e))?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            use std::io::Write;
+            stdin
+                .write_all(body.as_bytes())
+                .map_err(|e| format!("Failed to write browser request body: {}", e))?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|e| format!("Failed to finalize browser service request: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let fallback = if stderr.is_empty() {
+                "Browser service request failed".to_string()
+            } else {
+                stderr
+            };
+            return Err(browser_service_failure_message(container, &fallback));
+        }
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+
+    docker_exec_output(&["exec", container, "curl", "-fsS", "-X", method, &url])
+        .map_err(|error| browser_service_failure_message(container, &error))
+}
+
+fn browser_service_request<T: DeserializeOwned>(
+    method: &str,
+    path: &str,
+    payload: Option<serde_json::Value>,
+) -> Result<T, String> {
+    let body = match payload {
+        Some(value) => Some(serde_json::to_string(&value).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let raw = browser_service_exec(method, path, body.as_deref())?;
+    serde_json::from_str(&raw)
+        .map_err(|e| format!("Failed to parse browser service response: {}", e))
+}
+
 fn write_container_file(path: &str, content: &str) -> Result<(), String> {
     let dir = Path::new(path)
         .parent()
@@ -3904,6 +4057,58 @@ fn write_container_file(path: &str, content: &str) -> Result<(), String> {
         return Err("Failed to write file in container".to_string());
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BrowserInteractiveElement {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub label: String,
+    pub tag: String,
+    pub href: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BrowserSnapshot {
+    pub session_id: String,
+    pub url: String,
+    pub title: String,
+    pub text: String,
+    pub screenshot_base64: String,
+    pub screenshot_width: f64,
+    pub screenshot_height: f64,
+    pub interactive_elements: Vec<BrowserInteractiveElement>,
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+}
+
+fn normalize_browser_target_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Browser URL is required".to_string());
+    }
+    let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{}", trimmed)
+    };
+
+    let mut parsed = Url::parse(&with_scheme)
+        .map_err(|_| "Invalid browser URL. Enter a valid http/https URL.".to_string())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("Only http/https URLs are supported in the desktop browser".to_string());
+    }
+    if let Some(host) = parsed.host_str() {
+        if host == "localhost" || host == "127.0.0.1" {
+            parsed
+                .set_host(Some("host.docker.internal"))
+                .map_err(|_| "Failed to normalize localhost browser URL".to_string())?;
+        }
+    }
+    Ok(parsed.to_string())
 }
 
 fn write_container_file_if_missing(path: &str, content: &str) -> Result<(), String> {
@@ -11481,6 +11686,98 @@ pub async fn upload_workspace_file(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn browser_session_create(url: Option<String>) -> Result<BrowserSnapshot, String> {
+    let payload = url
+        .map(|raw| normalize_browser_target_url(&raw))
+        .transpose()?
+        .map(|normalized| serde_json::json!({ "url": normalized }));
+    browser_service_request("POST", "/sessions", payload)
+}
+
+#[tauri::command]
+pub async fn browser_snapshot(session_id: String) -> Result<BrowserSnapshot, String> {
+    browser_service_request("GET", &format!("/sessions/{}", session_id), None)
+}
+
+#[tauri::command]
+pub async fn browser_navigate(session_id: String, url: String) -> Result<BrowserSnapshot, String> {
+    browser_service_request(
+        "POST",
+        &format!("/sessions/{}/navigate", session_id),
+        Some(serde_json::json!({ "url": normalize_browser_target_url(&url)? })),
+    )
+}
+
+#[tauri::command]
+pub async fn browser_reload(session_id: String) -> Result<BrowserSnapshot, String> {
+    browser_service_request("POST", &format!("/sessions/{}/reload", session_id), None)
+}
+
+#[tauri::command]
+pub async fn browser_back(session_id: String) -> Result<BrowserSnapshot, String> {
+    browser_service_request("POST", &format!("/sessions/{}/back", session_id), None)
+}
+
+#[tauri::command]
+pub async fn browser_forward(session_id: String) -> Result<BrowserSnapshot, String> {
+    browser_service_request("POST", &format!("/sessions/{}/forward", session_id), None)
+}
+
+#[tauri::command]
+pub async fn browser_click(session_id: String, x: f64, y: f64) -> Result<BrowserSnapshot, String> {
+    browser_service_request(
+        "POST",
+        &format!("/sessions/{}/click", session_id),
+        Some(serde_json::json!({ "x": x, "y": y })),
+    )
+}
+
+#[tauri::command]
+pub async fn browser_session_close(session_id: String) -> Result<(), String> {
+    let _: serde_json::Value =
+        browser_service_request("DELETE", &format!("/sessions/{}", session_id), None)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn approve_gateway_device_pairing(request_id: String) -> Result<(), String> {
+    let trimmed = request_id.trim();
+    if trimmed.is_empty() {
+        return Err("Pairing request id is required".to_string());
+    }
+
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "Gateway container is not running. Start the sandbox first.".to_string())?;
+
+    let output = docker_command()
+        .args([
+            "exec",
+            container,
+            "node",
+            "/app/dist/index.js",
+            "devices",
+            "approve",
+            trimmed,
+            "--json",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to approve gateway device pairing: {}", e))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    Err(if detail.is_empty() {
+        "Failed to approve gateway device pairing".to_string()
+    } else {
+        format!("Failed to approve gateway device pairing: {}", detail)
+    })
+}
+
 // =============================================================================
 // Local OAuth (Google integrations)
 // =============================================================================
@@ -12830,8 +13127,6 @@ pub async fn approve_gateway_device_pairing(request_id: String) -> Result<(), St
         format!("Failed to approve gateway device pairing: {}", detail)
     })
 }
-
-#[tauri::command]
 pub async fn refresh_provider_token(
     app: AppHandle,
     state: State<'_, AppState>,

@@ -79,6 +79,27 @@ type Props = {
 type ViewMode = "grid" | "list";
 type ChatMessage = { id: string; role: "user" | "assistant"; content: string };
 type DesktopIcon = { id: string; x: number; y: number };
+type BrowserSnapshot = {
+  session_id: string;
+  url: string;
+  title: string;
+  text: string;
+  screenshot_base64: string;
+  screenshot_width: number;
+  screenshot_height: number;
+  interactive_elements: Array<{
+    id: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    label: string;
+    tag: string;
+    href?: string | null;
+  }>;
+  can_go_back: boolean;
+  can_go_forward: boolean;
+};
 
 const DEFAULT_WINDOW_Z: Record<string, number> = {
   finder: 60,
@@ -356,14 +377,12 @@ export function Files({
   const chatClientRef = useRef<GatewayClient | null>(null);
   const chatSessionRef = useRef<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const [browserNav, setBrowserNav] = useState<{ history: string[]; index: number }>({
-    history: [DEFAULT_BROWSER_URL],
-    index: 0,
-  });
   const [browserUrlInput, setBrowserUrlInput] = useState(DEFAULT_BROWSER_URL);
   const [browserLoading, setBrowserLoading] = useState(false);
   const [browserLoadError, setBrowserLoadError] = useState<string | null>(null);
-  const [browserFrameNonce, setBrowserFrameNonce] = useState(0);
+  const [browserSessionId, setBrowserSessionId] = useState<string | null>(null);
+  const [browserSnapshot, setBrowserSnapshot] = useState<BrowserSnapshot | null>(null);
+  const [browserClickingId, setBrowserClickingId] = useState<string | null>(null);
 
   const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
 
@@ -526,51 +545,119 @@ export function Files({
     startWindowDrag(e, chatDragRef, chatPos, setChatPos, "chat");
   }
 
-  const browserCurrentUrl = browserNav.history[browserNav.index] || DEFAULT_BROWSER_URL;
+  const browserCurrentUrl = browserSnapshot?.url || browserUrlInput || DEFAULT_BROWSER_URL;
 
   useEffect(() => {
-    setBrowserUrlInput(browserCurrentUrl);
-  }, [browserCurrentUrl]);
+    if (browserSnapshot?.url) {
+      setBrowserUrlInput(browserSnapshot.url);
+    }
+  }, [browserSnapshot?.url]);
 
-  function navigateBrowser(input: string) {
+  async function navigateBrowser(input: string) {
     const next = normalizeBrowserUrl(input);
     if (!next) return;
     setBrowserLoadError(null);
     setBrowserLoading(true);
-    setBrowserNav((prev) => {
-      const base = prev.history.slice(0, prev.index + 1);
-      if (base[base.length - 1] === next) {
-        return prev;
+    try {
+      let snapshot: BrowserSnapshot;
+      if (!browserSessionId) {
+        snapshot = await invoke<BrowserSnapshot>("browser_session_create", { url: next });
+        setBrowserSessionId(snapshot.session_id);
+      } else {
+        snapshot = await invoke<BrowserSnapshot>("browser_navigate", { sessionId: browserSessionId, url: next });
       }
-      return {
-        history: [...base, next],
-        index: base.length,
-      };
-    });
+      setBrowserSnapshot(snapshot);
+      setBrowserUrlInput(snapshot.url);
+    } catch (e) {
+      setBrowserLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBrowserLoading(false);
+    }
   }
 
-  function goBrowserBack() {
-    setBrowserNav((prev) => {
-      if (prev.index <= 0) return prev;
-      setBrowserLoadError(null);
-      setBrowserLoading(true);
-      return { ...prev, index: prev.index - 1 };
-    });
-  }
-
-  function goBrowserForward() {
-    setBrowserNav((prev) => {
-      if (prev.index >= prev.history.length - 1) return prev;
-      setBrowserLoadError(null);
-      setBrowserLoading(true);
-      return { ...prev, index: prev.index + 1 };
-    });
-  }
-
-  function reloadBrowser() {
+  async function goBrowserBack() {
+    if (!browserSessionId) return;
     setBrowserLoadError(null);
     setBrowserLoading(true);
-    setBrowserFrameNonce((prev) => prev + 1);
+    try {
+      const snapshot = await invoke<BrowserSnapshot>("browser_back", { sessionId: browserSessionId });
+      setBrowserSnapshot(snapshot);
+      setBrowserUrlInput(snapshot.url);
+    } catch (e) {
+      setBrowserLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBrowserLoading(false);
+    }
+  }
+
+  async function goBrowserForward() {
+    if (!browserSessionId) return;
+    setBrowserLoadError(null);
+    setBrowserLoading(true);
+    try {
+      const snapshot = await invoke<BrowserSnapshot>("browser_forward", { sessionId: browserSessionId });
+      setBrowserSnapshot(snapshot);
+      setBrowserUrlInput(snapshot.url);
+    } catch (e) {
+      setBrowserLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBrowserLoading(false);
+    }
+  }
+
+  async function reloadBrowser() {
+    if (!browserSessionId) {
+      await navigateBrowser(browserUrlInput || DEFAULT_BROWSER_URL);
+      return;
+    }
+    setBrowserLoadError(null);
+    setBrowserLoading(true);
+    try {
+      const snapshot = await invoke<BrowserSnapshot>("browser_reload", { sessionId: browserSessionId });
+      setBrowserSnapshot(snapshot);
+      setBrowserUrlInput(snapshot.url);
+    } catch (e) {
+      setBrowserLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBrowserLoading(false);
+    }
+  }
+
+  async function clickBrowserElement(
+    element: BrowserSnapshot["interactive_elements"][number]
+  ) {
+    if (!browserSessionId || browserLoading || browserClickingId) return;
+    setBrowserLoadError(null);
+    setBrowserClickingId(element.id);
+    try {
+      const snapshot = await invoke<BrowserSnapshot>("browser_click", {
+        sessionId: browserSessionId,
+        x: element.x + element.width / 2,
+        y: element.y + element.height / 2,
+      });
+      setBrowserSnapshot(snapshot);
+      setBrowserUrlInput(snapshot.url);
+    } catch (e) {
+      setBrowserLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBrowserClickingId(null);
+    }
+  }
+
+  async function closeBrowserWindow() {
+    const sessionId = browserSessionId;
+    setBrowserOpen(false);
+    setBrowserSnapshot(null);
+    setBrowserSessionId(null);
+    setBrowserLoading(false);
+    setBrowserClickingId(null);
+    setBrowserLoadError(null);
+    if (!sessionId) return;
+    try {
+      await invoke("browser_session_close", { sessionId });
+    } catch {
+      // Ignore close errors; session cleanup is best-effort.
+    }
   }
 
   async function openBrowserExternally(target?: string) {
@@ -1279,7 +1366,7 @@ export function Files({
               position={browserPos}
               size={browserSize}
               zIndex={windowZ.browser ?? 62}
-              onClose={() => setBrowserOpen(false)}
+              onClose={() => { void closeBrowserWindow(); }}
               onFocus={() => focusWindow("browser")}
               onDragStart={(e) =>
                 startWindowDrag(e, browserDragRef, browserPos, setBrowserPos, "browser")
@@ -1291,13 +1378,13 @@ export function Files({
                     className="flex items-center gap-2"
                     onSubmit={(e) => {
                       e.preventDefault();
-                      navigateBrowser(browserUrlInput);
+                      void navigateBrowser(browserUrlInput);
                     }}
                   >
                     <button
                       type="button"
-                      onClick={goBrowserBack}
-                      disabled={browserNav.index <= 0}
+                      onClick={() => { void goBrowserBack(); }}
+                      disabled={!browserSnapshot?.can_go_back || browserLoading}
                       className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-white text-[var(--text-secondary)] disabled:opacity-40"
                       title="Back"
                     >
@@ -1305,8 +1392,8 @@ export function Files({
                     </button>
                     <button
                       type="button"
-                      onClick={goBrowserForward}
-                      disabled={browserNav.index >= browserNav.history.length - 1}
+                      onClick={() => { void goBrowserForward(); }}
+                      disabled={!browserSnapshot?.can_go_forward || browserLoading}
                       className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-white text-[var(--text-secondary)] disabled:opacity-40"
                       title="Forward"
                     >
@@ -1314,7 +1401,7 @@ export function Files({
                     </button>
                     <button
                       type="button"
-                      onClick={reloadBrowser}
+                      onClick={() => { void reloadBrowser(); }}
                       className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-white text-[var(--text-secondary)]"
                       title="Reload"
                     >
@@ -1361,20 +1448,72 @@ export function Files({
                       Click to focus browser
                     </button>
                   )}
-                  <iframe
-                    key={`${browserCurrentUrl}|${browserFrameNonce}`}
-                    src={browserCurrentUrl}
-                    className="w-full h-full border-0"
-                    onLoad={() => {
-                      setBrowserLoading(false);
-                      setBrowserLoadError(null);
-                    }}
-                    onError={() => {
-                      setBrowserLoading(false);
-                      setBrowserLoadError("This site could not be loaded in the embedded browser.");
-                    }}
-                    referrerPolicy="no-referrer"
-                  />
+                  {browserLoading && !browserSnapshot ? (
+                    <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Loading browser session...
+                      </div>
+                    </div>
+                  ) : browserSnapshot ? (
+                    <div className="h-full flex flex-col">
+                      <div className="flex-1 min-h-0 overflow-auto bg-[#f5f5f5]">
+                        {browserSnapshot.screenshot_base64 ? (
+                          <div className="relative w-full">
+                            <img
+                              src={`data:image/png;base64,${browserSnapshot.screenshot_base64}`}
+                              alt={browserSnapshot.title || browserSnapshot.url}
+                              className="w-full h-auto block"
+                            />
+                            {browserSnapshot.interactive_elements.map((element) => (
+                              <button
+                                key={element.id}
+                                type="button"
+                                title={element.label || element.tag}
+                                onClick={() => { void clickBrowserElement(element); }}
+                                disabled={Boolean(browserClickingId) || browserLoading}
+                                className="absolute rounded border border-sky-500/80 bg-sky-400/10 hover:bg-sky-400/20 transition-colors disabled:cursor-wait"
+                                style={{
+                                  left: `${(element.x / Math.max(browserSnapshot.screenshot_width, 1)) * 100}%`,
+                                  top: `${(element.y / Math.max(browserSnapshot.screenshot_height, 1)) * 100}%`,
+                                  width: `${(element.width / Math.max(browserSnapshot.screenshot_width, 1)) * 100}%`,
+                                  height: `${(element.height / Math.max(browserSnapshot.screenshot_height, 1)) * 100}%`,
+                                }}
+                              >
+                                <span className="absolute left-0 top-0 -translate-y-full rounded bg-sky-600 px-1.5 py-0.5 text-[10px] font-medium text-white shadow-sm max-w-[240px] truncate">
+                                  {element.label || element.tag}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="h-full flex items-center justify-center text-sm text-[var(--text-secondary)]">
+                            No browser screenshot available.
+                          </div>
+                        )}
+                      </div>
+                      <div className="h-40 border-t border-[var(--border-subtle)] bg-white overflow-auto px-3 py-2">
+                        <div className="text-xs font-semibold text-[var(--text-primary)]">
+                          {browserSnapshot.title || browserSnapshot.url}
+                        </div>
+                        <div className="mt-1 text-[11px] text-[var(--text-tertiary)] break-all">
+                          {browserSnapshot.url}
+                        </div>
+                        <div className="mt-2 text-[11px] text-[var(--text-secondary)]">
+                          {browserSnapshot.interactive_elements.length > 0
+                            ? `Interactive targets: ${browserSnapshot.interactive_elements.length}. Click the highlighted regions on the screenshot.`
+                            : "No clickable elements detected on the current page."}
+                        </div>
+                        <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-[var(--text-secondary)] font-mono">
+                          {browserSnapshot.text || "No readable page text extracted."}
+                        </pre>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
+                      Enter a URL to start a browser session.
+                    </div>
+                  )}
                 </div>
               </div>
             </AppWindow>
@@ -1616,7 +1755,7 @@ export function Files({
               onClick={() => {
                 if (!browserOpen) {
                   setBrowserOpen(true);
-                  setBrowserLoading(true);
+                  void navigateBrowser(browserUrlInput || DEFAULT_BROWSER_URL);
                 }
                 focusWindow("browser");
               }}
