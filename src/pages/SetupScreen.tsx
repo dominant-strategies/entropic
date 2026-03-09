@@ -92,6 +92,50 @@ function diagnoseSetupError(rawError: string): SetupErrorDiagnosis {
     };
   }
 
+  if (
+    lower.includes("wsl platform installed") &&
+    lower.includes("restart windows")
+  ) {
+    return {
+      title: "Restart Windows to Finish WSL Setup",
+      summary:
+        "Windows accepted the WSL platform install, but the OS still needs one reboot before Entropic can import its managed runtime.",
+      causes: [
+        "WSL was enabled for the first time on this PC",
+        "Windows feature activation has not finished yet",
+      ],
+      actions: [
+        "Restart Windows completely, then reopen Entropic.",
+        "After the reboot, run first-time setup again.",
+      ],
+      technical,
+    };
+  }
+
+  if (
+    lower.includes("docker engine is not ready in entropic-prod") &&
+    (
+      lower.includes("temporary failure resolving") ||
+      lower.includes("unable to locate package docker.io") ||
+      lower.includes("missing native docker engine binaries")
+    )
+  ) {
+    return {
+      title: "Sandbox Runtime Image Is Outdated",
+      summary:
+        "The Windows sandbox image did not contain a working Docker engine, so setup fell back to package installation and failed.",
+      causes: [
+        "Published Windows WSL rootfs artifact is missing Docker",
+        "First-run setup tried to install Docker inside WSL and hit network or DNS failures",
+      ],
+      actions: [
+        "Update to the latest Entropic Windows build and retry setup.",
+        "If the issue persists, Entropic needs a republished Windows WSL rootfs artifact.",
+      ],
+      technical,
+    };
+  }
+
   return {
     title: "Secure Sandbox Setup Failed",
     summary:

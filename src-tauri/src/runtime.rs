@@ -99,6 +99,8 @@ const WINDOWS_BOOTSTRAP_STAGE_IMPORT_PROD: &str = "import-prod";
 const WINDOWS_BOOTSTRAP_STAGE_DOCKER_DEV: &str = "docker-dev";
 const WINDOWS_BOOTSTRAP_STAGE_DOCKER_PROD: &str = "docker-prod";
 const WINDOWS_BOOTSTRAP_STAGE_READY: &str = "ready";
+const WINDOWS_WSL_AVAILABILITY_POLL_ATTEMPTS: usize = 20;
+const WINDOWS_WSL_AVAILABILITY_POLL_MILLIS: u64 = 500;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct WindowsBootstrapState {
@@ -953,7 +955,28 @@ impl Runtime {
     }
 
     fn wsl_command(&self) -> Command {
-        let mut cmd = Command::new("wsl.exe");
+        if let Ok(script) = std::env::var("ENTROPIC_WSL_POWERSHELL_SCRIPT") {
+            let trimmed = script.trim();
+            if !trimmed.is_empty() {
+                let mut cmd = Command::new("powershell");
+                cmd.args([
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    trimmed,
+                ]);
+                apply_windows_no_window(&mut cmd);
+                return cmd;
+            }
+        }
+
+        let program = std::env::var("ENTROPIC_WSL_EXE")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "wsl.exe".to_string());
+        let mut cmd = Command::new(program);
         apply_windows_no_window(&mut cmd);
         cmd
     }
@@ -1383,6 +1406,23 @@ impl Runtime {
             .unwrap_or(false)
     }
 
+    fn windows_wait_for_wsl_available(&self) -> bool {
+        if self.windows_wsl_available() {
+            return true;
+        }
+
+        for _ in 0..WINDOWS_WSL_AVAILABILITY_POLL_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(
+                WINDOWS_WSL_AVAILABILITY_POLL_MILLIS,
+            ));
+            if self.windows_wsl_available() {
+                return true;
+            }
+        }
+
+        false
+    }
+
     fn windows_distro_registered(&self, distro: &str) -> bool {
         let output = match self.run_wsl(&["--list", "--quiet"]) {
             Ok(out) => out,
@@ -1471,7 +1511,8 @@ impl Runtime {
                     return Err(err);
                 }
 
-                if Self::output_mentions_reboot(&elevated) || !self.windows_wsl_available() {
+                if Self::output_mentions_reboot(&elevated) || !self.windows_wait_for_wsl_available()
+                {
                     let message = "WSL platform installed. Restart Windows to finish setup, then reopen Entropic."
                         .to_string();
                     self.save_windows_bootstrap_state(
@@ -1501,7 +1542,7 @@ impl Runtime {
             return Err(err);
         }
 
-        if Self::output_mentions_reboot(&direct) || !self.windows_wsl_available() {
+        if Self::output_mentions_reboot(&direct) || !self.windows_wait_for_wsl_available() {
             let message =
                 "WSL platform installed. Restart Windows to finish setup, then reopen Entropic."
                     .to_string();
@@ -1661,25 +1702,39 @@ docker_local() {
   env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock "$docker_path" "$@"
 }
 
-install_native_docker() {
-  if command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
-    apt-get install -y docker.io
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y docker
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y docker
-  elif command -v pacman >/dev/null 2>&1; then
-    pacman -Sy --noconfirm docker
-  else
-    echo "Unsupported Linux package manager for docker install" >&2
-    exit 31
-  fi
+write_runtime_config() {
+  mkdir -p /etc/docker /var/lib/docker /var/run
+  cat >/etc/docker/daemon.json <<'JSON'
+{
+  "features": {
+    "buildkit": true
+  },
+  "hosts": [
+    "unix:///var/run/docker.sock"
+  ]
+}
+JSON
+  cat >/etc/wsl.conf <<'CONF'
+[interop]
+enabled=false
+appendWindowsPath=false
+
+[network]
+generateResolvConf=true
+CONF
 }
 
+missing_native_docker() {
+  echo "Managed WSL rootfs is missing native Docker engine binaries." >&2
+  echo "Expected /usr/bin/docker and /usr/bin/dockerd inside the imported distro." >&2
+  echo "Republish the Windows WSL rootfs artifact with Docker preinstalled, then retry setup." >&2
+  exit 32
+}
+
+write_runtime_config
+
 if ! docker_bin >/dev/null 2>&1 || ! dockerd_bin >/dev/null 2>&1; then
-  install_native_docker
+  missing_native_docker
 fi
 
 if command -v systemctl >/dev/null 2>&1; then
@@ -1689,12 +1744,6 @@ fi
 
 if command -v service >/dev/null 2>&1; then
   service docker start >/dev/null 2>&1 || true
-fi
-
-if ! docker_local info >/dev/null 2>&1; then
-  if ! dockerd_bin >/dev/null 2>&1; then
-    install_native_docker
-  fi
 fi
 
 if ! docker_local info >/dev/null 2>&1; then
@@ -2794,11 +2843,187 @@ if [ "$#" -ge 1 ] && [ "$1" = "--distribution" ]; then
   exit 0
 fi
 
+if [ "$#" -ge 1 ] && [ "$1" = "-d" ]; then
+  distro="${2:-}"
+  if ! has_distro "$distro"; then
+    echo "distro not found: $distro" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
 if [ "$#" -ge 1 ] && [ "$1" = "--terminate" ]; then
   exit 0
 fi
 
 echo "unsupported fake wsl args: $*" >&2
+exit 1
+"#
+    }
+
+    fn fake_wsl_windows_script() -> &'static str {
+        r#"$ErrorActionPreference = "Stop"
+
+$stateFile = $env:ENTROPIC_TEST_WSL_STATE_FILE
+if ([string]::IsNullOrWhiteSpace($stateFile)) {
+  Write-Error "missing ENTROPIC_TEST_WSL_STATE_FILE"
+  exit 98
+}
+
+$installed = 0
+$reboot_pending = 0
+$distros = @()
+
+if (Test-Path $stateFile) {
+  foreach ($line in Get-Content $stateFile) {
+    if ($line -match '^installed=(\d+)$') {
+      $installed = [int]$Matches[1]
+    } elseif ($line -match '^reboot_pending=(\d+)$') {
+      $reboot_pending = [int]$Matches[1]
+    } elseif ($line -match '^distros="(.*)"$') {
+      $value = $Matches[1]
+      if (-not [string]::IsNullOrWhiteSpace($value)) {
+        $distros = @($value.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries))
+      }
+    }
+  }
+}
+
+function Save-State {
+  $parent = Split-Path -Parent $stateFile
+  if (-not [string]::IsNullOrWhiteSpace($parent)) {
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+  }
+  @(
+    "installed=$installed"
+    "reboot_pending=$reboot_pending"
+    ('distros="' + ($distros -join ',') + '"')
+  ) | Set-Content -Path $stateFile -Encoding ascii
+}
+
+function Has-Distro([string]$Name) {
+  return $distros -contains $Name
+}
+
+function Add-Distro([string]$Name) {
+  if (-not (Has-Distro $Name)) {
+    $script:distros += $Name
+  }
+}
+
+if ($args.Count -ge 1 -and ($args[0] -eq "--version" -or $args[0] -eq "--status")) {
+  if ($installed -eq 1 -and $reboot_pending -eq 0) {
+    Write-Output "WSL version 2.1.0"
+    exit 0
+  }
+  Write-Error "WSL not ready"
+  exit 1
+}
+
+if ($args.Count -ge 2 -and $args[0] -eq "--install" -and $args[1] -eq "--no-distribution") {
+  $installed = 1
+  if ($env:ENTROPIC_TEST_WSL_INSTALL_REBOOT -eq "1") {
+    $reboot_pending = 1
+    Save-State
+    Write-Output "Restart required to complete installation"
+    exit 0
+  }
+  $reboot_pending = 0
+  Save-State
+  Write-Output "Installed WSL"
+  exit 0
+}
+
+if ($args.Count -ge 2 -and $args[0] -eq "--set-default-version" -and $args[1] -eq "2") {
+  if ($installed -eq 1 -and $reboot_pending -eq 0) {
+    exit 0
+  }
+  Write-Error "WSL not available"
+  exit 1
+}
+
+if ($args.Count -ge 2 -and $args[0] -eq "--list" -and $args[1] -eq "--quiet") {
+  foreach ($entry in $distros) {
+    if (-not [string]::IsNullOrWhiteSpace($entry)) {
+      Write-Output $entry
+    }
+  }
+  exit 0
+}
+
+if ($args.Count -ge 1 -and $args[0] -eq "--install") {
+  $name = ""
+  $location = ""
+  for ($i = 1; $i -lt $args.Count; $i++) {
+    switch ($args[$i]) {
+      "--name" {
+        if ($i + 1 -lt $args.Count) {
+          $name = $args[$i + 1]
+          $i++
+        }
+      }
+      "--location" {
+        if ($i + 1 -lt $args.Count) {
+          $location = $args[$i + 1]
+          $i++
+        }
+      }
+    }
+  }
+  if ([string]::IsNullOrWhiteSpace($name)) {
+    Write-Error "missing distro name"
+    exit 1
+  }
+  Add-Distro $name
+  if (-not [string]::IsNullOrWhiteSpace($location)) {
+    New-Item -ItemType Directory -Force -Path $location | Out-Null
+  }
+  Save-State
+  exit 0
+}
+
+if ($args.Count -ge 1 -and $args[0] -eq "--import") {
+  $name = if ($args.Count -ge 2) { $args[1] } else { "" }
+  $location = if ($args.Count -ge 3) { $args[2] } else { "" }
+  if ([string]::IsNullOrWhiteSpace($name)) {
+    Write-Error "missing distro name"
+    exit 1
+  }
+  Add-Distro $name
+  if (-not [string]::IsNullOrWhiteSpace($location)) {
+    New-Item -ItemType Directory -Force -Path $location | Out-Null
+  }
+  Save-State
+  exit 0
+}
+
+if ($args.Count -ge 1 -and $args[0] -eq "--distribution") {
+  $distro = if ($args.Count -ge 2) { $args[1] } else { "" }
+  if (-not (Has-Distro $distro)) {
+    Write-Error "distro not found: $distro"
+    exit 1
+  }
+  if ($env:ENTROPIC_TEST_WSL_DOCKER_FAIL -eq "1") {
+    Write-Error "docker failed"
+    exit 1
+  }
+  exit 0
+}
+
+if ($args.Count -ge 1 -and $args[0] -eq "-d") {
+  $distro = if ($args.Count -ge 2) { $args[1] } else { "" }
+  if (-not (Has-Distro $distro)) {
+    Write-Error "distro not found: $distro"
+    exit 1
+  }
+  exit 0
+}
+
+if ($args.Count -ge 1 -and $args[0] -eq "--terminate") {
+  exit 0
+}
+
+Write-Error ("unsupported fake wsl args: " + ($args -join " "))
 exit 1
 "#
     }
@@ -2865,6 +3090,7 @@ exit 1
             let local_app_data = root_dir.join("localappdata");
             let resources_root = root_dir.join("resources-root");
             let runtime_resources = resources_root.join("resources").join("runtime");
+            fs::create_dir_all(&fake_bin_dir).expect("failed to create fake bin dir");
             fs::create_dir_all(&runtime_resources).expect("failed to create runtime resources");
 
             let dev_artifact = runtime_resources.join("entropic-runtime-dev.wsl");
@@ -2874,7 +3100,16 @@ exit 1
             fs::write(&dev_artifact, dev_contents).expect("failed to write dev artifact");
             fs::write(&prod_artifact, prod_contents).expect("failed to write prod artifact");
 
-            write_executable(&fake_bin_dir.join("wsl.exe"), fake_wsl_script());
+            let fake_wsl = if cfg!(windows) {
+                let fake_script = fake_bin_dir.join("fake-wsl.ps1");
+                fs::write(&fake_script, fake_wsl_windows_script())
+                    .expect("failed to write fake wsl powershell script");
+                fake_script
+            } else {
+                let fake_binary = fake_bin_dir.join("wsl.exe");
+                write_executable(&fake_binary, fake_wsl_script());
+                fake_binary
+            };
             let wsl_state_file = root_dir.join("fake-wsl-state.env");
 
             let env_guard = EnvGuard::new(&[
@@ -2886,6 +3121,8 @@ exit 1
                 "ENTROPIC_WSL_DEV_DISTRO_SHA256",
                 "ENTROPIC_WSL_PROD_DISTRO_SHA256",
                 "ENTROPIC_WSL_DISTRO_SHA256",
+                "ENTROPIC_WSL_EXE",
+                "ENTROPIC_WSL_POWERSHELL_SCRIPT",
                 "ENTROPIC_TEST_WSL_STATE_FILE",
                 "ENTROPIC_TEST_WSL_INSTALL_REBOOT",
                 "ENTROPIC_TEST_WSL_DOCKER_FAIL",
@@ -2899,6 +3136,13 @@ exit 1
                 format!("{}{}{}", fake_bin_dir.display(), path_sep, previous_path)
             };
             env_guard.set("PATH", merged_path);
+            if cfg!(windows) {
+                env_guard.set("ENTROPIC_WSL_POWERSHELL_SCRIPT", fake_wsl.display().to_string());
+                env_guard.remove("ENTROPIC_WSL_EXE");
+            } else {
+                env_guard.set("ENTROPIC_WSL_EXE", fake_wsl.display().to_string());
+                env_guard.remove("ENTROPIC_WSL_POWERSHELL_SCRIPT");
+            }
             env_guard.set("LOCALAPPDATA", local_app_data.display().to_string());
             env_guard.set("ENTROPIC_WINDOWS_MANAGED_WSL", "1");
             env_guard.set("ENTROPIC_RUNTIME_ALLOW_SHARED_DOCKER", "0");
@@ -3064,6 +3308,31 @@ exit 1
         assert!(
             !state.pending_reboot,
             "hash mismatch should fail closed without pending reboot state"
+        );
+    }
+
+    #[test]
+    fn windows_bootstrap_surfaces_docker_bootstrap_failure() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let fixture = WindowsBootstrapFixture::new("docker-failure", false);
+        std::env::set_var("ENTROPIC_TEST_WSL_DOCKER_FAIL", "1");
+
+        let err = fixture
+            .runtime
+            .ensure_windows_runtime_for_tests()
+            .expect_err("bootstrap should fail when docker bootstrap fails");
+        let text = err.to_string();
+        assert!(
+            text.contains("Docker engine is not ready"),
+            "expected docker bootstrap error, got: {}",
+            text
+        );
+
+        let state = fixture.read_bootstrap_state();
+        assert_eq!(state.stage, WINDOWS_BOOTSTRAP_STAGE_DOCKER_DEV);
+        assert!(
+            !state.pending_reboot,
+            "docker bootstrap failures should not masquerade as reboot-required"
         );
     }
 }

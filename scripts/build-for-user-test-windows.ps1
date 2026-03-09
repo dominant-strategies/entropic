@@ -152,16 +152,15 @@ function Ensure-WslRuntimeArtifacts {
     }
 
     Write-Step "Preparing managed WSL distro artifacts"
-    Assert-WslBaseDistroPresent
+    Invoke-DevWslHelper -Command "start" -Mode "dev"
 
-    $baseDistro = Get-WslBaseDistroName
     Remove-Item -Path $artifact -Force -ErrorAction SilentlyContinue
     Remove-Item -Path "$artifact.sha256" -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $hashPath -Force -ErrorAction SilentlyContinue
 
-    & wsl --export $baseDistro $artifact
+    & wsl --export entropic-dev $artifact
     if ($LASTEXITCODE -ne 0 -or -not (Test-FileNonEmpty $artifact)) {
-        throw "Failed exporting base WSL distro '$baseDistro' to $artifact"
+        throw "Failed exporting Docker-ready entropic-dev WSL distro to $artifact"
     }
 
     Write-WslArtifactHashes -ArtifactPath $artifact
