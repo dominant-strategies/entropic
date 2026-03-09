@@ -101,6 +101,29 @@ rsync -a "$RUNTIME_DIR/entrypoint.sh" "$STAGING_DIR/entrypoint.sh"
 # Copy dist
 rsync -a --delete "$OPENCLAW_SOURCE/dist/" "$STAGING_DIR/dist/"
 
+# Newer OpenClaw channel extensions import plugin-sdk subpaths such as
+# `openclaw/plugin-sdk/telegram`. If the local OpenClaw `dist/` is stale or
+# partially built, those concrete `dist/plugin-sdk/<entry>.js` files may be
+# missing even though `dist/plugin-sdk/index.js` still exports the required
+# symbols. Synthesize minimal JS entry shims so bundled extensions keep loading.
+if [ -f "$STAGING_DIR/dist/plugin-sdk/index.js" ]; then
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        target="$STAGING_DIR/dist/plugin-sdk/${entry}.js"
+        if [ ! -f "$target" ]; then
+            printf 'export * from "./index.js";\n' > "$target"
+        fi
+    done < <(node -e '
+const pkg = require(process.argv[1]);
+for (const key of Object.keys(pkg.exports || {})) {
+  if (!key.startsWith("./plugin-sdk/")) continue;
+  const entry = key.slice("./plugin-sdk/".length);
+  if (!entry || entry.includes("/")) continue;
+  console.log(entry);
+}
+' "$OPENCLAW_SOURCE/package.json")
+fi
+
 # Copy package.json
 rsync -a "$OPENCLAW_SOURCE/package.json" "$STAGING_DIR/package.json"
 

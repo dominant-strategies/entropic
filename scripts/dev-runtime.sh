@@ -121,8 +121,17 @@ ensure_runtime_images() {
 
 ensure_runtime_tars() {
   local runtime_tar="$PROJECT_ROOT/src-tauri/resources/openclaw-runtime.tar.gz"
+  local image_created=""
+  local tar_mtime=""
 
   mkdir -p "$PROJECT_ROOT/src-tauri/resources"
+
+  if run_docker image inspect openclaw-runtime:latest >/dev/null 2>&1; then
+    image_created="$(run_docker image inspect openclaw-runtime:latest --format '{{.Created}}' 2>/dev/null || true)"
+  fi
+  if [ -f "$runtime_tar" ]; then
+    tar_mtime="$(stat -f '%m' "$runtime_tar" 2>/dev/null || true)"
+  fi
 
   if [ ! -f "$runtime_tar" ]; then
     echo "[dev] Bundling runtime tar (openclaw-runtime:latest)..."
@@ -130,6 +139,16 @@ ensure_runtime_tars() {
     ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
     DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
       "$PROJECT_ROOT/scripts/bundle-runtime-image.sh"
+  elif [ -n "$image_created" ] && [ -n "$tar_mtime" ]; then
+    local image_epoch
+    image_epoch="$(node -e 'const raw=process.argv[1]; const ts=Date.parse(raw); if (Number.isFinite(ts)) process.stdout.write(String(Math.floor(ts/1000)));' "$image_created" 2>/dev/null || true)"
+    if [ -n "$image_epoch" ] && [ "$image_epoch" -gt "$tar_mtime" ]; then
+      echo "[dev] Runtime image is newer than bundled tar. Re-bundling runtime tar..."
+      ENTROPIC_RUNTIME_MODE=dev \
+      ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
+      DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
+        "$PROJECT_ROOT/scripts/bundle-runtime-image.sh"
+    fi
   fi
 }
 

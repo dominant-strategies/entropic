@@ -1668,6 +1668,20 @@ fn ensure_runtime_image() -> Result<(), String> {
         runtime_tar_path = find_runtime_tar();
     }
 
+    if cfg!(debug_assertions) {
+        let check = docker_command()
+            .args(["image", "inspect", RUNTIME_IMAGE])
+            .output()
+            .map_err(|e| format!("Failed to check image: {}", e))?;
+        if check.status.success() {
+            println!(
+                "[Entropic] Debug build detected; preferring local {} image over bundled runtime tar.",
+                RUNTIME_IMAGE
+            );
+            return Ok(());
+        }
+    }
+
     let mut require_local_reload = false;
 
     if let Some(tar_path) = runtime_tar_path.as_ref() {
@@ -6008,6 +6022,7 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         &["agents", "defaults"],
         &["tools", "web", "search", "perplexity"],
         &["gateway", "controlUi"],
+        &["gateway", "reload"],
         &["plugins", "slots"],
         &["plugins", "load", "paths"],
         &["plugins", "entries", "memory-lancedb"],
@@ -6067,6 +6082,14 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         cfg,
         &["gateway", "controlUi", "dangerouslyDisableDeviceAuth"],
         serde_json::json!(true),
+    );
+    // OpenClaw channel/plugin activation can require a restart rather than a
+    // pure hot reload. Keep the safer upstream behavior explicit so Telegram
+    // and similar channel changes are applied instead of being ignored.
+    set_openclaw_config_value(
+        cfg,
+        &["gateway", "reload", "mode"],
+        serde_json::json!("hybrid"),
     );
 
     let telegram_dm_policy = cfg
@@ -9318,8 +9341,8 @@ pub async fn send_telegram_welcome_message() -> Result<(), String> {
 
     // Read bot token and authorized chat IDs from gateway container
     let script = r#"const fs=require('fs');
-const config=JSON.parse(fs.readFileSync('/data/config.json','utf8'));
-const token=config.channels?.telegram?.token || '';
+const config=JSON.parse(fs.readFileSync('/home/node/.openclaw/openclaw.json','utf8'));
+const token=config.channels?.telegram?.botToken || '';
 const paths=['/data/credentials/telegram-default-allowFrom.json','/data/credentials/telegram-allowFrom.json'];
 let chatIds=[];
 for (const p of paths) {
