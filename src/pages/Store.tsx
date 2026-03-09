@@ -334,6 +334,7 @@ export function Store({
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const syncedIntegrationsRef = useRef<Set<string>>(new Set());
   const [justInstalledSlugs, setJustInstalledSlugs] = useState<Set<string>>(new Set());
+  const clawhubRequestSeqRef = useRef(0);
 
   // Redesign state - sub-tab removed, single unified view
 
@@ -429,20 +430,27 @@ export function Store({
     }
   }
 
-  const refreshClawhubCatalog = useCallback(async (opts?: { silent?: boolean; force?: boolean }) => {
+  const refreshClawhubCatalog = useCallback(async (
+    opts?: { silent?: boolean; force?: boolean; query?: string; sort?: ClawhubSort }
+  ) => {
+    const query = (opts?.query ?? skillQuery).trim();
+    const sort = opts?.sort ?? clawhubSort;
+    const requestSeq = ++clawhubRequestSeqRef.current;
     const fetchSort =
-      clawhubSort === "newest" ? "newest"
-      : clawhubSort === "downloads" ? "downloads"
-      : clawhubSort === "installs" ? "installsAllTime"
+      sort === "newest" ? "newest"
+      : sort === "downloads" ? "downloads"
+      : sort === "installs" ? "installsAllTime"
       : "rating";
-    const cacheKey = `${fetchSort}:${skillQuery.trim()}`;
+    const cacheKey = `${fetchSort}:${query}`;
 
     // Serve from cache if fresh and not forced
     if (!opts?.force) {
       const cached = clawhubCatalogCache.get(cacheKey);
       if (cached && Date.now() - cached.ts < CLAWHUB_CACHE_TTL_MS) {
-        setClawhubCatalog(cached.items);
-        setVisibleCount(PAGE_SIZE);
+        if (requestSeq === clawhubRequestSeqRef.current) {
+          setClawhubCatalog(cached.items);
+          setVisibleCount(PAGE_SIZE);
+        }
         return;
       }
     }
@@ -453,25 +461,31 @@ export function Store({
       // Fetch enough to fill several pages; ClawHub rate-limits per request so
       // we fetch a reasonable max up front and paginate client-side.
       const list = await invoke<ClawhubCatalogSkill[]>("get_clawhub_catalog", {
-        query: skillQuery.trim() || null,
+        query: query || null,
         limit: 100,
         sort: fetchSort,
       });
       const sorted = [...list].sort((a, b) => {
-        if (clawhubSort === "newest") return (b.updated_at || 0) - (a.updated_at || 0);
-        if (clawhubSort === "downloads") return b.downloads - a.downloads;
-        if (clawhubSort === "installs") return b.installs_all_time - a.installs_all_time;
+        if (sort === "newest") return (b.updated_at || 0) - (a.updated_at || 0);
+        if (sort === "downloads") return b.downloads - a.downloads;
+        if (sort === "installs") return b.installs_all_time - a.installs_all_time;
         return b.stars - a.stars;
       });
       clawhubCatalogCache.set(cacheKey, { items: sorted, ts: Date.now() });
-      setClawhubCatalog(sorted);
-      setVisibleCount(PAGE_SIZE);
+      if (requestSeq === clawhubRequestSeqRef.current) {
+        setClawhubCatalog(sorted);
+        setVisibleCount(PAGE_SIZE);
+      }
     } catch (err) {
       const message = String(err);
-      setClawhubLookupError(message);
+      if (requestSeq === clawhubRequestSeqRef.current) {
+        setClawhubLookupError(message);
+      }
       console.error("Failed to load ClawHub catalog:", err);
     } finally {
-      setClawhubLoading(false);
+      if (requestSeq === clawhubRequestSeqRef.current) {
+        setClawhubLoading(false);
+      }
     }
   }, [clawhubSort, skillQuery]);
 
@@ -540,8 +554,10 @@ export function Store({
   }, [setupProvider]);
 
   useEffect(() => {
+    const query = skillQuery;
+    const sort = clawhubSort;
     const timer = window.setTimeout(() => {
-      refreshClawhubCatalog();
+      refreshClawhubCatalog({ query, sort });
     }, 250);
     return () => window.clearTimeout(timer);
   }, [skillQuery, clawhubSort, refreshClawhubCatalog]);

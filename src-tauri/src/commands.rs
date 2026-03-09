@@ -3334,12 +3334,19 @@ fn command_output_error(output: &Output) -> String {
 }
 
 fn clawhub_exec(args: &[&str]) -> Result<Output, String> {
-    // Build a shell command that ensures clawhub is installed globally in
-    // the persistent /data/.local prefix (already in PATH) before running it.
-    // This avoids the fragile `npx -y` approach which re-downloads every time
-    // and is prone to npm cache corruption (ENOTEMPTY errors).
+    // Install clawhub into the persistent /data/.local prefix and self-heal
+    // stale/broken installs before invoking it. `command -v clawhub` is not
+    // sufficient because npm can leave behind a binary shim while required dist
+    // files are missing, which surfaces later as ERR_MODULE_NOT_FOUND.
     let mut shell_cmd = String::from(
-        "command -v clawhub >/dev/null 2>&1 || npm install -g --prefix /data/.local clawhub@0.7.0 >/dev/null 2>&1; exec clawhub",
+        "CLAWHUB_BIN=/data/.local/bin/clawhub; \
+         CLAWHUB_DIST=/data/.local/lib/node_modules/clawhub/dist/cli.js; \
+         CLAWHUB_BUILDINFO=/data/.local/lib/node_modules/clawhub/dist/cli/buildInfo.js; \
+         if [ ! -x \"$CLAWHUB_BIN\" ] || [ ! -f \"$CLAWHUB_DIST\" ] || [ ! -f \"$CLAWHUB_BUILDINFO\" ]; then \
+           rm -rf /data/.local/lib/node_modules/clawhub /data/.local/bin/clawhub /data/.local/bin/clawdhub; \
+           npm install -g --prefix /data/.local clawhub@0.7.0; \
+         fi; \
+         exec \"$CLAWHUB_BIN\"",
     );
     for arg in args {
         shell_cmd.push(' ');
@@ -10147,6 +10154,11 @@ pub async fn get_clawhub_catalog(
         // `clawhub search` output is plain text: one result per line in the form
         //   <slug>  <displayName>  (<score>)
         // with a leading spinner line "- Searching" that we skip.
+        //
+        // Do not synchronously hydrate every result via `clawhub inspect` here.
+        // That turns a single search into dozens of sequential network/CLI calls
+        // and leaves the Store stuck on "Loading catalog..." for too long.
+        // Full metadata is loaded lazily when the user opens a skill detail view.
         let mut out = Vec::new();
         for line in raw.lines() {
             let line = line.trim();
@@ -10161,38 +10173,15 @@ pub async fn get_clawhub_catalog(
                 continue;
             }
             let display_name = cols.get(1).unwrap_or(&slug.as_str()).trim().to_string();
-            // Hydrate with full metadata via inspect so we have summary, version, stats
-            let (summary, latest_version, downloads, installs_all_time, stars, updated_at) =
-                match clawhub_exec_output(&["inspect", slug.as_str(), "--json"]) {
-                    Ok(inspect_raw) => {
-                        if let Ok(payload) = parse_clawhub_json::<serde_json::Value>(&inspect_raw) {
-                            let skill = payload.get("skill").cloned().unwrap_or(serde_json::Value::Null);
-                            let lv = payload.get("latestVersion").cloned().unwrap_or(serde_json::Value::Null);
-                            let summary = skill.get("summary").and_then(|v| v.as_str()).unwrap_or("ClawHub skill").trim().to_string();
-                            let latest_version = lv.get("version").and_then(|v| v.as_str())
-                                .or_else(|| skill.get("tags").and_then(|v| v.get("latest")).and_then(|v| v.as_str()))
-                                .map(|v| v.to_string());
-                            let stats = skill.get("stats").cloned().unwrap_or(serde_json::Value::Null);
-                            let downloads = stats.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let installs_all_time = stats.get("installsAllTime").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let stars = stats.get("stars").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let updated_at = skill.get("updatedAt").and_then(|v| v.as_u64());
-                            (summary, latest_version, downloads, installs_all_time, stars, updated_at)
-                        } else {
-                            (display_name.clone(), None, 0u64, 0u64, 0u64, None)
-                        }
-                    }
-                    Err(_) => (display_name.clone(), None, 0u64, 0u64, 0u64, None),
-                };
             out.push(ClawhubCatalogSkill {
                 slug,
                 display_name,
-                summary,
-                latest_version,
-                downloads,
-                installs_all_time,
-                stars,
-                updated_at,
+                summary: "ClawHub skill".to_string(),
+                latest_version: None,
+                downloads: 0,
+                installs_all_time: 0,
+                stars: 0,
+                updated_at: None,
                 is_fallback: false,
             });
         }
