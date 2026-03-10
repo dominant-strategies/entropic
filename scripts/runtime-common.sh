@@ -226,6 +226,56 @@ entropic_run_colima() {
     "$colima_bin" "$@"
 }
 
+entropic_qemu_available() {
+    command -v qemu-img >/dev/null 2>&1
+}
+
+entropic_cleanup_stale_colima_profile() {
+    local colima_bin="$1"
+    local colima_home="$2"
+    local project_root="$3"
+    local profile="$4"
+    local runtime_dir="$colima_home/$profile"
+    local instance_dir="$colima_home/_lima/colima-$profile"
+    local pid_file="$runtime_dir/daemon/daemon.pid"
+    local pid
+    local command
+
+    entropic_run_colima "$colima_bin" "$colima_home" "$project_root" --profile "$profile" stop --force >/dev/null 2>&1 || true
+
+    if [ -f "$pid_file" ]; then
+        pid="$(tr -dc '0-9' < "$pid_file" | head -c 32)"
+        if [ -n "$pid" ]; then
+            command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+            case "$command" in
+                *colima*|*lima*|*hostagent*)
+                    kill "$pid" >/dev/null 2>&1 || true
+                    sleep 1
+                    if kill -0 "$pid" >/dev/null 2>&1; then
+                        kill -9 "$pid" >/dev/null 2>&1 || true
+                    fi
+                    ;;
+            esac
+        fi
+        rm -f "$pid_file"
+    fi
+
+    rm -f \
+        "$runtime_dir/docker.sock" \
+        "$runtime_dir/containerd.sock" \
+        "$instance_dir/ha.sock"
+}
+
+entropic_colima_profile_log_contains() {
+    local colima_home="$1"
+    local profile="$2"
+    local pattern="$3"
+    local ha_log="$colima_home/_lima/colima-$profile/ha.stderr.log"
+
+    [ -f "$ha_log" ] || return 1
+    grep -qi "$pattern" "$ha_log"
+}
+
 entropic_start_colima_for_mode() {
     local docker_bin="$1"
     local colima_bin="$2"
@@ -235,6 +285,7 @@ entropic_start_colima_for_mode() {
     local vm_type
     local host
     local attempts_left
+    local start_output
 
     colima_home="$(entropic_colima_home)" || return 1
     mkdir -p "$colima_home/_lima"
@@ -246,6 +297,11 @@ entropic_start_colima_for_mode() {
             vm_type="qemu"
         fi
 
+        if [ "$vm_type" = "qemu" ] && ! entropic_qemu_available; then
+            echo "WARNING: Skipping Colima qemu fallback for profile $profile because qemu-img is not installed." >&2
+            continue
+        fi
+
         if host="$(entropic_docker_host_for_profile "$docker_bin" "$colima_home" "$profile")"; then
             printf '%s\n' "$host"
             return 0
@@ -255,7 +311,8 @@ entropic_start_colima_for_mode() {
             entropic_run_colima "$colima_bin" "$colima_home" "$project_root" --profile "$profile" stop --force >/dev/null 2>&1 || true
         fi
 
-        if entropic_run_colima "$colima_bin" "$colima_home" "$project_root" --profile "$profile" start --vm-type "$vm_type" >&2; then
+        if start_output="$(entropic_run_colima "$colima_bin" "$colima_home" "$project_root" --profile "$profile" start --vm-type "$vm_type" 2>&1)"; then
+            printf '%s\n' "$start_output" >&2
             attempts_left=30
             while [ "$attempts_left" -gt 0 ]; do
                 if host="$(entropic_docker_host_for_profile "$docker_bin" "$colima_home" "$profile")"; then
@@ -265,6 +322,29 @@ entropic_start_colima_for_mode() {
                 sleep 1
                 attempts_left=$((attempts_left - 1))
             done
+        else
+            printf '%s\n' "$start_output" >&2
+            if [ "$vm_type" = "vz" ] && {
+                printf '%s\n' "$start_output" | grep -qi "in use by instance" ||
+                entropic_colima_profile_log_contains "$colima_home" "$profile" "in use by instance"
+            }; then
+                echo "WARNING: Detected stale Colima VZ state for profile $profile; forcing cleanup and retrying once." >&2
+                entropic_cleanup_stale_colima_profile "$colima_bin" "$colima_home" "$project_root" "$profile"
+                if start_output="$(entropic_run_colima "$colima_bin" "$colima_home" "$project_root" --profile "$profile" start --vm-type "$vm_type" 2>&1)"; then
+                    printf '%s\n' "$start_output" >&2
+                    attempts_left=30
+                    while [ "$attempts_left" -gt 0 ]; do
+                        if host="$(entropic_docker_host_for_profile "$docker_bin" "$colima_home" "$profile")"; then
+                            printf '%s\n' "$host"
+                            return 0
+                        fi
+                        sleep 1
+                        attempts_left=$((attempts_left - 1))
+                    done
+                else
+                    printf '%s\n' "$start_output" >&2
+                fi
+            fi
         fi
     done
 

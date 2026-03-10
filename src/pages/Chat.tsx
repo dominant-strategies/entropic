@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo, type ComponentType, type FormEvent } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, type ComponentType, type FormEvent, type ReactNode } from "react";
 import {
   Send,
   Paperclip,
@@ -59,6 +59,9 @@ import {
 } from "../lib/taskBoard";
 import { resolveGatewayAuth } from "../lib/gateway-auth";
 import { appendDiagnosticLog } from "../lib/diagnostics";
+import {
+  workspaceBrowserUrl,
+} from "../lib/nativePreview";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { getLocalCreditBalance } from "../lib/localCredits";
 import { signInWithDiscord, signInWithEmail, signInWithGoogle, signUpWithEmail, createCheckout, getBalance } from "../lib/auth";
@@ -108,6 +111,75 @@ type PendingAttachment = {
 type AuthState = { active_provider: string | null; providers: Array<{ id: string; has_key: boolean }> };
 type CalendarEvent = { id?: string; summary?: string; start?: string; end?: string; attendees?: Array<{ email?: string; displayName?: string }> };
 type ToolError = { tool?: string; error?: string; status?: string };
+type WorkspaceChatReference = {
+  key: string;
+  path: string;
+  name: string;
+  isHtml: boolean;
+  looksLikeFile: boolean;
+};
+type DesktopHandoff = {
+  path?: string;
+  url?: string;
+  action: "open" | "preview" | "browser";
+  looksLikeFile?: boolean;
+};
+
+const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
+const CHAT_WORKSPACE_PREFIXES = [
+  "/data/.openclaw/workspace",
+  "/data/workspace",
+  "/home/node/.openclaw/workspace",
+];
+const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/node\/\.openclaw\/workspace)(?:\/[^\s`"'<>]+)?)/g;
+
+function trimChatWorkspaceToken(raw: string): string {
+  return raw
+    .replace(/^[("'`\[]+/, "")
+    .replace(/[)"'`\],:;.!?]+$/, "");
+}
+
+function normalizeChatWorkspacePath(raw: string): string | null {
+  const trimmed = trimChatWorkspaceToken(raw.trim());
+  for (const prefix of CHAT_WORKSPACE_PREFIXES) {
+    if (trimmed === prefix) {
+      return "";
+    }
+    if (trimmed.startsWith(`${prefix}/`)) {
+      return trimmed.slice(prefix.length + 1);
+    }
+  }
+  return null;
+}
+
+function workspacePathName(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  return parts[parts.length - 1] || "Workspace";
+}
+
+function extractWorkspaceChatReferences(content: string): WorkspaceChatReference[] {
+  const refs: WorkspaceChatReference[] = [];
+  const seen = new Set<string>();
+
+  for (const match of content.matchAll(CHAT_WORKSPACE_PATH_RE)) {
+    const path = normalizeChatWorkspacePath(match[1] || "");
+    if (path === null) continue;
+    const name = workspacePathName(path);
+    const ext = name.split(".").pop()?.toLowerCase() || "";
+    const ref: WorkspaceChatReference = {
+      key: path || "__workspace__",
+      path,
+      name,
+      isHtml: ext === "html" || ext === "htm",
+      looksLikeFile: Boolean(path) && name.includes("."),
+    };
+    if (seen.has(ref.key)) continue;
+    seen.add(ref.key);
+    refs.push(ref);
+  }
+
+  return refs;
+}
 
 function GoogleIcon({ className }: { className?: string }) {
   return (
@@ -4159,6 +4231,26 @@ export function Chat({
 
   type AssistantRenderPayload = ReturnType<typeof parseToolPayloads>;
 
+  async function handoffWorkspacePathToDesktop(link: {
+    path: string;
+    action: DesktopHandoff["action"];
+    looksLikeFile: boolean;
+    url?: string;
+  }) {
+    try {
+      const payload: DesktopHandoff = {
+        path: link.path,
+        url: link.url,
+        action: link.action,
+        looksLikeFile: link.looksLikeFile,
+      };
+      window.localStorage.setItem(DESKTOP_HANDOFF_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // Ignore storage failures and still navigate.
+    }
+    onNavigate?.("files");
+  }
+
   function renderAssistantContent(message: Message, precomputedPayload?: AssistantRenderPayload) {
     const payload = precomputedPayload ?? {
       cleanText: message.content,
@@ -4174,7 +4266,14 @@ export function Chat({
       }
     }
     if (!payload.events.length && !payload.errors.length) {
-      return <MarkdownContent content={payload.cleanText} />;
+      return (
+        <div>
+          <MarkdownContent
+            content={payload.cleanText}
+            onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
+          />
+        </div>
+      );
     }
     return (
       <div className="space-y-2">
@@ -4182,7 +4281,12 @@ export function Chat({
           <span>{message.kind === "toolResult" ? "Tool Result" : "Assistant"}</span>
           {message.toolName ? <span className="text-[var(--text-quaternary)]">{message.toolName}</span> : null}
         </div>
-        {payload.cleanText ? <MarkdownContent content={payload.cleanText} /> : null}
+        {payload.cleanText ? (
+          <MarkdownContent
+            content={payload.cleanText}
+            onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
+          />
+        ) : null}
         {payload.events.length > 0 && (
           <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-3 shadow-sm">
             <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)] mb-2">

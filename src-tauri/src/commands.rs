@@ -23,7 +23,11 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Webview,
+    WebviewBuilder, WebviewUrl,
+};
+use tauri::webview::NewWindowResponse;
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -40,11 +44,19 @@ const ENTROPIC_PROXY_ALLOWED_HOSTS: &[&str] = &[
     "127.0.0.1",
 ];
 const BROWSER_SERVICE_PORT: &str = "19791";
+const BROWSER_SERVICE_HOST_PORT: &str = "19792";
+const BROWSER_DESKTOP_PORT: &str = "19793";
+const BROWSER_DESKTOP_HOST_PORT: &str = "19793";
 const BROWSER_SERVICE_PATH: &str = "/app/browser-service/server.mjs";
 const BROWSER_SERVICE_LOG_PATH: &str = "/data/browser/browser-service.log";
+const BROWSER_CONTROL_TOKEN_PATH: &str = "/data/browser/control-token";
+const EMBEDDED_PREVIEW_WEBVIEW_LABEL: &str = "desktop-browser-preview";
+const EMBEDDED_PREVIEW_STATE_EVENT: &str = "embedded-preview-state";
 const MAX_BRIDGE_DEVICES: usize = 10;
 const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const CLIENT_LOG_READ_MAX_BYTES: usize = 512 * 1024;
+
+static BROWSER_SERVICE_TOKEN_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 fn client_log_path() -> PathBuf {
     dirs::home_dir()
@@ -3923,7 +3935,7 @@ fn clipped_tail(text: &str, max_chars: usize) -> String {
     format!("...\n{}", tail)
 }
 
-fn browser_service_failure_message(container: &str, base_error: &str) -> String {
+fn browser_service_message(container: &str, headline: &str, base_error: &str) -> String {
     if !container_file_exists(container, BROWSER_SERVICE_PATH) {
         return "Browser service is not installed in the running sandbox image. Rebuild the openclaw runtime image and restart the sandbox."
             .to_string();
@@ -3935,15 +3947,134 @@ fn browser_service_failure_message(container: &str, base_error: &str) -> String 
 
     match log_excerpt {
         Some(log) => format!(
-            "Browser service is unavailable.\n{}\n\nBrowser service log:\n{}",
+            "{}\n{}\n\nBrowser service log:\n{}",
+            headline.trim(),
             base_error.trim(),
             log
         ),
         None => format!(
-            "Browser service is unavailable.\n{}\n\nNo browser service log was found yet. The runtime may still be starting, or the sandbox image may be outdated.",
+            "{}\n{}\n\nNo browser service log was found yet. The runtime may still be starting, or the sandbox image may be outdated.",
+            headline.trim(),
             base_error.trim()
         ),
     }
+}
+
+fn browser_service_failure_message(container: &str, base_error: &str) -> String {
+    browser_service_message(container, "Browser service is unavailable.", base_error)
+}
+
+fn browser_service_request_message(container: &str, base_error: &str) -> String {
+    browser_service_message(container, "Browser request failed.", base_error)
+}
+
+fn parse_browser_service_http_output(raw: &str) -> Result<(u16, String), String> {
+    const STATUS_MARKER: &str = "\n__ENTROPIC_BROWSER_HTTP_STATUS__:";
+    let marker_index = raw
+        .rfind(STATUS_MARKER)
+        .ok_or_else(|| "Failed to parse browser service HTTP status".to_string())?;
+    let body = raw[..marker_index].to_string();
+    let status_text = raw[marker_index + STATUS_MARKER.len()..].trim();
+    let status = status_text
+        .parse::<u16>()
+        .map_err(|e| format!("Invalid browser service HTTP status `{}`: {}", status_text, e))?;
+    Ok((status, body))
+}
+
+fn browser_service_error_detail(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "Browser service returned an empty error response".to_string();
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(value) => value
+            .get("error")
+            .and_then(|error| error.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| trimmed.to_string()),
+        Err(_) => trimmed.to_string(),
+    }
+}
+
+fn browser_service_token(container: &str) -> Result<String, String> {
+    let cache = BROWSER_SERVICE_TOKEN_CACHE.get_or_init(|| Mutex::new(None));
+    if let Some(existing) = cache
+        .lock()
+        .map_err(|_| "Failed to read cached browser service token".to_string())?
+        .clone()
+    {
+        return Ok(existing);
+    }
+
+    let raw = docker_exec_output(&["exec", container, "cat", BROWSER_CONTROL_TOKEN_PATH])
+        .map_err(|e| format!("Failed to read browser service token: {}", e))?;
+    let token = raw.trim().to_string();
+    if token.is_empty() {
+        return Err("Browser service token file is empty".to_string());
+    }
+
+    let mut guard = cache
+        .lock()
+        .map_err(|_| "Failed to cache browser service token".to_string())?;
+    *guard = Some(token.clone());
+    Ok(token)
+}
+
+fn browser_service_curl_output(
+    container: &str,
+    method: &str,
+    url: &str,
+    token: &str,
+    payload: Option<&str>,
+) -> Result<Output, String> {
+    let mut args = vec![
+        "exec".to_string(),
+        container.to_string(),
+        "curl".to_string(),
+        "-sS".to_string(),
+        "-X".to_string(),
+        method.to_string(),
+        "-w".to_string(),
+        "\n__ENTROPIC_BROWSER_HTTP_STATUS__:%{http_code}".to_string(),
+        "-H".to_string(),
+        format!("X-Entropic-Browser-Token: {}", token),
+    ];
+    if payload.is_some() {
+        args.splice(1..1, ["-i".to_string()]);
+        args.extend([
+            "-H".to_string(),
+            "Content-Type: application/json".to_string(),
+            "--data-binary".to_string(),
+            "@-".to_string(),
+        ]);
+    }
+    args.push(url.to_string());
+
+    let mut child = docker_command()
+        .args(&args)
+        .stdin(if payload.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to contact browser service: {}", e))?;
+
+    if let Some(body) = payload {
+        if let Some(stdin) = child.stdin.as_mut() {
+            use std::io::Write;
+            stdin
+                .write_all(body.as_bytes())
+                .map_err(|e| format!("Failed to write browser request body: {}", e))?;
+        }
+    }
+
+    child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to finalize browser service request: {}", e))
 }
 
 fn wait_for_browser_service(container: &str) -> Result<(), String> {
@@ -3972,50 +4103,29 @@ fn browser_service_exec(method: &str, path: &str, payload: Option<&str>) -> Resu
     wait_for_browser_service(container)?;
 
     let url = format!("http://127.0.0.1:{}{}", BROWSER_SERVICE_PORT, path);
-    if let Some(body) = payload {
-        let mut child = docker_command()
-            .args([
-                "exec",
-                "-i",
-                container,
-                "curl",
-                "-fsS",
-                "-X",
-                method,
-                "-H",
-                "Content-Type: application/json",
-                "--data-binary",
-                "@-",
-                &url,
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to contact browser service: {}", e))?;
-        if let Some(stdin) = child.stdin.as_mut() {
-            use std::io::Write;
-            stdin
-                .write_all(body.as_bytes())
-                .map_err(|e| format!("Failed to write browser request body: {}", e))?;
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|e| format!("Failed to finalize browser service request: {}", e))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let fallback = if stderr.is_empty() {
-                "Browser service request failed".to_string()
-            } else {
-                stderr
-            };
-            return Err(browser_service_failure_message(container, &fallback));
-        }
-        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    let token = browser_service_token(container)?;
+    let output = browser_service_curl_output(container, method, &url, &token, payload)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let fallback = if stderr.is_empty() {
+            "Browser service request failed".to_string()
+        } else {
+            stderr
+        };
+        return Err(browser_service_request_message(container, &fallback));
     }
 
-    docker_exec_output(&["exec", container, "curl", "-fsS", "-X", method, &url])
-        .map_err(|error| browser_service_failure_message(container, &error))
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (status, body) = parse_browser_service_http_output(&stdout)?;
+    if !(200..300).contains(&status) {
+        let detail = browser_service_error_detail(&body);
+        return Err(browser_service_request_message(
+            container,
+            &format!("HTTP {}: {}", status, detail),
+        ));
+    }
+
+    Ok(body)
 }
 
 fn browser_service_request<T: DeserializeOwned>(
@@ -4076,6 +4186,10 @@ pub struct BrowserSnapshot {
     pub session_id: String,
     pub url: String,
     pub title: String,
+    #[serde(default)]
+    pub live_ws_url: Option<String>,
+    #[serde(default)]
+    pub remote_desktop_url: Option<String>,
     pub text: String,
     pub screenshot_base64: String,
     pub screenshot_width: f64,
@@ -4083,6 +4197,25 @@ pub struct BrowserSnapshot {
     pub interactive_elements: Vec<BrowserInteractiveElement>,
     pub can_go_back: bool,
     pub can_go_forward: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedPreviewSyncRequest {
+    pub url: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedPreviewStatePayload {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 fn normalize_browser_target_url(raw: &str) -> Result<String, String> {
@@ -4102,13 +4235,140 @@ fn normalize_browser_target_url(raw: &str) -> Result<String, String> {
         return Err("Only http/https URLs are supported in the desktop browser".to_string());
     }
     if let Some(host) = parsed.host_str() {
-        if host == "localhost" || host == "127.0.0.1" {
+        if host == "container.localhost" || host == "runtime.localhost" {
             parsed
-                .set_host(Some("host.docker.internal"))
+                .set_host(Some("127.0.0.1"))
+                .map_err(|_| "Failed to normalize container-local browser URL".to_string())?;
+        } else if host == "localhost" || host == "127.0.0.1" {
+            parsed
+                .set_host(Some("127.0.0.1"))
                 .map_err(|_| "Failed to normalize localhost browser URL".to_string())?;
         }
     }
     Ok(parsed.to_string())
+}
+
+fn native_preview_navigation_allowed(url: &Url) -> bool {
+    if url.as_str() == "about:blank" {
+        return true;
+    }
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return false;
+    }
+    let host = match url.host_str() {
+        Some(host) => host.to_ascii_lowercase(),
+        None => return false,
+    };
+    let host_port = BROWSER_SERVICE_HOST_PORT.parse::<u16>().unwrap_or(19792);
+    let current_port = url.port_or_known_default().unwrap_or(host_port);
+    if current_port != host_port {
+        return false;
+    }
+    if host == "127.0.0.1" || host == "localhost" {
+        return url.path() == "/__workspace__/" || url.path().starts_with("/__workspace__/");
+    }
+    if let Some(port_text) = host
+        .strip_prefix('p')
+        .and_then(|value| value.strip_suffix(".localhost"))
+    {
+        return port_text.parse::<u16>().is_ok();
+    }
+    false
+}
+
+fn resolve_native_preview_target_url(raw: &str) -> Result<Url, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Preview URL is required".to_string());
+    }
+
+    let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{}", trimmed)
+    };
+
+    let mut parsed = Url::parse(&with_scheme)
+        .map_err(|_| "Invalid preview URL. Enter a valid local http/https URL.".to_string())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("Only http/https URLs are supported in native preview".to_string());
+    }
+
+    let host = parsed
+        .host_str()
+        .map(|value| value.to_ascii_lowercase())
+        .ok_or_else(|| "Preview URL host is required".to_string())?;
+    let host_port = BROWSER_SERVICE_HOST_PORT.parse::<u16>().unwrap_or(19792);
+    let browser_service_port = BROWSER_SERVICE_PORT.parse::<u16>().unwrap_or(19791);
+
+    if native_preview_navigation_allowed(&parsed) {
+        return Ok(parsed);
+    }
+
+    if host == "container.localhost"
+        || host == "runtime.localhost"
+        || host == "localhost"
+        || host == "127.0.0.1"
+    {
+        let target_port = parsed
+            .port_or_known_default()
+            .ok_or_else(|| "Preview URL must include an explicit local port".to_string())?;
+        if target_port == browser_service_port
+            && (parsed.path() == "/__workspace__/" || parsed.path().starts_with("/__workspace__/"))
+        {
+            parsed
+                .set_host(Some("127.0.0.1"))
+                .map_err(|_| "Failed to normalize workspace preview host".to_string())?;
+            parsed
+                .set_port(Some(host_port))
+                .map_err(|_| "Failed to normalize workspace preview port".to_string())?;
+            return Ok(parsed);
+        }
+        if target_port == host_port && native_preview_navigation_allowed(&parsed) {
+            return Ok(parsed);
+        }
+
+        let proxy_host = format!("p{}.localhost", target_port);
+        parsed
+            .set_host(Some(&proxy_host))
+            .map_err(|_| "Failed to normalize local preview host".to_string())?;
+        parsed
+            .set_port(Some(host_port))
+            .map_err(|_| "Failed to normalize local preview port".to_string())?;
+        if native_preview_navigation_allowed(&parsed) {
+            return Ok(parsed);
+        }
+    }
+
+    Err(
+        "Native preview only supports workspace HTML and container-local HTTP apps. Use the remote browser for external sites."
+            .to_string(),
+    )
+}
+
+fn emit_embedded_preview_state(app: &AppHandle, url: &Url, title: Option<String>) {
+    let payload = EmbeddedPreviewStatePayload {
+        url: url.to_string(),
+        title,
+    };
+    let _ = app.emit_to("main", EMBEDDED_PREVIEW_STATE_EVENT, payload);
+}
+
+fn emit_embedded_preview_state_from_webview(
+    app: &AppHandle,
+    webview: &Webview,
+    title: Option<String>,
+) {
+    if let Ok(url) = webview.url() {
+        if native_preview_navigation_allowed(&url) {
+            emit_embedded_preview_state(app, &url, title);
+        }
+    }
+}
+
+fn get_embedded_preview_webview(app: &AppHandle) -> Result<Webview, String> {
+    app.get_webview(EMBEDDED_PREVIEW_WEBVIEW_LABEL)
+        .ok_or_else(|| "Embedded preview is not active.".to_string())
 }
 
 fn write_container_file_if_missing(path: &str, content: &str) -> Result<(), String> {
@@ -6947,6 +7207,38 @@ fn container_instance_id() -> Option<String> {
     }
 }
 
+fn container_image_id(container: &str) -> Option<String> {
+    let output = docker_command()
+        .args(["inspect", "--format", "{{.Image}}", container])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+fn image_id(image: &str) -> Option<String> {
+    let output = docker_command()
+        .args(["image", "inspect", "--format", "{{.Id}}", image])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
 fn container_running() -> bool {
     gateway_container_exists(true)
 }
@@ -7990,6 +8282,12 @@ pub async fn start_gateway(
         let current_gateway_token = read_container_env("OPENCLAW_GATEWAY_TOKEN");
         let current_schema = read_container_env("ENTROPIC_GATEWAY_SCHEMA_VERSION");
         let current_model = read_container_env("OPENCLAW_MODEL");
+        let current_browser_host_port = read_container_env("ENTROPIC_BROWSER_HOST_PORT");
+        let current_browser_desktop_host_port =
+            read_container_env("ENTROPIC_BROWSER_DESKTOP_HOST_PORT");
+        let current_browser_headful = read_container_env("ENTROPIC_BROWSER_HEADFUL");
+        let current_container_image_id = container_image_id(OPENCLAW_CONTAINER);
+        let latest_runtime_image_id = image_id("openclaw-runtime:latest");
         let current_proxy_mode = read_container_env("ENTROPIC_PROXY_MODE");
         // Check legacy environment variable for backward compatibility during migration
         let legacy_proxy_mode = read_container_env("NOVA_PROXY_MODE");
@@ -8004,11 +8302,22 @@ pub async fn start_gateway(
         // Check both new and legacy proxy mode env vars to properly detect old containers
         let is_proxy_container =
             current_proxy_mode.as_deref() == Some("1") || legacy_proxy_mode.as_deref() == Some("1");
+        let image_matches_latest = match (
+            current_container_image_id.as_deref(),
+            latest_runtime_image_id.as_deref(),
+        ) {
+            (Some(current), Some(latest)) => current == latest,
+            _ => true,
+        };
         if !is_proxy_container
             && auth_type_matches
             && current_gateway_token.as_deref() == Some(gateway_token.as_str())
             && current_schema.as_deref() == Some(ENTROPIC_GATEWAY_SCHEMA_VERSION)
             && current_model.as_deref() == Some(base_model)
+            && current_browser_host_port.as_deref() == Some(BROWSER_SERVICE_HOST_PORT)
+            && current_browser_desktop_host_port.as_deref() == Some(BROWSER_DESKTOP_HOST_PORT)
+            && current_browser_headful.as_deref() == Some("1")
+            && image_matches_latest
         {
             apply_agent_settings(&app, &state)?;
             match wait_for_gateway_health_strict(&gateway_token, 6).await {
@@ -8085,6 +8394,15 @@ pub async fn start_gateway(
         ("XDG_CACHE_HOME", "/data/.cache"),
         ("npm_config_cache", "/data/.npm"),
         ("PLAYWRIGHT_BROWSERS_PATH", "/data/playwright"),
+        ("ENTROPIC_BROWSER_SERVICE_PORT", BROWSER_SERVICE_PORT),
+        ("ENTROPIC_BROWSER_HOST_PORT", BROWSER_SERVICE_HOST_PORT),
+        ("ENTROPIC_BROWSER_HEADFUL", "1"),
+        ("ENTROPIC_BROWSER_DESKTOP_PORT", BROWSER_DESKTOP_PORT),
+        (
+            "ENTROPIC_BROWSER_DESKTOP_HOST_PORT",
+            BROWSER_DESKTOP_HOST_PORT,
+        ),
+        ("ENTROPIC_BROWSER_BIND", "0.0.0.0"),
         ("ENTROPIC_BROWSER_PROFILE", "/data/browser/profile"),
         ("ENTROPIC_TOOLS_PATH", "/data/tools"),
     ];
@@ -8157,6 +8475,13 @@ pub async fn start_gateway(
         OPENCLAW_NETWORK.to_string(),
         "-p".to_string(),
         gateway_bind.to_string(),
+        "-p".to_string(),
+        format!("127.0.0.1:{}:{}", BROWSER_SERVICE_HOST_PORT, BROWSER_SERVICE_PORT),
+        "-p".to_string(),
+        format!(
+            "127.0.0.1:{}:{}",
+            BROWSER_DESKTOP_HOST_PORT, BROWSER_DESKTOP_PORT
+        ),
         "openclaw-runtime:latest".to_string(),
     ]);
 
@@ -8322,6 +8647,15 @@ pub async fn start_gateway_with_proxy(
             ("XDG_CACHE_HOME", "/data/.cache"),
             ("npm_config_cache", "/data/.npm"),
             ("PLAYWRIGHT_BROWSERS_PATH", "/data/playwright"),
+            ("ENTROPIC_BROWSER_SERVICE_PORT", BROWSER_SERVICE_PORT),
+            ("ENTROPIC_BROWSER_HOST_PORT", BROWSER_SERVICE_HOST_PORT),
+            ("ENTROPIC_BROWSER_HEADFUL", "1"),
+            ("ENTROPIC_BROWSER_DESKTOP_PORT", BROWSER_DESKTOP_PORT),
+            (
+                "ENTROPIC_BROWSER_DESKTOP_HOST_PORT",
+                BROWSER_DESKTOP_HOST_PORT,
+            ),
+            ("ENTROPIC_BROWSER_BIND", "0.0.0.0"),
             ("ENTROPIC_BROWSER_PROFILE", "/data/browser/profile"),
             ("ENTROPIC_TOOLS_PATH", "/data/tools"),
         ];
@@ -8367,6 +8701,13 @@ pub async fn start_gateway_with_proxy(
             OPENCLAW_NETWORK.to_string(),
             "-p".to_string(),
             gateway_bind.to_string(),
+            "-p".to_string(),
+            format!("127.0.0.1:{}:{}", BROWSER_SERVICE_HOST_PORT, BROWSER_SERVICE_PORT),
+            "-p".to_string(),
+            format!(
+                "127.0.0.1:{}:{}",
+                BROWSER_DESKTOP_HOST_PORT, BROWSER_DESKTOP_PORT
+            ),
             "openclaw-runtime:latest".to_string(),
         ]);
 
@@ -8397,6 +8738,12 @@ pub async fn start_gateway_with_proxy(
         let current_schema = read_container_env("ENTROPIC_GATEWAY_SCHEMA_VERSION");
         let current_model = read_container_env("OPENCLAW_MODEL");
         let current_image = read_container_env("OPENCLAW_IMAGE_MODEL");
+        let current_browser_host_port = read_container_env("ENTROPIC_BROWSER_HOST_PORT");
+        let current_browser_desktop_host_port =
+            read_container_env("ENTROPIC_BROWSER_DESKTOP_HOST_PORT");
+        let current_browser_headful = read_container_env("ENTROPIC_BROWSER_HEADFUL");
+        let current_container_image_id = container_image_id(OPENCLAW_CONTAINER);
+        let latest_runtime_image_id = image_id("openclaw-runtime:latest");
         let expected_image = image_model.clone().unwrap_or_default();
 
         let proxy_matches = current_proxy.as_deref() == Some(expected_proxy_env.as_str());
@@ -8406,6 +8753,13 @@ pub async fn start_gateway_with_proxy(
         let model_matches = current_model.as_deref() == Some(model.as_str());
         let image_matches =
             expected_image.is_empty() || current_image.as_deref() == Some(expected_image.as_str());
+        let container_image_matches_latest = match (
+            current_container_image_id.as_deref(),
+            latest_runtime_image_id.as_deref(),
+        ) {
+            (Some(current), Some(latest)) => current == latest,
+            _ => true,
+        };
         let token_matches = current_token.as_deref() == Some(gateway_token.as_str());
 
         if proxy_matches
@@ -8413,7 +8767,11 @@ pub async fn start_gateway_with_proxy(
             && schema_matches
             && model_matches
             && image_matches
+            && container_image_matches_latest
             && token_matches
+            && current_browser_host_port.as_deref() == Some(BROWSER_SERVICE_HOST_PORT)
+            && current_browser_desktop_host_port.as_deref() == Some(BROWSER_DESKTOP_HOST_PORT)
+            && current_browser_headful.as_deref() == Some("1")
         {
             println!("[Entropic] Proxy container already running with matching config. Reusing.");
             let reuse_prepare_started = Instant::now();
@@ -11687,11 +12045,27 @@ pub async fn upload_workspace_file(
 }
 
 #[tauri::command]
-pub async fn browser_session_create(url: Option<String>) -> Result<BrowserSnapshot, String> {
-    let payload = url
-        .map(|raw| normalize_browser_target_url(&raw))
-        .transpose()?
-        .map(|normalized| serde_json::json!({ "url": normalized }));
+pub async fn browser_session_create(
+    url: Option<String>,
+    viewport_width: Option<u32>,
+    viewport_height: Option<u32>,
+) -> Result<BrowserSnapshot, String> {
+    let normalized_url = url.map(|raw| normalize_browser_target_url(&raw)).transpose()?;
+    let mut payload = serde_json::Map::new();
+    if let Some(normalized) = normalized_url {
+        payload.insert("url".to_string(), serde_json::Value::String(normalized));
+    }
+    if let Some(width) = viewport_width {
+        payload.insert("viewport_width".to_string(), serde_json::json!(width));
+    }
+    if let Some(height) = viewport_height {
+        payload.insert("viewport_height".to_string(), serde_json::json!(height));
+    }
+    let payload = if payload.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(payload))
+    };
     browser_service_request("POST", "/sessions", payload)
 }
 
@@ -11737,6 +12111,134 @@ pub async fn browser_click(session_id: String, x: f64, y: f64) -> Result<Browser
 pub async fn browser_session_close(session_id: String) -> Result<(), String> {
     let _: serde_json::Value =
         browser_service_request("DELETE", &format!("/sessions/{}", session_id), None)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sync_embedded_preview_webview(
+    app: AppHandle,
+    request: EmbeddedPreviewSyncRequest,
+) -> Result<String, String> {
+    let resolved = resolve_native_preview_target_url(&request.url)?;
+    let x = request.x.max(0.0);
+    let y = request.y.max(0.0);
+    let width = request.width.max(1.0);
+    let height = request.height.max(1.0);
+    let parent_window = app
+        .get_window("main")
+        .ok_or_else(|| "Main window is not available.".to_string())?;
+
+    let webview = if let Some(webview) = app.get_webview(EMBEDDED_PREVIEW_WEBVIEW_LABEL) {
+        webview
+    } else {
+        if !request.visible {
+            return Ok(resolved.to_string());
+        }
+
+        let navigation_app = app.clone();
+        let title_app = app.clone();
+        let page_load_app = app.clone();
+        let new_window_app = app.clone();
+        let webview_builder = WebviewBuilder::new(
+            EMBEDDED_PREVIEW_WEBVIEW_LABEL,
+            WebviewUrl::External(resolved.clone()),
+        )
+        .on_navigation(move |next_url| {
+            if native_preview_navigation_allowed(next_url) {
+                emit_embedded_preview_state(&navigation_app, next_url, None);
+                return true;
+            }
+            let _ = navigation_app
+                .opener()
+                .open_url(next_url.as_str(), None::<&str>);
+            false
+        })
+        .on_new_window(move |next_url, _features| {
+            if native_preview_navigation_allowed(&next_url) {
+                if let Some(webview) = new_window_app.get_webview(EMBEDDED_PREVIEW_WEBVIEW_LABEL) {
+                    let _ = webview.navigate(next_url.clone());
+                }
+            } else {
+                let _ = new_window_app
+                    .opener()
+                    .open_url(next_url.as_str(), None::<&str>);
+            }
+            NewWindowResponse::Deny
+        })
+        .on_page_load(move |webview, payload| {
+            emit_embedded_preview_state(&page_load_app, payload.url(), None);
+            emit_embedded_preview_state_from_webview(&page_load_app, &webview, None);
+        })
+        .on_document_title_changed(move |webview, title| {
+            emit_embedded_preview_state_from_webview(&title_app, &webview, Some(title));
+        });
+
+        parent_window
+            .add_child(
+                webview_builder,
+                LogicalPosition::new(x, y),
+                LogicalSize::new(width, height),
+            )
+            .map_err(|e| format!("Failed to create embedded preview webview: {}", e))?
+    };
+
+    let current_url = webview.url().ok().map(|value| value.to_string());
+    if current_url.as_deref() != Some(resolved.as_str()) {
+        webview
+            .navigate(resolved.clone())
+            .map_err(|e| format!("Failed to navigate embedded preview: {}", e))?;
+    }
+
+    webview
+        .set_position(LogicalPosition::new(x, y))
+        .map_err(|e| format!("Failed to position embedded preview: {}", e))?;
+    webview
+        .set_size(LogicalSize::new(width, height))
+        .map_err(|e| format!("Failed to resize embedded preview: {}", e))?;
+
+    if request.visible {
+        let _ = webview.show();
+    } else {
+        let _ = webview.hide();
+    }
+
+    emit_embedded_preview_state(&app, &resolved, None);
+    Ok(resolved.to_string())
+}
+
+#[tauri::command]
+pub async fn hide_embedded_preview_webview(app: AppHandle) -> Result<(), String> {
+    if let Some(webview) = app.get_webview(EMBEDDED_PREVIEW_WEBVIEW_LABEL) {
+        let _ = webview.hide();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn embedded_preview_reload(app: AppHandle) -> Result<(), String> {
+    let webview = get_embedded_preview_webview(&app)?;
+    webview
+        .reload()
+        .map_err(|e| format!("Failed to reload embedded preview: {}", e))?;
+    emit_embedded_preview_state_from_webview(&app, &webview, None);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn embedded_preview_back(app: AppHandle) -> Result<(), String> {
+    let webview = get_embedded_preview_webview(&app)?;
+    webview
+        .eval("window.history.back();")
+        .map_err(|e| format!("Failed to navigate embedded preview back: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn embedded_preview_forward(app: AppHandle) -> Result<(), String> {
+    let webview = get_embedded_preview_webview(&app)?;
+    webview
+        .eval("window.history.forward();")
+        .map_err(|e| format!("Failed to navigate embedded preview forward: {}", e))?;
     Ok(())
 }
 
@@ -13091,42 +13593,6 @@ pub async fn sign_gateway_device_payload(
 }
 
 #[tauri::command]
-pub async fn approve_gateway_device_pairing(request_id: String) -> Result<(), String> {
-    let trimmed = request_id.trim();
-    if trimmed.is_empty() {
-        return Err("Pairing request id is required".to_string());
-    }
-
-    let container = running_gateway_container_name()
-        .ok_or_else(|| "Gateway container is not running. Start the sandbox first.".to_string())?;
-
-    let output = docker_command()
-        .args([
-            "exec",
-            container,
-            "node",
-            "/app/dist/index.js",
-            "devices",
-            "approve",
-            trimmed,
-            "--json",
-        ])
-        .output()
-        .map_err(|e| format!("Failed to approve gateway device pairing: {}", e))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if !stderr.is_empty() { stderr } else { stdout };
-    Err(if detail.is_empty() {
-        "Failed to approve gateway device pairing".to_string()
-    } else {
-        format!("Failed to approve gateway device pairing: {}", detail)
-    })
-}
 pub async fn refresh_provider_token(
     app: AppHandle,
     state: State<'_, AppState>,

@@ -1167,9 +1167,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         return (
           <Files
             gatewayRunning={gatewayRunning}
+            gatewayRetryIn={gatewayRetryIn}
             integrationsSyncing={integrationsSyncing}
             integrationsMissing={integrationsMissing}
             onGatewayToggle={toggleGateway}
+            onRecoverProxyAuth={recoverProxyAuthFromChat}
             isTogglingGateway={isTogglingGateway}
             experimentalDesktop={experimentalDesktop}
             onExperimentalDesktopChange={persistExperimentalDesktop}

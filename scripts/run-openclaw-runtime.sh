@@ -7,6 +7,8 @@ CONTAINER_NAME="openclaw-core"
 IMAGE="openclaw-runtime:latest"
 DATA_VOLUME="entropic-openclaw-data"
 PORT="${OPENCLAW_PORT:-18789}"
+BROWSER_HOST_PORT="${ENTROPIC_BROWSER_HOST_PORT:-19792}"
+BROWSER_DESKTOP_HOST_PORT="${ENTROPIC_BROWSER_DESKTOP_HOST_PORT:-19793}"
 
 # Colors
 GREEN='\033[0;32m'
@@ -47,7 +49,14 @@ docker run -d \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=100m \
     --tmpfs /run:rw,noexec,nosuid,nodev,size=10m \
     -v "$DATA_VOLUME":/data \
+    -e "ENTROPIC_BROWSER_HOST_PORT=${BROWSER_HOST_PORT}" \
+    -e "ENTROPIC_BROWSER_HEADFUL=1" \
+    -e "ENTROPIC_BROWSER_DESKTOP_PORT=19793" \
+    -e "ENTROPIC_BROWSER_DESKTOP_HOST_PORT=${BROWSER_DESKTOP_HOST_PORT}" \
+    -e "ENTROPIC_BROWSER_BIND=0.0.0.0" \
     -p "127.0.0.1:${PORT}:18789" \
+    -p "127.0.0.1:${BROWSER_HOST_PORT}:19791" \
+    -p "127.0.0.1:${BROWSER_DESKTOP_HOST_PORT}:19793" \
     --restart unless-stopped \
     --health-cmd="curl -sf http://localhost:18789/health || exit 1" \
     --health-interval=10s \

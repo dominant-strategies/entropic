@@ -43,7 +43,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Video codec libraries (h264 support for Chromium)
     libavcodec59 \
     libavformat59 \
-    libavutil57 && \
+    libavutil57 \
+    xvfb \
+    x11vnc \
+    novnc \
+    websockify && \
     rm -rf /var/lib/apt/lists/* && \
     # Make `python` resolve to python3 so skills can call either name
     ln -sfn /usr/bin/python3 /usr/local/bin/python && \
@@ -122,7 +126,7 @@ RUN SHARP_PNPM="$(find /app/node_modules/.pnpm -maxdepth 1 -name 'sharp@*' -type
 USER node
 
 # QMD is installed on-demand at runtime when enabled in Settings.
-ENV NODE_PATH="/data/.bun/install/global/node_modules:/home/node/.bun/install/global/node_modules${NODE_PATH:+:$NODE_PATH}"
+ENV NODE_PATH="/data/.bun/install/global/node_modules:/home/node/.bun/install/global/node_modules"
 
 # Health check
 # /health can return 503 when control-ui assets are intentionally omitted.
@@ -130,7 +134,7 @@ ENV NODE_PATH="/data/.bun/install/global/node_modules:/home/node/.bun/install/gl
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s \
     CMD sh -c 'if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then curl -fsS -H "Authorization: Bearer ${OPENCLAW_GATEWAY_TOKEN}" "http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/__openclaw__/canvas/" >/dev/null; else curl -fsS "http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/__openclaw__/canvas/" >/dev/null; fi || exit 1'
 
-EXPOSE 18789
+EXPOSE 18789 19791 19793
 
 # Set credentials directory to persistent storage
 ENV OPENCLAW_OAUTH_DIR=/data/credentials

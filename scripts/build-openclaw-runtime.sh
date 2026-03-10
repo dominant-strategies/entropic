@@ -135,6 +135,7 @@ rsync -a --delete "$OPENCLAW_SOURCE/docs/reference/templates/" "$STAGING_DIR/doc
 
 # Copy bundled plugins (curated set for the store)
 mkdir -p "$STAGING_DIR/extensions"
+mkdir -p "$STAGING_DIR/bundled-skills"
 
 PLUGINS_TO_BUNDLE=(
     "memory-core"

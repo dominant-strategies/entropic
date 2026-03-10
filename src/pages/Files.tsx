@@ -1,5 +1,18 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense, type ReactNode, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  lazy,
+  Suspense,
+  type ReactNode,
+  type ClipboardEvent as ReactClipboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type WheelEvent as ReactWheelEvent,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import { Store } from "@tauri-apps/plugin-store";
 import {
@@ -19,7 +32,6 @@ import {
   X,
   ArrowUp,
   MessageSquare,
-  Send,
   Loader2,
   Image,
   Puzzle,
@@ -31,13 +43,11 @@ import {
   CalendarClock,
   ListTodo,
   CreditCard,
+  MoreHorizontal,
+  Pin,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
-import {
-  createGatewayClient,
-  type GatewayClient,
-  type ChatEvent,
-} from "../lib/gateway";
-import { resolveGatewayAuth } from "../lib/gateway-auth";
 import { loadOnboardingData } from "../lib/profile";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
 const PluginStore = lazy(() => import("./Store").then((m) => ({ default: m.Store })));
@@ -48,8 +58,21 @@ const Settings = lazy(() => import("./Settings").then((m) => ({ default: m.Setti
 const Tasks = lazy(() => import("./Tasks").then((m) => ({ default: m.Tasks })));
 const Jobs = lazy(() => import("./Jobs").then((m) => ({ default: m.Jobs })));
 const BillingPage = lazy(() => import("./BillingPage").then((m) => ({ default: m.BillingPage })));
+import {
+  Chat,
+  type ChatSession as SharedChatSession,
+  type ChatSessionActionRequest,
+} from "./Chat";
 import { ModelSelector } from "../components/ModelSelector";
 import { useAuth } from "../contexts/AuthContext";
+import {
+  goEmbeddedPreviewBack,
+  goEmbeddedPreviewForward,
+  hideEmbeddedPreviewWebview,
+  isTrustedLocalPreviewUrl,
+  reloadEmbeddedPreview,
+  syncEmbeddedPreviewWebview,
+} from "../lib/nativePreview";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -61,9 +84,11 @@ type WorkspaceFileEntry = {
 
 type Props = {
   gatewayRunning: boolean;
+  gatewayRetryIn?: number | null;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
   onGatewayToggle: () => void;
+  onRecoverProxyAuth?: () => Promise<boolean> | boolean;
   isTogglingGateway: boolean;
   experimentalDesktop: boolean;
   onExperimentalDesktopChange: (value: boolean) => void;
@@ -77,12 +102,13 @@ type Props = {
   onImageModelChange: (model: string) => void;
 };
 type ViewMode = "grid" | "list";
-type ChatMessage = { id: string; role: "user" | "assistant"; content: string };
 type DesktopIcon = { id: string; x: number; y: number };
 type BrowserSnapshot = {
   session_id: string;
   url: string;
   title: string;
+  live_ws_url?: string | null;
+  remote_desktop_url?: string | null;
   text: string;
   screenshot_base64: string;
   screenshot_width: number;
@@ -99,6 +125,44 @@ type BrowserSnapshot = {
   }>;
   can_go_back: boolean;
   can_go_forward: boolean;
+};
+
+type BrowserLiveState = {
+  session_id: string;
+  url: string;
+  title: string;
+  live_ws_url?: string | null;
+  remote_desktop_url?: string | null;
+  viewport_width: number;
+  viewport_height: number;
+  can_go_back: boolean;
+  can_go_forward: boolean;
+};
+
+type EmbeddedPreviewState = {
+  url: string;
+  title: string | null;
+};
+
+type BrowserTabState = {
+  id: string;
+  title: string | null;
+  urlInput: string;
+  sessionId: string | null;
+  embeddedPreview: EmbeddedPreviewState | null;
+  snapshot: BrowserSnapshot | null;
+  liveState: BrowserLiveState | null;
+  liveError: string | null;
+  loading: boolean;
+};
+
+type PersistedBrowserTab = {
+  id: string;
+  title: string | null;
+  urlInput: string;
+  sessionId: string | null;
+  embeddedPreviewUrl: string | null;
+  embeddedPreviewTitle: string | null;
 };
 
 const DEFAULT_WINDOW_Z: Record<string, number> = {
@@ -119,8 +183,27 @@ const DEFAULT_WINDOW_Z: Record<string, number> = {
 const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md"]);
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
-const GATEWAY_URL = "ws://localhost:19789";
+const HTML_EXTS = new Set(["html", "htm"]);
+const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
+const DESKTOP_SESSION_STORAGE_KEY = "entropic.desktop.session.v1";
+const DEFAULT_DESKTOP_CHAT_TITLE = "New chat";
+const CHAT_WORKSPACE_PREFIXES = [
+  "/data/.openclaw/workspace",
+  "/data/workspace",
+  "/home/node/.openclaw/workspace",
+];
+const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/node\/\.openclaw\/workspace)(?:\/[^\s`"'<>]+)?)/g;
 const DEFAULT_BROWSER_URL = "https://clawhub.ai/skills";
+const DEFAULT_BROWSER_LIVE_WS_BASE = "ws://127.0.0.1:19792/live";
+const CONTAINER_LOCAL_BROWSER_BASE = "http://container.localhost:19791";
+const WORKSPACE_FOLDER_REFRESH_MS = 1500;
+const BROWSER_DETAILS_PANEL_HEIGHT = 0;
+const BROWSER_APP_WINDOW_TITLEBAR_HEIGHT = 34;
+const BROWSER_TOOLBAR_HEIGHT = 49;
+const LOCAL_BROWSER_INPUT_RE = /^(?:container\.localhost|runtime\.localhost|localhost|127\.0\.0\.1)(?::\d+)?(?:[/?#].*)?$/i;
+const BROWSER_DESKTOP_MIN_VIEWPORT_WIDTH = 1180;
+const BROWSER_DESKTOP_MIN_VIEWPORT_HEIGHT = 760;
+const BROWSER_DESKTOP_VIEWPORT_SCALE = 1.08;
 const PANEL_FALLBACK = (
   <div className="p-4 text-xs text-[var(--text-tertiary)]">Loading…</div>
 );
@@ -130,7 +213,220 @@ type PreviewState =
   | { kind: "image"; name: string; dataUrl: string }
   | { kind: "binary"; name: string; size: number };
 
+type WindowResizeDirection = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
+type WindowResizeState = { sx: number; sy: number; ox: number; oy: number; ow: number; oh: number };
+type ChatWorkspaceReference = {
+  key: string;
+  path: string;
+  name: string;
+  isHtml: boolean;
+  looksLikeFile: boolean;
+};
+type DesktopHandoff = {
+  path?: string;
+  url?: string;
+  action: "open" | "preview" | "browser";
+  looksLikeFile?: boolean;
+};
+type WindowPoint = { x: number; y: number };
+type WindowSize = { w: number; h: number };
+type DesktopSessionState = {
+  finderOpen: boolean;
+  chatOpen: boolean;
+  chatNavCollapsed: boolean;
+  browserOpen: boolean;
+  pluginsOpen: boolean;
+  skillsOpen: boolean;
+  channelsOpen: boolean;
+  tasksOpen: boolean;
+  jobsOpen: boolean;
+  logsOpen: boolean;
+  billingOpen: boolean;
+  settingsOpen: boolean;
+  finderPos: WindowPoint;
+  finderSize: WindowSize;
+  chatPos: WindowPoint;
+  chatSize: WindowSize;
+  browserPos: WindowPoint;
+  browserSize: WindowSize;
+  pluginsPos: WindowPoint;
+  skillsPos: WindowPoint;
+  channelsPos: WindowPoint;
+  tasksPos: WindowPoint;
+  jobsPos: WindowPoint;
+  logsPos: WindowPoint;
+  billingPos: WindowPoint;
+  settingsPos: WindowPoint;
+  windowZ: Record<string, number>;
+  zCounter: number;
+  currentPath: string;
+  history: string[];
+  historyIndex: number;
+  viewMode: ViewMode;
+  selected: string | null;
+  browserUrlInput: string;
+  browserSessionId: string | null;
+  browserEmbeddedPreviewUrl: string | null;
+  browserEmbeddedPreviewTitle: string | null;
+  browserTabs: PersistedBrowserTab[];
+  activeBrowserTabId: string | null;
+  desktopIcons: Record<string, DesktopIcon>;
+};
+
+function makeBrowserTabId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `browser-tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createBrowserTabState(overrides: Partial<BrowserTabState> = {}): BrowserTabState {
+  return {
+    id: overrides.id ?? makeBrowserTabId(),
+    title: overrides.title ?? null,
+    urlInput: overrides.urlInput ?? DEFAULT_BROWSER_URL,
+    sessionId: overrides.sessionId ?? null,
+    embeddedPreview: overrides.embeddedPreview ?? null,
+    snapshot: overrides.snapshot ?? null,
+    liveState: overrides.liveState ?? null,
+    liveError: overrides.liveError ?? null,
+    loading: overrides.loading ?? false,
+  };
+}
+
+function persistBrowserTabState(tab: BrowserTabState): PersistedBrowserTab {
+  return {
+    id: tab.id,
+    title: tab.title ?? null,
+    urlInput: tab.urlInput,
+    sessionId: tab.sessionId,
+    embeddedPreviewUrl: tab.embeddedPreview?.url ?? null,
+    embeddedPreviewTitle: tab.embeddedPreview?.title ?? null,
+  };
+}
+
+function restoreBrowserTabState(tab: PersistedBrowserTab): BrowserTabState {
+  return createBrowserTabState({
+    id: tab.id,
+    title: tab.title ?? null,
+    urlInput: tab.urlInput || DEFAULT_BROWSER_URL,
+    sessionId: tab.sessionId ?? null,
+    embeddedPreview: tab.embeddedPreviewUrl
+      ? {
+          url: tab.embeddedPreviewUrl,
+          title: tab.embeddedPreviewTitle ?? null,
+        }
+      : null,
+  });
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function asWindowPoint(value: unknown): WindowPoint | null {
+  if (!isRecord(value)) return null;
+  const x = Number(value.x);
+  const y = Number(value.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x, y };
+}
+
+function asWindowSize(value: unknown): WindowSize | null {
+  if (!isRecord(value)) return null;
+  const w = Number(value.w);
+  const h = Number(value.h);
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return null;
+  return { w, h };
+}
+
+function desktopChatSessionTitle(session: SharedChatSession): string {
+  return session.label || session.derivedTitle || session.displayName || DEFAULT_DESKTOP_CHAT_TITLE;
+}
+
+function sortDesktopChatSessions(list: SharedChatSession[]): SharedChatSession[] {
+  return [...list].sort((a, b) => {
+    const aPinned = a.pinned ? 1 : 0;
+    const bPinned = b.pinned ? 1 : 0;
+    if (aPinned !== bPinned) return bPinned - aPinned;
+    const aUpdated = typeof a.updatedAt === "number" ? a.updatedAt : 0;
+    const bUpdated = typeof b.updatedAt === "number" ? b.updatedAt : 0;
+    return bUpdated - aUpdated;
+  });
+}
+
+function clampWindowFrame(
+  bounds: { width: number; height: number },
+  position: WindowPoint,
+  size: WindowSize,
+  minSize: WindowSize,
+): { position: WindowPoint; size: WindowSize } {
+  const maxWidth = Math.max(minSize.w, Math.floor(bounds.width - 12));
+  const maxHeight = Math.max(minSize.h, Math.floor(bounds.height - 12));
+  const nextSize = {
+    w: Math.min(Math.max(size.w, minSize.w), maxWidth),
+    h: Math.min(Math.max(size.h, minSize.h), maxHeight),
+  };
+  const maxX = Math.max(0, Math.floor(bounds.width - nextSize.w));
+  const maxY = Math.max(0, Math.floor(bounds.height - nextSize.h));
+  return {
+    position: {
+      x: Math.min(Math.max(0, position.x), maxX),
+      y: Math.min(Math.max(0, position.y), maxY),
+    },
+    size: nextSize,
+  };
+}
+
+function workspaceEntriesEqual(a: WorkspaceFileEntry[], b: WorkspaceFileEntry[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (
+      left.name !== right.name
+      || left.path !== right.path
+      || left.is_directory !== right.is_directory
+      || left.size !== right.size
+      || left.modified_at !== right.modified_at
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function asStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const next = value.filter((entry): entry is string => typeof entry === "string");
+  return next.length > 0 ? next : [""];
+}
+
+function asWindowZ(value: unknown): Record<string, number> | null {
+  if (!isRecord(value)) return null;
+  const next: Record<string, number> = {};
+  for (const [key, rawValue] of Object.entries(value)) {
+    const numeric = Number(rawValue);
+    if (Number.isFinite(numeric)) {
+      next[key] = numeric;
+    }
+  }
+  return Object.keys(next).length > 0 ? next : null;
+}
+
+function asDesktopIcons(value: unknown): Record<string, DesktopIcon> | null {
+  if (!isRecord(value)) return null;
+  const next: Record<string, DesktopIcon> = {};
+  for (const [key, rawValue] of Object.entries(value)) {
+    const point = asWindowPoint(rawValue);
+    if (!point) continue;
+    next[key] = { id: key, x: point.x, y: point.y };
+  }
+  return Object.keys(next).length > 0 ? next : null;
+}
 
 function formatSize(bytes: number): string {
   if (bytes === 0) return "Zero bytes";
@@ -182,8 +478,115 @@ function normalizeBrowserUrl(raw: string): string {
   const value = raw.trim();
   if (!value) return "";
   if (/^https?:\/\//i.test(value)) return value;
+  if (LOCAL_BROWSER_INPUT_RE.test(value)) return `http://${value}`;
   if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(value)) return value;
   return `https://${value}`;
+}
+
+function presentBrowserUrl(raw: string): string {
+  if (!raw) return raw;
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    const proxiedPortMatch = host.match(/^p(\d+)\.localhost$/i);
+    if (proxiedPortMatch && parsed.port === "19792") {
+      parsed.hostname = "container.localhost";
+      parsed.port = proxiedPortMatch[1] || "";
+      return parsed.toString();
+    }
+    if ((host === "127.0.0.1" || host === "localhost") && parsed.port === "19792") {
+      if (parsed.pathname === "/__workspace__/" || parsed.pathname.startsWith("/__workspace__/")) {
+        parsed.hostname = "container.localhost";
+        parsed.port = "19791";
+        return parsed.toString();
+      }
+    }
+    if (host === "127.0.0.1" || host === "localhost") {
+      parsed.hostname = "container.localhost";
+      return parsed.toString();
+    }
+    return raw;
+  } catch {
+    return raw;
+  }
+}
+
+function requestedBrowserViewportSize(width: number, height: number) {
+  return {
+    width: Math.max(
+      BROWSER_DESKTOP_MIN_VIEWPORT_WIDTH,
+      Math.round(Math.max(320, width) * BROWSER_DESKTOP_VIEWPORT_SCALE),
+    ),
+    height: Math.max(
+      BROWSER_DESKTOP_MIN_VIEWPORT_HEIGHT,
+      Math.round(Math.max(240, height) * BROWSER_DESKTOP_VIEWPORT_SCALE),
+    ),
+  };
+}
+
+function workspaceBrowserUrl(path: string): string {
+  const normalized = path
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return normalized
+    ? `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace__/${normalized}`
+    : `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace__/`;
+}
+
+function trimChatWorkspaceToken(raw: string): string {
+  return raw
+    .replace(/^[("'`\[]+/, "")
+    .replace(/[)"'`\],:;.!?]+$/, "");
+}
+
+function normalizeChatWorkspacePath(raw: string): string | null {
+  const trimmed = trimChatWorkspaceToken(raw.trim());
+  for (const prefix of CHAT_WORKSPACE_PREFIXES) {
+    if (trimmed === prefix) {
+      return "";
+    }
+    if (trimmed.startsWith(`${prefix}/`)) {
+      return trimmed.slice(prefix.length + 1);
+    }
+  }
+  return null;
+}
+
+function workspacePathName(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  return parts[parts.length - 1] || "Workspace";
+}
+
+function workspacePathParent(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  parts.pop();
+  return parts.join("/");
+}
+
+function extractChatWorkspaceReferences(content: string): ChatWorkspaceReference[] {
+  const refs: ChatWorkspaceReference[] = [];
+  const seen = new Set<string>();
+
+  for (const match of content.matchAll(CHAT_WORKSPACE_PATH_RE)) {
+    const path = normalizeChatWorkspacePath(match[1] || "");
+    if (path === null) continue;
+    const name = workspacePathName(path);
+    const ext = name.split(".").pop()?.toLowerCase() || "";
+    const ref: ChatWorkspaceReference = {
+      key: path || "__workspace__",
+      path,
+      name,
+      isHtml: HTML_EXTS.has(ext),
+      looksLikeFile: Boolean(path) && name.includes("."),
+    };
+    if (seen.has(ref.key)) continue;
+    seen.add(ref.key);
+    refs.push(ref);
+  }
+
+  return refs;
 }
 
 function FolderIcon({ size = 64, selected = false }: { size?: number; selected?: boolean }) {
@@ -202,8 +605,10 @@ function AppWindow({
   size,
   onClose,
   onDragStart,
+  onResizeStart,
   onFocus,
   zIndex,
+  glass = true,
   children,
 }: {
   title: string;
@@ -212,10 +617,26 @@ function AppWindow({
   size: { w: number; h: number };
   onClose: () => void;
   onDragStart: (e: ReactMouseEvent<HTMLDivElement>) => void;
+  onResizeStart?: (direction: WindowResizeDirection, e: ReactMouseEvent<HTMLDivElement>) => void;
   onFocus: () => void;
   zIndex: number;
+  glass?: boolean;
   children: ReactNode;
 }) {
+  const resizeHandles: Array<{
+    direction: WindowResizeDirection;
+    className: string;
+  }> = [
+    { direction: "n", className: "absolute left-4 right-4 top-0 z-20 h-3 cursor-ns-resize" },
+    { direction: "s", className: "absolute bottom-0 left-4 right-4 z-20 h-3 cursor-ns-resize" },
+    { direction: "e", className: "absolute right-0 top-4 bottom-4 z-20 w-3 cursor-ew-resize" },
+    { direction: "w", className: "absolute left-0 top-4 bottom-4 z-20 w-3 cursor-ew-resize" },
+    { direction: "nw", className: "absolute left-0 top-0 z-20 h-4 w-4 cursor-nwse-resize" },
+    { direction: "ne", className: "absolute right-0 top-0 z-20 h-4 w-4 cursor-nesw-resize" },
+    { direction: "se", className: "absolute bottom-0 right-0 z-20 h-4 w-4 cursor-nwse-resize" },
+    { direction: "sw", className: "absolute bottom-0 left-0 z-20 h-4 w-4 cursor-nesw-resize" },
+  ];
+
   return (
     <div
       className="absolute flex flex-col rounded-xl overflow-hidden animate-scale-in"
@@ -225,9 +646,9 @@ function AppWindow({
         width: size.w,
         height: size.h,
         zIndex,
-        background: "rgba(248,248,248,0.92)",
-        backdropFilter: "blur(18px)",
-        WebkitBackdropFilter: "blur(18px)",
+        background: glass ? "rgba(248,248,248,0.92)" : "#f6f1e8",
+        backdropFilter: glass ? "blur(18px)" : "none",
+        WebkitBackdropFilter: glass ? "blur(18px)" : "none",
         boxShadow: "0 24px 70px rgba(0,0,0,0.28), 0 0 0 0.5px rgba(255,255,255,0.6)",
         border: "1px solid rgba(255,255,255,0.65)",
       }}
@@ -236,7 +657,10 @@ function AppWindow({
     >
       <div
         className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing"
-        style={{ background: "rgba(255,255,255,0.9)", borderBottom: "1px solid rgba(0,0,0,0.08)" }}
+        style={{
+          background: glass ? "rgba(255,255,255,0.9)" : "#f9f4ec",
+          borderBottom: "1px solid rgba(0,0,0,0.08)",
+        }}
         onMouseDown={onDragStart}
       >
         <div className="flex items-center gap-2 z-10">
@@ -260,9 +684,24 @@ function AppWindow({
           </div>
         </div>
       </div>
-      <div className="flex-1 overflow-hidden" style={{ background: "rgba(255,255,255,0.94)" }}>
+      <div
+        className="flex-1 overflow-hidden"
+        style={{ background: glass ? "rgba(255,255,255,0.94)" : "#f6f1e8" }}
+      >
         <div className="h-full overflow-auto">{children}</div>
       </div>
+      {onResizeStart && (
+        <>
+          {resizeHandles.map((handle) => (
+            <div
+              key={handle.direction}
+              className={handle.className}
+              onMouseDown={(e) => onResizeStart(handle.direction, e)}
+            />
+          ))}
+          <div className="pointer-events-none absolute bottom-1 right-1 z-10 h-3 w-3 rounded-sm border-r-2 border-b-2 border-black/25" />
+        </>
+      )}
     </div>
   );
 }
@@ -270,9 +709,11 @@ function AppWindow({
 // ═════════════════════════════════════════════════════════════════════
 export function Files({
   gatewayRunning,
+  gatewayRetryIn,
   integrationsSyncing,
   integrationsMissing,
   onGatewayToggle,
+  onRecoverProxyAuth,
   isTogglingGateway,
   experimentalDesktop,
   onExperimentalDesktopChange,
@@ -314,10 +755,15 @@ export function Files({
 
   // Chat window drag
   const [chatPos, setChatPos] = useState({ x: 120, y: 40 });
+  const [chatSize, setChatSize] = useState({ w: 860, h: 560 });
+  const [chatNavCollapsed, setChatNavCollapsed] = useState(false);
   const chatDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const [browserPos, setBrowserPos] = useState({ x: 140, y: 52 });
-  const [browserSize] = useState({ w: 840, h: 560 });
+  const chatResizeRef = useRef<WindowResizeState | null>(null);
+  const [desktopBounds, setDesktopBounds] = useState({ width: 0, height: 0 });
+  const [browserPos, setBrowserPos] = useState({ x: 108, y: 40 });
+  const [browserSize, setBrowserSize] = useState({ w: 1180, h: 760 });
   const browserDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const browserResizeRef = useRef<WindowResizeState | null>(null);
 
   // Plugin windows drag
   const [pluginsPos, setPluginsPos] = useState({ x: 180, y: 80 });
@@ -367,22 +813,40 @@ export function Files({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const createFolderInputRef = useRef<HTMLInputElement>(null);
+  const filesFetchSeqRef = useRef(0);
+  const filesLoadingSeqRef = useRef(0);
 
   // Chat
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState("");
-  const [chatLoading, setChatLoading] = useState(false);
-  const [chatConnected, setChatConnected] = useState(false);
-  const [chatConnecting, setChatConnecting] = useState(false);
-  const chatClientRef = useRef<GatewayClient | null>(null);
-  const chatSessionRef = useRef<string | null>(null);
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  const [chatSessions, setChatSessions] = useState<SharedChatSession[]>([]);
+  const [chatCurrentSession, setChatCurrentSession] = useState<string | null>(null);
+  const [chatRequestedSession, setChatRequestedSession] = useState<string | null>(null);
+  const [chatRequestedAction, setChatRequestedAction] = useState<ChatSessionActionRequest | null>(null);
+  const [chatSessionQuery, setChatSessionQuery] = useState("");
+  const [openChatSessionMenuKey, setOpenChatSessionMenuKey] = useState<string | null>(null);
+  const initialBrowserTabRef = useRef<BrowserTabState>(createBrowserTabState());
+  const [browserTabs, setBrowserTabs] = useState<BrowserTabState[]>([initialBrowserTabRef.current]);
+  const [activeBrowserTabId, setActiveBrowserTabId] = useState<string | null>(initialBrowserTabRef.current.id);
   const [browserUrlInput, setBrowserUrlInput] = useState(DEFAULT_BROWSER_URL);
   const [browserLoading, setBrowserLoading] = useState(false);
   const [browserLoadError, setBrowserLoadError] = useState<string | null>(null);
   const [browserSessionId, setBrowserSessionId] = useState<string | null>(null);
+  const [browserEmbeddedPreview, setBrowserEmbeddedPreview] = useState<EmbeddedPreviewState | null>(null);
   const [browserSnapshot, setBrowserSnapshot] = useState<BrowserSnapshot | null>(null);
   const [browserClickingId, setBrowserClickingId] = useState<string | null>(null);
+  const [browserLiveState, setBrowserLiveState] = useState<BrowserLiveState | null>(null);
+  const [browserLiveHasFrame, setBrowserLiveHasFrame] = useState(false);
+  const [browserLiveConnected, setBrowserLiveConnected] = useState(false);
+  const [browserLiveError, setBrowserLiveError] = useState<string | null>(null);
+  const browserLiveSocketRef = useRef<WebSocket | null>(null);
+  const browserLiveImageRef = useRef<HTMLImageElement | null>(null);
+  const browserViewportRef = useRef<HTMLDivElement | null>(null);
+  const browserLiveMovePendingRef = useRef<{ x: number; y: number } | null>(null);
+  const browserLiveMoveRafRef = useRef<number | null>(null);
+  const browserLiveFramePendingRef = useRef<string | null>(null);
+  const browserLiveFrameRafRef = useRef<number | null>(null);
+  const browserLiveLastFrameRef = useRef<string | null>(null);
+  const browserLiveSizeRef = useRef<string>("");
+  const browserEmbeddedPreviewSyncKeyRef = useRef<string>("");
 
   const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
 
@@ -399,6 +863,140 @@ export function Files({
     moved: boolean;
   } | null>(null);
   const iconClickGuardRef = useRef(false);
+  const [desktopStateHydrated, setDesktopStateHydrated] = useState(false);
+  const desktopSessionSnapshotRef = useRef<DesktopSessionState | null>(null);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(DESKTOP_SESSION_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as Partial<DesktopSessionState>;
+      if (!isRecord(saved)) return;
+
+      if (typeof saved.finderOpen === "boolean") setFinderOpen(saved.finderOpen);
+      if (typeof saved.chatOpen === "boolean") setChatOpen(saved.chatOpen);
+      if (typeof saved.chatNavCollapsed === "boolean") setChatNavCollapsed(saved.chatNavCollapsed);
+      if (typeof saved.browserOpen === "boolean") setBrowserOpen(saved.browserOpen);
+      if (typeof saved.pluginsOpen === "boolean") setPluginsOpen(saved.pluginsOpen);
+      if (typeof saved.skillsOpen === "boolean") setSkillsOpen(saved.skillsOpen);
+      if (typeof saved.channelsOpen === "boolean") setChannelsOpen(saved.channelsOpen);
+      if (typeof saved.tasksOpen === "boolean") setTasksOpen(saved.tasksOpen);
+      if (typeof saved.jobsOpen === "boolean") setJobsOpen(saved.jobsOpen);
+      if (typeof saved.logsOpen === "boolean") setLogsOpen(saved.logsOpen);
+      if (typeof saved.billingOpen === "boolean") setBillingOpen(saved.billingOpen);
+      if (typeof saved.settingsOpen === "boolean") setSettingsOpen(saved.settingsOpen);
+
+      const nextFinderPos = asWindowPoint(saved.finderPos);
+      if (nextFinderPos) setFinderPos(nextFinderPos);
+      const nextFinderSize = asWindowSize(saved.finderSize);
+      if (nextFinderSize) setFinderSize(nextFinderSize);
+      const nextChatPos = asWindowPoint(saved.chatPos);
+      if (nextChatPos) setChatPos(nextChatPos);
+      const nextChatSize = asWindowSize(saved.chatSize);
+      if (nextChatSize) setChatSize(nextChatSize);
+      const nextBrowserPos = asWindowPoint(saved.browserPos);
+      if (nextBrowserPos) setBrowserPos(nextBrowserPos);
+      const nextBrowserSize = asWindowSize(saved.browserSize);
+      if (nextBrowserSize) setBrowserSize(nextBrowserSize);
+      const nextPluginsPos = asWindowPoint(saved.pluginsPos);
+      if (nextPluginsPos) setPluginsPos(nextPluginsPos);
+      const nextSkillsPos = asWindowPoint(saved.skillsPos);
+      if (nextSkillsPos) setSkillsPos(nextSkillsPos);
+      const nextChannelsPos = asWindowPoint(saved.channelsPos);
+      if (nextChannelsPos) setChannelsPos(nextChannelsPos);
+      const nextTasksPos = asWindowPoint(saved.tasksPos);
+      if (nextTasksPos) setTasksPos(nextTasksPos);
+      const nextJobsPos = asWindowPoint(saved.jobsPos);
+      if (nextJobsPos) setJobsPos(nextJobsPos);
+      const nextLogsPos = asWindowPoint(saved.logsPos);
+      if (nextLogsPos) setLogsPos(nextLogsPos);
+      const nextBillingPos = asWindowPoint(saved.billingPos);
+      if (nextBillingPos) setBillingPos(nextBillingPos);
+      const nextSettingsPos = asWindowPoint(saved.settingsPos);
+      if (nextSettingsPos) setSettingsPos(nextSettingsPos);
+
+      const nextWindowZ = asWindowZ(saved.windowZ);
+      if (nextWindowZ) {
+        setWindowZ(nextWindowZ);
+      }
+      if (typeof saved.zCounter === "number" && Number.isFinite(saved.zCounter)) {
+        zCounter.current = saved.zCounter;
+      } else if (nextWindowZ) {
+        zCounter.current = Math.max(...Object.values(nextWindowZ));
+      }
+
+      if (typeof saved.currentPath === "string") setCurrentPath(saved.currentPath);
+      const nextHistory = asStringArray(saved.history);
+      if (nextHistory) setHistory(nextHistory);
+      if (typeof saved.historyIndex === "number" && Number.isFinite(saved.historyIndex)) {
+        setHistoryIndex(Math.max(0, Math.floor(saved.historyIndex)));
+      }
+      if (saved.viewMode === "grid" || saved.viewMode === "list") setViewMode(saved.viewMode);
+      if (typeof saved.selected === "string" || saved.selected === null) setSelected(saved.selected ?? null);
+      if (typeof saved.browserUrlInput === "string") setBrowserUrlInput(presentBrowserUrl(saved.browserUrlInput));
+      if (typeof saved.browserSessionId === "string" || saved.browserSessionId === null) {
+        setBrowserSessionId(saved.browserSessionId ?? null);
+      }
+      if (
+        typeof saved.browserEmbeddedPreviewUrl === "string" ||
+        saved.browserEmbeddedPreviewUrl === null
+      ) {
+        setBrowserEmbeddedPreview(
+          saved.browserEmbeddedPreviewUrl
+            ? {
+                url: saved.browserEmbeddedPreviewUrl,
+                title:
+                  typeof saved.browserEmbeddedPreviewTitle === "string"
+                    ? saved.browserEmbeddedPreviewTitle
+                    : null,
+              }
+            : null,
+        );
+      }
+      if (Array.isArray(saved.browserTabs) && saved.browserTabs.length > 0) {
+        const restoredTabs = saved.browserTabs
+          .map((value) => {
+            if (!isRecord(value) || typeof value.id !== "string") return null;
+            return restoreBrowserTabState({
+              id: value.id,
+              title: typeof value.title === "string" ? value.title : null,
+              urlInput: typeof value.urlInput === "string" ? value.urlInput : DEFAULT_BROWSER_URL,
+              sessionId: typeof value.sessionId === "string" ? value.sessionId : null,
+              embeddedPreviewUrl:
+                typeof value.embeddedPreviewUrl === "string" ? value.embeddedPreviewUrl : null,
+              embeddedPreviewTitle:
+                typeof value.embeddedPreviewTitle === "string" ? value.embeddedPreviewTitle : null,
+            });
+          })
+          .filter((value): value is BrowserTabState => value !== null);
+        if (restoredTabs.length > 0) {
+          const nextActiveTabId =
+            typeof saved.activeBrowserTabId === "string"
+              ? saved.activeBrowserTabId
+              : restoredTabs[0]?.id ?? null;
+          const activeTab =
+            restoredTabs.find((tab) => tab.id === nextActiveTabId) ?? restoredTabs[0] ?? null;
+          setBrowserTabs(restoredTabs);
+          setActiveBrowserTabId(activeTab?.id ?? null);
+          if (activeTab) {
+            setBrowserUrlInput(presentBrowserUrl(activeTab.urlInput));
+            setBrowserSessionId(activeTab.sessionId);
+            setBrowserEmbeddedPreview(activeTab.embeddedPreview);
+            setBrowserSnapshot(activeTab.snapshot);
+            setBrowserLiveState(activeTab.liveState);
+            setBrowserLiveError(activeTab.liveError);
+            setBrowserLoading(activeTab.loading);
+          }
+        }
+      }
+      const nextDesktopIcons = asDesktopIcons(saved.desktopIcons);
+      if (nextDesktopIcons) setDesktopIcons(nextDesktopIcons);
+    } catch {
+      // Ignore invalid persisted desktop state.
+    } finally {
+      setDesktopStateHydrated(true);
+    }
+  }, []);
 
   function handleIconMouseDown(id: string, e: ReactMouseEvent<HTMLElement>) {
     e.stopPropagation();
@@ -463,15 +1061,214 @@ export function Files({
     }).catch(() => {});
   }, []);
 
-  // Resize finder when container changes
+  // Track desktop bounds for window clamping.
   useEffect(() => {
     if (!containerRef.current) return;
     const ro = new ResizeObserver(([e]) => {
-      const { width, height } = e.contentRect;
-      setFinderSize({ w: Math.min(680, width - 60), h: Math.min(460, height - 80) });
+      const width = Math.max(0, Math.floor(e.contentRect.width));
+      const height = Math.max(0, Math.floor(e.contentRect.height));
+      setDesktopBounds((prev) => (
+        prev.width === width && prev.height === height
+          ? prev
+          : { width, height }
+      ));
     });
     ro.observe(containerRef.current);
     return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (desktopBounds.width <= 0 || desktopBounds.height <= 0) return;
+    const bounds = desktopBounds;
+
+    const clampResizableWindow = (
+      position: WindowPoint,
+      size: WindowSize,
+      minSize: WindowSize,
+      setPosition: (value: WindowPoint | ((prev: WindowPoint) => WindowPoint)) => void,
+      setWindowSize: (value: WindowSize | ((prev: WindowSize) => WindowSize)) => void,
+    ) => {
+      const next = clampWindowFrame(bounds, position, size, minSize);
+      setPosition((prev) => (
+        prev.x === next.position.x && prev.y === next.position.y ? prev : next.position
+      ));
+      setWindowSize((prev) => (
+        prev.w === next.size.w && prev.h === next.size.h ? prev : next.size
+      ));
+    };
+
+    const clampFixedWindow = (
+      position: WindowPoint,
+      size: WindowSize,
+      setPosition: (value: WindowPoint | ((prev: WindowPoint) => WindowPoint)) => void,
+    ) => {
+      const next = clampWindowFrame(bounds, position, size, size);
+      setPosition((prev) => (
+        prev.x === next.position.x && prev.y === next.position.y ? prev : next.position
+      ));
+    };
+
+    clampResizableWindow(finderPos, finderSize, { w: 320, h: 240 }, setFinderPos, setFinderSize);
+    clampResizableWindow(chatPos, chatSize, { w: 720, h: 500 }, setChatPos, setChatSize);
+    clampResizableWindow(browserPos, browserSize, { w: 640, h: 420 }, setBrowserPos, setBrowserSize);
+    clampFixedWindow(pluginsPos, pluginsSize, setPluginsPos);
+    clampFixedWindow(skillsPos, skillsSize, setSkillsPos);
+    clampFixedWindow(channelsPos, channelsSize, setChannelsPos);
+    clampFixedWindow(tasksPos, tasksSize, setTasksPos);
+    clampFixedWindow(jobsPos, jobsSize, setJobsPos);
+    clampFixedWindow(logsPos, logsSize, setLogsPos);
+    clampFixedWindow(billingPos, billingSize, setBillingPos);
+    clampFixedWindow(settingsPos, settingsSize, setSettingsPos);
+  }, [
+    desktopBounds,
+    finderPos,
+    finderSize,
+    chatPos,
+    chatSize,
+    browserPos,
+    browserSize,
+    pluginsPos,
+    skillsPos,
+    channelsPos,
+    tasksPos,
+    jobsPos,
+    logsPos,
+    billingPos,
+    settingsPos,
+    pluginsSize,
+    skillsSize,
+    channelsSize,
+    tasksSize,
+    jobsSize,
+    logsSize,
+    billingSize,
+    settingsSize,
+  ]);
+
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest("[data-desktop-chat-session-menu]") || target.closest("[data-desktop-chat-session-trigger]")) {
+        return;
+      }
+      setOpenChatSessionMenuKey(null);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, []);
+
+  useEffect(() => {
+    if (!openChatSessionMenuKey) return;
+    if (chatSessions.some((session) => session.key === openChatSessionMenuKey)) return;
+    setOpenChatSessionMenuKey(null);
+  }, [chatSessions, openChatSessionMenuKey]);
+
+  useEffect(() => {
+    if (!desktopStateHydrated) return;
+    const snapshot: DesktopSessionState = {
+      finderOpen,
+      chatOpen,
+      chatNavCollapsed,
+      browserOpen,
+      pluginsOpen,
+      skillsOpen,
+      channelsOpen,
+      tasksOpen,
+      jobsOpen,
+      logsOpen,
+      billingOpen,
+      settingsOpen,
+      finderPos,
+      finderSize,
+      chatPos,
+      chatSize,
+      browserPos,
+      browserSize,
+      pluginsPos,
+      skillsPos,
+      channelsPos,
+      tasksPos,
+      jobsPos,
+      logsPos,
+      billingPos,
+      settingsPos,
+      windowZ,
+      zCounter: zCounter.current,
+      currentPath,
+      history,
+      historyIndex,
+      viewMode,
+      selected,
+      browserUrlInput,
+      browserSessionId,
+      browserEmbeddedPreviewUrl: browserEmbeddedPreview?.url ?? null,
+      browserEmbeddedPreviewTitle: browserEmbeddedPreview?.title ?? null,
+      browserTabs: browserTabs.map(persistBrowserTabState),
+      activeBrowserTabId,
+      desktopIcons,
+    };
+    desktopSessionSnapshotRef.current = snapshot;
+    const timeoutId = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(DESKTOP_SESSION_STORAGE_KEY, JSON.stringify(snapshot));
+      } catch {
+        // Ignore storage failures.
+      }
+    }, 120);
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    desktopStateHydrated,
+    finderOpen,
+    chatOpen,
+    chatNavCollapsed,
+    browserOpen,
+    pluginsOpen,
+    skillsOpen,
+    channelsOpen,
+    tasksOpen,
+    jobsOpen,
+    logsOpen,
+    billingOpen,
+    settingsOpen,
+    finderPos,
+    finderSize,
+    chatPos,
+    chatSize,
+    browserPos,
+    browserSize,
+    pluginsPos,
+    skillsPos,
+    channelsPos,
+    tasksPos,
+    jobsPos,
+    logsPos,
+    billingPos,
+    settingsPos,
+    windowZ,
+    currentPath,
+    history,
+    historyIndex,
+    viewMode,
+    selected,
+    browserUrlInput,
+    browserSessionId,
+    browserEmbeddedPreview,
+    browserTabs,
+    activeBrowserTabId,
+    desktopIcons,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      const snapshot = desktopSessionSnapshotRef.current;
+      if (!snapshot) return;
+      try {
+        window.localStorage.setItem(DESKTOP_SESSION_STORAGE_KEY, JSON.stringify(snapshot));
+      } catch {
+        // Ignore storage failures.
+      }
+    };
   }, []);
 
   async function saveWallpaper(id: string, custom?: string | null) {
@@ -514,6 +1311,7 @@ export function Files({
     e: ReactMouseEvent<HTMLElement>,
     ref: React.MutableRefObject<{ sx: number; sy: number; ox: number; oy: number } | null>,
     pos: { x: number; y: number },
+    size: { w: number; h: number },
     setPos: (next: { x: number; y: number }) => void,
     id: string
   ) {
@@ -523,9 +1321,12 @@ export function Files({
     ref.current = { sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y };
     function onMove(ev: globalThis.MouseEvent) {
       if (!ref.current) return;
+      const bounds = containerRef.current?.getBoundingClientRect();
+      const maxX = bounds ? Math.max(0, Math.floor(bounds.width - size.w)) : Number.POSITIVE_INFINITY;
+      const maxY = bounds ? Math.max(0, Math.floor(bounds.height - size.h)) : Number.POSITIVE_INFINITY;
       setPos({
-        x: Math.max(0, ref.current.ox + ev.clientX - ref.current.sx),
-        y: Math.max(0, ref.current.oy + ev.clientY - ref.current.sy),
+        x: Math.min(Math.max(0, ref.current.ox + ev.clientX - ref.current.sx), maxX),
+        y: Math.min(Math.max(0, ref.current.oy + ev.clientY - ref.current.sy), maxY),
       });
     }
     function onUp() {
@@ -538,36 +1339,679 @@ export function Files({
   }
 
   function handleFinderDragStart(e: ReactMouseEvent<HTMLElement>) {
-    startWindowDrag(e, dragRef, finderPos, setFinderPos, "finder");
+    startWindowDrag(e, dragRef, finderPos, finderSize, setFinderPos, "finder");
   }
 
   function handleChatDragStart(e: ReactMouseEvent<HTMLElement>) {
-    startWindowDrag(e, chatDragRef, chatPos, setChatPos, "chat");
+    startWindowDrag(e, chatDragRef, chatPos, chatSize, setChatPos, "chat");
   }
 
-  const browserCurrentUrl = browserSnapshot?.url || browserUrlInput || DEFAULT_BROWSER_URL;
+  function startWindowResize(
+    e: ReactMouseEvent<HTMLElement>,
+    direction: WindowResizeDirection,
+    ref: React.MutableRefObject<WindowResizeState | null>,
+    pos: { x: number; y: number },
+    size: { w: number; h: number },
+    setPos: (next: { x: number; y: number }) => void,
+    setSize: (next: { w: number; h: number }) => void,
+    id: string,
+    minSize: { w: number; h: number },
+  ) {
+    e.preventDefault();
+    e.stopPropagation();
+    focusWindow(id);
+    ref.current = { sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y, ow: size.w, oh: size.h };
+    function onMove(ev: globalThis.MouseEvent) {
+      if (!ref.current) return;
+      const deltaX = ev.clientX - ref.current.sx;
+      const deltaY = ev.clientY - ref.current.sy;
+      const bounds = containerRef.current?.getBoundingClientRect();
+      const maxRight = bounds ? Math.floor(bounds.width - 12) : Number.POSITIVE_INFINITY;
+      const maxBottom = bounds ? Math.floor(bounds.height - 12) : Number.POSITIVE_INFINITY;
+      const originalLeft = ref.current.ox;
+      const originalTop = ref.current.oy;
+      const originalRight = ref.current.ox + ref.current.ow;
+      const originalBottom = ref.current.oy + ref.current.oh;
+
+      let nextLeft = originalLeft;
+      let nextTop = originalTop;
+      let nextRight = originalRight;
+      let nextBottom = originalBottom;
+
+      if (direction.includes("w")) {
+        nextLeft = Math.max(0, Math.min(originalLeft + deltaX, originalRight - minSize.w));
+      }
+      if (direction.includes("e")) {
+        nextRight = Math.max(
+          originalLeft + minSize.w,
+          Math.min(originalRight + deltaX, maxRight),
+        );
+      }
+      if (direction.includes("n")) {
+        nextTop = Math.max(0, Math.min(originalTop + deltaY, originalBottom - minSize.h));
+      }
+      if (direction.includes("s")) {
+        nextBottom = Math.max(
+          originalTop + minSize.h,
+          Math.min(originalBottom + deltaY, maxBottom),
+        );
+      }
+
+      setPos({ x: nextLeft, y: nextTop });
+      setSize({ w: nextRight - nextLeft, h: nextBottom - nextTop });
+    }
+    function onUp() {
+      ref.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  function closeBrowserLiveSocket() {
+    if (browserLiveMoveRafRef.current !== null) {
+      window.cancelAnimationFrame(browserLiveMoveRafRef.current);
+      browserLiveMoveRafRef.current = null;
+    }
+    if (browserLiveFrameRafRef.current !== null) {
+      window.cancelAnimationFrame(browserLiveFrameRafRef.current);
+      browserLiveFrameRafRef.current = null;
+    }
+    browserLiveMovePendingRef.current = null;
+    browserLiveFramePendingRef.current = null;
+    browserLiveSizeRef.current = "";
+    const socket = browserLiveSocketRef.current;
+    browserLiveSocketRef.current = null;
+    if (socket) {
+      socket.close();
+    }
+  }
+
+  function sendBrowserLiveMessage(payload: Record<string, unknown>) {
+    const socket = browserLiveSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    socket.send(JSON.stringify(payload));
+  }
+
+  const browserUsingEmbeddedPreview = Boolean(browserEmbeddedPreview?.url);
+  const browserCurrentUrl =
+    browserEmbeddedPreview?.url || browserLiveState?.url || browserSnapshot?.url || browserUrlInput || DEFAULT_BROWSER_URL;
+  const browserCanGoBack = browserUsingEmbeddedPreview
+    ? true
+    : browserLiveState?.can_go_back ?? browserSnapshot?.can_go_back ?? false;
+  const browserCanGoForward = browserUsingEmbeddedPreview
+    ? true
+    : browserLiveState?.can_go_forward ?? browserSnapshot?.can_go_forward ?? false;
+  const browserViewportWidth = browserLiveState?.viewport_width ?? browserSnapshot?.screenshot_width ?? 1440;
+  const browserViewportHeight = browserLiveState?.viewport_height ?? browserSnapshot?.screenshot_height ?? 900;
+  const browserRemoteDesktopUrl =
+    browserLiveState?.remote_desktop_url || browserSnapshot?.remote_desktop_url || null;
+  const browserHasRemoteDesktop = Boolean(browserRemoteDesktopUrl);
+  const browserSnapshotImage =
+    browserSnapshot?.screenshot_base64 ? `data:image/png;base64,${browserSnapshot.screenshot_base64}` : null;
+  const browserHasRenderableImage = browserLiveHasFrame || Boolean(browserSnapshotImage);
+  const browserUsingEmbeddedRemoteDesktop = browserHasRemoteDesktop && !browserHasRenderableImage;
+  const browserTitle =
+    browserEmbeddedPreview?.title ||
+    browserLiveState?.title ||
+    browserSnapshot?.title ||
+    browserSnapshot?.url ||
+    browserCurrentUrl;
+  function buildActiveBrowserTabState(base?: BrowserTabState | null): BrowserTabState {
+    return {
+      id: base?.id ?? activeBrowserTabId ?? makeBrowserTabId(),
+      title: browserTitle || base?.title || null,
+      urlInput: browserUrlInput,
+      sessionId: browserSessionId,
+      embeddedPreview: browserEmbeddedPreview,
+      snapshot: browserSnapshot,
+      liveState: browserLiveState,
+      liveError: browserLiveError,
+      loading: browserLoading,
+    };
+  }
+
+  function commitActiveBrowserTabState(tabs: BrowserTabState[]): BrowserTabState[] {
+    if (!activeBrowserTabId) return tabs;
+    const index = tabs.findIndex((tab) => tab.id === activeBrowserTabId);
+    if (index < 0) return tabs;
+    const current = tabs[index];
+    const next = buildActiveBrowserTabState(current);
+    if (
+      current.title === next.title &&
+      current.urlInput === next.urlInput &&
+      current.sessionId === next.sessionId &&
+      current.embeddedPreview === next.embeddedPreview &&
+      current.snapshot === next.snapshot &&
+      current.liveState === next.liveState &&
+      current.liveError === next.liveError &&
+      current.loading === next.loading
+    ) {
+      return tabs;
+    }
+    const copy = tabs.slice();
+    copy[index] = next;
+    return copy;
+  }
+
+  function applyBrowserTabState(tab: BrowserTabState) {
+    closeBrowserLiveSocket();
+    resetBrowserLiveFrame();
+    setBrowserUrlInput(presentBrowserUrl(tab.urlInput));
+    setBrowserSessionId(tab.sessionId);
+    setBrowserEmbeddedPreview(tab.embeddedPreview);
+    setBrowserSnapshot(tab.snapshot);
+    setBrowserLiveState(tab.liveState);
+    setBrowserLiveConnected(false);
+    setBrowserLiveError(tab.liveError);
+    setBrowserLoading(tab.loading);
+    setBrowserClickingId(null);
+  }
+
+  function browserTabLabel(tab: BrowserTabState): string {
+    const title = tab.title?.trim();
+    if (title) return title;
+    const rawUrl = tab.embeddedPreview?.url || tab.liveState?.url || tab.snapshot?.url || tab.urlInput;
+    try {
+      const parsed = new URL(normalizeBrowserUrl(rawUrl));
+      const host = parsed.hostname.replace(/^www\./, "");
+      return host || "New tab";
+    } catch {
+      return rawUrl || "New tab";
+    }
+  }
+
+  function selectBrowserTab(tabId: string) {
+    const committedTabs = commitActiveBrowserTabState(browserTabs);
+    const nextTab = committedTabs.find((tab) => tab.id === tabId);
+    if (!nextTab) return;
+    setBrowserTabs(committedTabs);
+    setActiveBrowserTabId(tabId);
+    applyBrowserTabState(nextTab);
+    if (!browserOpen) {
+      setBrowserOpen(true);
+    }
+    focusWindow("browser");
+  }
+
+  function createBrowserTab(targetUrl?: string) {
+    const normalizedTarget = targetUrl ? normalizeBrowserUrl(targetUrl) : "";
+    const nextTab = createBrowserTabState({
+      title: null,
+      urlInput: normalizedTarget || DEFAULT_BROWSER_URL,
+      embeddedPreview:
+        normalizedTarget && isTrustedLocalPreviewUrl(normalizedTarget)
+          ? { url: normalizedTarget, title: null }
+          : null,
+      loading: false,
+    });
+    const committedTabs = commitActiveBrowserTabState(browserTabs);
+    setBrowserTabs([...committedTabs, nextTab]);
+    setActiveBrowserTabId(nextTab.id);
+    applyBrowserTabState(nextTab);
+    setBrowserLoadError(null);
+    if (!browserOpen) {
+      setBrowserOpen(true);
+    }
+    focusWindow("browser");
+  }
+
+  async function closeBrowserTab(tabId: string) {
+    const committedTabs = commitActiveBrowserTabState(browserTabs);
+    const closingTab = committedTabs.find((tab) => tab.id === tabId);
+    if (!closingTab) return;
+
+    if (closingTab.sessionId) {
+      try {
+        await invoke("browser_session_close", { sessionId: closingTab.sessionId });
+      } catch {
+        // Ignore background tab close failures.
+      }
+    }
+
+    const remainingTabs = committedTabs.filter((tab) => tab.id !== tabId);
+    if (remainingTabs.length === 0) {
+      const nextTab = createBrowserTabState();
+      setBrowserTabs([nextTab]);
+      setActiveBrowserTabId(nextTab.id);
+      applyBrowserTabState(nextTab);
+      setBrowserOpen(false);
+      return;
+    }
+
+    setBrowserTabs(remainingTabs);
+    if (tabId === activeBrowserTabId) {
+      const nextIndex = Math.max(0, committedTabs.findIndex((tab) => tab.id === tabId) - 1);
+      const nextTab = remainingTabs[nextIndex] ?? remainingTabs[remainingTabs.length - 1];
+      setActiveBrowserTabId(nextTab.id);
+      applyBrowserTabState(nextTab);
+    }
+  }
 
   useEffect(() => {
-    if (browserSnapshot?.url) {
-      setBrowserUrlInput(browserSnapshot.url);
+    if (!activeBrowserTabId) return;
+    setBrowserTabs((prev) => commitActiveBrowserTabState(prev));
+  }, [
+    activeBrowserTabId,
+    browserUrlInput,
+    browserSessionId,
+    browserEmbeddedPreview,
+    browserSnapshot,
+    browserLiveState,
+    browserLiveError,
+    browserLoading,
+    browserTitle,
+  ]);
+
+  function browserFrameDataUrl(format: string | null | undefined, data: string) {
+    const normalized = format === "png" ? "png" : "jpeg";
+    return `data:image/${normalized};base64,${data}`;
+  }
+
+  function resetBrowserLiveFrame() {
+    if (browserLiveFrameRafRef.current !== null) {
+      window.cancelAnimationFrame(browserLiveFrameRafRef.current);
+      browserLiveFrameRafRef.current = null;
     }
-  }, [browserSnapshot?.url]);
+    browserLiveFramePendingRef.current = null;
+    browserLiveLastFrameRef.current = null;
+    setBrowserLiveHasFrame(false);
+    const image = browserLiveImageRef.current;
+    if (image) {
+      image.removeAttribute("src");
+    }
+  }
+
+  function queueBrowserLiveFrame(format: string | null | undefined, data: string) {
+    browserLiveFramePendingRef.current = browserFrameDataUrl(format, data);
+    if (browserLiveFrameRafRef.current !== null) {
+      return;
+    }
+    browserLiveFrameRafRef.current = window.requestAnimationFrame(() => {
+      browserLiveFrameRafRef.current = null;
+      const nextFrame = browserLiveFramePendingRef.current;
+      browserLiveFramePendingRef.current = null;
+      if (!nextFrame) return;
+      browserLiveLastFrameRef.current = nextFrame;
+      const image = browserLiveImageRef.current;
+      if (image && image.src !== nextFrame) {
+        image.src = nextFrame;
+      }
+      setBrowserLiveHasFrame((prev) => (prev ? prev : true));
+    });
+  }
+
+  useEffect(() => {
+    if (browserUsingEmbeddedPreview) return;
+    const nextUrl = browserLiveState?.url || browserSnapshot?.url;
+    if (nextUrl) {
+      setBrowserUrlInput(presentBrowserUrl(nextUrl));
+    }
+  }, [browserUsingEmbeddedPreview, browserLiveState?.url, browserSnapshot?.url]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<EmbeddedPreviewState>("embedded-preview-state", (event) => {
+      const payload = event.payload;
+      if (!payload?.url) return;
+      setBrowserEmbeddedPreview((prev) => ({
+        url: payload.url,
+        title: typeof payload.title === "string" ? payload.title : prev?.title ?? null,
+      }));
+      setBrowserUrlInput(presentBrowserUrl(payload.url));
+    }).then((dispose) => {
+      unlisten = dispose;
+    }).catch(() => {});
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const image = browserLiveImageRef.current;
+    if (!image) return;
+    const nextSrc = browserLiveLastFrameRef.current || browserSnapshotImage;
+    if (nextSrc) {
+      if (image.src !== nextSrc) {
+        image.src = nextSrc;
+      }
+    } else {
+      image.removeAttribute("src");
+    }
+  }, [browserSnapshotImage, browserLiveHasFrame, browserSessionId]);
+
+  useEffect(() => {
+    if (
+      !desktopStateHydrated ||
+      !browserOpen ||
+      browserUsingEmbeddedPreview ||
+      !browserSessionId ||
+      browserSnapshot ||
+      browserLiveState
+    ) {
+      return;
+    }
+    let cancelled = false;
+    setBrowserLoading(true);
+    invoke<BrowserSnapshot>("browser_snapshot", { sessionId: browserSessionId })
+      .then((snapshot) => {
+        if (cancelled) return;
+        setBrowserSnapshot(snapshot);
+        setBrowserUrlInput(presentBrowserUrl(snapshot.url));
+        setBrowserLoadError(null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setBrowserSessionId(null);
+        setBrowserSnapshot(null);
+        setBrowserLiveState(null);
+        resetBrowserLiveFrame();
+        setBrowserLiveConnected(false);
+        setBrowserLoadError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBrowserLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [desktopStateHydrated, browserOpen, browserUsingEmbeddedPreview, browserSessionId, browserSnapshot, browserLiveState]);
+
+  useEffect(() => {
+    if (!browserOpen || !browserSessionId || browserUsingEmbeddedPreview) {
+      closeBrowserLiveSocket();
+      resetBrowserLiveFrame();
+      setBrowserLiveConnected(false);
+      return;
+    }
+
+    resetBrowserLiveFrame();
+    const wsUrl = browserSnapshot?.live_ws_url || browserLiveState?.live_ws_url || `${DEFAULT_BROWSER_LIVE_WS_BASE}/${browserSessionId}`;
+    const socket = new WebSocket(wsUrl);
+    browserLiveSocketRef.current = socket;
+    setBrowserLiveConnected(false);
+    setBrowserLiveError(null);
+
+    socket.onopen = () => {
+      if (browserLiveSocketRef.current !== socket) return;
+      setBrowserLiveConnected(true);
+      sendBrowserLiveMessage({ type: "focus" });
+    };
+
+    socket.onmessage = (event) => {
+      if (browserLiveSocketRef.current !== socket) return;
+      try {
+        const message = JSON.parse(String(event.data)) as
+          | { type: "frame"; data: string; format?: string }
+          | { type: "state"; url: string; title: string; can_go_back: boolean; can_go_forward: boolean; viewport_width: number; viewport_height: number; session_id: string; live_ws_url?: string | null; remote_desktop_url?: string | null; }
+          | { type: "clipboard_copy"; text: string }
+          | { type: "error"; error: string };
+
+        if (message.type === "frame") {
+          queueBrowserLiveFrame(message.format, message.data);
+          return;
+        }
+        if (message.type === "state") {
+          setBrowserLiveState(message);
+          return;
+        }
+        if (message.type === "error") {
+          setBrowserLiveError(message.error);
+          return;
+        }
+        if (message.type === "clipboard_copy") {
+          if (typeof message.text === "string" && message.text.length > 0) {
+            void navigator.clipboard?.writeText?.(message.text).catch(() => {});
+          }
+        }
+      } catch (error) {
+        setBrowserLiveError(error instanceof Error ? error.message : String(error));
+      }
+    };
+
+    socket.onerror = () => {
+      if (browserLiveSocketRef.current !== socket) return;
+      setBrowserLiveError("Live browser connection failed.");
+    };
+
+    socket.onclose = () => {
+      if (browserLiveSocketRef.current === socket) {
+        browserLiveSocketRef.current = null;
+      }
+      setBrowserLiveConnected(false);
+    };
+
+    return () => {
+      if (browserLiveSocketRef.current === socket) {
+        browserLiveSocketRef.current = null;
+      }
+      socket.close();
+    };
+  }, [browserOpen, browserSessionId, browserSnapshot?.live_ws_url, browserUsingEmbeddedPreview]);
+
+  useEffect(() => {
+    if (!browserOpen || !browserSessionId || !browserLiveConnected || browserUsingEmbeddedRemoteDesktop) {
+      browserLiveSizeRef.current = "";
+      return;
+    }
+
+    const viewport = browserViewportRef.current;
+    if (!viewport) return;
+
+    let rafId: number | null = null;
+    const sendResize = () => {
+      rafId = null;
+      const rect = viewport.getBoundingClientRect();
+      const viewportSize = requestedBrowserViewportSize(rect.width, rect.height);
+      const nextSize = `${viewportSize.width}x${viewportSize.height}`;
+      if (browserLiveSizeRef.current === nextSize) {
+        return;
+      }
+      browserLiveSizeRef.current = nextSize;
+      sendBrowserLiveMessage({
+        type: "resize",
+        width: viewportSize.width,
+        height: viewportSize.height,
+      });
+    };
+
+    const scheduleResize = () => {
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+      rafId = window.requestAnimationFrame(sendResize);
+    };
+
+    scheduleResize();
+    const observer = new ResizeObserver(() => {
+      scheduleResize();
+    });
+    observer.observe(viewport);
+
+    return () => {
+      observer.disconnect();
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
+  }, [browserOpen, browserSessionId, browserLiveConnected, browserUsingEmbeddedRemoteDesktop]);
+
+  function browserViewportPoint(clientX: number, clientY: number) {
+    const target = browserLiveConnected ? browserViewportRef.current : browserLiveImageRef.current;
+    if (!target) return null;
+    const rect = target.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const relativeX = Math.min(Math.max(clientX - rect.left, 0), rect.width);
+    const relativeY = Math.min(Math.max(clientY - rect.top, 0), rect.height);
+    return {
+      x: (relativeX / rect.width) * browserViewportWidth,
+      y: (relativeY / rect.height) * browserViewportHeight,
+    };
+  }
+
+  function queueBrowserMouseMove(x: number, y: number) {
+    browserLiveMovePendingRef.current = { x, y };
+    if (browserLiveMoveRafRef.current !== null) {
+      return;
+    }
+    browserLiveMoveRafRef.current = window.requestAnimationFrame(() => {
+      browserLiveMoveRafRef.current = null;
+      const point = browserLiveMovePendingRef.current;
+      browserLiveMovePendingRef.current = null;
+      if (!point) return;
+      sendBrowserLiveMessage({ type: "mouse_move", x: point.x, y: point.y });
+    });
+  }
+
+  function handleBrowserViewportMouseMove(e: ReactMouseEvent<HTMLElement>) {
+    if (!browserLiveConnected) return;
+    const point = browserViewportPoint(e.clientX, e.clientY);
+    if (!point) return;
+    queueBrowserMouseMove(point.x, point.y);
+  }
+
+  function handleBrowserViewportMouseDown(e: ReactMouseEvent<HTMLElement>) {
+    if (!browserLiveConnected) return;
+    const point = browserViewportPoint(e.clientX, e.clientY);
+    if (!point) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.currentTarget.focus();
+    sendBrowserLiveMessage({
+      type: "mouse_down",
+      x: point.x,
+      y: point.y,
+      button: e.button === 2 ? "right" : e.button === 1 ? "middle" : "left",
+    });
+  }
+
+  function handleBrowserViewportMouseUp(e: ReactMouseEvent<HTMLElement>) {
+    if (!browserLiveConnected) return;
+    const point = browserViewportPoint(e.clientX, e.clientY);
+    if (!point) return;
+    e.preventDefault();
+    e.stopPropagation();
+    sendBrowserLiveMessage({
+      type: "mouse_up",
+      x: point.x,
+      y: point.y,
+      button: e.button === 2 ? "right" : e.button === 1 ? "middle" : "left",
+    });
+  }
+
+  function handleBrowserViewportWheel(e: ReactWheelEvent<HTMLElement>) {
+    if (!browserLiveConnected) return;
+    const point = browserViewportPoint(e.clientX, e.clientY);
+    if (!point) return;
+    e.preventDefault();
+    sendBrowserLiveMessage({
+      type: "wheel",
+      x: point.x,
+      y: point.y,
+      deltaX: e.deltaX,
+      deltaY: e.deltaY,
+    });
+  }
+
+  function handleBrowserViewportPaste(e: ReactClipboardEvent<HTMLElement>) {
+    if (!browserLiveConnected) return;
+    const text = e.clipboardData.getData("text/plain");
+    if (!text) return;
+    e.preventDefault();
+    e.stopPropagation();
+    sendBrowserLiveMessage({ type: "paste", text });
+  }
+
+  function handleBrowserViewportCopy(e: ReactClipboardEvent<HTMLElement>) {
+    if (!browserLiveConnected) return;
+    e.preventDefault();
+    e.stopPropagation();
+    sendBrowserLiveMessage({ type: "copy_request" });
+  }
+
+  async function handleBrowserViewportKeyDown(e: ReactKeyboardEvent<HTMLElement>) {
+    if (!browserLiveConnected) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const usesPrimaryModifier = e.metaKey || e.ctrlKey;
+    const normalizedKey = e.key.toLowerCase();
+    if (usesPrimaryModifier && !e.altKey) {
+      if (normalizedKey === "v") {
+        const text = await navigator.clipboard?.readText?.().catch(() => "") ?? "";
+        if (text) {
+          sendBrowserLiveMessage({ type: "paste", text });
+        }
+        return;
+      }
+      if (normalizedKey === "c") {
+        sendBrowserLiveMessage({ type: "copy_request" });
+        return;
+      }
+    }
+    sendBrowserLiveMessage({
+      type: "key",
+      key: e.key,
+      code: e.code,
+      text: e.key.length === 1 ? e.key : "",
+      altKey: e.altKey,
+      ctrlKey: e.ctrlKey,
+      metaKey: e.metaKey,
+      shiftKey: e.shiftKey,
+    });
+  }
+
+  function browserRequestedViewportSize() {
+    const liveViewport = browserViewportRef.current?.getBoundingClientRect();
+    if (liveViewport && liveViewport.width > 0 && liveViewport.height > 0) {
+      return requestedBrowserViewportSize(liveViewport.width, liveViewport.height);
+    }
+    return requestedBrowserViewportSize(
+      browserSize.w,
+      browserSize.h
+        - BROWSER_APP_WINDOW_TITLEBAR_HEIGHT
+        - BROWSER_TOOLBAR_HEIGHT
+        - BROWSER_DETAILS_PANEL_HEIGHT,
+    );
+  }
 
   async function navigateBrowser(input: string) {
     const next = normalizeBrowserUrl(input);
     if (!next) return;
+    if (isTrustedLocalPreviewUrl(next)) {
+      setBrowserEmbeddedPreview((prev) => ({
+        url: next,
+        title: prev?.title ?? null,
+      }));
+      setBrowserUrlInput(presentBrowserUrl(next));
+      setBrowserLoadError(null);
+      setBrowserLoading(false);
+      return;
+    }
+
+    setBrowserEmbeddedPreview(null);
     setBrowserLoadError(null);
     setBrowserLoading(true);
     try {
       let snapshot: BrowserSnapshot;
       if (!browserSessionId) {
-        snapshot = await invoke<BrowserSnapshot>("browser_session_create", { url: next });
+        const viewport = browserRequestedViewportSize();
+        snapshot = await invoke<BrowserSnapshot>("browser_session_create", {
+          url: next,
+          viewportWidth: viewport.width,
+          viewportHeight: viewport.height,
+        });
         setBrowserSessionId(snapshot.session_id);
       } else {
         snapshot = await invoke<BrowserSnapshot>("browser_navigate", { sessionId: browserSessionId, url: next });
       }
       setBrowserSnapshot(snapshot);
-      setBrowserUrlInput(snapshot.url);
+      setBrowserUrlInput(presentBrowserUrl(snapshot.url));
     } catch (e) {
       setBrowserLoadError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -576,13 +2020,21 @@ export function Files({
   }
 
   async function goBrowserBack() {
+    if (browserUsingEmbeddedPreview) {
+      try {
+        await goEmbeddedPreviewBack();
+      } catch (e) {
+        setBrowserLoadError(e instanceof Error ? e.message : String(e));
+      }
+      return;
+    }
     if (!browserSessionId) return;
     setBrowserLoadError(null);
     setBrowserLoading(true);
     try {
       const snapshot = await invoke<BrowserSnapshot>("browser_back", { sessionId: browserSessionId });
       setBrowserSnapshot(snapshot);
-      setBrowserUrlInput(snapshot.url);
+      setBrowserUrlInput(presentBrowserUrl(snapshot.url));
     } catch (e) {
       setBrowserLoadError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -591,13 +2043,21 @@ export function Files({
   }
 
   async function goBrowserForward() {
+    if (browserUsingEmbeddedPreview) {
+      try {
+        await goEmbeddedPreviewForward();
+      } catch (e) {
+        setBrowserLoadError(e instanceof Error ? e.message : String(e));
+      }
+      return;
+    }
     if (!browserSessionId) return;
     setBrowserLoadError(null);
     setBrowserLoading(true);
     try {
       const snapshot = await invoke<BrowserSnapshot>("browser_forward", { sessionId: browserSessionId });
       setBrowserSnapshot(snapshot);
-      setBrowserUrlInput(snapshot.url);
+      setBrowserUrlInput(presentBrowserUrl(snapshot.url));
     } catch (e) {
       setBrowserLoadError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -606,6 +2066,14 @@ export function Files({
   }
 
   async function reloadBrowser() {
+    if (browserUsingEmbeddedPreview) {
+      try {
+        await reloadEmbeddedPreview();
+      } catch (e) {
+        setBrowserLoadError(e instanceof Error ? e.message : String(e));
+      }
+      return;
+    }
     if (!browserSessionId) {
       await navigateBrowser(browserUrlInput || DEFAULT_BROWSER_URL);
       return;
@@ -615,7 +2083,7 @@ export function Files({
     try {
       const snapshot = await invoke<BrowserSnapshot>("browser_reload", { sessionId: browserSessionId });
       setBrowserSnapshot(snapshot);
-      setBrowserUrlInput(snapshot.url);
+      setBrowserUrlInput(presentBrowserUrl(snapshot.url));
     } catch (e) {
       setBrowserLoadError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -636,7 +2104,7 @@ export function Files({
         y: element.y + element.height / 2,
       });
       setBrowserSnapshot(snapshot);
-      setBrowserUrlInput(snapshot.url);
+      setBrowserUrlInput(presentBrowserUrl(snapshot.url));
     } catch (e) {
       setBrowserLoadError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -645,23 +2113,40 @@ export function Files({
   }
 
   async function closeBrowserWindow() {
-    const sessionId = browserSessionId;
+    const committedTabs = commitActiveBrowserTabState(browserTabs);
+    const sessionIds = committedTabs
+      .map((tab) => tab.sessionId)
+      .filter((value): value is string => typeof value === "string" && value.length > 0);
+    const nextTab = createBrowserTabState();
+    closeBrowserLiveSocket();
+    resetBrowserLiveFrame();
     setBrowserOpen(false);
+    setBrowserTabs([nextTab]);
+    setActiveBrowserTabId(nextTab.id);
     setBrowserSnapshot(null);
+    setBrowserLiveState(null);
+    setBrowserLiveConnected(false);
+    setBrowserLiveError(null);
     setBrowserSessionId(null);
+    setBrowserEmbeddedPreview(null);
+    setBrowserUrlInput(DEFAULT_BROWSER_URL);
     setBrowserLoading(false);
     setBrowserClickingId(null);
     setBrowserLoadError(null);
-    if (!sessionId) return;
-    try {
-      await invoke("browser_session_close", { sessionId });
-    } catch {
-      // Ignore close errors; session cleanup is best-effort.
+    for (const sessionId of sessionIds) {
+      try {
+        await invoke("browser_session_close", { sessionId });
+      } catch {
+        // Ignore close errors; session cleanup is best-effort.
+      }
     }
   }
 
   async function openBrowserExternally(target?: string) {
-    const url = normalizeBrowserUrl(target ?? browserCurrentUrl);
+    const rawTarget = browserUsingEmbeddedPreview
+      ? browserEmbeddedPreview?.url || target || browserCurrentUrl
+      : target ?? browserCurrentUrl;
+    const url = normalizeBrowserUrl(rawTarget);
     if (!url) return;
     try {
       await open(url);
@@ -672,18 +2157,61 @@ export function Files({
 
   // ── File browser logic ──────────────────────────────────────────────
 
-  const fetchFiles = useCallback(async (path: string) => {
-    setLoading(true); setError(null);
+  const fetchFiles = useCallback(async (path: string, options?: { silent?: boolean }) => {
+    const silent = options?.silent === true;
+    const requestSeq = filesFetchSeqRef.current + 1;
+    filesFetchSeqRef.current = requestSeq;
+    if (!silent) {
+      filesLoadingSeqRef.current = requestSeq;
+      setLoading(true);
+      setError(null);
+    }
     try {
       const result = await invoke<WorkspaceFileEntry[]>("list_workspace_files", { path });
-      const filtered = result.filter((e) => !(path === "" && HIDDEN_FILES.has(e.name)));
+      if (requestSeq !== filesFetchSeqRef.current) return;
+      const filtered = result.filter((entry) => !(path === "" && HIDDEN_FILES.has(entry.name)));
       filtered.sort((a, b) => a.is_directory !== b.is_directory ? (a.is_directory ? -1 : 1) : a.name.localeCompare(b.name));
-      setEntries(filtered);
-    } catch (e) { setError(e instanceof Error ? e.message : String(e)); setEntries([]); }
-    finally { setLoading(false); }
-  }, []);
+      setEntries((prev) => (workspaceEntriesEqual(prev, filtered) ? prev : filtered));
+      if (selected && !filtered.some((entry) => entry.path === selected)) {
+        setSelected(null);
+      }
+      if (!silent) {
+        setError(null);
+      }
+    } catch (e) {
+      if (requestSeq !== filesFetchSeqRef.current) return;
+      if (!silent) {
+        setError(e instanceof Error ? e.message : String(e));
+        setEntries([]);
+      }
+    } finally {
+      if (!silent && requestSeq === filesLoadingSeqRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [selected]);
 
   useEffect(() => { if (finderOpen) fetchFiles(currentPath); }, [currentPath, fetchFiles, finderOpen]);
+  useEffect(() => {
+    if (!finderOpen) return;
+    const refreshCurrentFolder = () => {
+      if (document.hidden) return;
+      void fetchFiles(currentPath, { silent: true });
+    };
+    const intervalId = window.setInterval(refreshCurrentFolder, WORKSPACE_FOLDER_REFRESH_MS);
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        void fetchFiles(currentPath, { silent: true });
+      }
+    };
+    window.addEventListener("focus", refreshCurrentFolder);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", refreshCurrentFolder);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [currentPath, fetchFiles, finderOpen]);
   useEffect(() => { const h = () => setContextMenu(null); window.addEventListener("click", h); return () => window.removeEventListener("click", h); }, []);
 
   function openFolder(path: string) { setCurrentPath(path); setHistory([path]); setHistoryIndex(0); setFinderOpen(true); setSelected(null); }
@@ -692,8 +2220,159 @@ export function Files({
   function goForward() { if (historyIndex < history.length - 1) { setHistoryIndex(historyIndex + 1); setCurrentPath(history[historyIndex + 1]); setSelected(null); } }
 
   function handleEntryClick(entry: WorkspaceFileEntry, e: React.MouseEvent) { e.stopPropagation(); setSelected(entry.path); }
-  function handleEntryDoubleClick(entry: WorkspaceFileEntry) { if (entry.is_directory) navigateTo(entry.path); else handleView(entry); }
+  function handleEntryDoubleClick(entry: WorkspaceFileEntry) {
+    if (entry.is_directory) {
+      navigateTo(entry.path);
+      return;
+    }
+    const ext = entry.name.split(".").pop()?.toLowerCase() || "";
+    if (HTML_EXTS.has(ext)) {
+      void openWorkspaceFileInBrowser(entry);
+      return;
+    }
+    handleView(entry);
+  }
   function handleContextMenuEntry(entry: WorkspaceFileEntry, e: React.MouseEvent) { e.preventDefault(); e.stopPropagation(); setSelected(entry.path); setContextMenu({ x: e.clientX, y: e.clientY, entry }); }
+
+  async function openWorkspaceFileInBrowser(entry: WorkspaceFileEntry) {
+    if (entry.is_directory) return;
+    const ext = entry.name.split(".").pop()?.toLowerCase() || "";
+    if (!HTML_EXTS.has(ext)) return;
+    const targetUrl = workspaceBrowserUrl(entry.path);
+    if (!browserOpen) {
+      setBrowserOpen(true);
+    }
+    focusWindow("browser");
+    if (isTrustedLocalPreviewUrl(targetUrl)) {
+      setBrowserEmbeddedPreview({
+        url: targetUrl,
+        title: entry.name,
+      });
+      setBrowserUrlInput(presentBrowserUrl(targetUrl));
+      setBrowserLoadError(null);
+      return;
+    }
+    await navigateBrowser(targetUrl);
+  }
+
+  function showWorkspacePathInDesktop(path: string, looksLikeFile: boolean) {
+    if (!path) {
+      openFolder("");
+      return;
+    }
+    if (looksLikeFile) {
+      openFolder(workspacePathParent(path));
+      setSelected(path);
+      return;
+    }
+    openFolder(path);
+  }
+
+  async function previewWorkspacePath(path: string) {
+    await handleView({
+      name: workspacePathName(path),
+      path,
+      is_directory: false,
+      size: 0,
+      modified_at: 0,
+    });
+  }
+
+  async function openWorkspacePathInBrowser(path: string) {
+    await openWorkspaceFileInBrowser({
+      name: workspacePathName(path),
+      path,
+      is_directory: false,
+      size: 0,
+      modified_at: 0,
+    });
+  }
+
+  async function openBrowserUrlInDesktop(targetUrl: string) {
+    if (!browserOpen) {
+      setBrowserOpen(true);
+    }
+    focusWindow("browser");
+    if (isTrustedLocalPreviewUrl(targetUrl)) {
+      setBrowserEmbeddedPreview((prev) => ({
+        url: targetUrl,
+        title: prev?.title ?? "Entropic Preview",
+      }));
+      setBrowserUrlInput(presentBrowserUrl(targetUrl));
+      setBrowserLoadError(null);
+      return;
+    }
+    setBrowserUrlInput(presentBrowserUrl(targetUrl));
+    await navigateBrowser(targetUrl);
+  }
+
+  function consumeDesktopHandoff(): DesktopHandoff | null {
+    try {
+      const raw = window.localStorage.getItem(DESKTOP_HANDOFF_STORAGE_KEY);
+      if (!raw) return null;
+      window.localStorage.removeItem(DESKTOP_HANDOFF_STORAGE_KEY);
+      return JSON.parse(raw) as DesktopHandoff;
+    } catch {
+      return null;
+    }
+  }
+
+  async function applyDesktopHandoff(handoff: DesktopHandoff | null) {
+    if (!handoff || typeof handoff.action !== "string") {
+      return;
+    }
+    if (handoff.action === "browser" && typeof handoff.url === "string" && handoff.url.trim()) {
+      await openBrowserUrlInDesktop(handoff.url);
+      return;
+    }
+    if (typeof handoff.path !== "string") {
+      return;
+    }
+    const looksLikeFile =
+      typeof handoff.looksLikeFile === "boolean"
+        ? handoff.looksLikeFile
+        : Boolean(handoff.path && workspacePathName(handoff.path).includes("."));
+    if (handoff.action === "browser") {
+      await openWorkspacePathInBrowser(handoff.path);
+      return;
+    }
+    if (handoff.action === "preview") {
+      showWorkspacePathInDesktop(handoff.path, true);
+      await previewWorkspacePath(handoff.path);
+      return;
+    }
+    showWorkspacePathInDesktop(handoff.path, looksLikeFile);
+  }
+
+  useEffect(() => {
+    void applyDesktopHandoff(consumeDesktopHandoff());
+  }, []);
+
+  function openBrowserWindow(targetUrl = browserCurrentUrl) {
+    if (!browserOpen) {
+      setBrowserOpen(true);
+    }
+    focusWindow("browser");
+    setBrowserUrlInput(presentBrowserUrl(targetUrl));
+    if (isTrustedLocalPreviewUrl(targetUrl)) {
+      setBrowserEmbeddedPreview((prev) => ({
+        url: targetUrl,
+        title: prev?.title ?? "Entropic Preview",
+      }));
+      return;
+    }
+    if (browserSessionId && targetUrl !== browserCurrentUrl) {
+      void navigateBrowser(targetUrl);
+    }
+  }
+
+  async function copyDesktopPath(path: string) {
+    try {
+      await navigator.clipboard?.writeText?.(path);
+    } catch (e) {
+      setError(`Copy failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   async function handleView(entry: WorkspaceFileEntry) {
     const ext = entry.name.split(".").pop()?.toLowerCase() || "";
@@ -788,69 +2467,80 @@ export function Files({
 
   // ── Chat ────────────────────────────────────────────────────────────
 
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatMessages, chatLoading]);
-
-  useEffect(() => {
-    if (!chatOpen || !gatewayRunning) return;
-    let cancelled = false;
-    let attachedClient: ReturnType<typeof createGatewayClient> | null = null;
-    let onConnected: (() => void) | null = null;
-    let onDisconnected: (() => void) | null = null;
-    let onChat: ((ev: ChatEvent) => void) | null = null;
-    (async () => {
-      setChatConnecting(true);
-      try {
-        const { wsUrl, token } = await resolveGatewayAuth();
-        const client = createGatewayClient(wsUrl || GATEWAY_URL, token);
-        attachedClient = client;
-        onConnected = () => { if (cancelled) return; chatClientRef.current = client; setChatConnected(true); setChatConnecting(false); if (!chatSessionRef.current) chatSessionRef.current = client.createSessionKey(); };
-        onDisconnected = () => { if (!cancelled) setChatConnected(false); };
-        onChat = (ev: ChatEvent) => { if (!cancelled) handleChatEvent(ev); };
-        client.on("connected", onConnected);
-        client.on("disconnected", onDisconnected);
-        client.on("chat", onChat);
-        await client.connect();
-      } catch { if (!cancelled) setChatConnecting(false); }
-    })();
-    return () => {
-      cancelled = true;
-      if (attachedClient && onConnected) attachedClient.off("connected", onConnected);
-      if (attachedClient && onDisconnected) attachedClient.off("disconnected", onDisconnected);
-      if (attachedClient && onChat) attachedClient.off("chat", onChat);
-    };
-  }, [chatOpen, gatewayRunning]);
-
-  function handleChatEvent(event: ChatEvent) {
-    if (event.state === "delta" || event.state === "final") {
-      let text = "";
-      if (typeof event.message?.content === "string") {
-        text = event.message.content;
-      } else if (Array.isArray(event.message?.content)) {
-        text = event.message.content
-          .filter((c) => c.type === "text")
-          .map((c) => c.text || "")
-          .join("");
-      }
-      if (!text) return;
-      setChatMessages((prev) => { const idx = prev.findIndex((m) => m.id === event.runId && m.role === "assistant"); if (idx >= 0) { const u = [...prev]; u[idx] = { ...u[idx], content: text }; return u; } return [...prev, { id: event.runId, role: "assistant", content: text }]; });
-      if (event.state === "final") {
-        setChatLoading(false);
-        window.dispatchEvent(new Event("entropic-local-credits-changed"));
-      }
-    } else if (event.state === "error" || event.state === "aborted") {
-      setChatLoading(false);
-      window.dispatchEvent(new Event("entropic-local-credits-changed"));
-    }
+  function createNewChatSession() {
+    setChatRequestedSession("__new__");
+    setChatRequestedAction(null);
+    setChatOpen(true);
+    focusWindow("chat");
   }
 
-  async function handleChatSend() {
-    const text = chatInput.trim();
-    if (!text || !chatClientRef.current?.isConnected() || !chatSessionRef.current || chatLoading) return;
-    const fileList = entries.map((e) => `${e.is_directory ? "[folder]" : "[file]"} ${e.name}`).join("\n");
-    const ctx = `[File context — current directory: /${currentPath || "workspace"}, ${entries.length} items]\n${fileList}\n\nUser question: ${text}`;
-    setChatMessages((prev) => [...prev, { id: crypto.randomUUID(), role: "user", content: text }]);
-    setChatInput(""); setChatLoading(true);
-    try { await chatClientRef.current.sendMessage(chatSessionRef.current, ctx); } catch { setChatLoading(false); }
+  function selectChatSession(sessionKey: string) {
+    setChatRequestedSession(sessionKey);
+    setChatRequestedAction(null);
+    setChatCurrentSession(sessionKey);
+    setChatOpen(true);
+    focusWindow("chat");
+  }
+
+  function requestChatSessionAction(
+    action:
+      | { type: "delete"; key: string }
+      | { type: "pin"; key: string; pinned: boolean }
+      | { type: "rename"; key: string; label: string }
+  ) {
+    setChatRequestedAction({ id: crypto.randomUUID(), ...action });
+    setChatRequestedSession(action.key);
+    setChatOpen(true);
+    focusWindow("chat");
+  }
+
+  function handleDesktopChatNavigate(page: "chat" | "store" | "skills" | "channels" | "files" | "tasks" | "jobs" | "settings" | "billing") {
+    switch (page) {
+      case "chat":
+        setChatOpen(true);
+        focusWindow("chat");
+        return;
+      case "store":
+        setPluginsOpen(true);
+        focusWindow("plugins");
+        return;
+      case "skills":
+        setSkillsOpen(true);
+        focusWindow("skills");
+        return;
+      case "channels":
+        setChannelsOpen(true);
+        focusWindow("channels");
+        return;
+      case "files":
+        {
+          const handoff = consumeDesktopHandoff();
+          if (handoff) {
+            void applyDesktopHandoff(handoff);
+            return;
+          }
+        }
+        setFinderOpen(true);
+        focusWindow("finder");
+        return;
+      case "tasks":
+        setTasksOpen(true);
+        focusWindow("tasks");
+        return;
+      case "jobs":
+        setJobsOpen(true);
+        focusWindow("jobs");
+        return;
+      case "settings":
+        setSettingsOpen(true);
+        focusWindow("settings");
+        return;
+      case "billing":
+        setBillingOpen(true);
+        focusWindow("billing");
+        return;
+      default:
+    }
   }
 
   // ── Computed ─────────────────────────────────────────────────────────
@@ -862,15 +2552,129 @@ export function Files({
   const currentWp = getWallpaperById(wallpaperId);
   const isWpImage = (wallpaperId === "custom" && customWallpaper) || currentWp?.type === "photo";
   const highestWindowZ = Math.max(...Object.values(windowZ));
+  const normalizedChatQuery = chatSessionQuery.trim().toLowerCase();
+  const sortedChatSessions = sortDesktopChatSessions(chatSessions);
+  const activeChatSession = chatCurrentSession
+    ? chatSessions.find((session) => session.key === chatCurrentSession) || null
+    : null;
+  const visibleChatSessions = normalizedChatQuery
+    ? sortedChatSessions.filter((session) => (
+      desktopChatSessionTitle(session).toLowerCase().includes(normalizedChatQuery)
+    ))
+    : sortedChatSessions;
   const browserWindowZ = windowZ.browser ?? DEFAULT_WINDOW_Z.browser;
   const browserNeedsFocusOverlay = browserWindowZ < highestWindowZ;
+
+  useEffect(() => {
+    return () => {
+      void hideEmbeddedPreviewWebview().catch(() => {});
+    };
+  }, []);
+
+  useEffect(() => {
+    let frameId: number | null = null;
+    let cancelled = false;
+
+    const syncOrHide = async () => {
+      if (!browserUsingEmbeddedPreview || !browserEmbeddedPreview?.url) {
+        browserEmbeddedPreviewSyncKeyRef.current = "";
+        try {
+          await hideEmbeddedPreviewWebview();
+        } catch {
+          // Ignore embedded preview hide failures during teardown.
+        }
+        return;
+      }
+
+      const viewport = browserViewportRef.current;
+      if (!browserOpen || browserNeedsFocusOverlay || !viewport) {
+        const hiddenKey = `${browserEmbeddedPreview.url}|hidden`;
+        if (browserEmbeddedPreviewSyncKeyRef.current === hiddenKey) {
+          return;
+        }
+        browserEmbeddedPreviewSyncKeyRef.current = hiddenKey;
+        try {
+          await syncEmbeddedPreviewWebview({
+            url: browserEmbeddedPreview.url,
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            visible: false,
+          });
+        } catch {
+          // Ignore embedded preview hide failures while the browser is backgrounded.
+        }
+        return;
+      }
+
+      const rect = viewport.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return;
+      }
+
+      const nextKey = [
+        browserEmbeddedPreview.url,
+        Math.round(rect.left),
+        Math.round(rect.top),
+        Math.round(rect.width),
+        Math.round(rect.height),
+      ].join("|");
+      if (browserEmbeddedPreviewSyncKeyRef.current === nextKey) {
+        return;
+      }
+      browserEmbeddedPreviewSyncKeyRef.current = nextKey;
+
+      try {
+        const resolved = await syncEmbeddedPreviewWebview({
+          url: browserEmbeddedPreview.url,
+          x: rect.left,
+          y: rect.top,
+          width: rect.width,
+          height: rect.height,
+          visible: true,
+        });
+        if (cancelled) return;
+        setBrowserEmbeddedPreview((prev) => {
+          if (!prev) return prev;
+          if (prev.url === resolved) return prev;
+          return { ...prev, url: resolved };
+        });
+        setBrowserUrlInput(presentBrowserUrl(resolved));
+        setBrowserLoadError(null);
+      } catch (error) {
+        if (cancelled) return;
+        setBrowserLoadError(error instanceof Error ? error.message : String(error));
+      }
+    };
+
+    frameId = window.requestAnimationFrame(() => {
+      void syncOrHide();
+    });
+
+    return () => {
+      cancelled = true;
+      if (frameId !== null) {
+        window.cancelAnimationFrame(frameId);
+      }
+    };
+  }, [
+    browserOpen,
+    browserUsingEmbeddedPreview,
+    browserEmbeddedPreview,
+    browserNeedsFocusOverlay,
+    browserPos,
+    browserSize,
+    desktopBounds.width,
+    desktopBounds.height,
+  ]);
 
   // ═══════════════════════════════════════════════════════════════════
   // RENDER
   // ═══════════════════════════════════════════════════════════════════
 
   return (
-    <div className="h-full flex flex-col select-none relative overflow-hidden">
+    <div className="h-full w-full min-w-0 flex flex-col select-none relative overflow-hidden">
       {/* Top toolbar */}
       <div className="absolute top-0 left-0 right-0 z-20">
         <div
@@ -911,12 +2715,12 @@ export function Files({
       </div>
 
       {/* Main area */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 min-w-0 flex overflow-hidden">
 
         {/* Desktop area */}
         <div
           ref={containerRef}
-          className="flex-1 relative overflow-hidden"
+          className="flex-1 min-w-0 relative overflow-hidden"
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
@@ -943,6 +2747,12 @@ export function Files({
                     if (iconClickGuardRef.current) return;
                     e.stopPropagation();
                     setSelected("__user_folder");
+                  }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setSelected("__user_folder");
+                    setContextMenu({ x: e.clientX, y: e.clientY });
                   }}
                   onDoubleClick={() => openFolder("")}
                 >
@@ -1103,6 +2913,7 @@ export function Files({
           {contextMenu && !contextMenu.entry && (
             <div className="fixed z-50 py-1 rounded-lg min-w-[180px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, background: "rgba(30,30,30,0.9)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.4)" }} onClick={(e) => e.stopPropagation()}>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFolder(finderOpen ? currentPath : ""); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" />New Folder</button>
+              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openBrowserWindow(); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" />Open Browser</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { setShowWallpaperPicker(true); setContextMenu(null); }}><Image className="w-3.5 h-3.5" />Change Wallpaper</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { fileInputRef.current?.click(); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" />Add Files</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openFolder(""); setContextMenu(null); }}><Folder className="w-3.5 h-3.5" />Open Workspace</button>
@@ -1110,8 +2921,12 @@ export function Files({
           )}
           {contextMenu && contextMenu.entry && (
             <div className="fixed z-[55] py-1 rounded-lg min-w-[160px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, background: "rgba(30,30,30,0.95)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }} onClick={(e) => e.stopPropagation()}>
+              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleEntryDoubleClick(contextMenu.entry!); setContextMenu(null); }}><Folder className="w-3.5 h-3.5" style={{ color: "#888" }} />Open</button>
+              {!contextMenu.entry.is_directory && HTML_EXTS.has(contextMenu.entry.name.split(".").pop()?.toLowerCase() || "") && (
+                <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void openWorkspaceFileInBrowser(contextMenu.entry!); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" style={{ color: "#888" }} />Open in Browser</button>
+              )}
               {!contextMenu.entry.is_directory && <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleView(contextMenu.entry!); setContextMenu(null); }}><Eye className="w-3.5 h-3.5" style={{ color: "#888" }} />Quick Look</button>}
-              {contextMenu.entry.is_directory && <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { navigateTo(contextMenu.entry!.path); setContextMenu(null); }}><Folder className="w-3.5 h-3.5" style={{ color: "#888" }} />Open</button>}
+              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void copyDesktopPath(contextMenu.entry!.path); setContextMenu(null); }}><FileText className="w-3.5 h-3.5" style={{ color: "#888" }} />Copy Path</button>
               <div className="my-1" style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }} />
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left" style={{ color: "#ff5f57" }} onClick={() => { handleDelete(contextMenu.entry!); setContextMenu(null); }}><Trash2 className="w-3.5 h-3.5" />Move to Trash</button>
             </div>
@@ -1285,77 +3100,250 @@ export function Files({
 
           {/* ── FLOATING CHAT WINDOW (draggable) ────────────────────── */}
           {chatOpen && (
-            <div
-              className="absolute flex flex-col rounded-xl overflow-hidden animate-scale-in"
-              style={{
-                top: chatPos.y, left: chatPos.x,
-                width: 360, height: 420,
-                boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56), 0 0 0 0.5px rgba(255,255,255,0.1)",
-                border: "0.5px solid rgba(255,255,255,0.08)",
-                zIndex: windowZ.chat ?? 61,
-              }}
-              onMouseDownCapture={() => focusWindow("chat")}
-              onClick={(e) => e.stopPropagation()}
+            <AppWindow
+              title="Chat"
+              icon={MessageSquare}
+              position={chatPos}
+              size={chatSize}
+              zIndex={windowZ.chat ?? 61}
+              glass={false}
+              onClose={() => setChatOpen(false)}
+              onFocus={() => focusWindow("chat")}
+              onDragStart={handleChatDragStart}
+              onResizeStart={(direction, e) =>
+                startWindowResize(
+                  e,
+                  direction,
+                  chatResizeRef,
+                  chatPos,
+                  chatSize,
+                  setChatPos,
+                  setChatSize,
+                  "chat",
+                  { w: 640, h: 420 },
+                )
+              }
             >
-              {/* Title bar — drag handle */}
-              <div
-                className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing"
-                style={{ background: "#2d2d2d", borderBottom: "1px solid #1a1a1a" }}
-                onMouseDown={handleChatDragStart}
-              >
-                <div className="flex items-center gap-2 z-10">
-                  <button onClick={() => setChatOpen(false)} className="w-3 h-3 rounded-full hover:opacity-80 group relative" style={{ background: "#ff5f57" }} title="Close">
-                    <X className="w-2 h-2 absolute inset-0.5 opacity-0 group-hover:opacity-100 text-black/60" />
-                  </button>
-                  <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} />
-                  <div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
-                </div>
-                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                  <div className="flex items-center gap-2">
-                    <MessageSquare className="w-3.5 h-3.5" style={{ color: "#5be579" }} />
-                    <span className="text-xs font-medium" style={{ color: "#ccc" }}>Chat</span>
-                    {!chatConnected && !chatConnecting && <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: "rgba(255,255,255,0.1)", color: "#888" }}>offline</span>}
+              <div className="h-full min-w-0 flex bg-[#f4f0ea] text-[var(--text-primary)]">
+                <aside
+                  className={`${chatNavCollapsed ? "w-[78px]" : "w-[280px]"} shrink-0 border-r flex flex-col transition-[width] duration-200`}
+                  style={{ borderColor: "rgba(0,0,0,0.08)", background: "linear-gradient(180deg, rgba(255,250,243,0.98) 0%, rgba(244,238,228,0.98) 100%)" }}
+                >
+                  <div className="p-3 border-b" style={{ borderColor: "rgba(0,0,0,0.08)" }}>
+                    <div className={`flex items-center gap-2 ${chatNavCollapsed ? "flex-col" : "justify-between mb-3"}`}>
+                      <div className={`min-w-0 ${chatNavCollapsed ? "flex flex-col items-center gap-2 w-full" : ""}`}>
+                        <button
+                          type="button"
+                          onClick={() => setChatNavCollapsed((prev) => !prev)}
+                          className="h-8 w-8 rounded-xl border flex items-center justify-center transition-colors hover:bg-black/5"
+                          style={{ borderColor: "rgba(36,26,18,0.1)", color: "#241a12" }}
+                          title={chatNavCollapsed ? "Expand conversations" : "Collapse conversations"}
+                          aria-label={chatNavCollapsed ? "Expand conversations" : "Collapse conversations"}
+                        >
+                          {chatNavCollapsed ? (
+                            <PanelLeftOpen className="w-4 h-4" />
+                          ) : (
+                            <PanelLeftClose className="w-4 h-4" />
+                          )}
+                        </button>
+                        {!chatNavCollapsed && (
+                          <>
+                            <p className="text-[11px] uppercase tracking-[0.24em]" style={{ color: "rgba(36,26,18,0.46)" }}>
+                              Conversations
+                            </p>
+                            <p className="text-[12px] mt-1" style={{ color: "rgba(36,26,18,0.68)" }}>
+                              {activeChatSession ? desktopChatSessionTitle(activeChatSession) : "Shared with main chat"}
+                            </p>
+                          </>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={createNewChatSession}
+                        className={`h-8 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 ${chatNavCollapsed ? "w-8 px-0" : "px-3"}`}
+                        style={{ background: "rgba(36,26,18,0.92)", color: "#fff8ef", border: "1px solid rgba(36,26,18,0.1)" }}
+                        title="New chat"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        {!chatNavCollapsed && "New"}
+                      </button>
+                    </div>
+                    {!chatNavCollapsed && (
+                      <input
+                        type="text"
+                        value={chatSessionQuery}
+                        onChange={(e) => setChatSessionQuery(e.target.value)}
+                        placeholder="Search history"
+                        className="w-full h-9 px-3 rounded-xl text-xs outline-none"
+                        style={{ background: "rgba(255,255,255,0.78)", color: "#241a12", border: "1px solid rgba(36,26,18,0.1)" }}
+                      />
+                    )}
                   </div>
-                </div>
-              </div>
+                  <div className={`flex-1 overflow-auto ${chatNavCollapsed ? "p-2 space-y-2" : "p-2 space-y-1.5"}`}>
+                    {visibleChatSessions.length === 0 ? (
+                      <div className="px-3 py-5 text-center">
+                        <p className="text-xs" style={{ color: "rgba(36,26,18,0.58)" }}>No matching chats</p>
+                      </div>
+                    ) : chatNavCollapsed ? visibleChatSessions.slice(0, 8).map((session) => {
+                      const isActive = session.key === chatCurrentSession;
+                      const SessionIcon = session.pinned ? Pin : MessageSquare;
+                      return (
+                        <button
+                          key={session.key}
+                          type="button"
+                          onClick={() => selectChatSession(session.key)}
+                          className="w-full h-11 rounded-2xl border flex items-center justify-center transition-colors"
+                          style={{
+                            background: isActive ? "rgba(109,40,217,0.12)" : "rgba(255,255,255,0.56)",
+                            borderColor: isActive ? "rgba(109,40,217,0.18)" : "rgba(36,26,18,0.06)",
+                            color: "#241a12",
+                          }}
+                          title={desktopChatSessionTitle(session)}
+                        >
+                          <SessionIcon className="w-4 h-4" />
+                        </button>
+                      );
+                    }) : visibleChatSessions.map((session) => {
+                      const isActive = session.key === chatCurrentSession;
+                      return (
+                        <div key={session.key} className="relative flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => selectChatSession(session.key)}
+                            className="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-2xl text-left transition-colors min-w-0"
+                            style={{
+                              background: isActive ? "rgba(109,40,217,0.12)" : "rgba(255,255,255,0.56)",
+                              border: isActive ? "1px solid rgba(109,40,217,0.18)" : "1px solid rgba(36,26,18,0.06)",
+                            }}
+                          >
+                            {session.pinned ? (
+                              <Pin className="w-3.5 h-3.5 shrink-0" style={{ color: "rgba(36,26,18,0.54)" }} />
+                            ) : (
+                              <MessageSquare className="w-3.5 h-3.5 shrink-0" style={{ color: "rgba(36,26,18,0.54)" }} />
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-[12px] font-semibold" style={{ color: "#241a12" }}>
+                                {desktopChatSessionTitle(session)}
+                              </p>
+                              <p className="mt-1 text-[10px]" style={{ color: "rgba(36,26,18,0.48)" }}>
+                                {typeof session.updatedAt === "number"
+                                  ? formatDate(Math.floor(session.updatedAt / 1000))
+                                  : "Saved conversation"}
+                              </p>
+                            </div>
+                          </button>
+                          <button
+                            data-desktop-chat-session-trigger
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setOpenChatSessionMenuKey((prev) => (prev === session.key ? null : session.key));
+                            }}
+                            className="p-1.5 rounded-lg transition-colors hover:bg-black/5"
+                            style={{ color: "rgba(36,26,18,0.54)" }}
+                            title="Chat options"
+                            aria-label="Chat options"
+                          >
+                            <MoreHorizontal className="w-3.5 h-3.5" />
+                          </button>
+                          {openChatSessionMenuKey === session.key && (
+                            <div
+                              data-desktop-chat-session-menu
+                              className="absolute right-0 top-10 z-30 w-40 rounded-xl border p-1.5 shadow-lg"
+                              style={{
+                                background: "rgba(255,250,243,0.98)",
+                                borderColor: "rgba(36,26,18,0.1)",
+                              }}
+                            >
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  requestChatSessionAction({
+                                    type: "pin",
+                                    key: session.key,
+                                    pinned: !session.pinned,
+                                  });
+                                  setOpenChatSessionMenuKey(null);
+                                }}
+                                className="w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] text-left transition-colors hover:bg-black/5"
+                                style={{ color: "#241a12" }}
+                              >
+                                <Pin className="w-3.5 h-3.5" />
+                                {session.pinned ? "Unpin" : "Pin"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  requestChatSessionAction({ type: "delete", key: session.key });
+                                  setOpenChatSessionMenuKey(null);
+                                }}
+                                className="w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] text-left transition-colors hover:bg-red-50"
+                                style={{ color: "#dc2626" }}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                Delete
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </aside>
 
-              {/* Messages */}
-              <div className="flex-1 overflow-auto p-3 space-y-2" style={{ background: "#1e1e1e" }}>
-                {chatMessages.length === 0 && !chatLoading && (
-                  <div className="flex items-center justify-center h-full">
-                    <div className="text-center px-4">
-                      <MessageSquare className="w-8 h-8 mx-auto mb-2" style={{ color: "#555", opacity: 0.3 }} />
-                      <p className="text-xs" style={{ color: "#888" }}>Ask questions about your files</p>
-                      <p className="text-[10px] mt-1" style={{ color: "#666" }}>e.g. "What's in config.json?"</p>
+                <div className="min-w-0 flex-1 flex flex-col bg-[rgba(255,255,255,0.62)]">
+                  <div
+                    className="px-4 py-3 border-b flex items-center justify-between gap-3"
+                    style={{ borderColor: "rgba(0,0,0,0.08)", background: "rgba(255,250,243,0.82)" }}
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold" style={{ color: "#241a12" }}>
+                        {activeChatSession ? desktopChatSessionTitle(activeChatSession) : DEFAULT_DESKTOP_CHAT_TITLE}
+                      </p>
+                      <p className="mt-1 text-[11px]" style={{ color: "rgba(36,26,18,0.56)" }}>
+                        Same sessions, drafts, and history as the main chat view
+                      </p>
+                    </div>
+                    <div className="shrink-0 px-2.5 py-1 rounded-full text-[10px] font-medium" style={{ background: "rgba(36,26,18,0.06)", color: "rgba(36,26,18,0.56)" }}>
+                      {chatSessions.length} session{chatSessions.length === 1 ? "" : "s"}
                     </div>
                   </div>
-                )}
-                {chatMessages.map((msg) => (
-                  <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                    <div className="max-w-[85%] px-3 py-2 rounded-xl text-xs" style={msg.role === "user" ? { background: "#7c3aed", color: "white" } : { background: "#2d2d2d", color: "#d4d4d4" }}>
-                      <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
-                    </div>
+                  <div className="min-w-0 flex-1 overflow-hidden">
+                    <Chat
+                      isVisible={chatOpen}
+                      gatewayRunning={gatewayRunning}
+                      gatewayStarting={Boolean(gatewayRetryIn) || (isTogglingGateway && !gatewayRunning)}
+                      gatewayRetryIn={gatewayRetryIn ?? null}
+                      onStartGateway={onGatewayToggle}
+                      onRecoverProxyAuth={onRecoverProxyAuth}
+                      useLocalKeys={useLocalKeys}
+                      selectedModel={selectedModel}
+                      onModelChange={onModelChange}
+                      imageModel={imageModel}
+                      integrationsSyncing={integrationsSyncing}
+                      integrationsMissing={integrationsMissing}
+                      onNavigate={handleDesktopChatNavigate}
+                      onSessionsChange={(sessions, currentKey) => {
+                        setChatSessions(sessions);
+                        setChatCurrentSession((prev) => currentKey ?? prev);
+                        setChatRequestedSession((pending) => {
+                          if (!pending) return pending;
+                          if (pending === "__new__") {
+                            return currentKey ? null : pending;
+                          }
+                          return pending === currentKey ? null : pending;
+                        });
+                        setChatRequestedAction(null);
+                      }}
+                      requestedSession={chatRequestedSession}
+                      requestedSessionAction={chatRequestedAction}
+                    />
                   </div>
-                ))}
-                {chatLoading && <div className="flex justify-start"><div className="px-3 py-2 rounded-xl" style={{ background: "#2d2d2d" }}><Loader2 className="w-4 h-4 animate-spin" style={{ color: "#888" }} /></div></div>}
-                <div ref={chatEndRef} />
+                </div>
               </div>
-
-              {/* Input */}
-              <div className="flex items-center gap-2 px-3 py-2 flex-shrink-0" style={{ background: "#252526", borderTop: "1px solid #1a1a1a" }}>
-                <input
-                  type="text"
-                  className="flex-1 text-xs px-3 py-1.5 rounded-md outline-none"
-                  style={{ background: "#1e1e1e", color: "#d4d4d4", border: "1px solid #3a3a3a" }}
-                  placeholder={chatConnected ? "Ask about these files..." : "Connecting..."}
-                  value={chatInput}
-                  disabled={!chatConnected || chatLoading}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleChatSend(); } }}
-                />
-                <button onClick={handleChatSend} disabled={!chatInput.trim() || !chatConnected || chatLoading} className="p-1.5 rounded-md disabled:opacity-40" style={{ background: "#7c3aed" }}><Send className="w-3.5 h-3.5 text-white" /></button>
-              </div>
-            </div>
+            </AppWindow>
           )}
 
           {/* ── BROWSER WINDOW ───────────────────────────────────────── */}
@@ -1369,10 +3357,70 @@ export function Files({
               onClose={() => { void closeBrowserWindow(); }}
               onFocus={() => focusWindow("browser")}
               onDragStart={(e) =>
-                startWindowDrag(e, browserDragRef, browserPos, setBrowserPos, "browser")
+                startWindowDrag(e, browserDragRef, browserPos, browserSize, setBrowserPos, "browser")
+              }
+              onResizeStart={(direction, e) =>
+                startWindowResize(
+                  e,
+                  direction,
+                  browserResizeRef,
+                  browserPos,
+                  browserSize,
+                  setBrowserPos,
+                  setBrowserSize,
+                  "browser",
+                  { w: 640, h: 420 },
+                )
               }
             >
               <div className="h-full flex flex-col bg-white">
+                <div className="flex items-center gap-2 px-2 py-2 border-b border-[var(--border-subtle)] bg-[#f7f3eb]">
+                  <div className="flex-1 min-w-0 flex items-center gap-2 overflow-x-auto">
+                    {browserTabs.map((tab) => {
+                      const isActive = tab.id === activeBrowserTabId;
+                      return (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => selectBrowserTab(tab.id)}
+                          className={`group min-w-0 max-w-[240px] h-9 px-3 rounded-xl border flex items-center gap-2 text-sm transition-colors ${
+                            isActive
+                              ? "bg-white text-[var(--text-primary)] shadow-sm"
+                              : "bg-white/55 text-[var(--text-secondary)] hover:bg-white/80"
+                          }`}
+                          style={{ borderColor: isActive ? "rgba(24,34,48,0.12)" : "rgba(24,34,48,0.08)" }}
+                          title={browserTabLabel(tab)}
+                        >
+                          <Globe className="w-3.5 h-3.5 shrink-0" />
+                          <span className="min-w-0 flex-1 truncate text-left">
+                            {browserTabLabel(tab)}
+                          </span>
+                          <span
+                            role="button"
+                            tabIndex={-1}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void closeBrowserTab(tab.id);
+                            }}
+                            className="shrink-0 rounded-md p-0.5 text-[var(--text-tertiary)] hover:bg-black/5 hover:text-[var(--text-primary)]"
+                            aria-label={`Close ${browserTabLabel(tab)}`}
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => createBrowserTab()}
+                    className="h-9 w-9 shrink-0 rounded-xl border border-[var(--border-subtle)] bg-white text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                    title="New tab"
+                    aria-label="New tab"
+                  >
+                    <Plus className="w-4 h-4 mx-auto" />
+                  </button>
+                </div>
                 <div className="px-3 py-2 border-b border-[var(--border-subtle)] bg-[var(--system-gray-6)]/70">
                   <form
                     className="flex items-center gap-2"
@@ -1384,7 +3432,7 @@ export function Files({
                     <button
                       type="button"
                       onClick={() => { void goBrowserBack(); }}
-                      disabled={!browserSnapshot?.can_go_back || browserLoading}
+                      disabled={!browserCanGoBack || browserLoading}
                       className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-white text-[var(--text-secondary)] disabled:opacity-40"
                       title="Back"
                     >
@@ -1393,7 +3441,7 @@ export function Files({
                     <button
                       type="button"
                       onClick={() => { void goBrowserForward(); }}
-                      disabled={!browserSnapshot?.can_go_forward || browserLoading}
+                      disabled={!browserCanGoForward || browserLoading}
                       className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-white text-[var(--text-secondary)] disabled:opacity-40"
                       title="Forward"
                     >
@@ -1432,11 +3480,6 @@ export function Files({
                       Open
                     </button>
                   </form>
-                  {browserLoadError && (
-                    <p className="mt-2 text-xs text-red-600">
-                      {browserLoadError}
-                    </p>
-                  )}
                 </div>
                 <div className="relative flex-1 bg-white">
                   {browserNeedsFocusOverlay && (
@@ -1448,24 +3491,88 @@ export function Files({
                       Click to focus browser
                     </button>
                   )}
-                  {browserLoading && !browserSnapshot ? (
+                  {browserLoading && !browserSnapshot && !browserLiveState && !browserUsingEmbeddedPreview ? (
                     <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
                       <div className="flex items-center gap-2">
                         <Loader2 className="w-4 h-4 animate-spin" />
                         Loading browser session...
                       </div>
                     </div>
-                  ) : browserSnapshot ? (
+                  ) : (browserUsingEmbeddedPreview || browserSnapshot || browserLiveState) ? (
                     <div className="h-full flex flex-col">
-                      <div className="flex-1 min-h-0 overflow-auto bg-[#f5f5f5]">
-                        {browserSnapshot.screenshot_base64 ? (
-                          <div className="relative w-full">
-                            <img
-                              src={`data:image/png;base64,${browserSnapshot.screenshot_base64}`}
-                              alt={browserSnapshot.title || browserSnapshot.url}
-                              className="w-full h-auto block"
+                      <div
+                        ref={browserViewportRef}
+                        className={browserUsingEmbeddedPreview
+                          ? "flex-1 min-h-0 overflow-hidden bg-white"
+                          : browserUsingEmbeddedRemoteDesktop
+                          ? "flex-1 min-h-0 overflow-hidden bg-[#f4f4f5]"
+                          : browserLiveConnected
+                          ? "flex-1 min-h-0 overflow-hidden bg-[#0b0b0c] flex items-center justify-center"
+                          : "flex-1 min-h-0 overflow-auto bg-[#f5f5f5]"}
+                      >
+                        {browserUsingEmbeddedPreview ? (
+                          <div className="relative w-full h-full overflow-hidden bg-white">
+                            <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
+                              Local preview is loading...
+                            </div>
+                          </div>
+                        ) : browserUsingEmbeddedRemoteDesktop && browserRemoteDesktopUrl ? (
+                          <div className="relative w-full h-full overflow-hidden bg-white">
+                            <iframe
+                              key={browserRemoteDesktopUrl}
+                              src={browserRemoteDesktopUrl}
+                              title={browserTitle}
+                              className="absolute left-0 w-full border-0 bg-white"
+                              allow="clipboard-read; clipboard-write"
+                              style={{
+                                top: -44,
+                                height: "calc(100% + 44px)",
+                                pointerEvents: browserLiveConnected ? "none" : undefined,
+                              }}
                             />
-                            {browserSnapshot.interactive_elements.map((element) => (
+                            {browserLiveConnected && (
+                              <div
+                                className="absolute inset-0 z-10 cursor-default"
+                                tabIndex={0}
+                                onFocus={() => sendBrowserLiveMessage({ type: "focus" })}
+                                onMouseMove={handleBrowserViewportMouseMove}
+                                onMouseDown={handleBrowserViewportMouseDown}
+                                onMouseUp={handleBrowserViewportMouseUp}
+                                onWheel={handleBrowserViewportWheel}
+                                onKeyDown={handleBrowserViewportKeyDown}
+                                onPaste={handleBrowserViewportPaste}
+                                onCopy={handleBrowserViewportCopy}
+                                onContextMenu={(e) => e.preventDefault()}
+                              />
+                            )}
+                          </div>
+                        ) : browserHasRenderableImage ? (
+                          <div
+                            className={browserLiveConnected
+                              ? "relative w-full h-full flex items-center justify-center"
+                              : "relative w-full"}
+                          >
+                            <img
+                              ref={browserLiveImageRef}
+                              src={browserSnapshotImage || undefined}
+                              alt={browserTitle}
+                              className={browserLiveConnected
+                                ? "block max-w-full max-h-full object-contain select-none"
+                                : "w-full h-auto block"}
+                              draggable={false}
+                              decoding="async"
+                              tabIndex={browserLiveConnected ? 0 : -1}
+                              onFocus={() => sendBrowserLiveMessage({ type: "focus" })}
+                              onMouseMove={handleBrowserViewportMouseMove}
+                              onMouseDown={handleBrowserViewportMouseDown}
+                              onMouseUp={handleBrowserViewportMouseUp}
+                              onWheel={handleBrowserViewportWheel}
+                              onKeyDown={handleBrowserViewportKeyDown}
+                              onPaste={handleBrowserViewportPaste}
+                              onCopy={handleBrowserViewportCopy}
+                              onContextMenu={(e) => e.preventDefault()}
+                            />
+                            {!browserLiveConnected && (browserSnapshot?.interactive_elements ?? []).map((element) => (
                               <button
                                 key={element.id}
                                 type="button"
@@ -1474,10 +3581,10 @@ export function Files({
                                 disabled={Boolean(browserClickingId) || browserLoading}
                                 className="absolute rounded border border-sky-500/80 bg-sky-400/10 hover:bg-sky-400/20 transition-colors disabled:cursor-wait"
                                 style={{
-                                  left: `${(element.x / Math.max(browserSnapshot.screenshot_width, 1)) * 100}%`,
-                                  top: `${(element.y / Math.max(browserSnapshot.screenshot_height, 1)) * 100}%`,
-                                  width: `${(element.width / Math.max(browserSnapshot.screenshot_width, 1)) * 100}%`,
-                                  height: `${(element.height / Math.max(browserSnapshot.screenshot_height, 1)) * 100}%`,
+                                  left: `${(element.x / Math.max(browserSnapshot?.screenshot_width ?? browserViewportWidth, 1)) * 100}%`,
+                                  top: `${(element.y / Math.max(browserSnapshot?.screenshot_height ?? browserViewportHeight, 1)) * 100}%`,
+                                  width: `${(element.width / Math.max(browserSnapshot?.screenshot_width ?? browserViewportWidth, 1)) * 100}%`,
+                                  height: `${(element.height / Math.max(browserSnapshot?.screenshot_height ?? browserViewportHeight, 1)) * 100}%`,
                                 }}
                               >
                                 <span className="absolute left-0 top-0 -translate-y-full rounded bg-sky-600 px-1.5 py-0.5 text-[10px] font-medium text-white shadow-sm max-w-[240px] truncate">
@@ -1486,27 +3593,15 @@ export function Files({
                               </button>
                             ))}
                           </div>
+                        ) : browserLiveConnected ? (
+                          <div className="h-full flex items-center justify-center text-sm text-white/60">
+                            Waiting for live browser frame...
+                          </div>
                         ) : (
                           <div className="h-full flex items-center justify-center text-sm text-[var(--text-secondary)]">
                             No browser screenshot available.
                           </div>
                         )}
-                      </div>
-                      <div className="h-40 border-t border-[var(--border-subtle)] bg-white overflow-auto px-3 py-2">
-                        <div className="text-xs font-semibold text-[var(--text-primary)]">
-                          {browserSnapshot.title || browserSnapshot.url}
-                        </div>
-                        <div className="mt-1 text-[11px] text-[var(--text-tertiary)] break-all">
-                          {browserSnapshot.url}
-                        </div>
-                        <div className="mt-2 text-[11px] text-[var(--text-secondary)]">
-                          {browserSnapshot.interactive_elements.length > 0
-                            ? `Interactive targets: ${browserSnapshot.interactive_elements.length}. Click the highlighted regions on the screenshot.`
-                            : "No clickable elements detected on the current page."}
-                        </div>
-                        <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-[var(--text-secondary)] font-mono">
-                          {browserSnapshot.text || "No readable page text extracted."}
-                        </pre>
                       </div>
                     </div>
                   ) : (
@@ -1530,7 +3625,7 @@ export function Files({
               onClose={() => setPluginsOpen(false)}
               onFocus={() => focusWindow("plugins")}
               onDragStart={(e) =>
-                startWindowDrag(e, pluginsDragRef, pluginsPos, setPluginsPos, "plugins")
+                startWindowDrag(e, pluginsDragRef, pluginsPos, pluginsSize, setPluginsPos, "plugins")
               }
             >
               <Suspense fallback={PANEL_FALLBACK}>
@@ -1553,7 +3648,7 @@ export function Files({
               onClose={() => setSkillsOpen(false)}
               onFocus={() => focusWindow("skills")}
               onDragStart={(e) =>
-                startWindowDrag(e, skillsDragRef, skillsPos, setSkillsPos, "skills")
+                startWindowDrag(e, skillsDragRef, skillsPos, skillsSize, setSkillsPos, "skills")
               }
             >
               <Suspense fallback={PANEL_FALLBACK}>
@@ -1576,7 +3671,7 @@ export function Files({
               onClose={() => setChannelsOpen(false)}
               onFocus={() => focusWindow("channels")}
               onDragStart={(e) =>
-                startWindowDrag(e, channelsDragRef, channelsPos, setChannelsPos, "channels")
+                startWindowDrag(e, channelsDragRef, channelsPos, channelsSize, setChannelsPos, "channels")
               }
             >
               <Suspense fallback={PANEL_FALLBACK}>
@@ -1596,7 +3691,7 @@ export function Files({
               onClose={() => setTasksOpen(false)}
               onFocus={() => focusWindow("tasks")}
               onDragStart={(e) =>
-                startWindowDrag(e, tasksDragRef, tasksPos, setTasksPos, "tasks")
+                startWindowDrag(e, tasksDragRef, tasksPos, tasksSize, setTasksPos, "tasks")
               }
             >
               <Suspense fallback={PANEL_FALLBACK}>
@@ -1616,7 +3711,7 @@ export function Files({
               onClose={() => setJobsOpen(false)}
               onFocus={() => focusWindow("jobs")}
               onDragStart={(e) =>
-                startWindowDrag(e, jobsDragRef, jobsPos, setJobsPos, "jobs")
+                startWindowDrag(e, jobsDragRef, jobsPos, jobsSize, setJobsPos, "jobs")
               }
             >
               <Suspense fallback={PANEL_FALLBACK}>
@@ -1636,7 +3731,7 @@ export function Files({
               onClose={() => setLogsOpen(false)}
               onFocus={() => focusWindow("logs")}
               onDragStart={(e) =>
-                startWindowDrag(e, logsDragRef, logsPos, setLogsPos, "logs")
+                startWindowDrag(e, logsDragRef, logsPos, logsSize, setLogsPos, "logs")
               }
             >
               <Suspense fallback={PANEL_FALLBACK}>
@@ -1656,7 +3751,7 @@ export function Files({
               onClose={() => setBillingOpen(false)}
               onFocus={() => focusWindow("billing")}
               onDragStart={(e) =>
-                startWindowDrag(e, billingDragRef, billingPos, setBillingPos, "billing")
+                startWindowDrag(e, billingDragRef, billingPos, billingSize, setBillingPos, "billing")
               }
             >
               <Suspense fallback={PANEL_FALLBACK}>
@@ -1676,7 +3771,7 @@ export function Files({
               onClose={() => setSettingsOpen(false)}
               onFocus={() => focusWindow("settings")}
               onDragStart={(e) =>
-                startWindowDrag(e, settingsDragRef, settingsPos, setSettingsPos, "settings")
+                startWindowDrag(e, settingsDragRef, settingsPos, settingsSize, setSettingsPos, "settings")
               }
             >
               <Suspense fallback={PANEL_FALLBACK}>
