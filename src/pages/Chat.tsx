@@ -11,6 +11,7 @@ import {
   Globe,
   Activity,
   TrendingUp,
+  Terminal,
   ChevronDown,
   ChevronUp,
   Bot,
@@ -82,6 +83,7 @@ type Message = {
   toolName?: string;
   sentAt?: number | null;
   attachments?: MessageAttachment[];
+  terminalResult?: TerminalCommandResult;
   assistantPayload?: {
     events: CalendarEvent[];
     errors: ToolError[];
@@ -124,8 +126,27 @@ type DesktopHandoff = {
   action: "open" | "preview" | "browser";
   looksLikeFile?: boolean;
 };
+type ComposerMode = "chat" | "shell";
+type ChatTerminalState = {
+  cwd: string;
+};
+type TerminalCommandResult = {
+  command: string;
+  cwd: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+};
+type ChatTerminalRunResponse = {
+  stdout: string;
+  stderr: string;
+  exit_code: number | null;
+  cwd: string;
+};
 
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
+const TERMINAL_DEFAULT_CWD = "/data/workspace";
+const DEFAULT_COMPOSER_MODE: ComposerMode = "chat";
 const CHAT_WORKSPACE_PREFIXES = [
   "/data/.openclaw/workspace",
   "/data/workspace",
@@ -257,6 +278,9 @@ type PersistedChatData = {
   sessions: ChatSession[];
   messages: Record<string, Message[]>; // sessionKey -> messages
   drafts: Record<string, string>; // sessionKey -> unsent draft
+  shellDrafts: Record<string, string>;
+  composerModeBySession: Record<string, ComposerMode>;
+  terminalBySession: Record<string, ChatTerminalState>;
   currentSession: string | null;
 };
 
@@ -321,6 +345,9 @@ async function persistChatData(data: PersistedChatData): Promise<void> {
       sessions: data.sessions.slice(0, MAX_PERSISTED_SESSIONS),
       messages: {},
       drafts: {},
+      shellDrafts: {},
+      composerModeBySession: {},
+      terminalBySession: {},
       currentSession: data.currentSession,
     };
     for (const s of trimmed.sessions) {
@@ -337,11 +364,33 @@ async function persistChatData(data: PersistedChatData): Promise<void> {
       if (typeof draft === "string" && draft.length > 0) {
         trimmed.drafts[s.key] = draft;
       }
+      const shellDraft = data.shellDrafts[s.key];
+      if (typeof shellDraft === "string" && shellDraft.length > 0) {
+        trimmed.shellDrafts[s.key] = shellDraft;
+      }
+      const composerMode = data.composerModeBySession[s.key];
+      if (composerMode === "shell") {
+        trimmed.composerModeBySession[s.key] = composerMode;
+      }
+      const terminalState = data.terminalBySession[s.key];
+      if (terminalState?.cwd) {
+        trimmed.terminalBySession[s.key] = {
+          cwd: terminalState.cwd,
+        };
+      }
     }
     if (trimmed.currentSession) {
       const currentDraft = data.drafts[trimmed.currentSession];
       if (typeof currentDraft === "string" && currentDraft.length > 0) {
         trimmed.drafts[trimmed.currentSession] = currentDraft;
+      }
+      const currentShellDraft = data.shellDrafts[trimmed.currentSession];
+      if (typeof currentShellDraft === "string" && currentShellDraft.length > 0) {
+        trimmed.shellDrafts[trimmed.currentSession] = currentShellDraft;
+      }
+      const currentMode = data.composerModeBySession[trimmed.currentSession];
+      if (currentMode === "shell") {
+        trimmed.composerModeBySession[trimmed.currentSession] = currentMode;
       }
     }
     await store.set("chatData", trimmed);
@@ -371,6 +420,28 @@ async function loadPersistedChatData(): Promise<PersistedChatData | null> {
       if (typeof draft !== "string") continue;
       drafts[sessionKey] = draft;
     }
+    const shellDrafts: Record<string, string> = {};
+    for (const [sessionKey, draft] of Object.entries(data.shellDrafts || {})) {
+      if (!allowedKeys.has(sessionKey)) continue;
+      if (typeof draft !== "string") continue;
+      shellDrafts[sessionKey] = draft;
+    }
+    const composerModeBySession: Record<string, ComposerMode> = {};
+    for (const [sessionKey, mode] of Object.entries(data.composerModeBySession || {})) {
+      if (!allowedKeys.has(sessionKey)) continue;
+      composerModeBySession[sessionKey] = mode === "shell" ? "shell" : "chat";
+    }
+    const terminalBySession: Record<string, ChatTerminalState> = {};
+    for (const [sessionKey, value] of Object.entries(data.terminalBySession || {})) {
+      if (!allowedKeys.has(sessionKey)) continue;
+      if (!value || typeof value !== "object") continue;
+      const cwd = typeof (value as ChatTerminalState).cwd === "string"
+        ? (value as ChatTerminalState).cwd.trim()
+        : "";
+      terminalBySession[sessionKey] = {
+        cwd: cwd || TERMINAL_DEFAULT_CWD,
+      };
+    }
     const currentSession =
       typeof data.currentSession === "string" && allowedKeys.has(data.currentSession)
         ? data.currentSession
@@ -380,12 +451,23 @@ async function loadPersistedChatData(): Promise<PersistedChatData | null> {
       sessions,
       messages,
       drafts,
+      shellDrafts,
+      composerModeBySession,
+      terminalBySession,
       currentSession,
     };
   } catch (err) {
     console.warn("[Entropic] Failed to load persisted chat data:", err);
     return null;
   }
+}
+
+function parseRunSlashCommand(raw: string): string | null {
+  const match = raw.match(/^\/run(?:\s+|\n)([\s\S]+)$/i);
+  if (!match) {
+    return raw.trim().toLowerCase() === "/run" ? "" : null;
+  }
+  return match[1].trimEnd();
 }
 
 function extractJsonBlocks(text: string): Array<{ jsonText: string; start: number; end: number }> {
@@ -1510,6 +1592,7 @@ export function Chat({
     (isAuthenticated || (localCreditsCents ?? 0) > 0);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
+  const [shellDraftsBySession, setShellDraftsBySession] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -1557,6 +1640,8 @@ export function Chat({
     telegramConnected: boolean;
   } | null>(null);
   const [telegramSetupOpen, setTelegramSetupOpen] = useState(false);
+  const [composerModeBySession, setComposerModeBySession] = useState<Record<string, ComposerMode>>({});
+  const [terminalStateBySession, setTerminalStateBySession] = useState<Record<string, ChatTerminalState>>({});
   const [integrationSetupBySession, setIntegrationSetupBySession] = useState<Record<string, IntegrationSetupState>>({});
   const [quickSuggestionBySession, setQuickSuggestionBySession] = useState<Record<string, QuickSuggestionState>>({});
   const [builderChecklistBySession, setBuilderChecklistBySession] = useState<Record<string, BuilderChecklistState>>({});
@@ -1568,6 +1653,9 @@ export function Chat({
   const connectInFlightRef = useRef(false);
   const currentSessionRef = useRef<string | null>(null);
   const draftsRef = useRef<Record<string, string>>({});
+  const shellDraftsRef = useRef<Record<string, string>>({});
+  const composerModeBySessionRef = useRef<Record<string, ComposerMode>>({});
+  const terminalStateBySessionRef = useRef<Record<string, ChatTerminalState>>({});
   const handledRequestedSessionRef = useRef<string | null>(null);
   const handledRequestedActionRef = useRef<string | null>(null);
   const handlersRef = useRef<{
@@ -1597,6 +1685,12 @@ export function Chat({
   const builderSessionsRef = useRef<Set<string>>(new Set());
   const avatarUploadDataUrlByFileNameRef = useRef<Map<string, string>>(new Map());
   const wasVisibleRef = useRef(isVisible !== false);
+  const activeComposerMode = currentSession
+    ? composerModeBySession[currentSession] || DEFAULT_COMPOSER_MODE
+    : DEFAULT_COMPOSER_MODE;
+  const activeTerminalState = currentSession
+    ? terminalStateBySession[currentSession] || { cwd: TERMINAL_DEFAULT_CWD }
+    : { cwd: TERMINAL_DEFAULT_CWD };
   const integrationSetup = currentSession ? integrationSetupBySession[currentSession] || null : null;
   const quickSuggestion = currentSession ? quickSuggestionBySession[currentSession] || null : null;
   const builderChecklist = currentSession ? builderChecklistBySession[currentSession] || null : null;
@@ -1605,6 +1699,30 @@ export function Chat({
     setIntegrationSetupBySession((prev) => {
       const next = { ...prev };
       if (value) {
+        next[sessionKey] = value;
+      } else {
+        delete next[sessionKey];
+      }
+      return next;
+    });
+  }
+
+  function setTerminalStateForSession(sessionKey: string, value: ChatTerminalState | null) {
+    setTerminalStateBySession((prev) => {
+      const next = { ...prev };
+      if (value) {
+        next[sessionKey] = value;
+      } else {
+        delete next[sessionKey];
+      }
+      return next;
+    });
+  }
+
+  function setComposerModeForSession(sessionKey: string, value: ComposerMode | null) {
+    setComposerModeBySession((prev) => {
+      const next = { ...prev };
+      if (value && value !== DEFAULT_COMPOSER_MODE) {
         next[sessionKey] = value;
       } else {
         delete next[sessionKey];
@@ -1955,6 +2073,9 @@ export function Chat({
         }
         setSessions(applySessionTitles(cached.sessions));
         setDraftsBySession(cached.drafts || {});
+        setShellDraftsBySession(cached.shellDrafts || {});
+        setComposerModeBySession(cached.composerModeBySession || {});
+        setTerminalStateBySession(cached.terminalBySession || {});
         const restoreKey = cached.currentSession || cached.sessions[0].key;
         currentSessionRef.current = restoreKey;
         setCurrentSession(restoreKey);
@@ -1977,10 +2098,16 @@ export function Chat({
       const currentSnap = currentSessionRef.current;
       const messagesSnap = { ...sessionMessagesRef.current };
       const draftsSnap = { ...draftsRef.current };
+      const shellDraftsSnap = { ...shellDraftsRef.current };
+      const composerModeSnap = { ...composerModeBySessionRef.current };
+      const terminalSnap = { ...terminalStateBySessionRef.current };
       persistChatData({
         sessions: sessionsSnap,
         messages: messagesSnap,
         drafts: draftsSnap,
+        shellDrafts: shellDraftsSnap,
+        composerModeBySession: composerModeSnap,
+        terminalBySession: terminalSnap,
         currentSession: currentSnap,
       });
     }, 500);
@@ -2015,6 +2142,33 @@ export function Chat({
       return next;
     });
 
+    setShellDraftsBySession((prev) => {
+      const fromDraft = prev[from];
+      const toDraft = prev[to];
+      if (typeof fromDraft !== "string" || fromDraft.length === 0) {
+        return prev;
+      }
+      if (typeof toDraft === "string" && toDraft.length > 0) {
+        const next = { ...prev };
+        delete next[from];
+        return next;
+      }
+      const next = { ...prev, [to]: fromDraft };
+      delete next[from];
+      return next;
+    });
+
+    setComposerModeBySession((prev) => {
+      const fromMode = prev[from];
+      if (!fromMode) return prev;
+      const next = { ...prev };
+      if (!next[to]) {
+        next[to] = fromMode;
+      }
+      delete next[from];
+      return next;
+    });
+
     setIntegrationSetupBySession((prev) => {
       const fromSetup = prev[from];
       if (!fromSetup) return prev;
@@ -2032,6 +2186,17 @@ export function Chat({
       const next = { ...prev };
       if (!next[to]) {
         next[to] = fromSuggestion;
+      }
+      delete next[from];
+      return next;
+    });
+
+    setTerminalStateBySession((prev) => {
+      const fromState = prev[from];
+      if (!fromState) return prev;
+      const next = { ...prev };
+      if (!next[to]) {
+        next[to] = fromState;
       }
       delete next[from];
       return next;
@@ -2101,6 +2266,18 @@ export function Chat({
     draftsRef.current = draftsBySession;
   }, [draftsBySession]);
 
+  useEffect(() => {
+    shellDraftsRef.current = shellDraftsBySession;
+  }, [shellDraftsBySession]);
+
+  useEffect(() => {
+    composerModeBySessionRef.current = composerModeBySession;
+  }, [composerModeBySession]);
+
+  useEffect(() => {
+    terminalStateBySessionRef.current = terminalStateBySession;
+  }, [terminalStateBySession]);
+
   // Persist on unmount (navigation away)
   useEffect(() => {
     return () => {
@@ -2111,11 +2288,17 @@ export function Chat({
       const currentSnap = currentSessionRef.current;
       const messagesSnap = { ...sessionMessagesRef.current };
       const draftsSnap = { ...draftsRef.current };
+      const shellDraftsSnap = { ...shellDraftsRef.current };
+      const composerModeSnap = { ...composerModeBySessionRef.current };
+      const terminalSnap = { ...terminalStateBySessionRef.current };
       if (sessionsSnap.length > 0) {
         persistChatData({
           sessions: sessionsSnap,
           messages: messagesSnap,
           drafts: draftsSnap,
+          shellDrafts: shellDraftsSnap,
+          composerModeBySession: composerModeSnap,
+          terminalBySession: terminalSnap,
           currentSession: currentSnap,
         });
       }
@@ -2208,6 +2391,16 @@ export function Chat({
   useEffect(() => {
     currentSessionRef.current = currentSession;
   }, [currentSession]);
+
+  useEffect(() => {
+    if (!textareaRef.current) return;
+    const ta = textareaRef.current;
+    ta.style.height = "auto";
+    const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
+    const maxHeight = lineHeight * 5;
+    ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
+    ta.style.overflowY = ta.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, [currentSession, activeComposerMode]);
 
   // When returning to the chat view, rehydrate the currently selected session.
   useEffect(() => {
@@ -3142,6 +3335,9 @@ export function Chat({
       const snapshotSession = sessionsRef.current.find((session) => session.key === action.key);
       const snapshotMessages = sessionMessagesRef.current[action.key] || [];
       const snapshotDraft = draftsRef.current[action.key] || "";
+      const snapshotShellDraft = shellDraftsRef.current[action.key] || "";
+      const snapshotComposerMode = composerModeBySessionRef.current[action.key] || null;
+      const snapshotTerminalState = terminalStateBySessionRef.current[action.key] || null;
       const snapshotIntegrationSetup = integrationSetupBySession[action.key] || null;
       const snapshotQuickSuggestion = quickSuggestionBySession[action.key] || null;
       const snapshotBuilderChecklist = builderChecklistBySession[action.key] || null;
@@ -3154,11 +3350,27 @@ export function Chat({
       const nextDrafts = { ...draftsRef.current };
       delete nextDrafts[action.key];
       draftsRef.current = nextDrafts;
+      const nextShellDrafts = { ...shellDraftsRef.current };
+      delete nextShellDrafts[action.key];
+      shellDraftsRef.current = nextShellDrafts;
       setSessions(applySessionTitles(remaining));
       const nextMessages = { ...sessionMessagesRef.current };
       delete nextMessages[action.key];
       sessionMessagesRef.current = nextMessages;
       setDraftsBySession(nextDrafts);
+      setShellDraftsBySession(nextShellDrafts);
+      setComposerModeBySession((prev) => {
+        if (!prev[action.key]) return prev;
+        const next = { ...prev };
+        delete next[action.key];
+        return next;
+      });
+      setTerminalStateBySession((prev) => {
+        if (!prev[action.key]) return prev;
+        const next = { ...prev };
+        delete next[action.key];
+        return next;
+      });
       setIntegrationSetupBySession((prev) => {
         if (!prev[action.key]) return prev;
         const next = { ...prev };
@@ -3207,6 +3419,17 @@ export function Chat({
             draftsRef.current = restoredDrafts;
             setDraftsBySession(restoredDrafts);
           }
+          if (snapshotShellDraft) {
+            const restoredShellDrafts = { ...shellDraftsRef.current, [action.key]: snapshotShellDraft };
+            shellDraftsRef.current = restoredShellDrafts;
+            setShellDraftsBySession(restoredShellDrafts);
+          }
+          if (snapshotComposerMode) {
+            setComposerModeBySession((prev) => ({ ...prev, [action.key]: snapshotComposerMode }));
+          }
+          if (snapshotTerminalState) {
+            setTerminalStateBySession((prev) => ({ ...prev, [action.key]: snapshotTerminalState }));
+          }
           if (snapshotIntegrationSetup) {
             setIntegrationSetupBySession((prev) => ({ ...prev, [action.key]: snapshotIntegrationSetup }));
           }
@@ -3231,7 +3454,12 @@ export function Chat({
     if (!force && existing && sessionsRef.current.some((session) => session.key === existing)) {
       const existingMessages = sessionMessagesRef.current[existing] || [];
       const existingDraft = draftsRef.current[existing] || "";
-      if (existingMessages.length === 0 && existingDraft.trim().length === 0) {
+      const existingShellDraft = shellDraftsRef.current[existing] || "";
+      if (
+        existingMessages.length === 0 &&
+        existingDraft.trim().length === 0 &&
+        existingShellDraft.trim().length === 0
+      ) {
         setCurrentSession(existing);
         visibleMessagesSessionRef.current = existing;
         setMessages([]);
@@ -3308,16 +3536,35 @@ export function Chat({
     }
   }
 
-  async function handleSend(content?: string) {
+  async function handleSend(content?: string, options?: { mode?: ComposerMode }) {
     let sendSession = currentSessionRef.current;
     if (!sendSession) {
       createNewSession({ force: true });
       sendSession = currentSessionRef.current;
     }
-    const currentDraft = sendSession ? (draftsRef.current[sendSession] || "") : "";
-    const messageContent = content || currentDraft.trim();
+    const composerMode =
+      options?.mode ??
+      (content === undefined
+        ? sendSession
+          ? composerModeBySessionRef.current[sendSession] || DEFAULT_COMPOSER_MODE
+          : DEFAULT_COMPOSER_MODE
+        : DEFAULT_COMPOSER_MODE);
+    const draftSource =
+      composerMode === "shell" ? shellDraftsRef.current : draftsRef.current;
+    const currentDraft = sendSession ? (draftSource[sendSession] || "") : "";
+    const composerInput = content || currentDraft.trim();
+    const rawMessageContent =
+      composerMode === "shell"
+        ? parseRunSlashCommand(composerInput) ?? composerInput
+        : composerInput;
+    const messageContent =
+      composerMode === "shell" && rawMessageContent
+        ? `/run ${rawMessageContent}`
+        : rawMessageContent;
+    const userMessageContent =
+      composerMode === "shell" ? rawMessageContent : messageContent;
     const failedDraftRestore = content ? null : currentDraft;
-    if (!sendSession || isLoading || (!messageContent && pendingAttachments.length === 0)) return;
+    if (!sendSession || isLoading || (!rawMessageContent && pendingAttachments.length === 0)) return;
     const attachmentsPayload = pendingAttachments.map((attachment) => ({
       fileName: attachment.fileName,
       mimeType: attachment.mimeType,
@@ -3329,15 +3576,109 @@ export function Chat({
         ? `[Attached image: ${pendingAttachments[0]?.fileName || "image"}]`
         : `[Attached ${pendingAttachments.length} images]`;
     const userVisibleContent = hasAttachments
-      ? messageContent
-        ? `${messageContent}\n\n${attachmentLine}`
+      ? userMessageContent
+        ? `${userMessageContent}\n\n${attachmentLine}`
         : attachmentLine
-      : messageContent;
+      : userMessageContent;
     let outboundMessageContent = hasAttachments
-      ? messageContent
-        ? `${messageContent}\n\nAttached image context: ${pendingAttachments.map((attachment) => attachment.fileName || "image").join(", ")}`
+      ? userMessageContent
+        ? `${userMessageContent}\n\nAttached image context: ${pendingAttachments.map((attachment) => attachment.fileName || "image").join(", ")}`
         : `Attached image context: ${pendingAttachments.map((attachment) => attachment.fileName || "image").join(", ")}`
       : messageContent;
+    const runCommand = parseRunSlashCommand(messageContent);
+    if (runCommand !== null) {
+      if (hasAttachments) {
+        const message = "Image attachments are not supported with `/run`.";
+        setError(message);
+        appendAssistantNotice(message, sendSession);
+        return;
+      }
+      if (!runCommand.trim()) {
+        const message = "Usage: `/run <command>`";
+        setError(message);
+        appendAssistantNotice(message, sendSession);
+        return;
+      }
+
+      const userMessage: Message = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: userMessageContent,
+        sentAt: Date.now(),
+      };
+      appendLocalMessage(userMessage, sendSession);
+
+      if (!content && sendSession) {
+        if (composerMode === "shell") {
+          setShellDraftsBySession((prev) => ({ ...prev, [sendSession]: "" }));
+        } else {
+          setDraftsBySession((prev) => ({ ...prev, [sendSession]: "" }));
+        }
+        if (textareaRef.current) {
+          textareaRef.current.style.height = "auto";
+          textareaRef.current.style.overflowY = "hidden";
+        }
+      }
+
+      setIsLoading(true);
+      setThinkingStatus("Running command");
+      setError(null);
+
+      const currentCwd =
+        terminalStateBySessionRef.current[sendSession]?.cwd || TERMINAL_DEFAULT_CWD;
+
+      try {
+        const response = await invoke<ChatTerminalRunResponse>("run_chat_terminal_command", {
+          command: runCommand,
+          cwd: currentCwd,
+        });
+        const nextCwd = response.cwd?.trim() || currentCwd;
+        setTerminalStateForSession(sendSession, { cwd: nextCwd });
+        appendLocalMessage(
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: "",
+            kind: "toolResult",
+            toolName: "/run",
+            sentAt: Date.now(),
+            terminalResult: {
+              command: runCommand,
+              cwd: nextCwd,
+              stdout: response.stdout || "",
+              stderr: response.stderr || "",
+              exitCode: response.exit_code ?? null,
+            },
+          },
+          sendSession
+        );
+      } catch (e) {
+        const message = e instanceof Error ? e.message : "Failed to run command.";
+        setError(message);
+        appendLocalMessage(
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: "",
+            kind: "toolResult",
+            toolName: "/run",
+            sentAt: Date.now(),
+            terminalResult: {
+              command: runCommand,
+              cwd: currentCwd,
+              stdout: "",
+              stderr: message,
+              exitCode: null,
+            },
+          },
+          sendSession
+        );
+      } finally {
+        setIsLoading(false);
+        setThinkingStatus(null);
+      }
+      return;
+    }
     const liveClient = clientRef.current;
     if (!liveClient || !liveClient.isConnected()) {
       if (!connectInFlightRef.current) {
@@ -3384,7 +3725,11 @@ export function Chat({
     }
 
     if (!content && sendSession) {
-      setDraftsBySession((prev) => ({ ...prev, [sendSession]: "" }));
+      if (composerMode === "shell") {
+        setShellDraftsBySession((prev) => ({ ...prev, [sendSession]: "" }));
+      } else {
+        setDraftsBySession((prev) => ({ ...prev, [sendSession]: "" }));
+      }
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';
         textareaRef.current.style.overflowY = 'hidden';
@@ -3552,7 +3897,11 @@ export function Chat({
       await refreshTrialCredits();
       addDiag(`send failed: ${e instanceof Error ? e.message : "unknown"}`);
       if (failedDraftRestore !== null && sendSession && currentSessionRef.current === sendSession) {
-        setDraftsBySession((prev) => ({ ...prev, [sendSession]: failedDraftRestore }));
+        if (composerMode === "shell") {
+          setShellDraftsBySession((prev) => ({ ...prev, [sendSession]: failedDraftRestore }));
+        } else {
+          setDraftsBySession((prev) => ({ ...prev, [sendSession]: failedDraftRestore }));
+        }
       }
     }
   }
@@ -3561,22 +3910,16 @@ export function Chat({
     return s.label || s.derivedTitle || s.displayName || `Chat ${s.key.slice(0, 8)}`;
   }
 
-  function appendAssistantNotice(content: string, sessionKeyInput?: string) {
+  function appendLocalMessage(message: Message, sessionKeyInput?: string) {
     const sessionKey = sessionKeyInput || ensureComposerSession();
     if (!sessionKey) return;
-    const notice: Message = {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      content,
-      sentAt: Date.now(),
-    };
     if (currentSessionRef.current === sessionKey) {
       setShowWelcome(false);
       visibleMessagesSessionRef.current = sessionKey;
-      setMessages((prev) => [...prev, notice]);
+      setMessages((prev) => [...prev, message]);
     }
     const cachedMsgs = sessionMessagesRef.current[sessionKey] || [];
-    sessionMessagesRef.current[sessionKey] = [...cachedMsgs, notice];
+    sessionMessagesRef.current[sessionKey] = [...cachedMsgs, message];
     setSessions((prev) => {
       const updated = prev.some((s) => s.key === sessionKey)
         ? prev.map((s) => (s.key === sessionKey ? { ...s, updatedAt: Date.now() } : s))
@@ -3584,6 +3927,18 @@ export function Chat({
       return applySessionTitles(normalizeSessionsList(updated));
     });
     schedulePersist();
+  }
+
+  function appendAssistantNotice(content: string, sessionKeyInput?: string) {
+    appendLocalMessage(
+      {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content,
+        sentAt: Date.now(),
+      },
+      sessionKeyInput
+    );
   }
 
   async function isIntegrationReady(provider: IntegrationQuickActionRequirement["provider"]): Promise<boolean> {
@@ -4251,7 +4606,39 @@ export function Chat({
     onNavigate?.("files");
   }
 
+  function renderTerminalResult(message: Message) {
+    const result = message.terminalResult;
+    if (!result) return null;
+    const combined = [result.stdout.trimEnd(), result.stderr.trimEnd()].filter(Boolean).join("\n");
+    return (
+      <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--bg-secondary)]/90 p-3 shadow-sm">
+        <div className="flex items-center justify-between gap-3 text-[11px] text-[var(--text-tertiary)]">
+          <div className="flex items-center gap-2">
+            <Terminal className="w-3.5 h-3.5" />
+            <span className="font-medium text-[var(--text-primary)]">/run</span>
+            <span className="truncate">{result.cwd}</span>
+          </div>
+          <span className={clsx(
+            "rounded-full px-2 py-0.5 font-medium",
+            result.exitCode === 0
+              ? "bg-emerald-500/10 text-emerald-700"
+              : "bg-red-500/10 text-red-700"
+          )}>
+            exit {result.exitCode ?? "?"}
+          </span>
+        </div>
+        <pre className="mt-2 overflow-x-auto rounded-lg bg-[#0b1020] px-3 py-2 text-[12px] leading-6 text-slate-100">
+          <span className="text-emerald-300">$ {result.command}</span>
+          {combined ? `\n${combined}` : "\n"}
+        </pre>
+      </div>
+    );
+  }
+
   function renderAssistantContent(message: Message, precomputedPayload?: AssistantRenderPayload) {
+    if (message.kind === "toolResult" && message.toolName === "/run" && message.terminalResult) {
+      return renderTerminalResult(message);
+    }
     const payload = precomputedPayload ?? {
       cleanText: message.content,
       events: message.assistantPayload?.events ?? [],
@@ -4796,11 +5183,32 @@ export function Chat({
     </div>
   ) : null, [isLoading, thinkingStatus]);
 
+  const activeDraft = currentSession
+    ? activeComposerMode === "shell"
+      ? shellDraftsBySession[currentSession] || ""
+      : draftsBySession[currentSession] || ""
+    : "";
+
+  useEffect(() => {
+    if (!textareaRef.current) return;
+    const ta = textareaRef.current;
+    ta.style.height = "auto";
+    const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
+    const maxHeight = lineHeight * 5;
+    ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
+    ta.style.overflowY = ta.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, [activeDraft]);
+
+  useEffect(() => {
+    if (activeComposerMode === "shell" && dragActive) {
+      setDragActive(false);
+    }
+  }, [activeComposerMode, dragActive]);
+
   if (isConnecting) return renderConnecting();
   if (localTrialLoading) return renderConnecting();
   if (!connectedProvider && !proxyEnabled) return renderNoProvider();
   const autoStartExpected = proxyEnabled && !gatewayRunning;
-  const activeDraft = currentSession ? (draftsBySession[currentSession] || "") : "";
   const showBillingAction = Boolean(error && isBillingIssueMessage(error));
   const showSignInAction = Boolean(
     error && isBillingIssueMessage(error) && !isAuthenticated && isAuthConfigured
@@ -4817,11 +5225,13 @@ export function Chat({
     <div
       className="h-full flex flex-col bg-transparent"
       onDragOver={(event) => {
+        if (activeComposerMode === "shell") return;
         event.preventDefault();
         setDragActive(true);
       }}
       onDragLeave={() => setDragActive(false)}
       onDrop={(event) => {
+        if (activeComposerMode === "shell") return;
         event.preventDefault();
         setDragActive(false);
         void addImageAttachments(event.dataTransfer?.files);
@@ -4948,16 +5358,65 @@ export function Chat({
               event.currentTarget.value = "";
             }}
           />
+          <div className="flex items-center justify-between gap-3">
+            <div className="inline-flex items-center rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-1 shadow-sm">
+              {([
+                { key: "chat", label: "Chat", icon: Bot },
+                { key: "shell", label: "Shell", icon: Terminal },
+              ] as const).map((mode) => {
+                const Icon = mode.icon;
+                const active = activeComposerMode === mode.key;
+                return (
+                  <button
+                    key={mode.key}
+                    type="button"
+                    onClick={() => {
+                      const sessionKey = currentSession || ensureComposerSession();
+                      if (!sessionKey) return;
+                      setComposerModeForSession(sessionKey, mode.key);
+                      requestAnimationFrame(() => textareaRef.current?.focus());
+                    }}
+                    className={clsx(
+                      "inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
+                      active
+                        ? "bg-[var(--text-primary)] text-white"
+                        : "text-[var(--text-secondary)] hover:bg-black/5"
+                    )}
+                    aria-pressed={active}
+                  >
+                    <Icon className="h-3.5 w-3.5" />
+                    <span>{mode.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+            {activeComposerMode === "shell" ? (
+              <div className="min-w-0 text-[11px] text-[var(--text-tertiary)]">
+                <div className="inline-flex min-w-0 max-w-full items-center gap-2 rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] px-2.5 py-1">
+                  <Terminal className="h-3.5 w-3.5 shrink-0" />
+                  <span className="shrink-0 font-medium text-[var(--text-secondary)]">/run</span>
+                  <span
+                    className="truncate font-mono text-[var(--text-primary)]"
+                    title={activeTerminalState.cwd}
+                  >
+                    {activeTerminalState.cwd}
+                  </span>
+                </div>
+              </div>
+            ) : null}
+          </div>
           <div className="flex items-end gap-2">
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={isLoading}
-              className="btn-secondary !p-2.5"
-              title="Attach image"
-              aria-label="Attach image"
-            >
-              <Paperclip className="w-4 h-4" />
-            </button>
+            {activeComposerMode === "chat" ? (
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isLoading}
+                className="btn-secondary !p-2.5"
+                title="Attach image"
+                aria-label="Attach image"
+              >
+                <Paperclip className="w-4 h-4" />
+              </button>
+            ) : null}
             <textarea
               ref={textareaRef}
               value={activeDraft}
@@ -4968,10 +5427,17 @@ export function Chat({
                 const sessionKey = currentSession || ensureComposerSession();
                 if (!sessionKey) return;
                 const nextValue = e.target.value;
-                setDraftsBySession((prev) => {
-                  if ((prev[sessionKey] || "") === nextValue) return prev;
-                  return { ...prev, [sessionKey]: nextValue };
-                });
+                if (activeComposerMode === "shell") {
+                  setShellDraftsBySession((prev) => {
+                    if ((prev[sessionKey] || "") === nextValue) return prev;
+                    return { ...prev, [sessionKey]: nextValue };
+                  });
+                } else {
+                  setDraftsBySession((prev) => {
+                    if ((prev[sessionKey] || "") === nextValue) return prev;
+                    return { ...prev, [sessionKey]: nextValue };
+                  });
+                }
                 const ta = e.target;
                 ta.style.height = 'auto';
                 const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
@@ -4980,7 +5446,12 @@ export function Chat({
                 ta.style.overflowY = ta.scrollHeight > maxHeight ? 'auto' : 'hidden';
               }}
               onKeyDown={e => {if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }}}
-              placeholder="Message your assistant..." rows={1}
+              placeholder={
+                activeComposerMode === "shell"
+                  ? "Run a command in the workspace shell"
+                  : "Message your assistant"
+              }
+              rows={1}
               className="form-input flex-1 resize-none leading-tight"
               style={{ overflow: 'hidden' }}
             />
@@ -4993,7 +5464,7 @@ export function Chat({
             </button>
           </div>
         </div>
-        {dragActive && (
+        {dragActive && activeComposerMode === "chat" && (
           <div className="absolute inset-0 bg-black/10 border-2 border-dashed border-white/50 flex items-center justify-center font-medium text-white">
             Drop files to attach
           </div>

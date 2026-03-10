@@ -43,6 +43,7 @@ import {
   CalendarClock,
   ListTodo,
   CreditCard,
+  Terminal,
   MoreHorizontal,
   Pin,
   PanelLeftClose,
@@ -165,18 +166,38 @@ type PersistedBrowserTab = {
   embeddedPreviewTitle: string | null;
 };
 
+type DesktopTerminalStatus = "disconnected" | "ready" | "exited" | "error";
+
+type DesktopTerminalSnapshot = {
+  session_id: string;
+  output: string;
+  status: Exclude<DesktopTerminalStatus, "disconnected">;
+  exit_code: number | null;
+  container_name: string;
+  workspace_path: string;
+};
+
+type DesktopTerminalEventPayload = {
+  session_id: string;
+  chunk: string;
+  stream: "stdout" | "stderr" | "system";
+  status: Exclude<DesktopTerminalStatus, "disconnected">;
+  exit_code: number | null;
+};
+
 const DEFAULT_WINDOW_Z: Record<string, number> = {
   finder: 60,
   chat: 61,
   browser: 62,
-  plugins: 63,
-  skills: 64,
-  channels: 65,
-  tasks: 66,
-  jobs: 67,
-  logs: 68,
-  billing: 69,
-  settings: 70,
+  terminal: 63,
+  plugins: 64,
+  skills: 65,
+  channels: 66,
+  tasks: 67,
+  jobs: 68,
+  logs: 69,
+  billing: 70,
+  settings: 71,
   preview: 80,
 };
 
@@ -204,6 +225,7 @@ const LOCAL_BROWSER_INPUT_RE = /^(?:container\.localhost|runtime\.localhost|loca
 const BROWSER_DESKTOP_MIN_VIEWPORT_WIDTH = 1180;
 const BROWSER_DESKTOP_MIN_VIEWPORT_HEIGHT = 760;
 const BROWSER_DESKTOP_VIEWPORT_SCALE = 1.08;
+const DESKTOP_TERMINAL_EVENT = "desktop-terminal-output";
 const PANEL_FALLBACK = (
   <div className="p-4 text-xs text-[var(--text-tertiary)]">Loading…</div>
 );
@@ -235,6 +257,7 @@ type DesktopSessionState = {
   chatOpen: boolean;
   chatNavCollapsed: boolean;
   browserOpen: boolean;
+  terminalOpen: boolean;
   pluginsOpen: boolean;
   skillsOpen: boolean;
   channelsOpen: boolean;
@@ -249,6 +272,8 @@ type DesktopSessionState = {
   chatSize: WindowSize;
   browserPos: WindowPoint;
   browserSize: WindowSize;
+  terminalPos: WindowPoint;
+  terminalSize: WindowSize;
   pluginsPos: WindowPoint;
   skillsPos: WindowPoint;
   channelsPos: WindowPoint;
@@ -270,6 +295,8 @@ type DesktopSessionState = {
   browserEmbeddedPreviewTitle: string | null;
   browserTabs: PersistedBrowserTab[];
   activeBrowserTabId: string | null;
+  terminalSessionId: string | null;
+  terminalInput: string;
   desktopIcons: Record<string, DesktopIcon>;
 };
 
@@ -739,6 +766,7 @@ export function Files({
   const [finderOpen, setFinderOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [channelsOpen, setChannelsOpen] = useState(false);
@@ -764,6 +792,10 @@ export function Files({
   const [browserSize, setBrowserSize] = useState({ w: 1180, h: 760 });
   const browserDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
   const browserResizeRef = useRef<WindowResizeState | null>(null);
+  const [terminalPos, setTerminalPos] = useState({ x: 156, y: 70 });
+  const [terminalSize, setTerminalSize] = useState({ w: 920, h: 560 });
+  const terminalDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const terminalResizeRef = useRef<WindowResizeState | null>(null);
 
   // Plugin windows drag
   const [pluginsPos, setPluginsPos] = useState({ x: 180, y: 80 });
@@ -847,6 +879,14 @@ export function Files({
   const browserLiveLastFrameRef = useRef<string | null>(null);
   const browserLiveSizeRef = useRef<string>("");
   const browserEmbeddedPreviewSyncKeyRef = useRef<string>("");
+  const [terminalSessionId, setTerminalSessionId] = useState<string | null>(null);
+  const [terminalOutput, setTerminalOutput] = useState("");
+  const [terminalInput, setTerminalInput] = useState("");
+  const [terminalStatus, setTerminalStatus] = useState<DesktopTerminalStatus>("disconnected");
+  const [terminalExitCode, setTerminalExitCode] = useState<number | null>(null);
+  const [terminalError, setTerminalError] = useState<string | null>(null);
+  const [terminalBootstrapping, setTerminalBootstrapping] = useState(false);
+  const terminalOutputRef = useRef<HTMLDivElement | null>(null);
 
   const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
 
@@ -877,6 +917,7 @@ export function Files({
       if (typeof saved.chatOpen === "boolean") setChatOpen(saved.chatOpen);
       if (typeof saved.chatNavCollapsed === "boolean") setChatNavCollapsed(saved.chatNavCollapsed);
       if (typeof saved.browserOpen === "boolean") setBrowserOpen(saved.browserOpen);
+      if (typeof saved.terminalOpen === "boolean") setTerminalOpen(saved.terminalOpen);
       if (typeof saved.pluginsOpen === "boolean") setPluginsOpen(saved.pluginsOpen);
       if (typeof saved.skillsOpen === "boolean") setSkillsOpen(saved.skillsOpen);
       if (typeof saved.channelsOpen === "boolean") setChannelsOpen(saved.channelsOpen);
@@ -898,6 +939,10 @@ export function Files({
       if (nextBrowserPos) setBrowserPos(nextBrowserPos);
       const nextBrowserSize = asWindowSize(saved.browserSize);
       if (nextBrowserSize) setBrowserSize(nextBrowserSize);
+      const nextTerminalPos = asWindowPoint(saved.terminalPos);
+      if (nextTerminalPos) setTerminalPos(nextTerminalPos);
+      const nextTerminalSize = asWindowSize(saved.terminalSize);
+      if (nextTerminalSize) setTerminalSize(nextTerminalSize);
       const nextPluginsPos = asWindowPoint(saved.pluginsPos);
       if (nextPluginsPos) setPluginsPos(nextPluginsPos);
       const nextSkillsPos = asWindowPoint(saved.skillsPos);
@@ -936,6 +981,12 @@ export function Files({
       if (typeof saved.browserUrlInput === "string") setBrowserUrlInput(presentBrowserUrl(saved.browserUrlInput));
       if (typeof saved.browserSessionId === "string" || saved.browserSessionId === null) {
         setBrowserSessionId(saved.browserSessionId ?? null);
+      }
+      if (typeof saved.terminalSessionId === "string" || saved.terminalSessionId === null) {
+        setTerminalSessionId(saved.terminalSessionId ?? null);
+      }
+      if (typeof saved.terminalInput === "string") {
+        setTerminalInput(saved.terminalInput);
       }
       if (
         typeof saved.browserEmbeddedPreviewUrl === "string" ||
@@ -1111,6 +1162,7 @@ export function Files({
     clampResizableWindow(finderPos, finderSize, { w: 320, h: 240 }, setFinderPos, setFinderSize);
     clampResizableWindow(chatPos, chatSize, { w: 720, h: 500 }, setChatPos, setChatSize);
     clampResizableWindow(browserPos, browserSize, { w: 640, h: 420 }, setBrowserPos, setBrowserSize);
+    clampResizableWindow(terminalPos, terminalSize, { w: 680, h: 360 }, setTerminalPos, setTerminalSize);
     clampFixedWindow(pluginsPos, pluginsSize, setPluginsPos);
     clampFixedWindow(skillsPos, skillsSize, setSkillsPos);
     clampFixedWindow(channelsPos, channelsSize, setChannelsPos);
@@ -1127,6 +1179,8 @@ export function Files({
     chatSize,
     browserPos,
     browserSize,
+    terminalPos,
+    terminalSize,
     pluginsPos,
     skillsPos,
     channelsPos,
@@ -1171,6 +1225,7 @@ export function Files({
       chatOpen,
       chatNavCollapsed,
       browserOpen,
+      terminalOpen,
       pluginsOpen,
       skillsOpen,
       channelsOpen,
@@ -1185,6 +1240,8 @@ export function Files({
       chatSize,
       browserPos,
       browserSize,
+      terminalPos,
+      terminalSize,
       pluginsPos,
       skillsPos,
       channelsPos,
@@ -1206,6 +1263,8 @@ export function Files({
       browserEmbeddedPreviewTitle: browserEmbeddedPreview?.title ?? null,
       browserTabs: browserTabs.map(persistBrowserTabState),
       activeBrowserTabId,
+      terminalSessionId,
+      terminalInput,
       desktopIcons,
     };
     desktopSessionSnapshotRef.current = snapshot;
@@ -1223,6 +1282,7 @@ export function Files({
     chatOpen,
     chatNavCollapsed,
     browserOpen,
+    terminalOpen,
     pluginsOpen,
     skillsOpen,
     channelsOpen,
@@ -1237,6 +1297,8 @@ export function Files({
     chatSize,
     browserPos,
     browserSize,
+    terminalPos,
+    terminalSize,
     pluginsPos,
     skillsPos,
     channelsPos,
@@ -1256,6 +1318,8 @@ export function Files({
     browserEmbeddedPreview,
     browserTabs,
     activeBrowserTabId,
+    terminalSessionId,
+    terminalInput,
     desktopIcons,
   ]);
 
@@ -1409,6 +1473,89 @@ export function Files({
     window.addEventListener("mouseup", onUp);
   }
 
+  function applyTerminalSnapshot(snapshot: DesktopTerminalSnapshot) {
+    setTerminalSessionId(snapshot.session_id);
+    setTerminalOutput(snapshot.output);
+    setTerminalStatus(snapshot.status);
+    setTerminalExitCode(snapshot.exit_code ?? null);
+    setTerminalError(null);
+  }
+
+  function appendTerminalLocalOutput(chunk: string) {
+    if (!chunk) return;
+    setTerminalOutput((prev) => `${prev}${chunk}`);
+  }
+
+  function openTerminalWindow() {
+    if (!terminalOpen) {
+      setTerminalOpen(true);
+    }
+    focusWindow("terminal");
+  }
+
+  async function closeTerminalWindow() {
+    const sessionId = terminalSessionId;
+    setTerminalOpen(false);
+    setTerminalSessionId(null);
+    setTerminalOutput("");
+    setTerminalStatus("disconnected");
+    setTerminalExitCode(null);
+    setTerminalError(null);
+    if (!sessionId) return;
+    try {
+      await invoke("desktop_terminal_close", { sessionId });
+    } catch {
+      // Ignore close failures while tearing down UI state.
+    }
+  }
+
+  async function restartTerminalSession() {
+    const sessionId = terminalSessionId;
+    setTerminalSessionId(null);
+    setTerminalOutput("");
+    setTerminalStatus("disconnected");
+    setTerminalExitCode(null);
+    setTerminalError(null);
+    if (sessionId) {
+      try {
+        await invoke("desktop_terminal_close", { sessionId });
+      } catch {
+        // Ignore restart cleanup failures and let the next create attempt recover.
+      }
+    }
+  }
+
+  async function clearTerminalBuffer() {
+    if (!terminalSessionId) {
+      setTerminalOutput("");
+      return;
+    }
+    try {
+      await invoke("desktop_terminal_clear", { sessionId: terminalSessionId });
+      setTerminalOutput("");
+      setTerminalError(null);
+    } catch (error) {
+      setTerminalError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function submitTerminalInput() {
+    if (!terminalSessionId) return;
+    const command = terminalInput.replace(/\r\n/g, "\n");
+    if (!command.trim()) return;
+    const payload = command.endsWith("\n") ? command : `${command}\n`;
+    appendTerminalLocalOutput(`$ ${command}\n`);
+    setTerminalInput("");
+    setTerminalError(null);
+    try {
+      await invoke("desktop_terminal_write", { sessionId: terminalSessionId, input: payload });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setTerminalError(message);
+      appendTerminalLocalOutput(`[write failed] ${message}\n`);
+    }
+  }
+
   function closeBrowserLiveSocket() {
     if (browserLiveMoveRafRef.current !== null) {
       window.cancelAnimationFrame(browserLiveMoveRafRef.current);
@@ -1460,6 +1607,24 @@ export function Files({
     browserSnapshot?.title ||
     browserSnapshot?.url ||
     browserCurrentUrl;
+  const terminalStatusLabel = terminalBootstrapping
+    ? "Connecting"
+    : terminalStatus === "ready"
+      ? "Live"
+      : terminalStatus === "exited"
+        ? terminalExitCode === null
+          ? "Exited"
+          : `Exited (${terminalExitCode})`
+        : terminalStatus === "error"
+          ? "Error"
+          : "Idle";
+  const terminalStatusTone = terminalBootstrapping
+    ? "#f59e0b"
+    : terminalStatus === "ready"
+      ? "#22c55e"
+      : terminalStatus === "error"
+        ? "#ef4444"
+        : "rgba(148,163,184,0.95)";
   function buildActiveBrowserTabState(base?: BrowserTabState | null): BrowserTabState {
     return {
       id: base?.id ?? activeBrowserTabId ?? makeBrowserTabId(),
@@ -1669,6 +1834,76 @@ export function Files({
       unlisten?.();
     };
   }, []);
+
+  useEffect(() => {
+    let unlistenTerminal: (() => void) | undefined;
+    void listen<DesktopTerminalEventPayload>(DESKTOP_TERMINAL_EVENT, (event) => {
+      const payload = event.payload;
+      if (!payload || payload.session_id !== terminalSessionId) return;
+      if (payload.chunk) {
+        appendTerminalLocalOutput(payload.chunk);
+      }
+      setTerminalStatus(payload.status);
+      setTerminalExitCode(payload.exit_code ?? null);
+    }).then((dispose) => {
+      unlistenTerminal = dispose;
+    }).catch(() => {});
+    return () => {
+      unlistenTerminal?.();
+    };
+  }, [terminalSessionId]);
+
+  useEffect(() => {
+    if (!desktopStateHydrated || !terminalOpen) return;
+    let cancelled = false;
+    async function ensureTerminalSession() {
+      setTerminalBootstrapping(true);
+      try {
+        if (terminalSessionId) {
+          try {
+            const snapshot = await invoke<DesktopTerminalSnapshot>("desktop_terminal_snapshot", {
+              sessionId: terminalSessionId,
+            });
+            if (!cancelled) {
+              applyTerminalSnapshot(snapshot);
+            }
+            return;
+          } catch {
+            if (!cancelled) {
+              setTerminalSessionId(null);
+              setTerminalOutput("");
+              setTerminalStatus("disconnected");
+              setTerminalExitCode(null);
+            }
+          }
+        }
+
+        const snapshot = await invoke<DesktopTerminalSnapshot>("desktop_terminal_create");
+        if (!cancelled) {
+          applyTerminalSnapshot(snapshot);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setTerminalStatus("error");
+          setTerminalError(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (!cancelled) {
+          setTerminalBootstrapping(false);
+        }
+      }
+    }
+    void ensureTerminalSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [desktopStateHydrated, terminalOpen, terminalSessionId]);
+
+  useEffect(() => {
+    const element = terminalOutputRef.current;
+    if (!element) return;
+    element.scrollTop = element.scrollHeight;
+  }, [terminalOutput, terminalOpen]);
 
   useEffect(() => {
     const image = browserLiveImageRef.current;
@@ -2804,7 +3039,7 @@ export function Files({
                 width: finderSize.w, height: finderSize.h,
                 boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56), 0 0 0 0.5px rgba(255,255,255,0.1)",
                 border: "0.5px solid rgba(255,255,255,0.08)",
-                zIndex: windowZ.finder ?? 60,
+                zIndex: windowZ.finder ?? DEFAULT_WINDOW_Z.finder,
               }}
               onMouseDownCapture={() => focusWindow("finder")}
               onClick={(e) => e.stopPropagation()}
@@ -2914,6 +3149,7 @@ export function Files({
             <div className="fixed z-50 py-1 rounded-lg min-w-[180px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, background: "rgba(30,30,30,0.9)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.4)" }} onClick={(e) => e.stopPropagation()}>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFolder(finderOpen ? currentPath : ""); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" />New Folder</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openBrowserWindow(); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" />Open Browser</button>
+              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openTerminalWindow(); setContextMenu(null); }}><Terminal className="w-3.5 h-3.5" />Open Terminal</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { setShowWallpaperPicker(true); setContextMenu(null); }}><Image className="w-3.5 h-3.5" />Change Wallpaper</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { fileInputRef.current?.click(); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" />Add Files</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openFolder(""); setContextMenu(null); }}><Folder className="w-3.5 h-3.5" />Open Workspace</button>
@@ -3105,7 +3341,7 @@ export function Files({
               icon={MessageSquare}
               position={chatPos}
               size={chatSize}
-              zIndex={windowZ.chat ?? 61}
+              zIndex={windowZ.chat ?? DEFAULT_WINDOW_Z.chat}
               glass={false}
               onClose={() => setChatOpen(false)}
               onFocus={() => focusWindow("chat")}
@@ -3353,7 +3589,7 @@ export function Files({
               icon={Globe}
               position={browserPos}
               size={browserSize}
-              zIndex={windowZ.browser ?? 62}
+              zIndex={windowZ.browser ?? DEFAULT_WINDOW_Z.browser}
               onClose={() => { void closeBrowserWindow(); }}
               onFocus={() => focusWindow("browser")}
               onDragStart={(e) =>
@@ -3614,6 +3850,123 @@ export function Files({
             </AppWindow>
           )}
 
+          {/* ── TERMINAL WINDOW ─────────────────────────────────────── */}
+          {terminalOpen && (
+            <AppWindow
+              title="Terminal"
+              icon={Terminal}
+              position={terminalPos}
+              size={terminalSize}
+              zIndex={windowZ.terminal ?? DEFAULT_WINDOW_Z.terminal}
+              onClose={() => { void closeTerminalWindow(); }}
+              onFocus={() => focusWindow("terminal")}
+              onDragStart={(e) =>
+                startWindowDrag(e, terminalDragRef, terminalPos, terminalSize, setTerminalPos, "terminal")
+              }
+              onResizeStart={(direction, e) =>
+                startWindowResize(
+                  e,
+                  direction,
+                  terminalResizeRef,
+                  terminalPos,
+                  terminalSize,
+                  setTerminalPos,
+                  setTerminalSize,
+                  "terminal",
+                  { w: 680, h: 360 },
+                )
+              }
+            >
+              <div className="h-full flex flex-col bg-[#060816] text-[#e5e7eb]">
+                <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-white/10 bg-[#0b1020]">
+                  <div className="min-w-0 flex items-center gap-3">
+                    <div
+                      className="inline-flex items-center gap-2 rounded-full px-2.5 py-1 text-[11px] font-medium"
+                      style={{ background: "rgba(255,255,255,0.06)", color: "#f8fafc" }}
+                    >
+                      <span className="h-2 w-2 rounded-full" style={{ background: terminalStatusTone }} />
+                      {terminalStatusLabel}
+                    </div>
+                    <span className="truncate text-[11px] text-slate-400">
+                      OpenClaw runtime shell in `/data/workspace`
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => { void clearTerminalBuffer(); }}
+                      className="h-8 px-3 rounded-lg border border-white/10 bg-white/5 text-xs font-medium text-slate-200 hover:bg-white/10"
+                    >
+                      Clear
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { void restartTerminalSession(); }}
+                      className="h-8 px-3 rounded-lg border border-white/10 bg-white/5 text-xs font-medium text-slate-200 hover:bg-white/10"
+                    >
+                      Restart
+                    </button>
+                  </div>
+                </div>
+                <div
+                  ref={terminalOutputRef}
+                  className="flex-1 overflow-auto px-4 py-3 font-mono text-[12px] leading-6 select-text"
+                >
+                  {terminalOutput ? (
+                    <pre className="whitespace-pre-wrap break-words text-[#e5e7eb]">{terminalOutput}</pre>
+                  ) : (
+                    <div className="text-[12px] text-slate-500">
+                      {terminalBootstrapping
+                        ? "Starting runtime shell..."
+                        : "Run commands inside the OpenClaw container workspace."}
+                    </div>
+                  )}
+                </div>
+                <div className="border-t border-white/10 bg-[#0b1020] px-4 py-3">
+                  {terminalError && (
+                    <div className="mb-2 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-[11px] text-red-100">
+                      {terminalError}
+                    </div>
+                  )}
+                  <div className="flex items-start gap-3 rounded-2xl border border-white/10 bg-black/25 px-3 py-3">
+                    <span className="pt-1 font-mono text-sm text-emerald-400">$</span>
+                    <textarea
+                      value={terminalInput}
+                      onChange={(e) => setTerminalInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          void submitTerminalInput();
+                        }
+                      }}
+                      disabled={terminalBootstrapping || terminalStatus !== "ready" || !terminalSessionId}
+                      placeholder={
+                        terminalBootstrapping
+                          ? "Starting shell…"
+                          : terminalStatus === "ready"
+                            ? "Enter a command"
+                            : "Restart the session to run more commands"
+                      }
+                      className="min-h-[78px] flex-1 resize-none bg-transparent font-mono text-[13px] leading-6 text-[#f8fafc] outline-none placeholder:text-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => { void submitTerminalInput(); }}
+                      disabled={terminalBootstrapping || terminalStatus !== "ready" || !terminalSessionId || !terminalInput.trim()}
+                      className="mt-1 h-9 px-4 rounded-xl bg-emerald-500 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Run
+                    </button>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-slate-500">
+                    <span>`Enter` runs the command. `Shift+Enter` adds a new line.</span>
+                    <span>This shell runs inside the sandbox container, not on your host.</span>
+                  </div>
+                </div>
+              </div>
+            </AppWindow>
+          )}
+
           {/* ── PLUGINS WINDOW ───────────────────────────────────────── */}
           {pluginsOpen && (
             <AppWindow
@@ -3621,7 +3974,7 @@ export function Files({
               icon={Puzzle}
               position={pluginsPos}
               size={pluginsSize}
-              zIndex={windowZ.plugins ?? 63}
+              zIndex={windowZ.plugins ?? DEFAULT_WINDOW_Z.plugins}
               onClose={() => setPluginsOpen(false)}
               onFocus={() => focusWindow("plugins")}
               onDragStart={(e) =>
@@ -3644,7 +3997,7 @@ export function Files({
               icon={Sparkles}
               position={skillsPos}
               size={skillsSize}
-              zIndex={windowZ.skills ?? 64}
+              zIndex={windowZ.skills ?? DEFAULT_WINDOW_Z.skills}
               onClose={() => setSkillsOpen(false)}
               onFocus={() => focusWindow("skills")}
               onDragStart={(e) =>
@@ -3667,7 +4020,7 @@ export function Files({
               icon={Radio}
               position={channelsPos}
               size={channelsSize}
-              zIndex={windowZ.channels ?? 65}
+              zIndex={windowZ.channels ?? DEFAULT_WINDOW_Z.channels}
               onClose={() => setChannelsOpen(false)}
               onFocus={() => focusWindow("channels")}
               onDragStart={(e) =>
@@ -3687,7 +4040,7 @@ export function Files({
               icon={ListTodo}
               position={tasksPos}
               size={tasksSize}
-              zIndex={windowZ.tasks ?? 66}
+              zIndex={windowZ.tasks ?? DEFAULT_WINDOW_Z.tasks}
               onClose={() => setTasksOpen(false)}
               onFocus={() => focusWindow("tasks")}
               onDragStart={(e) =>
@@ -3707,7 +4060,7 @@ export function Files({
               icon={CalendarClock}
               position={jobsPos}
               size={jobsSize}
-              zIndex={windowZ.jobs ?? 67}
+              zIndex={windowZ.jobs ?? DEFAULT_WINDOW_Z.jobs}
               onClose={() => setJobsOpen(false)}
               onFocus={() => focusWindow("jobs")}
               onDragStart={(e) =>
@@ -3727,7 +4080,7 @@ export function Files({
               icon={ScrollText}
               position={logsPos}
               size={logsSize}
-              zIndex={windowZ.logs ?? 68}
+              zIndex={windowZ.logs ?? DEFAULT_WINDOW_Z.logs}
               onClose={() => setLogsOpen(false)}
               onFocus={() => focusWindow("logs")}
               onDragStart={(e) =>
@@ -3747,7 +4100,7 @@ export function Files({
               icon={CreditCard}
               position={billingPos}
               size={billingSize}
-              zIndex={windowZ.billing ?? 68}
+              zIndex={windowZ.billing ?? DEFAULT_WINDOW_Z.billing}
               onClose={() => setBillingOpen(false)}
               onFocus={() => focusWindow("billing")}
               onDragStart={(e) =>
@@ -3767,7 +4120,7 @@ export function Files({
               icon={SettingsIcon}
               position={settingsPos}
               size={settingsSize}
-              zIndex={windowZ.settings ?? 69}
+              zIndex={windowZ.settings ?? DEFAULT_WINDOW_Z.settings}
               onClose={() => setSettingsOpen(false)}
               onFocus={() => focusWindow("settings")}
               onDragStart={(e) =>
@@ -3864,6 +4217,23 @@ export function Files({
                 <Globe className="w-6 h-6 text-white" />
               </div>
               <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${browserOpen ? "bg-white/80" : "opacity-0"}`} />
+            </button>
+
+            {/* Terminal */}
+            <button
+              onClick={() => {
+                openTerminalWindow();
+              }}
+              className="group flex flex-col items-center"
+              title="Terminal"
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #1f2937 0%, #0f172a 100%)", boxShadow: "0 3px 10px rgba(15,23,42,0.45)" }}
+              >
+                <Terminal className="w-6 h-6 text-white" />
+              </div>
+              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${terminalOpen ? "bg-white/80" : "opacity-0"}`} />
             </button>
 
             {/* Integrations */}

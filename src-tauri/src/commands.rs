@@ -21,7 +21,7 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Webview,
@@ -29,7 +29,7 @@ use tauri::{
 };
 use tauri::webview::NewWindowResponse;
 use tauri_plugin_opener::OpenerExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
@@ -52,11 +52,221 @@ const BROWSER_SERVICE_LOG_PATH: &str = "/data/browser/browser-service.log";
 const BROWSER_CONTROL_TOKEN_PATH: &str = "/data/browser/control-token";
 const EMBEDDED_PREVIEW_WEBVIEW_LABEL: &str = "desktop-browser-preview";
 const EMBEDDED_PREVIEW_STATE_EVENT: &str = "embedded-preview-state";
+const DESKTOP_TERMINAL_EVENT: &str = "desktop-terminal-output";
+const DESKTOP_TERMINAL_BUFFER_MAX_BYTES: usize = 200_000;
 const MAX_BRIDGE_DEVICES: usize = 10;
 const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const CLIENT_LOG_READ_MAX_BYTES: usize = 512 * 1024;
 
 static BROWSER_SERVICE_TOKEN_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static DESKTOP_TERMINAL_MANAGER: OnceLock<DesktopTerminalManager> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopTerminalStatus {
+    Ready,
+    Exited,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopTerminalSnapshot {
+    pub session_id: String,
+    pub output: String,
+    pub status: DesktopTerminalStatus,
+    pub exit_code: Option<i32>,
+    pub container_name: String,
+    pub workspace_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DesktopTerminalEventPayload {
+    pub session_id: String,
+    pub chunk: String,
+    pub stream: String,
+    pub status: DesktopTerminalStatus,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatTerminalRunResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub cwd: String,
+}
+
+struct DesktopTerminalSession {
+    container_name: String,
+    workspace_path: String,
+    buffer: AsyncMutex<String>,
+    stdin: AsyncMutex<Option<tokio::process::ChildStdin>>,
+    status: AsyncMutex<DesktopTerminalStatus>,
+    exit_code: AsyncMutex<Option<i32>>,
+    kill_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+struct DesktopTerminalManager {
+    sessions: Mutex<HashMap<String, Arc<DesktopTerminalSession>>>,
+}
+
+fn desktop_terminal_manager() -> &'static DesktopTerminalManager {
+    DESKTOP_TERMINAL_MANAGER.get_or_init(|| DesktopTerminalManager {
+        sessions: Mutex::new(HashMap::new()),
+    })
+}
+
+fn generate_terminal_session_id() -> String {
+    let mut bytes = [0u8; 18];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn trim_terminal_buffer(buffer: &mut String) {
+    if buffer.len() <= DESKTOP_TERMINAL_BUFFER_MAX_BYTES {
+        return;
+    }
+    let overflow = buffer.len() - DESKTOP_TERMINAL_BUFFER_MAX_BYTES;
+    let remove_at = buffer
+        .char_indices()
+        .find_map(|(idx, _)| (idx >= overflow).then_some(idx))
+        .unwrap_or(overflow);
+    buffer.drain(..remove_at);
+}
+
+async fn append_terminal_buffer(
+    session: &DesktopTerminalSession,
+    chunk: &str,
+) {
+    if chunk.is_empty() {
+        return;
+    }
+    let mut buffer = session.buffer.lock().await;
+    buffer.push_str(chunk);
+    trim_terminal_buffer(&mut buffer);
+}
+
+async fn current_terminal_snapshot(
+    session_id: &str,
+    session: &DesktopTerminalSession,
+) -> DesktopTerminalSnapshot {
+    DesktopTerminalSnapshot {
+        session_id: session_id.to_string(),
+        output: session.buffer.lock().await.clone(),
+        status: *session.status.lock().await,
+        exit_code: *session.exit_code.lock().await,
+        container_name: session.container_name.clone(),
+        workspace_path: session.workspace_path.clone(),
+    }
+}
+
+async fn emit_terminal_event(
+    app: &AppHandle,
+    session_id: &str,
+    session: &DesktopTerminalSession,
+    stream: &str,
+    chunk: String,
+) {
+    let payload = DesktopTerminalEventPayload {
+        session_id: session_id.to_string(),
+        chunk,
+        stream: stream.to_string(),
+        status: *session.status.lock().await,
+        exit_code: *session.exit_code.lock().await,
+    };
+    let _ = app.emit(DESKTOP_TERMINAL_EVENT, payload);
+}
+
+async fn read_terminal_stream<R>(
+    app: AppHandle,
+    session_id: String,
+    session: Arc<DesktopTerminalSession>,
+    stream: &'static str,
+    reader: R,
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut chunk = [0u8; 4096];
+
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(read) => {
+                let text = String::from_utf8_lossy(&chunk[..read]).to_string();
+                append_terminal_buffer(&session, &text).await;
+                emit_terminal_event(&app, &session_id, &session, stream, text).await;
+            }
+            Err(error) => {
+                let message = format!("\n[terminal {} stream error: {}]\n", stream, error);
+                {
+                    let mut status = session.status.lock().await;
+                    *status = DesktopTerminalStatus::Error;
+                }
+                append_terminal_buffer(&session, &message).await;
+                emit_terminal_event(&app, &session_id, &session, "system", message).await;
+                break;
+            }
+        }
+    }
+}
+
+fn resolve_chat_terminal_cwd(raw: Option<String>) -> Result<String, String> {
+    let Some(value) = raw else {
+        return Ok(WORKSPACE_ROOT.to_string());
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(WORKSPACE_ROOT.to_string());
+    }
+    if trimmed.contains('\0') || trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err("Invalid working directory".to_string());
+    }
+    if trimmed.starts_with('/') {
+        return Ok(trimmed.to_string());
+    }
+    let sanitized = sanitize_workspace_path(trimmed)?;
+    if sanitized.is_empty() {
+        Ok(WORKSPACE_ROOT.to_string())
+    } else {
+        Ok(format!("{}/{}", WORKSPACE_ROOT, sanitized))
+    }
+}
+
+fn parse_chat_terminal_stderr_meta(
+    stderr: &str,
+    marker: &str,
+    fallback_cwd: &str,
+) -> ChatTerminalRunResult {
+    let exit_prefix = format!("__ENTROPIC_CHAT_EXIT__:{}:", marker);
+    let cwd_prefix = format!("__ENTROPIC_CHAT_CWD__:{}:", marker);
+    let mut exit_code = None;
+    let mut cwd = None;
+    let mut clean_lines = Vec::new();
+
+    for line in stderr.lines() {
+        let trimmed = line.trim_end_matches('\r');
+        if let Some(rest) = trimmed.strip_prefix(&exit_prefix) {
+            exit_code = rest.trim().parse::<i32>().ok();
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix(&cwd_prefix) {
+            let value = rest.trim();
+            if !value.is_empty() {
+                cwd = Some(value.to_string());
+            }
+            continue;
+        }
+        clean_lines.push(trimmed.to_string());
+    }
+
+    ChatTerminalRunResult {
+        stdout: String::new(),
+        stderr: clean_lines.join("\n").trim().to_string(),
+        exit_code,
+        cwd: cwd.unwrap_or_else(|| fallback_cwd.to_string()),
+    }
+}
 
 fn client_log_path() -> PathBuf {
     dirs::home_dir()
@@ -333,6 +543,15 @@ fn find_docker_binary() -> String {
 fn docker_command() -> Command {
     let docker = find_docker_binary();
     let mut cmd = Command::new(docker);
+    if let Some(host) = get_docker_host() {
+        cmd.env("DOCKER_HOST", host);
+    }
+    cmd
+}
+
+fn tokio_docker_command() -> tokio::process::Command {
+    let docker = find_docker_binary();
+    let mut cmd = tokio::process::Command::new(docker);
     if let Some(host) = get_docker_host() {
         cmd.env("DOCKER_HOST", host);
     }
@@ -3285,6 +3504,17 @@ fn stop_scanner_sidecar() {
 /// Preserve Entropic containers on app exit; keep state for faster resume.
 /// Called from the Tauri RunEvent::Exit handler.
 pub fn cleanup_on_exit() {
+    if let Some(manager) = DESKTOP_TERMINAL_MANAGER.get() {
+        if let Ok(sessions) = manager.sessions.lock() {
+            for session in sessions.values() {
+                if let Ok(mut kill_tx) = session.kill_tx.lock() {
+                    if let Some(tx) = kill_tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            }
+        }
+    }
     println!("[Entropic] App exit requested — preserving running Entropic containers.");
 }
 
@@ -12112,6 +12342,280 @@ pub async fn browser_session_close(session_id: String) -> Result<(), String> {
     let _: serde_json::Value =
         browser_service_request("DELETE", &format!("/sessions/{}", session_id), None)?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn desktop_terminal_create(app: AppHandle) -> Result<DesktopTerminalSnapshot, String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
+    let session_id = generate_terminal_session_id();
+    let bootstrap_script = format!(
+        "cd {workspace} 2>/dev/null || cd /data/.openclaw/workspace 2>/dev/null || cd /data 2>/dev/null || cd /; export TERM=xterm-256color; exec sh",
+        workspace = WORKSPACE_ROOT,
+    );
+
+    let mut child = tokio_docker_command()
+        .args(["exec", "-i", container, "sh", "-lc", &bootstrap_script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start runtime terminal: {}", e))?;
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Runtime terminal did not expose stdin".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Runtime terminal did not expose stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Runtime terminal did not expose stderr".to_string())?;
+
+    let banner = format!(
+        "OpenClaw runtime shell connected.\nContainer: {container}\nWorkspace: {workspace}\n\n",
+        container = container,
+        workspace = WORKSPACE_ROOT,
+    );
+
+    let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
+    let session = Arc::new(DesktopTerminalSession {
+        container_name: container.to_string(),
+        workspace_path: WORKSPACE_ROOT.to_string(),
+        buffer: AsyncMutex::new(banner),
+        stdin: AsyncMutex::new(Some(stdin)),
+        status: AsyncMutex::new(DesktopTerminalStatus::Ready),
+        exit_code: AsyncMutex::new(None),
+        kill_tx: Mutex::new(Some(kill_tx)),
+    });
+
+    {
+        let mut sessions = desktop_terminal_manager()
+            .sessions
+            .lock()
+            .map_err(|_| "Terminal session manager is unavailable".to_string())?;
+        sessions.insert(session_id.clone(), session.clone());
+    }
+
+    {
+        let app = app.clone();
+        let session_id = session_id.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            read_terminal_stream(app, session_id, session, "stdout", stdout).await;
+        });
+    }
+
+    {
+        let app = app.clone();
+        let session_id = session_id.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            read_terminal_stream(app, session_id, session, "stderr", stderr).await;
+        });
+    }
+
+    {
+        let app = app.clone();
+        let session_id = session_id.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            let wait_result = tokio::select! {
+                result = child.wait() => result,
+                _ = &mut kill_rx => {
+                    let _ = child.kill().await;
+                    child.wait().await
+                }
+            };
+
+            {
+                let mut stdin = session.stdin.lock().await;
+                stdin.take();
+            }
+
+            let (status, exit_code, message) = match wait_result {
+                Ok(result) => {
+                    let code = result.code();
+                    if result.success() {
+                        (
+                            DesktopTerminalStatus::Exited,
+                            code,
+                            "\n[terminal session ended]\n".to_string(),
+                        )
+                    } else {
+                        (
+                            DesktopTerminalStatus::Exited,
+                            code,
+                            format!(
+                                "\n[terminal session ended with code {}]\n",
+                                code.map(|value| value.to_string()).unwrap_or_else(|| "unknown".to_string())
+                            ),
+                        )
+                    }
+                }
+                Err(error) => (
+                    DesktopTerminalStatus::Error,
+                    None,
+                    format!("\n[terminal session error: {}]\n", error),
+                ),
+            };
+
+            {
+                let mut next_status = session.status.lock().await;
+                *next_status = status;
+            }
+            {
+                let mut next_exit = session.exit_code.lock().await;
+                *next_exit = exit_code;
+            }
+
+            append_terminal_buffer(&session, &message).await;
+            emit_terminal_event(&app, &session_id, &session, "system", message).await;
+        });
+    }
+
+    Ok(current_terminal_snapshot(&session_id, &session).await)
+}
+
+#[tauri::command]
+pub async fn desktop_terminal_snapshot(
+    session_id: String,
+) -> Result<DesktopTerminalSnapshot, String> {
+    let session = {
+        let sessions = desktop_terminal_manager()
+            .sessions
+            .lock()
+            .map_err(|_| "Terminal session manager is unavailable".to_string())?;
+        sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| "Terminal session not found".to_string())?
+    };
+    Ok(current_terminal_snapshot(&session_id, &session).await)
+}
+
+#[tauri::command]
+pub async fn desktop_terminal_write(session_id: String, input: String) -> Result<(), String> {
+    let session = {
+        let sessions = desktop_terminal_manager()
+            .sessions
+            .lock()
+            .map_err(|_| "Terminal session manager is unavailable".to_string())?;
+        sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| "Terminal session not found".to_string())?
+    };
+
+    if !matches!(*session.status.lock().await, DesktopTerminalStatus::Ready) {
+        return Err("Terminal session is not accepting input".to_string());
+    }
+
+    let mut stdin = session.stdin.lock().await;
+    let handle = stdin
+        .as_mut()
+        .ok_or_else(|| "Terminal session stdin is no longer available".to_string())?;
+    handle
+        .write_all(input.as_bytes())
+        .await
+        .map_err(|e| format!("Failed to write to terminal session: {}", e))
+}
+
+#[tauri::command]
+pub async fn desktop_terminal_clear(session_id: String) -> Result<(), String> {
+    let session = {
+        let sessions = desktop_terminal_manager()
+            .sessions
+            .lock()
+            .map_err(|_| "Terminal session manager is unavailable".to_string())?;
+        sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| "Terminal session not found".to_string())?
+    };
+    let mut buffer = session.buffer.lock().await;
+    buffer.clear();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn desktop_terminal_close(session_id: String) -> Result<(), String> {
+    let session = {
+        let mut sessions = desktop_terminal_manager()
+            .sessions
+            .lock()
+            .map_err(|_| "Terminal session manager is unavailable".to_string())?;
+        sessions.remove(&session_id)
+    };
+
+    let Some(session) = session else {
+        return Ok(());
+    };
+
+    if let Ok(mut kill_tx) = session.kill_tx.lock() {
+        if let Some(tx) = kill_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+
+    let mut stdin = session.stdin.lock().await;
+    stdin.take();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn run_chat_terminal_command(
+    command: String,
+    cwd: Option<String>,
+) -> Result<ChatTerminalRunResult, String> {
+    if command.trim().is_empty() {
+        return Err("Command required".to_string());
+    }
+
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
+    let resolved_cwd = resolve_chat_terminal_cwd(cwd)?;
+    let marker = generate_terminal_session_id();
+    let cwd_q = sh_single_quote(&resolved_cwd);
+    let marker_q = sh_single_quote(&marker);
+    let script = format!(
+        "cd -- {cwd}\ncommand_text=$(cat)\neval \"$command_text\"\nstatus=$?\nprintf '\\n__ENTROPIC_CHAT_EXIT__:%s:%s\\n' {marker} \"$status\" >&2\nprintf '__ENTROPIC_CHAT_CWD__:%s:%s\\n' {marker} \"$PWD\" >&2\nexit \"$status\"\n",
+        cwd = cwd_q,
+        marker = marker_q,
+    );
+
+    let command_text = command;
+    let docker_host = get_docker_host();
+    let output = tokio::task::spawn_blocking(move || {
+        let mut child = Command::new(find_docker_binary());
+        if let Some(host) = docker_host {
+            child.env("DOCKER_HOST", host);
+        }
+        let mut child = child
+            .args(["exec", "-i", container, "sh", "-lc", &script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            use std::io::Write;
+            stdin.write_all(command_text.as_bytes())?;
+        }
+        child.wait_with_output()
+    })
+    .await
+    .map_err(|e| format!("Failed to join /run command task: {}", e))?
+    .map_err(|e| format!("Failed to run /run command: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let mut parsed = parse_chat_terminal_stderr_meta(&stderr, &marker, &resolved_cwd);
+    parsed.stdout = stdout.trim_end().to_string();
+    parsed.exit_code = parsed.exit_code.or(output.status.code());
+    Ok(parsed)
 }
 
 #[tauri::command]
