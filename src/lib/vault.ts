@@ -31,6 +31,11 @@ type IntegrationIndexEntry = {
 let cachedSession: StrongholdSession | null = null;
 let sessionInitPromise: Promise<StrongholdSession> | null = null;
 
+export function resetIntegrationVaultSession(): void {
+  cachedSession = null;
+  sessionInitPromise = null;
+}
+
 function encodeJson(value: unknown): number[] {
   const encoded = new TextEncoder().encode(JSON.stringify(value));
   return Array.from(encoded);

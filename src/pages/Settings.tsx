@@ -16,7 +16,8 @@ import { useAuth } from "../contexts/AuthContext";
 import { ModelSelector } from "../components/ModelSelector";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
 import { getProxyUrl, signOut as authSignOut } from "../lib/auth";
-import { disconnectIntegration } from "../lib/integrations";
+import { disconnectIntegration, resetIntegrationState } from "../lib/integrations";
+import { resetIntegrationVaultSession } from "../lib/vault";
 import { Logs } from "./Logs";
 import {
   clearDiagnosticLogs,
@@ -80,6 +81,15 @@ type RuntimeFetchResult = {
   runtime_sha256: string;
   cache_path: string;
 };
+
+const RESET_STORE_FILES = [
+  "entropic-auth.json",
+  "entropic-settings.json",
+  "entropic-chat-history.json",
+  "entropic-integrations.json",
+  "entropic-profile.json",
+  "auth.json",
+];
 
 function SettingsGroup({ title, children }: { title?: string, children: React.ReactNode }) {
   return (
@@ -1262,7 +1272,7 @@ export function Settings({
               <button
                 onClick={async () => {
                   const confirmed = await ask(
-                    "Import data from previous install, then fully reset runtime VMs/containers/volumes to fix Colima or Docker drift? Runtime workspace data may be removed, but imported auth/settings are kept.",
+                    "Import data from previous install, then fully reset runtime VMs/containers/volumes to fix isolated runtime drift? Runtime workspace data may be removed, but imported auth/settings are kept.",
                     {
                       title: "Import + Runtime Reset",
                       kind: "warning",
@@ -1304,12 +1314,12 @@ export function Settings({
             <div className="flex-1">
               <div className="text-[14px] font-medium text-[var(--text-primary)] mb-1">Reset Application</div>
               <div className="text-[12px] text-[var(--text-secondary)] mb-3">
-                Fully reset Entropic: removes all chat history, settings, Colima VMs, Docker containers, volumes, and caches.
+                Fully reset Entropic: removes all chat history, settings, isolated runtime state, containers, volumes, and caches.
               </div>
               <button
                 onClick={async () => {
                   console.log("[Settings] Reset Application clicked");
-                  const confirmed = await ask("Are you sure you want to fully reset? This removes all chat history, settings, VMs, containers, and caches.", {
+                  const confirmed = await ask("Are you sure you want to fully reset? This removes all chat history, settings, runtime state, containers, and caches.", {
                     title: "Reset Application",
                     kind: "warning",
                     okLabel: "Reset",
@@ -1333,13 +1343,15 @@ export function Settings({
                     // Sign out and clear all auth/settings stores so in-memory state is also cleared
                     console.log("[Settings] Signing out and clearing auth...");
                     try { await authSignOut(); } catch (e) { console.warn("[Settings] signOut failed:", e); }
-                    for (const storeName of ["entropic-auth.json", "entropic-settings.json", "entropic-chat-history.json", "auth.json"]) {
+                    for (const storeName of RESET_STORE_FILES) {
                       try {
                         const s = await Store.load(storeName);
                         await s.clear();
                         await s.save();
                       } catch (e) { console.warn(`[Settings] Failed to clear ${storeName}:`, e); }
                     }
+                    resetIntegrationVaultSession();
+                    resetIntegrationState();
 
                     alert("Cleanup completed!\n\n" + result);
                   } catch (err) {
@@ -1367,7 +1379,7 @@ export function Settings({
               <div className="flex-1">
                 <div className="text-[14px] font-medium text-[var(--text-primary)] mb-1">Uninstall Entropic</div>
                 <div className="text-[12px] text-[var(--text-secondary)] mb-3">
-                  Clean up all data and quit the app. After this, you can move Entropic to trash.
+                  Clean up all data and quit the app. After this, you can remove the installed app.
                 </div>
                 <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg mb-3">
                   <AlertTriangle className="w-4 h-4 text-blue-600 flex-shrink-0" />
@@ -1378,7 +1390,7 @@ export function Settings({
                 <button
                   onClick={async () => {
                     console.log("[Settings] Cleanup and Quit clicked");
-                    const confirmed = await ask("Are you sure you want to completely uninstall Entropic?\n\nThis will delete all data including settings and quit the app. You can then move Entropic.app to trash.\n\nThis action cannot be undone.", {
+                    const confirmed = await ask("Are you sure you want to completely uninstall Entropic?\n\nThis will delete all data including settings and quit the app. You can then remove the installed app.\n\nThis action cannot be undone.", {
                       title: "Uninstall Entropic",
                       kind: "warning",
                       okLabel: "Uninstall",
@@ -1402,15 +1414,17 @@ export function Settings({
                       // Sign out of Supabase and clear all Tauri stores
                       console.log("[Settings] Signing out and clearing auth...");
                       try { await authSignOut(); } catch (e) { console.warn("[Settings] signOut failed:", e); }
-                      for (const storeName of ["entropic-auth.json", "entropic-settings.json", "entropic-chat-history.json", "auth.json"]) {
+                      for (const storeName of RESET_STORE_FILES) {
                         try {
                           const s = await Store.load(storeName);
                           await s.clear();
                           await s.save();
                         } catch (e) { console.warn(`[Settings] Failed to clear ${storeName}:`, e); }
                       }
+                      resetIntegrationVaultSession();
+                      resetIntegrationState();
 
-                      alert("Uninstall cleanup completed!\n\n" + result + "\n\nThe app will now quit. You can move Entropic to trash.");
+                      alert("Uninstall cleanup completed!\n\n" + result + "\n\nThe app will now quit. You can now remove the installed app.");
 
                       // Quit the app
                       console.log("[Settings] Quitting app...");
