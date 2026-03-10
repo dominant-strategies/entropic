@@ -69,55 +69,58 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm.cmd tauri build --bundles nsis
 
-      - name: Sign Windows app executable
-        uses: azure/trusted-signing-action@v0.5.10
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE_NAME }}
-          files: |
-            ${{ github.workspace }}\src-tauri\target\release\entropic.exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-
-      - name: Sign Windows installer
-        uses: azure/trusted-signing-action@v0.5.10
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE_NAME }}
-          files-folder: ${{ github.workspace }}\src-tauri\target\release\bundle\nsis
-          files-folder-filter: exe
-          files-folder-recurse: false
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-
-      - name: Verify Authenticode signatures
-        shell: pwsh
-        run: |
-          $targets = @(
-            Join-Path $PWD 'src-tauri\target\release\entropic.exe'
-          )
-          $installerDir = Join-Path $PWD 'src-tauri\target\release\bundle\nsis'
-          $targets += Get-ChildItem -Path $installerDir -Filter '*.exe' -File | ForEach-Object { $_.FullName }
-          foreach ($target in $targets) {
-            if (-not (Test-Path $target)) {
-              throw "Missing signed target: $target"
-            }
-            $sig = Get-AuthenticodeSignature $target
-            Write-Host "$target => $($sig.Status)"
-            if ($sig.Status -ne 'Valid') {
-              throw "Authenticode signature verification failed for $target: $($sig.StatusMessage)"
-            }
-          }
+      # Windows Authenticode signing is temporarily disabled.
+      # Re-enable these steps once Azure Trusted Signing is configured for releases.
+      #
+      # - name: Sign Windows app executable
+      #   uses: azure/trusted-signing-action@v0.5.10
+      #   with:
+      #     azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+      #     azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+      #     azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+      #     endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+      #     signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+      #     certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE_NAME }}
+      #     files: |
+      #       ${{ github.workspace }}\src-tauri\target\release\entropic.exe
+      #     file-digest: SHA256
+      #     timestamp-rfc3161: http://timestamp.acs.microsoft.com
+      #     timestamp-digest: SHA256
+      #
+      # - name: Sign Windows installer
+      #   uses: azure/trusted-signing-action@v0.5.10
+      #   with:
+      #     azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+      #     azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+      #     azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+      #     endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+      #     signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+      #     certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE_NAME }}
+      #     files-folder: ${{ github.workspace }}\src-tauri\target\release\bundle\nsis
+      #     files-folder-filter: exe
+      #     files-folder-recurse: false
+      #     file-digest: SHA256
+      #     timestamp-rfc3161: http://timestamp.acs.microsoft.com
+      #     timestamp-digest: SHA256
+      #
+      # - name: Verify Authenticode signatures
+      #   shell: pwsh
+      #   run: |
+      #     $targets = @(
+      #       Join-Path $PWD 'src-tauri\target\release\entropic.exe'
+      #     )
+      #     $installerDir = Join-Path $PWD 'src-tauri\target\release\bundle\nsis'
+      #     $targets += Get-ChildItem -Path $installerDir -Filter '*.exe' -File | ForEach-Object { $_.FullName }
+      #     foreach ($target in $targets) {
+      #       if (-not (Test-Path $target)) {
+      #         throw "Missing signed target: $target"
+      #       }
+      #       $sig = Get-AuthenticodeSignature $target
+      #       Write-Host "$target => $($sig.Status)"
+      #       if ($sig.Status -ne 'Valid') {
+      #         throw "Authenticode signature verification failed for $target: $($sig.StatusMessage)"
+      #       }
+      #     }
 
       - name: Prepare artifacts
         id: artifacts
