@@ -900,7 +900,8 @@ fn download_url_to_path(
     let retries_str = retries.to_string();
     let connect_timeout_str = connect_timeout_secs.to_string();
     let max_time_str = max_time_secs.to_string();
-    let curl = Command::new("curl")
+    let mut curl_cmd = Command::new("curl");
+    curl_cmd
         .arg("-fL")
         .arg("--retry")
         .arg(&retries_str)
@@ -912,8 +913,9 @@ fn download_url_to_path(
         .arg(&max_time_str)
         .arg("-o")
         .arg(output_path)
-        .arg(url)
-        .output();
+        .arg(url);
+    apply_windows_no_window(&mut curl_cmd);
+    let curl = curl_cmd.output();
 
     match curl {
         Ok(out) if out.status.success() => Ok(()),
@@ -921,13 +923,15 @@ fn download_url_to_path(
             let curl_stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let wget_tries = format!("--tries={}", retries.max(1));
             let wget_timeout = format!("--timeout={}", max_time_secs);
-            let wget = Command::new("wget")
+            let mut wget_cmd = Command::new("wget");
+            wget_cmd
                 .arg("-O")
                 .arg(output_path)
                 .arg(&wget_tries)
                 .arg(&wget_timeout)
-                .arg(url)
-                .output();
+                .arg(url);
+            apply_windows_no_window(&mut wget_cmd);
+            let wget = wget_cmd.output();
             match wget {
                 Ok(wout) if wout.status.success() => Ok(()),
                 Ok(wout) => {
@@ -943,13 +947,15 @@ fn download_url_to_path(
         Err(cerr) => {
             let wget_tries = format!("--tries={}", retries.max(1));
             let wget_timeout = format!("--timeout={}", max_time_secs);
-            let wget = Command::new("wget")
+            let mut wget_cmd = Command::new("wget");
+            wget_cmd
                 .arg("-O")
                 .arg(output_path)
                 .arg(&wget_tries)
                 .arg(&wget_timeout)
-                .arg(url)
-                .output();
+                .arg(url);
+            apply_windows_no_window(&mut wget_cmd);
+            let wget = wget_cmd.output();
             match wget {
                 Ok(wout) if wout.status.success() => Ok(()),
                 Ok(wout) => {
@@ -2335,7 +2341,7 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
                                 "minProtocol": 3,
                                 "maxProtocol": 3,
                                 "client": {
-                                    "id": "openclaw-control-ui",
+                                    "id": "openclaw-probe",
                                     "displayName": "Entropic Desktop",
                                     "version": "0.1.0",
                                     "platform": "desktop",
@@ -6466,6 +6472,8 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
             "https://localhost",
             "https://127.0.0.1",
             "tauri://localhost",
+            "http://tauri.localhost",
+            "https://tauri.localhost",
             "http://localhost:5174",
             "http://127.0.0.1:5174"
         ]),

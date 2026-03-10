@@ -299,21 +299,12 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
         "tauri://localhost",
         "http://tauri.localhost",
         "https://tauri.localhost",
-        "http://localhost:5174"
+        "http://localhost:5174",
+        "http://127.0.0.1:5174"
       ],
       "allowInsecureAuth": true,
       "dangerouslyDisableDeviceAuth": true,
-      "dangerouslyAllowHostHeaderOriginFallback": true,
-      "allowedOrigins": [
-        "null",
-        "http://localhost",
-        "http://127.0.0.1",
-        "https://localhost",
-        "https://127.0.0.1",
-        "tauri://localhost",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174"
-      ]
+      "dangerouslyAllowHostHeaderOriginFallback": true
     }${GATEWAY_AUTH_BLOCK}
   },
   "plugins": {
