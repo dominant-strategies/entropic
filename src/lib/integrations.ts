@@ -30,6 +30,12 @@ const INTEGRATIONS_CACHE_TTL_MS = 30_000;
 let integrationsCache: { ts: number; data: Integration[] } | null = null;
 let integrationsCachedIndex: { ts: number; data: Integration[] } | null = null;
 
+export function resetIntegrationState(): void {
+  integrationsCache = null;
+  integrationsCachedIndex = null;
+  window.dispatchEvent(new Event("entropic-integration-updated"));
+}
+
 export type IntegrationProvider = "google_calendar" | "google_email" | "x";
 
 export interface Integration {

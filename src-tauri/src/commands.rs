@@ -6725,6 +6725,8 @@ fn auth_store_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("auth.json"))
 }
 
+const ENTROPIC_APP_IDENTIFIER: &str = "ai.openclaw.entropic";
+const ENTROPIC_DEV_APP_IDENTIFIER: &str = "ai.openclaw.entropic.dev";
 const LEGACY_NOVA_APP_IDENTIFIER: &str = "ai.openclaw.nova";
 const LEGACY_NOVA_STORE_FILE_MAPPINGS: &[(&str, &str)] = &[
     ("nova-auth.json", "entropic-auth.json"),
@@ -6762,6 +6764,60 @@ fn legacy_nova_app_data_dir_candidates() -> Vec<PathBuf> {
     }
     if let Some(data_dir) = dirs::data_dir() {
         dirs.push(data_dir.join(LEGACY_NOVA_APP_IDENTIFIER));
+    }
+
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+fn app_data_dir_candidates_for_identifiers(identifiers: &[&str]) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Some(home) = dirs::home_dir() {
+        for identifier in identifiers {
+            dirs.push(
+                home.join("Library")
+                    .join("Application Support")
+                    .join(identifier),
+            );
+            dirs.push(home.join(".local").join("share").join(identifier));
+            dirs.push(home.join("AppData").join("Roaming").join(identifier));
+            dirs.push(home.join("AppData").join("Local").join(identifier));
+        }
+    }
+
+    if let Some(data_local) = dirs::data_local_dir() {
+        for identifier in identifiers {
+            dirs.push(data_local.join(identifier));
+        }
+    }
+    if let Some(data_dir) = dirs::data_dir() {
+        for identifier in identifiers {
+            dirs.push(data_dir.join(identifier));
+        }
+    }
+
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+fn app_cache_dir_candidates() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join("Library").join("Caches").join("entropic"));
+        dirs.push(home.join("Library").join("Caches").join("entropic-dev"));
+        dirs.push(home.join(".cache").join("entropic"));
+        dirs.push(home.join(".cache").join("entropic-dev"));
+        dirs.push(home.join("AppData").join("Local").join("entropic"));
+        dirs.push(home.join("AppData").join("Local").join("entropic-dev"));
+    }
+
+    if let Some(cache_dir) = dirs::cache_dir() {
+        dirs.push(cache_dir.join("entropic"));
+        dirs.push(cache_dir.join("entropic-dev"));
     }
 
     dirs.sort();
@@ -8607,6 +8663,7 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
     use std::fs;
 
     let runtime = get_runtime(&app);
+    let platform = Platform::detect();
     let mut cleanup_log = Vec::<String>::new();
 
     // Stop runtime first
@@ -8617,101 +8674,108 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
         cleanup_log.push("Runtime stopped successfully".to_string());
     }
 
-    // Clean up Docker resources if requested
+    // Clean up Docker/resources/runtime state if requested.
     if include_vms {
-        cleanup_log.push("Cleaning up Docker resources...".to_string());
-        stop_legacy_nova_runtime_processes(&mut cleanup_log);
+        if matches!(platform, Platform::Windows) {
+            cleanup_log.push("Resetting managed Windows runtime...".to_string());
+            if let Err(e) = runtime.reset_isolated_runtime_state() {
+                cleanup_log.push(format!(
+                    "Warning: Failed to reset managed Windows runtime: {}",
+                    e
+                ));
+            } else {
+                cleanup_log.push("Managed Windows runtime reset completed".to_string());
+            }
+        } else {
+            cleanup_log.push("Cleaning up Docker resources...".to_string());
+            stop_legacy_nova_runtime_processes(&mut cleanup_log);
 
-        let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
-        let docker_bin = find_docker_binary();
-        let colima_bin = find_colima_binary();
+            let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
+            let docker_bin = find_docker_binary();
+            let colima_bin = find_colima_binary();
 
-        // Try to clean up Docker using shell commands
-        let colima_homes = vec![
-            home_dir.join(".nova").join("colima"),
-            home_dir.join(".nova").join("colima-dev"),
-            home_dir.join(".entropic").join("colima"),
-            home_dir.join(".entropic").join("colima-dev"),
-        ];
-        let profiles = vec![
-            ENTROPIC_VZ_PROFILE,
-            ENTROPIC_QEMU_PROFILE,
-            LEGACY_NOVA_VZ_PROFILE,
-            LEGACY_NOVA_QEMU_PROFILE,
-        ];
+            let colima_homes = vec![
+                home_dir.join(".nova").join("colima"),
+                home_dir.join(".nova").join("colima-dev"),
+                home_dir.join(".entropic").join("colima"),
+                home_dir.join(".entropic").join("colima-dev"),
+            ];
+            let profiles = vec![
+                ENTROPIC_VZ_PROFILE,
+                ENTROPIC_QEMU_PROFILE,
+                LEGACY_NOVA_VZ_PROFILE,
+                LEGACY_NOVA_QEMU_PROFILE,
+            ];
 
-        for colima_home in &colima_homes {
-            for profile in &profiles {
-                let socket = colima_home.join(profile).join("docker.sock");
-                if socket.exists() {
-                    let host = format!("unix://{}", socket.display());
+            for colima_home in &colima_homes {
+                for profile in &profiles {
+                    let socket = colima_home.join(profile).join("docker.sock");
+                    if socket.exists() {
+                        let host = format!("unix://{}", socket.display());
 
-                    // Remove containers
-                    let _ = std::process::Command::new(&docker_bin)
-                        .args(&["ps", "-aq"])
-                        .env("DOCKER_HOST", &host)
-                        .output()
-                        .and_then(|out| {
-                            let containers = String::from_utf8_lossy(&out.stdout);
-                            for container_id in containers.lines().filter(|l| !l.trim().is_empty())
-                            {
-                                let _ = std::process::Command::new(&docker_bin)
-                                    .args(&["rm", "-f", container_id])
-                                    .env("DOCKER_HOST", &host)
-                                    .output();
-                            }
-                            Ok(())
-                        });
+                        let _ = std::process::Command::new(&docker_bin)
+                            .args(&["ps", "-aq"])
+                            .env("DOCKER_HOST", &host)
+                            .output()
+                            .and_then(|out| {
+                                let containers = String::from_utf8_lossy(&out.stdout);
+                                for container_id in
+                                    containers.lines().filter(|l| !l.trim().is_empty())
+                                {
+                                    let _ = std::process::Command::new(&docker_bin)
+                                        .args(&["rm", "-f", container_id])
+                                        .env("DOCKER_HOST", &host)
+                                        .output();
+                                }
+                                Ok(())
+                            });
 
-                    // System prune
-                    let _ = std::process::Command::new(&docker_bin)
-                        .args(&["system", "prune", "-af", "--volumes"])
-                        .env("DOCKER_HOST", &host)
+                        let _ = std::process::Command::new(&docker_bin)
+                            .args(&["system", "prune", "-af", "--volumes"])
+                            .env("DOCKER_HOST", &host)
+                            .output();
+                    }
+                }
+            }
+
+            cleanup_log.push("Docker cleanup completed".to_string());
+            cleanup_log.push("Deleting Colima VMs...".to_string());
+            for colima_home in &colima_homes {
+                let prefix = if colima_home.to_string_lossy().contains(&format!(
+                    "{}{}",
+                    std::path::MAIN_SEPARATOR,
+                    ".nova"
+                )) {
+                    "Removing legacy"
+                } else {
+                    "Removing runtime"
+                };
+                cleanup_log.push(format!("{} {}...", prefix, colima_home.display()));
+                for profile in &profiles {
+                    let _ = std::process::Command::new(&colima_bin)
+                        .args(&["delete", "-f", "-p", profile])
+                        .env("COLIMA_HOME", colima_home)
+                        .env("LIMA_HOME", colima_home.join("_lima"))
                         .output();
                 }
             }
-        }
+            cleanup_log.push("Colima VMs deleted".to_string());
 
-        cleanup_log.push("Docker cleanup completed".to_string());
-
-        // Delete Colima VMs
-        cleanup_log.push("Deleting Colima VMs...".to_string());
-        for colima_home in &colima_homes {
-            let prefix = if colima_home.to_string_lossy().contains(&format!(
-                "{}{}",
-                std::path::MAIN_SEPARATOR,
-                ".nova"
-            )) {
-                "Removing legacy"
-            } else {
-                "Removing runtime"
-            };
-            cleanup_log.push(format!("{} {}...", prefix, colima_home.display()));
-            for profile in &profiles {
-                let _ = std::process::Command::new(&colima_bin)
-                    .args(&["delete", "-f", "-p", profile])
-                    .env("COLIMA_HOME", colima_home)
-                    .env("LIMA_HOME", colima_home.join("_lima"))
+            cleanup_log.push("Cleaning up Docker contexts...".to_string());
+            for context in &[
+                "colima-nova-vz",
+                "colima-nova-qemu",
+                "colima-entropic-vz",
+                "colima-entropic-qemu",
+            ] {
+                let _ = std::process::Command::new(&docker_bin)
+                    .args(&["context", "rm", "-f", context])
                     .output();
             }
+            cleanup_log.push("Docker contexts cleaned".to_string());
         }
-        cleanup_log.push("Colima VMs deleted".to_string());
 
-        // Remove Docker contexts left behind by old installs
-        cleanup_log.push("Cleaning up Docker contexts...".to_string());
-        for context in &[
-            "colima-nova-vz",
-            "colima-nova-qemu",
-            "colima-entropic-vz",
-            "colima-entropic-qemu",
-        ] {
-            let _ = std::process::Command::new(&docker_bin)
-                .args(&["context", "rm", "-f", context])
-                .output();
-        }
-        cleanup_log.push("Docker contexts cleaned".to_string());
-
-        // Remove runtime state directories from both naming eras.
+        let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
         for runtime_dir in [home_dir.join(".nova"), home_dir.join(".entropic")] {
             if runtime_dir.exists() {
                 if let Err(e) = fs::remove_dir_all(&runtime_dir) {
@@ -8727,35 +8791,30 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
         }
     }
 
-    // Full cleanup: remove ALL app data, caches, and stores (chat history, settings, etc.)
-    // Mirrors: rm -rf ~/Library/Application Support/ai.openclaw.entropic{,.dev}
-    //                  ~/Library/Caches/entropic{,-dev}
-    //                  ~/.cache/entropic
+    // Full cleanup removes app data and cache directories across supported OS layouts.
     cleanup_log.push("Cleaning up all app data and caches...".to_string());
-    let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
-    // Kill any legacy Nova processes that may be holding open file handles
-    // in the old app data directory, which would cause "permission denied" on removal.
-    let _ = std::process::Command::new("pkill")
-        .args(&["-9", "-f", "Nova.app"])
-        .output();
+    if matches!(platform, Platform::MacOS) {
+        let _ = std::process::Command::new("pkill")
+            .args(&["-9", "-f", "Nova.app"])
+            .output();
+    }
 
-    let dirs_to_remove = vec![
-        // App data (Tauri stores: chat history, settings, auth)
-        home_dir.join("Library/Application Support/ai.openclaw.entropic"),
-        home_dir.join("Library/Application Support/ai.openclaw.entropic.dev"),
-        // Legacy nova app data (older installs may have permission-locked files here)
-        home_dir.join("Library/Application Support/ai.openclaw.nova"),
-        // App caches
-        home_dir.join("Library/Caches/entropic"),
-        home_dir.join("Library/Caches/entropic-dev"),
-        home_dir.join(".cache/entropic"),
-    ];
+    let mut dirs_to_remove = app_data_dir_candidates_for_identifiers(&[
+        ENTROPIC_APP_IDENTIFIER,
+        ENTROPIC_DEV_APP_IDENTIFIER,
+        LEGACY_NOVA_APP_IDENTIFIER,
+    ]);
+    dirs_to_remove.extend(app_cache_dir_candidates());
+    dirs_to_remove.sort();
+    dirs_to_remove.dedup();
     for dir in &dirs_to_remove {
         if dir.exists() {
             // Fix permissions before removal — older installs may have locked files
-            let _ = std::process::Command::new("chmod")
-                .args(&["-R", "u+w", &dir.to_string_lossy().to_string()])
-                .output();
+            if matches!(platform, Platform::MacOS | Platform::Linux) {
+                let _ = std::process::Command::new("chmod")
+                    .args(&["-R", "u+w", &dir.to_string_lossy().to_string()])
+                    .output();
+            }
             if let Err(e) = fs::remove_dir_all(dir) {
                 cleanup_log.push(format!(
                     "Warning: Failed to remove {}: {}",
