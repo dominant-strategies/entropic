@@ -113,6 +113,26 @@ function diagnoseSetupError(rawError: string): SetupErrorDiagnosis {
   }
 
   if (
+    lower.includes("installed wsl command is too old") ||
+    (lower.includes("invalid command line option") && lower.includes("--install"))
+  ) {
+    return {
+      title: "Update WSL Before Setup Can Continue",
+      summary:
+        "This Windows PC has an older WSL command-line tool that does not support Entropic's automatic WSL installation flow.",
+      causes: [
+        "Windows is using an older in-box WSL CLI without `wsl --install` support",
+        "WSL platform components are missing or the machine needs the newer WSL package",
+      ],
+      actions: [
+        "Update WSL, or enable Windows Subsystem for Linux and Virtual Machine Platform in Windows Features.",
+        "Restart Windows completely, then reopen Entropic and run setup again.",
+      ],
+      technical,
+    };
+  }
+
+  if (
     lower.includes("docker engine is not ready in entropic-prod") &&
     (
       lower.includes("temporary failure resolving") ||

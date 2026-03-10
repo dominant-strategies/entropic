@@ -1403,14 +1403,19 @@ impl Runtime {
     }
 
     fn windows_wsl_available(&self) -> bool {
-        if let Ok(out) = self.run_wsl(&["--version"]) {
-            if out.status.success() {
-                return true;
+        for args in [
+            &["--version"][..],
+            &["--status"][..],
+            &["--list", "--quiet"][..],
+            &["-l", "-q"][..],
+        ] {
+            if let Ok(out) = self.run_wsl(args) {
+                if out.status.success() {
+                    return true;
+                }
             }
         }
-        self.run_wsl(&["--status"])
-            .map(|out| out.status.success())
-            .unwrap_or(false)
+        false
     }
 
     fn windows_wait_for_wsl_available(&self) -> bool {
@@ -1465,6 +1470,20 @@ impl Runtime {
             || combined.contains("required reboot")
     }
 
+    fn output_mentions_unsupported_wsl_install(output: &std::process::Output) -> bool {
+        let combined = format!(
+            "{}\n{}",
+            Self::sanitize_command_output(&output.stdout),
+            Self::sanitize_command_output(&output.stderr)
+        )
+        .to_ascii_lowercase();
+        (combined.contains("invalid command line option")
+            || combined.contains("unrecognized option")
+            || combined.contains("unknown option")
+            || combined.contains("unknown argument"))
+            && combined.contains("--install")
+    }
+
     fn ensure_windows_wsl_platform(&self) -> Result<(), RuntimeError> {
         if self.windows_wsl_available() {
             return Ok(());
@@ -1481,6 +1500,18 @@ impl Runtime {
         if !direct.status.success() {
             let combined = Self::command_output_summary(&direct);
             let lower = combined.to_ascii_lowercase();
+
+            if Self::output_mentions_unsupported_wsl_install(&direct) {
+                if self.windows_wsl_available() {
+                    return Ok(());
+                }
+                let err = RuntimeError::CommandFailed(
+                    "The installed WSL command is too old for Entropic's automatic setup. Update WSL or enable Windows Subsystem for Linux and Virtual Machine Platform, restart Windows, then reopen Entropic.".to_string(),
+                );
+                self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
+                return Err(err);
+            }
+
             let needs_elevation = lower.contains("elevation")
                 || lower.contains("administrator")
                 || lower.contains("access is denied")
@@ -2822,6 +2853,10 @@ add_distro() {
 }
 
 if [ "$#" -ge 1 ] && { [ "$1" = "--version" ] || [ "$1" = "--status" ]; }; then
+  if [ "${ENTROPIC_TEST_WSL_LEGACY_CLI:-0}" = "1" ]; then
+    echo "Invalid command line option: $1" >&2
+    exit 1
+  fi
   if [ "$installed" = "1" ] && [ "$reboot_pending" = "0" ]; then
     echo "WSL version 2.1.0"
     exit 0
@@ -2831,6 +2866,10 @@ if [ "$#" -ge 1 ] && { [ "$1" = "--version" ] || [ "$1" = "--status" ]; }; then
 fi
 
 if [ "$#" -ge 2 ] && [ "$1" = "--install" ] && [ "$2" = "--no-distribution" ]; then
+  if [ "${ENTROPIC_TEST_WSL_LEGACY_CLI:-0}" = "1" ]; then
+    echo "Invalid command line option: --install" >&2
+    exit 1
+  fi
   installed=1
   if [ "${ENTROPIC_TEST_WSL_INSTALL_REBOOT:-0}" = "1" ]; then
     reboot_pending=1
@@ -2853,6 +2892,26 @@ if [ "$#" -ge 2 ] && [ "$1" = "--set-default-version" ] && [ "$2" = "2" ]; then
 fi
 
 if [ "$#" -ge 2 ] && [ "$1" = "--list" ] && [ "$2" = "--quiet" ]; then
+  if [ "$installed" != "1" ] || [ "$reboot_pending" != "0" ]; then
+    echo "WSL not available" >&2
+    exit 1
+  fi
+  OLDIFS=$IFS
+  IFS=','
+  for entry in $distros; do
+    if [ -n "$entry" ]; then
+      echo "$entry"
+    fi
+  done
+  IFS=$OLDIFS
+  exit 0
+fi
+
+if [ "$#" -ge 2 ] && [ "$1" = "-l" ] && [ "$2" = "-q" ]; then
+  if [ "$installed" != "1" ] || [ "$reboot_pending" != "0" ]; then
+    echo "WSL not available" >&2
+    exit 1
+  fi
   OLDIFS=$IFS
   IFS=','
   for entry in $distros; do
@@ -2865,6 +2924,10 @@ if [ "$#" -ge 2 ] && [ "$1" = "--list" ] && [ "$2" = "--quiet" ]; then
 fi
 
 if [ "$#" -ge 1 ] && [ "$1" = "--install" ]; then
+  if [ "${ENTROPIC_TEST_WSL_LEGACY_CLI:-0}" = "1" ]; then
+    echo "Invalid command line option: --install" >&2
+    exit 1
+  fi
   name=""
   location=""
   shift
@@ -3015,6 +3078,10 @@ function Add-Distro([string]$Name) {
 }
 
 if ($args.Count -ge 1 -and ($args[0] -eq "--version" -or $args[0] -eq "--status")) {
+  if ($env:ENTROPIC_TEST_WSL_LEGACY_CLI -eq "1") {
+    Write-Error ("Invalid command line option: " + $args[0])
+    exit 1
+  }
   if ($installed -eq 1 -and $reboot_pending -eq 0) {
     Write-Output "WSL version 2.1.0"
     exit 0
@@ -3024,6 +3091,10 @@ if ($args.Count -ge 1 -and ($args[0] -eq "--version" -or $args[0] -eq "--status"
 }
 
 if ($args.Count -ge 2 -and $args[0] -eq "--install" -and $args[1] -eq "--no-distribution") {
+  if ($env:ENTROPIC_TEST_WSL_LEGACY_CLI -eq "1") {
+    Write-Error "Invalid command line option: --install"
+    exit 1
+  }
   $installed = 1
   if ($env:ENTROPIC_TEST_WSL_INSTALL_REBOOT -eq "1") {
     $reboot_pending = 1
@@ -3046,6 +3117,23 @@ if ($args.Count -ge 2 -and $args[0] -eq "--set-default-version" -and $args[1] -e
 }
 
 if ($args.Count -ge 2 -and $args[0] -eq "--list" -and $args[1] -eq "--quiet") {
+  if ($installed -ne 1 -or $reboot_pending -ne 0) {
+    Write-Error "WSL not available"
+    exit 1
+  }
+  foreach ($entry in $distros) {
+    if (-not [string]::IsNullOrWhiteSpace($entry)) {
+      Write-Output $entry
+    }
+  }
+  exit 0
+}
+
+if ($args.Count -ge 2 -and $args[0] -eq "-l" -and $args[1] -eq "-q") {
+  if ($installed -ne 1 -or $reboot_pending -ne 0) {
+    Write-Error "WSL not available"
+    exit 1
+  }
   foreach ($entry in $distros) {
     if (-not [string]::IsNullOrWhiteSpace($entry)) {
       Write-Output $entry
@@ -3055,6 +3143,10 @@ if ($args.Count -ge 2 -and $args[0] -eq "--list" -and $args[1] -eq "--quiet") {
 }
 
 if ($args.Count -ge 1 -and $args[0] -eq "--install") {
+  if ($env:ENTROPIC_TEST_WSL_LEGACY_CLI -eq "1") {
+    Write-Error "Invalid command line option: --install"
+    exit 1
+  }
   $name = ""
   $location = ""
   for ($i = 1; $i -lt $args.Count; $i++) {
@@ -3246,6 +3338,7 @@ exit 1
                 "ENTROPIC_TEST_WSL_STATE_FILE",
                 "ENTROPIC_TEST_WSL_INSTALL_REBOOT",
                 "ENTROPIC_TEST_WSL_DOCKER_FAIL",
+                "ENTROPIC_TEST_WSL_LEGACY_CLI",
             ]);
 
             let path_sep = if cfg!(windows) { ";" } else { ":" };
@@ -3279,6 +3372,7 @@ exit 1
                 if install_requires_reboot { "1" } else { "0" },
             );
             env_guard.remove("ENTROPIC_TEST_WSL_DOCKER_FAIL");
+            env_guard.remove("ENTROPIC_TEST_WSL_LEGACY_CLI");
             env_guard.set("ENTROPIC_WSL_DEV_DISTRO_SHA256", sha256_hex(dev_contents));
             env_guard.set("ENTROPIC_WSL_PROD_DISTRO_SHA256", sha256_hex(prod_contents));
             env_guard.remove("ENTROPIC_WSL_DISTRO_SHA256");
@@ -3409,6 +3503,64 @@ exit 1
         assert!(
             wsl_state.contains("entropic-prod"),
             "prod distro should be present after resumed setup"
+        );
+    }
+
+    #[test]
+    fn windows_bootstrap_legacy_wsl_cli_already_available_succeeds() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let fixture = WindowsBootstrapFixture::new("legacy-cli-available", false);
+        std::env::set_var("ENTROPIC_TEST_WSL_LEGACY_CLI", "1");
+        fs::write(
+            &fixture.wsl_state_file,
+            "installed=1\nreboot_pending=0\ndistros=\"\"\n",
+        )
+        .expect("failed to seed fake wsl state");
+
+        fixture
+            .runtime
+            .ensure_windows_runtime_for_tests()
+            .expect("bootstrap should succeed with legacy WSL CLI");
+
+        assert!(
+            !fixture.bootstrap_state_file.exists(),
+            "bootstrap-state.json should be cleared after successful setup"
+        );
+        let wsl_state = fixture.read_wsl_state();
+        assert!(
+            wsl_state.contains("entropic-dev"),
+            "dev distro should be imported"
+        );
+        assert!(
+            wsl_state.contains("entropic-prod"),
+            "prod distro should be imported"
+        );
+    }
+
+    #[test]
+    fn windows_bootstrap_legacy_wsl_cli_without_platform_surfaces_upgrade_guidance() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let fixture = WindowsBootstrapFixture::new("legacy-cli-missing", false);
+        std::env::set_var("ENTROPIC_TEST_WSL_LEGACY_CLI", "1");
+
+        let err = fixture
+            .runtime
+            .ensure_windows_runtime_for_tests()
+            .expect_err("legacy WSL CLI without platform should fail");
+
+        assert!(
+            err.to_string()
+                .contains("installed WSL command is too old for Entropic's automatic setup"),
+            "expected legacy-WSL guidance, got: {}",
+            err
+        );
+        let state = fixture.read_bootstrap_state();
+        assert_eq!(state.stage, WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL);
+        assert!(
+            state.error
+                .unwrap_or_default()
+                .contains("installed WSL command is too old"),
+            "bootstrap state should persist the legacy-WSL guidance"
         );
     }
 
