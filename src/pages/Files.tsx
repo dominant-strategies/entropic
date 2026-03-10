@@ -91,8 +91,6 @@ type Props = {
   onGatewayToggle: () => void;
   onRecoverProxyAuth?: () => Promise<boolean> | boolean;
   isTogglingGateway: boolean;
-  experimentalDesktop: boolean;
-  onExperimentalDesktopChange: (value: boolean) => void;
   selectedModel: string;
   onModelChange: (model: string) => void;
   useLocalKeys: boolean;
@@ -742,8 +740,6 @@ export function Files({
   onGatewayToggle,
   onRecoverProxyAuth,
   isTogglingGateway,
-  experimentalDesktop,
-  onExperimentalDesktopChange,
   selectedModel,
   onModelChange,
   useLocalKeys,
@@ -4132,8 +4128,6 @@ export function Files({
                   gatewayRunning={gatewayRunning}
                   onGatewayToggle={onGatewayToggle}
                   isTogglingGateway={isTogglingGateway}
-                  experimentalDesktop={experimentalDesktop}
-                  onExperimentalDesktopChange={onExperimentalDesktopChange}
                   selectedModel={selectedModel}
                   onModelChange={onModelChange}
                   useLocalKeys={useLocalKeys}

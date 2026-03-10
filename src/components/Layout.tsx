@@ -55,7 +55,6 @@ type Props = {
   onOpenFeedback?: () => void;
   children: ReactNode;
   gatewayRunning: boolean;
-  experimentalDesktop?: boolean;
   integrationsSyncing?: boolean;
   chatSessions?: ChatSession[];
   currentChatSession?: string | null;
@@ -71,8 +70,8 @@ type Props = {
 
 const baseNavItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
   { id: "chat", label: "New Chat", icon: Plus },
-  { id: "jobs", label: "Jobs", icon: CalendarClock },
   { id: "files", label: "Desktop", icon: FolderOpen },
+  { id: "jobs", label: "Jobs", icon: CalendarClock },
   { id: "channels", label: "Messaging", icon: Radio },
   // { id: "store", label: "Integrations", icon: Puzzle },
   { id: "skills", label: "Skills", icon: Sparkles },
@@ -100,7 +99,6 @@ export function Layout({
   onOpenFeedback,
   children,
   gatewayRunning,
-  experimentalDesktop = false,
   integrationsSyncing,
   chatSessions,
   currentChatSession,
@@ -192,9 +190,7 @@ export function Layout({
   const profileAvatarUrl = isRenderableAvatarDataUrl(profile.avatarDataUrl)
     ? profile.avatarDataUrl.trim()
     : undefined;
-  const navItems = baseNavItems.filter((item) =>
-    item.id === "files" ? experimentalDesktop : true
-  );
+  const navItems = baseNavItems;
 
   return (
     <div className="h-screen w-screen flex bg-[var(--bg-app)] text-[var(--text-primary)] font-sans overflow-hidden">
