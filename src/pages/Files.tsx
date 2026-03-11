@@ -90,6 +90,7 @@ type Props = {
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
   onGatewayToggle: () => void;
+  onApplyRuntimeResources?: () => void | Promise<void>;
   onRecoverProxyAuth?: () => Promise<boolean> | boolean;
   isTogglingGateway: boolean;
   selectedModel: string;
@@ -795,6 +796,7 @@ export function Files({
   integrationsSyncing,
   integrationsMissing,
   onGatewayToggle,
+  onApplyRuntimeResources,
   onRecoverProxyAuth,
   isTogglingGateway,
   selectedModel,
@@ -4399,6 +4401,7 @@ export function Files({
                 <Settings
                   gatewayRunning={gatewayRunning}
                   onGatewayToggle={onGatewayToggle}
+                  onApplyRuntimeResources={onApplyRuntimeResources}
                   isTogglingGateway={isTogglingGateway}
                   selectedModel={selectedModel}
                   onModelChange={onModelChange}

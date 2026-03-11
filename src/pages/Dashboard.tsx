@@ -1155,6 +1155,83 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     await toggleGateway();
   }
 
+  async function applyRuntimeResourcesAndRestart() {
+    if (isTogglingGateway) return;
+
+    setIsTogglingGateway(true);
+    setStartupError(null);
+    clearGatewayRetry();
+    setShowGatewayStartup(true);
+    setGatewayStartupStage("launch");
+
+    try {
+      await invoke("stop_runtime");
+      gatewayHealthFailureStreakRef.current = 0;
+      autoStartAttemptedRef.current = false;
+      setGatewayRunning(false);
+
+      const proxyEnabled =
+        isAuthConfigured &&
+        !useLocalKeys &&
+        (isAuthenticated || (localCreditBalanceCents ?? 0) > 0);
+
+      if (proxyEnabled) {
+        const started = await startGatewayProxyFlow({
+          model: selectedModel,
+          image: imageModel,
+          stopFirst: false,
+          allowRetry: false,
+        });
+        if (!started) {
+          throw new Error("Sandbox restart did not complete.");
+        }
+        return;
+      }
+
+      if (isAuthConfigured && !useLocalKeys) {
+        setStartupError(buildOutOfCreditsStartupError());
+        setShowGatewayStartup(false);
+        throw new Error("Sandbox restart requires available proxy credits.");
+      }
+
+      setGatewayStartupStage("launch");
+      await invoke("start_gateway", { model: selectedModel });
+      setGatewayStartupStage("health");
+
+      const healthStart = Date.now();
+      let wsReady = false;
+      while (Date.now() - healthStart < 90_000) {
+        const ok = await getGatewayStatusCached({ force: true });
+        if (ok) {
+          wsReady = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+      }
+
+      if (!wsReady) {
+        throw new Error(
+          "Sandbox restarted but did not become healthy within 90 s. Please try again."
+        );
+      }
+
+      gatewayHealthFailureStreakRef.current = 0;
+      runtimeAutoRefreshAttemptedRef.current = false;
+      setGatewayRunning(true);
+      setStartupError(null);
+      setGatewayStartupStage("idle");
+      setShowGatewayStartup(false);
+    } catch (error) {
+      console.error("[Entropic] Failed to apply runtime resources:", error);
+      setStartupError((current) => current ?? { message: extractGatewayStartError(error) });
+      setGatewayStartupStage("idle");
+      setShowGatewayStartup(false);
+      throw error instanceof Error ? error : new Error(extractGatewayStartError(error));
+    } finally {
+      setIsTogglingGateway(false);
+    }
+  }
+
   async function recoverProxyAuthFromChat(): Promise<boolean> {
     if (
       !isAuthConfigured ||
@@ -1339,6 +1416,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             integrationsSyncing={integrationsSyncing}
             integrationsMissing={integrationsMissing}
             onGatewayToggle={toggleGateway}
+            onApplyRuntimeResources={applyRuntimeResourcesAndRestart}
             onRecoverProxyAuth={recoverProxyAuthFromChat}
             isTogglingGateway={isTogglingGateway}
             selectedModel={selectedModel}
@@ -1364,6 +1442,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           <Settings
             gatewayRunning={gatewayRunning}
             onGatewayToggle={toggleGateway}
+            onApplyRuntimeResources={applyRuntimeResourcesAndRestart}
             isTogglingGateway={isTogglingGateway}
             selectedModel={selectedModel}
             onModelChange={handleModelChange}

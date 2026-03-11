@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-shell";
 import { Loader2, CheckCircle2, XCircle, AlertTriangle, Copy } from "lucide-react";
 import entropicLogo from "../assets/entropic-logo.png";
+import quaiHeaderWhite from "../assets/quai-header-white.png";
 import quaiLogo from "../assets/quai-logo.svg";
 
 export type SetupProgress = {
@@ -177,12 +178,25 @@ function diagnoseSetupError(rawError: string): SetupErrorDiagnosis {
   };
 }
 
+function detectDarkTheme(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const root = document.documentElement;
+  if (root.classList.contains("dark")) return true;
+  if (root.classList.contains("light")) return false;
+
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
+}
+
 export function SetupScreen({ onComplete, preview }: Props) {
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState<SetupProgress | null>(null);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
   const [factIndex, setFactIndex] = useState(0);
   const [tosAccepted, setTosAccepted] = useState(false);
+  const [isDarkTheme, setIsDarkTheme] = useState(() => detectDarkTheme());
   const isPreview = Boolean(preview);
 
   const activeProgress = useMemo(() => {
@@ -238,6 +252,37 @@ export function SetupScreen({ onComplete, preview }: Props) {
       return () => clearInterval(interval);
     }
   }, [isPreview, isRunning, onComplete]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const media = window.matchMedia?.("(prefers-color-scheme: dark)");
+    const updateTheme = () => setIsDarkTheme(detectDarkTheme());
+    updateTheme();
+
+    const observer = new MutationObserver(updateTheme);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+
+    if (media?.addEventListener) {
+      media.addEventListener("change", updateTheme);
+    } else if (media?.addListener) {
+      media.addListener(updateTheme);
+    }
+
+    return () => {
+      observer.disconnect();
+      if (media?.removeEventListener) {
+        media.removeEventListener("change", updateTheme);
+      } else if (media?.removeListener) {
+        media.removeListener(updateTheme);
+      }
+    };
+  }, []);
 
   // Rotate educational facts during setup
   useEffect(() => {
@@ -310,7 +355,11 @@ export function SetupScreen({ onComplete, preview }: Props) {
       {/* Logo and Title — hidden entirely on error screen */}
       {!activeProgress?.error && (
         <div className="mb-12 text-center mt-auto">
-          <img src={entropicLogo} alt="Entropic" className="w-20 h-20 mx-auto mb-6" />
+          <img
+            src={isDarkTheme ? quaiHeaderWhite : entropicLogo}
+            alt={isDarkTheme ? "Quai Network" : "Entropic"}
+            className={isDarkTheme ? "mx-auto mb-6 h-auto w-full max-w-[260px]" : "mx-auto mb-6 h-20 w-20"}
+          />
           <h1 className="text-3xl font-semibold text-[var(--text-primary)] mb-2">
             Welcome to Entropic
           </h1>
