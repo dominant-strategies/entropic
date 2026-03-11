@@ -98,7 +98,9 @@ type Props = {
   onUseLocalKeysChange: (value: boolean) => void;
   codeModel: string;
   imageModel: string;
+  imageGenerationModel: string;
   onCodeModelChange: (model: string) => void;
+  onImageGenerationModelChange: (model: string) => void;
   onImageModelChange: (model: string) => void;
 };
 type ViewMode = "grid" | "list";
@@ -764,7 +766,9 @@ export function Files({
   onUseLocalKeysChange,
   codeModel,
   imageModel,
+  imageGenerationModel,
   onCodeModelChange,
+  onImageGenerationModelChange,
   onImageModelChange,
 }: Props) {
   const { balance, isAuthenticated, isAuthConfigured } = useAuth();
@@ -3780,6 +3784,7 @@ export function Files({
                       selectedModel={selectedModel}
                       onModelChange={onModelChange}
                       imageModel={imageModel}
+                      imageGenerationModel={imageGenerationModel}
                       integrationsSyncing={integrationsSyncing}
                       integrationsMissing={integrationsMissing}
                       onNavigate={handleDesktopChatNavigate}
@@ -4364,7 +4369,9 @@ export function Files({
                   onUseLocalKeysChange={onUseLocalKeysChange}
                   codeModel={codeModel}
                   imageModel={imageModel}
+                  imageGenerationModel={imageGenerationModel}
                   onCodeModelChange={onCodeModelChange}
+                  onImageGenerationModelChange={onImageGenerationModelChange}
                   onImageModelChange={onImageModelChange}
                 />
               </Suspense>

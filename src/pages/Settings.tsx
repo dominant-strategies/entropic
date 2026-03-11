@@ -26,10 +26,12 @@ import {
   type DiagnosticLogEntry,
   type DiagnosticLogType,
 } from "../lib/diagnostics";
+import { PROXY_IMAGE_GENERATION_MODELS } from "../components/ModelSelector";
 
 type Props = {
   gatewayRunning: boolean;
   onGatewayToggle: () => void;
+  onApplyRuntimeResources?: () => void | Promise<void>;
   isTogglingGateway: boolean;
   selectedModel: string;
   onModelChange: (model: string) => void;
@@ -37,7 +39,9 @@ type Props = {
   onUseLocalKeysChange: (value: boolean) => void | Promise<void>;
   codeModel: string;
   imageModel: string;
+  imageGenerationModel: string;
   onCodeModelChange: (model: string) => void;
+  onImageGenerationModelChange: (model: string) => void;
   onImageModelChange: (model: string) => void;
 };
 
@@ -45,6 +49,9 @@ type AgentProfileState = {
   memory_sessions_enabled?: boolean;
   memory_enabled?: boolean;
   memory_qmd_enabled?: boolean;
+  runtime_cpu?: number;
+  runtime_memory_gb?: number;
+  runtime_disk_gb?: number;
   soul?: string;
   identity_name?: string;
   identity_avatar?: string | null;
@@ -88,6 +95,19 @@ const RESET_STORE_FILES = [
   "entropic-profile.json",
   "auth.json",
 ];
+
+type RuntimeResourceUsage = {
+  running: boolean;
+  container?: string | null;
+  vm_cpu_count?: number | null;
+  vm_memory_total_bytes?: number | null;
+  cpu_percent?: number | null;
+  memory_used_bytes?: number | null;
+  memory_limit_bytes?: number | null;
+  disk_used_bytes?: number | null;
+  disk_total_bytes?: number | null;
+  data_used_bytes?: number | null;
+};
 
 function SettingsGroup({ title, children }: { title?: string, children: React.ReactNode }) {
   return (
@@ -137,9 +157,23 @@ function SettingsRow({
   );
 }
 
+function formatBytes(value?: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let next = value;
+  let unitIndex = 0;
+  while (next >= 1024 && unitIndex < units.length - 1) {
+    next /= 1024;
+    unitIndex += 1;
+  }
+  const digits = next >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${next.toFixed(digits)} ${units[unitIndex]}`;
+}
+
 export function Settings({
   gatewayRunning,
   onGatewayToggle,
+  onApplyRuntimeResources,
   isTogglingGateway,
   selectedModel,
   onModelChange,
@@ -147,7 +181,9 @@ export function Settings({
   onUseLocalKeysChange,
   codeModel,
   imageModel,
+  imageGenerationModel,
   onCodeModelChange,
+  onImageGenerationModelChange,
   onImageModelChange,
 }: Props) {
   console.log("[Settings] Component rendering");
@@ -159,6 +195,15 @@ export function Settings({
   const [memorySessionIndexing, setMemorySessionIndexing] = useState(false);
   const [memoryEnabled, setMemoryEnabled] = useState(true);
   const [memoryQmdEnabled, setMemoryQmdEnabled] = useState(false);
+  const [runtimeCpu, setRuntimeCpu] = useState(2);
+  const [runtimeMemoryGb, setRuntimeMemoryGb] = useState(4);
+  const [runtimeDiskGb, setRuntimeDiskGb] = useState(20);
+  const [runtimeResourceBaseline, setRuntimeResourceBaseline] = useState({ cpu: 2, memoryGb: 4, diskGb: 20 });
+  const [runtimeResourceError, setRuntimeResourceError] = useState<string | null>(null);
+  const [runtimeResourceNotice, setRuntimeResourceNotice] = useState<string | null>(null);
+  const [runtimeResourceSaving, setRuntimeResourceSaving] = useState(false);
+  const [runtimeResourceUsage, setRuntimeResourceUsage] = useState<RuntimeResourceUsage | null>(null);
+  const [runtimeResourceUsageError, setRuntimeResourceUsageError] = useState<string | null>(null);
   const [memorySessionIndexingError, setMemorySessionIndexingError] = useState<string | null>(null);
   const [memoryQmdError, setMemoryQmdError] = useState<string | null>(null);
   const [soul, setSoul] = useState("");
@@ -196,7 +241,25 @@ export function Settings({
   const profileAvatarDataUrl = isRenderableAvatarDataUrl(profile.avatarDataUrl)
     ? profile.avatarDataUrl.trim()
     : undefined;
-
+  const isMacOS =
+    typeof document !== "undefined" &&
+    document.documentElement.classList.contains("platform-macos");
+  const runtimeResourcesDirty =
+    runtimeCpu !== runtimeResourceBaseline.cpu ||
+    runtimeMemoryGb !== runtimeResourceBaseline.memoryGb ||
+    runtimeDiskGb !== runtimeResourceBaseline.diskGb;
+  const liveCpuText =
+    typeof runtimeResourceUsage?.cpu_percent === "number"
+      ? `${runtimeResourceUsage.cpu_percent.toFixed(1)}%`
+      : "—";
+  const liveMemoryText =
+    runtimeResourceUsage?.memory_used_bytes != null
+      ? `${formatBytes(runtimeResourceUsage.memory_used_bytes)} / ${runtimeResourceBaseline.memoryGb} GB`
+      : "—";
+  const liveDiskText =
+    runtimeResourceUsage?.disk_used_bytes != null
+      ? `${formatBytes(runtimeResourceUsage.disk_used_bytes)} / ${runtimeResourceBaseline.diskGb} GB`
+      : "—";
   // Theme state
   type ThemeMode = "system" | "light" | "dark";
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
@@ -245,6 +308,17 @@ export function Settings({
       setMemorySessionIndexing(Boolean(state.memory_sessions_enabled));
       setMemoryEnabled(state.memory_enabled ?? true);
       setMemoryQmdEnabled(Boolean(state.memory_qmd_enabled));
+      const nextRuntimeCpu = Math.min(16, Math.max(1, state.runtime_cpu ?? 2));
+      const nextRuntimeMemoryGb = Math.min(64, Math.max(2, state.runtime_memory_gb ?? 4));
+      const nextRuntimeDiskGb = Math.min(500, Math.max(20, state.runtime_disk_gb ?? 20));
+      setRuntimeCpu(nextRuntimeCpu);
+      setRuntimeMemoryGb(nextRuntimeMemoryGb);
+      setRuntimeDiskGb(nextRuntimeDiskGb);
+      setRuntimeResourceBaseline({
+        cpu: nextRuntimeCpu,
+        memoryGb: nextRuntimeMemoryGb,
+        diskGb: nextRuntimeDiskGb,
+      });
       const hasIdentityName = Object.prototype.hasOwnProperty.call(state, "identity_name");
       const hasIdentityAvatar = Object.prototype.hasOwnProperty.call(state, "identity_avatar");
       if (hasIdentityName || hasIdentityAvatar) {
@@ -332,6 +406,35 @@ export function Settings({
       }
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let intervalId: number | null = null;
+
+    const refreshRuntimeUsage = () => {
+      void invoke<RuntimeResourceUsage>("get_runtime_resource_usage")
+        .then((usage) => {
+          if (cancelled) return;
+          setRuntimeResourceUsage(usage);
+          setRuntimeResourceUsageError(null);
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          console.error("[Entropic] Failed to load runtime resource usage:", error);
+          setRuntimeResourceUsageError("Unable to read live sandbox usage right now.");
+        });
+    };
+
+    refreshRuntimeUsage();
+    intervalId = window.setInterval(refreshRuntimeUsage, 5000);
+
+    return () => {
+      cancelled = true;
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [gatewayRunning]);
 
   useEffect(() => {
     if (!gatewayRunning) {
@@ -516,6 +619,67 @@ export function Settings({
       );
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleRuntimeResourceSave(applyAfterSave = false) {
+    const nextCpu = Math.min(16, Math.max(1, Math.round(runtimeCpu)));
+    const nextMemoryGb = Math.min(64, Math.max(2, Math.round(runtimeMemoryGb)));
+    const nextDiskGb = Math.min(500, Math.max(20, Math.round(runtimeDiskGb)));
+    let settingsSaved = false;
+    if (applyAfterSave && gatewayRunning && onApplyRuntimeResources) {
+      const confirmed = await ask(
+        "Save the new Colima CPU, RAM, and disk settings and restart the sandbox now? This will interrupt active tasks.",
+        {
+          title: "Apply Colima Size",
+          kind: "warning",
+          okLabel: "Apply and Restart",
+          cancelLabel: "Cancel",
+        }
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+    setRuntimeCpu(nextCpu);
+    setRuntimeMemoryGb(nextMemoryGb);
+    setRuntimeDiskGb(nextDiskGb);
+    setRuntimeResourceSaving(true);
+    setRuntimeResourceError(null);
+    setRuntimeResourceNotice(null);
+    try {
+      await invoke("set_runtime_resources", {
+        cpuCount: nextCpu,
+        memoryGb: nextMemoryGb,
+        diskGb: nextDiskGb,
+      });
+      settingsSaved = true;
+      setRuntimeResourceBaseline({
+        cpu: nextCpu,
+        memoryGb: nextMemoryGb,
+        diskGb: nextDiskGb,
+      });
+      if (applyAfterSave && gatewayRunning && onApplyRuntimeResources) {
+        setRuntimeResourceNotice("Applying the new Colima size and restarting the sandbox...");
+        await onApplyRuntimeResources();
+        setRuntimeResourceNotice("Applied. Sandbox restarted with the new Colima size.");
+      } else {
+        setRuntimeResourceNotice(
+          gatewayRunning
+            ? "Saved. Restart the sandbox to apply the new Colima size."
+            : "Saved. The new Colima size will apply the next time the sandbox starts."
+        );
+      }
+    } catch (error) {
+      console.error("[Entropic] Failed to save runtime resources:", error);
+      const detail = error instanceof Error ? error.message : String(error);
+      setRuntimeResourceError(
+        settingsSaved && applyAfterSave && gatewayRunning
+          ? `Saved the new Colima size, but could not restart the sandbox: ${detail}`
+          : "Could not save Colima CPU, memory, and disk settings."
+      );
+    } finally {
+      setRuntimeResourceSaving(false);
     }
   }
 
@@ -866,6 +1030,49 @@ export function Settings({
         </SettingsRow>
       </SettingsGroup>
 
+      <div className="relative">
+        <SettingsGroup title="Intelligence">
+          <SettingsRow label="Primary Model" icon={Cpu}>
+            <div className="w-80">
+              <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
+            </div>
+          </SettingsRow>
+          {!useLocalKeys && (
+            <>
+              <SettingsRow label="Coding Model" icon={Cpu}>
+                <div className="w-80">
+                  <ModelSelector selectedModel={codeModel} onModelChange={onCodeModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
+                </div>
+              </SettingsRow>
+              <SettingsRow label="Vision Model" icon={Image}>
+                <div className="w-80">
+                  <ModelSelector selectedModel={imageModel} onModelChange={onImageModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
+                </div>
+              </SettingsRow>
+              <SettingsRow
+                label="Image Generation Model"
+                icon={Sparkles}
+                description="Used for the upcoming Image mode and generated images."
+              >
+                <div className="w-80">
+                  <ModelSelector
+                    selectedModel={imageGenerationModel}
+                    onModelChange={onImageGenerationModelChange}
+                    models={PROXY_IMAGE_GENERATION_MODELS}
+                  />
+                </div>
+              </SettingsRow>
+            </>
+          )}
+          {useLocalKeys && (
+            <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
+              Image generation is proxy/OpenRouter-only right now. Local Anthropic keys will not
+              generate images, and direct OpenAI/Google image generation is not wired yet.
+            </div>
+          )}
+        </SettingsGroup>
+      </div>
+
       <SettingsGroup title="System">
         <SettingsRow label="Gateway Status" icon={Shield} description={gatewayRunning ? "Running on localhost:19789" : "Secure sandbox stopped"}>
           <button 
@@ -884,6 +1091,68 @@ export function Settings({
             />
           </button>
         </SettingsRow>
+
+        {isMacOS && (
+          <>
+            <div className="p-4 flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3 overflow-hidden">
+                <div className="w-7 h-7 rounded-md bg-[var(--system-blue)]/10 text-[var(--system-blue)] flex items-center justify-center flex-shrink-0">
+                  <Cpu className="w-4 h-4" />
+                </div>
+                <div className="text-[14px] font-medium text-[var(--text-primary)]">Colima VM</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-tertiary)]">
+                  <span>CPU</span>
+                  <input type="number" min={1} max={16} step={1} value={runtimeCpu} onChange={(event) => setRuntimeCpu(Number(event.target.value) || 1)} className="w-14 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-2 py-1 text-sm text-[var(--text-primary)]" />
+                </label>
+                <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-tertiary)]">
+                  <span>RAM</span>
+                  <input type="number" min={2} max={64} step={1} value={runtimeMemoryGb} onChange={(event) => setRuntimeMemoryGb(Number(event.target.value) || 2)} className="w-16 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-2 py-1 text-sm text-[var(--text-primary)]" />
+                  <span>GB</span>
+                </label>
+                <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-tertiary)]">
+                  <span>Disk</span>
+                  <input type="number" min={20} max={500} step={1} value={runtimeDiskGb} onChange={(event) => setRuntimeDiskGb(Number(event.target.value) || 20)} className="w-16 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-2 py-1 text-sm text-[var(--text-primary)]" />
+                  <span>GB</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void handleRuntimeResourceSave(gatewayRunning)}
+                  disabled={runtimeResourceSaving || !runtimeResourcesDirty}
+                  className="px-3 py-1 text-xs font-semibold rounded-md bg-[#1A1A2E] text-white hover:opacity-80 disabled:opacity-50"
+                >
+                  {runtimeResourceSaving
+                    ? gatewayRunning
+                      ? "Applying..."
+                      : "Saving..."
+                    : gatewayRunning
+                      ? "Apply and Restart"
+                      : "Save"}
+                </button>
+              </div>
+            </div>
+            <div className="px-4 pb-4">
+              <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-2">
+                <div className="grid grid-cols-4 gap-3 text-[12px] text-[var(--text-secondary)]">
+                  <div className="flex items-center font-medium">{runtimeResourceUsage?.running ? "Current Usage" : "Usage"}</div>
+                  <div><div className="text-[var(--text-tertiary)]">CPU</div><div className="font-medium text-[var(--text-primary)]">{liveCpuText}</div></div>
+                  <div><div className="text-[var(--text-tertiary)]">RAM</div><div className="font-medium text-[var(--text-primary)]">{liveMemoryText}</div></div>
+                  <div><div className="text-[var(--text-tertiary)]">Disk</div><div className="font-medium text-[var(--text-primary)]">{liveDiskText}</div></div>
+                </div>
+              </div>
+            </div>
+            {runtimeResourceError && (
+              <div className="px-4 pb-3 text-xs text-red-500">{runtimeResourceError}</div>
+            )}
+            {runtimeResourceUsageError && (
+              <div className="px-4 pb-3 text-xs text-red-500">{runtimeResourceUsageError}</div>
+            )}
+            {runtimeResourceNotice && (
+              <div className="px-4 pb-3 text-xs text-green-500">{runtimeResourceNotice}</div>
+            )}
+          </>
+        )}
 
         <SettingsRow
           label="Use QMD Memory Backend"
@@ -978,31 +1247,6 @@ export function Settings({
           <div className="px-4 pb-4 pt-2 text-xs text-green-500">{gatewayConfigNotice}</div>
         )}
       </SettingsGroup>
-
-
-      <div className="relative">
-        <SettingsGroup title="Intelligence">
-          <SettingsRow label="Primary Model" icon={Cpu}>
-            <div className="w-80">
-              <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
-            </div>
-          </SettingsRow>
-          {!useLocalKeys && (
-            <>
-              <SettingsRow label="Coding Model" icon={Cpu}>
-                <div className="w-80">
-                  <ModelSelector selectedModel={codeModel} onModelChange={onCodeModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
-                </div>
-              </SettingsRow>
-              <SettingsRow label="Vision Model" icon={Image}>
-                <div className="w-80">
-                  <ModelSelector selectedModel={imageModel} onModelChange={onImageModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
-                </div>
-              </SettingsRow>
-            </>
-          )}
-        </SettingsGroup>
-      </div>
 
       <SettingsGroup title="Keys">
         <SettingsRow

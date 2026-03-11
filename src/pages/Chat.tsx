@@ -3,6 +3,8 @@ import {
   Send,
   Paperclip,
   Sparkles,
+  Image as ImageIcon,
+  Download,
   X,
   Loader2,
   ExternalLink,
@@ -149,7 +151,7 @@ type DesktopHandoff = {
   action: "open" | "preview" | "browser";
   looksLikeFile?: boolean;
 };
-type ComposerMode = "chat" | "shell";
+type ComposerMode = "chat" | "shell" | "image";
 type ChatTerminalState = {
   cwd: string;
 };
@@ -158,6 +160,14 @@ type ChatTerminalRunResponse = {
   stderr: string;
   exit_code: number | null;
   cwd: string;
+};
+type ChatImageGenerationResponse = {
+  text: string;
+  images: Array<{
+    file_name: string;
+    mime_type: string;
+    data_url: string;
+  }>;
 };
 
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
@@ -279,6 +289,7 @@ type PersistedChatData = {
   messages: Record<string, Message[]>; // sessionKey -> messages
   drafts: Record<string, string>; // sessionKey -> unsent draft
   shellDrafts: Record<string, string>;
+  imageDrafts: Record<string, string>;
   composerModeBySession: Record<string, ComposerMode>;
   terminalBySession: Record<string, ChatTerminalState>;
   currentSession: string | null;
@@ -346,6 +357,7 @@ async function persistChatData(data: PersistedChatData): Promise<void> {
       messages: {},
       drafts: {},
       shellDrafts: {},
+      imageDrafts: {},
       composerModeBySession: {},
       terminalBySession: {},
       currentSession: data.currentSession,
@@ -368,8 +380,12 @@ async function persistChatData(data: PersistedChatData): Promise<void> {
       if (typeof shellDraft === "string" && shellDraft.length > 0) {
         trimmed.shellDrafts[s.key] = shellDraft;
       }
+      const imageDraft = data.imageDrafts[s.key];
+      if (typeof imageDraft === "string" && imageDraft.length > 0) {
+        trimmed.imageDrafts[s.key] = imageDraft;
+      }
       const composerMode = data.composerModeBySession[s.key];
-      if (composerMode === "shell") {
+      if (composerMode && composerMode !== DEFAULT_COMPOSER_MODE) {
         trimmed.composerModeBySession[s.key] = composerMode;
       }
       const terminalState = data.terminalBySession[s.key];
@@ -388,8 +404,12 @@ async function persistChatData(data: PersistedChatData): Promise<void> {
       if (typeof currentShellDraft === "string" && currentShellDraft.length > 0) {
         trimmed.shellDrafts[trimmed.currentSession] = currentShellDraft;
       }
+      const currentImageDraft = data.imageDrafts[trimmed.currentSession];
+      if (typeof currentImageDraft === "string" && currentImageDraft.length > 0) {
+        trimmed.imageDrafts[trimmed.currentSession] = currentImageDraft;
+      }
       const currentMode = data.composerModeBySession[trimmed.currentSession];
-      if (currentMode === "shell") {
+      if (currentMode && currentMode !== DEFAULT_COMPOSER_MODE) {
         trimmed.composerModeBySession[trimmed.currentSession] = currentMode;
       }
     }
@@ -426,10 +446,17 @@ async function loadPersistedChatData(): Promise<PersistedChatData | null> {
       if (typeof draft !== "string") continue;
       shellDrafts[sessionKey] = draft;
     }
+    const imageDrafts: Record<string, string> = {};
+    for (const [sessionKey, draft] of Object.entries(data.imageDrafts || {})) {
+      if (!allowedKeys.has(sessionKey)) continue;
+      if (typeof draft !== "string") continue;
+      imageDrafts[sessionKey] = draft;
+    }
     const composerModeBySession: Record<string, ComposerMode> = {};
     for (const [sessionKey, mode] of Object.entries(data.composerModeBySession || {})) {
       if (!allowedKeys.has(sessionKey)) continue;
-      composerModeBySession[sessionKey] = mode === "shell" ? "shell" : "chat";
+      composerModeBySession[sessionKey] =
+        mode === "shell" || mode === "image" ? mode : "chat";
     }
     const terminalBySession: Record<string, ChatTerminalState> = {};
     for (const [sessionKey, value] of Object.entries(data.terminalBySession || {})) {
@@ -452,6 +479,7 @@ async function loadPersistedChatData(): Promise<PersistedChatData | null> {
       messages,
       drafts,
       shellDrafts,
+      imageDrafts,
       composerModeBySession,
       terminalBySession,
       currentSession,
@@ -475,6 +503,7 @@ const HISTORY_LIMIT = 500;
 const ACTIVE_RUN_IDLE_TIMEOUT_MS = 120_000;
 const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 4;
 const MAX_IMAGE_ATTACHMENT_BYTES = 5_000_000;
+const GENERATED_IMAGES_DEST_PATH = "generated-images";
 
 const QUICK_ACTION_ICONS: Record<ChatQuickActionIcon, typeof Mail> = {
   mail: Mail,
@@ -838,6 +867,7 @@ export function Chat({
   selectedModel,
   onModelChange: _onModelChange,
   imageModel: _imageModel,
+  imageGenerationModel,
   integrationsSyncing,
   integrationsMissing,
   onNavigate,
@@ -856,6 +886,7 @@ export function Chat({
   selectedModel: string;
   onModelChange?: (model: string) => void;
   imageModel: string;
+  imageGenerationModel: string;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
   onNavigate?: (page: Page) => void;
@@ -875,6 +906,7 @@ export function Chat({
   const [messages, setMessages] = useState<Message[]>([]);
   const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
   const [shellDraftsBySession, setShellDraftsBySession] = useState<Record<string, string>>({});
+  const [imageDraftsBySession, setImageDraftsBySession] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -900,6 +932,8 @@ export function Chat({
   const [providerStatus, setProviderStatus] = useState<AuthState["providers"]>([]);
   const [gatewayUrl, setGatewayUrl] = useState(DEFAULT_GATEWAY_URL);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [savingWorkspaceImageKeys, setSavingWorkspaceImageKeys] = useState<Record<string, boolean>>({});
+  const [savedWorkspaceImagePaths, setSavedWorkspaceImagePaths] = useState<Record<string, string>>({});
   const [dragActive, setDragActive] = useState(false);
   const [onboardingData, setOnboardingData] = useState<OnboardingData | null>(null);
   const [agentProfile, setAgentProfile] = useState<AgentProfile | null>(null);
@@ -937,6 +971,7 @@ export function Chat({
   const currentSessionRef = useRef<string | null>(null);
   const draftsRef = useRef<Record<string, string>>({});
   const shellDraftsRef = useRef<Record<string, string>>({});
+  const imageDraftsRef = useRef<Record<string, string>>({});
   const composerModeBySessionRef = useRef<Record<string, ComposerMode>>({});
   const terminalStateBySessionRef = useRef<Record<string, ChatTerminalState>>({});
   const handledRequestedSessionRef = useRef<string | null>(null);
@@ -1052,8 +1087,59 @@ export function Chat({
     return match ? match[1] : value;
   }
 
+  function formatUnknownUiError(error: unknown, fallback: string): string {
+    if (error instanceof Error && error.message.trim()) {
+      return error.message.trim();
+    }
+    if (typeof error === "string" && error.trim()) {
+      return error.trim();
+    }
+    if (error && typeof error === "object" && "message" in error) {
+      const message = (error as { message?: unknown }).message;
+      if (typeof message === "string" && message.trim()) {
+        return message.trim();
+      }
+    }
+    try {
+      const serialized = JSON.stringify(error);
+      if (serialized && serialized !== "{}") {
+        return serialized;
+      }
+    } catch {
+      // Ignore serialization failures and fall through.
+    }
+    return fallback;
+  }
+
   function normalizeAttachmentFileName(name: string): string {
     return name.trim().toLowerCase();
+  }
+
+  function imageAttachmentActionKey(messageId: string, index: number): string {
+    return `${messageId}-attachment-${index}`;
+  }
+
+  function extensionForImageMimeType(mimeType: string): string {
+    const normalized = mimeType.trim().toLowerCase();
+    if (normalized === "image/jpeg") return "jpg";
+    if (normalized === "image/svg+xml") return "svg";
+    if (normalized === "image/webp") return "webp";
+    if (normalized === "image/gif") return "gif";
+    return "png";
+  }
+
+  function buildWorkspaceImageFileName(fileName: string, mimeType: string): string {
+    const trimmed = fileName.trim();
+    const safeBase = (trimmed || "generated-image")
+      .replace(/\.[a-z0-9]+$/i, "")
+      .replace(/[^a-z0-9._-]+/gi, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .toLowerCase();
+    const base = safeBase || "generated-image";
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const ext = extensionForImageMimeType(mimeType);
+    return `${base}-${stamp}.${ext}`;
   }
 
   function readFileAsDataUrl(file: File): Promise<string> {
@@ -1396,6 +1482,7 @@ export function Chat({
         setSessions(applySessionTitles(cached.sessions));
         setDraftsBySession(cached.drafts || {});
         setShellDraftsBySession(cached.shellDrafts || {});
+        setImageDraftsBySession(cached.imageDrafts || {});
         setComposerModeBySession(cached.composerModeBySession || {});
         setTerminalStateBySession(cached.terminalBySession || {});
         const restoreKey = cached.currentSession || cached.sessions[0].key;
@@ -1421,6 +1508,7 @@ export function Chat({
       const messagesSnap = { ...sessionMessagesRef.current };
       const draftsSnap = { ...draftsRef.current };
       const shellDraftsSnap = { ...shellDraftsRef.current };
+      const imageDraftsSnap = { ...imageDraftsRef.current };
       const composerModeSnap = { ...composerModeBySessionRef.current };
       const terminalSnap = { ...terminalStateBySessionRef.current };
       persistChatData({
@@ -1428,6 +1516,7 @@ export function Chat({
         messages: messagesSnap,
         drafts: draftsSnap,
         shellDrafts: shellDraftsSnap,
+        imageDrafts: imageDraftsSnap,
         composerModeBySession: composerModeSnap,
         terminalBySession: terminalSnap,
         currentSession: currentSnap,
@@ -1465,6 +1554,22 @@ export function Chat({
     });
 
     setShellDraftsBySession((prev) => {
+      const fromDraft = prev[from];
+      const toDraft = prev[to];
+      if (typeof fromDraft !== "string" || fromDraft.length === 0) {
+        return prev;
+      }
+      if (typeof toDraft === "string" && toDraft.length > 0) {
+        const next = { ...prev };
+        delete next[from];
+        return next;
+      }
+      const next = { ...prev, [to]: fromDraft };
+      delete next[from];
+      return next;
+    });
+
+    setImageDraftsBySession((prev) => {
       const fromDraft = prev[from];
       const toDraft = prev[to];
       if (typeof fromDraft !== "string" || fromDraft.length === 0) {
@@ -1593,6 +1698,10 @@ export function Chat({
   }, [shellDraftsBySession]);
 
   useEffect(() => {
+    imageDraftsRef.current = imageDraftsBySession;
+  }, [imageDraftsBySession]);
+
+  useEffect(() => {
     composerModeBySessionRef.current = composerModeBySession;
   }, [composerModeBySession]);
 
@@ -1611,6 +1720,7 @@ export function Chat({
       const messagesSnap = { ...sessionMessagesRef.current };
       const draftsSnap = { ...draftsRef.current };
       const shellDraftsSnap = { ...shellDraftsRef.current };
+      const imageDraftsSnap = { ...imageDraftsRef.current };
       const composerModeSnap = { ...composerModeBySessionRef.current };
       const terminalSnap = { ...terminalStateBySessionRef.current };
       if (sessionsSnap.length > 0) {
@@ -1619,6 +1729,7 @@ export function Chat({
           messages: messagesSnap,
           drafts: draftsSnap,
           shellDrafts: shellDraftsSnap,
+          imageDrafts: imageDraftsSnap,
           composerModeBySession: composerModeSnap,
           terminalBySession: terminalSnap,
           currentSession: currentSnap,
@@ -2712,6 +2823,7 @@ export function Chat({
       const snapshotMessages = sessionMessagesRef.current[action.key] || [];
       const snapshotDraft = draftsRef.current[action.key] || "";
       const snapshotShellDraft = shellDraftsRef.current[action.key] || "";
+      const snapshotImageDraft = imageDraftsRef.current[action.key] || "";
       const snapshotComposerMode = composerModeBySessionRef.current[action.key] || null;
       const snapshotTerminalState = terminalStateBySessionRef.current[action.key] || null;
       const snapshotIntegrationSetup = integrationSetupBySession[action.key] || null;
@@ -2729,12 +2841,16 @@ export function Chat({
       const nextShellDrafts = { ...shellDraftsRef.current };
       delete nextShellDrafts[action.key];
       shellDraftsRef.current = nextShellDrafts;
+      const nextImageDrafts = { ...imageDraftsRef.current };
+      delete nextImageDrafts[action.key];
+      imageDraftsRef.current = nextImageDrafts;
       setSessions(applySessionTitles(remaining));
       const nextMessages = { ...sessionMessagesRef.current };
       delete nextMessages[action.key];
       sessionMessagesRef.current = nextMessages;
       setDraftsBySession(nextDrafts);
       setShellDraftsBySession(nextShellDrafts);
+      setImageDraftsBySession(nextImageDrafts);
       setComposerModeBySession((prev) => {
         if (!prev[action.key]) return prev;
         const next = { ...prev };
@@ -2800,6 +2916,11 @@ export function Chat({
             shellDraftsRef.current = restoredShellDrafts;
             setShellDraftsBySession(restoredShellDrafts);
           }
+          if (snapshotImageDraft) {
+            const restoredImageDrafts = { ...imageDraftsRef.current, [action.key]: snapshotImageDraft };
+            imageDraftsRef.current = restoredImageDrafts;
+            setImageDraftsBySession(restoredImageDrafts);
+          }
           if (snapshotComposerMode) {
             setComposerModeBySession((prev) => ({ ...prev, [action.key]: snapshotComposerMode }));
           }
@@ -2831,10 +2952,12 @@ export function Chat({
       const existingMessages = sessionMessagesRef.current[existing] || [];
       const existingDraft = draftsRef.current[existing] || "";
       const existingShellDraft = shellDraftsRef.current[existing] || "";
+      const existingImageDraft = imageDraftsRef.current[existing] || "";
       if (
         existingMessages.length === 0 &&
         existingDraft.trim().length === 0 &&
-        existingShellDraft.trim().length === 0
+        existingShellDraft.trim().length === 0 &&
+        existingImageDraft.trim().length === 0
       ) {
         setCurrentSession(existing);
         visibleMessagesSessionRef.current = existing;
@@ -2926,7 +3049,11 @@ export function Chat({
           : DEFAULT_COMPOSER_MODE
         : DEFAULT_COMPOSER_MODE);
     const draftSource =
-      composerMode === "shell" ? shellDraftsRef.current : draftsRef.current;
+      composerMode === "shell"
+        ? shellDraftsRef.current
+        : composerMode === "image"
+          ? imageDraftsRef.current
+          : draftsRef.current;
     const currentDraft = sendSession ? (draftSource[sendSession] || "") : "";
     const composerInput = content || currentDraft.trim();
     const rawMessageContent =
@@ -3055,6 +3182,91 @@ export function Chat({
       }
       return;
     }
+
+    if (composerMode === "image") {
+      if (!proxyEnabled) {
+        const message = "Image generation currently requires proxy mode in Settings.";
+        setError(message);
+        appendAssistantNotice(message, sendSession);
+        return;
+      }
+      if (!gatewayRunning) {
+        const message = "Start the sandbox first to generate images.";
+        setError(message);
+        appendAssistantNotice(message, sendSession);
+        return;
+      }
+      if (!userMessageContent && !hasAttachments) {
+        const message = "Enter an image prompt or attach a reference image.";
+        setError(message);
+        appendAssistantNotice(message, sendSession);
+        return;
+      }
+
+      const userMessage: Message = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: userVisibleContent,
+        sentAt: Date.now(),
+        attachments: hasAttachments
+          ? pendingAttachments.map((a) => ({
+              fileName: a.fileName,
+              mimeType: a.mimeType,
+              previewUrl: a.previewUrl || `data:${a.mimeType};base64,${a.content}`,
+            }))
+          : undefined,
+      };
+      appendLocalMessage(userMessage, sendSession);
+
+      if (!content && sendSession) {
+        setImageDraftsBySession((prev) => ({ ...prev, [sendSession]: "" }));
+        if (textareaRef.current) {
+          textareaRef.current.style.height = "auto";
+          textareaRef.current.style.overflowY = "hidden";
+        }
+      }
+
+      setIsLoading(true);
+      setThinkingStatus("Generating image");
+      setError(null);
+
+      try {
+        const response = await invoke<ChatImageGenerationResponse>("generate_chat_image", {
+          model: imageGenerationModel,
+          prompt: userMessageContent,
+          attachments: attachmentsPayload,
+        });
+        const generatedCount = response.images.length;
+        appendLocalMessage(
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content:
+              response.text ||
+              (generatedCount > 0
+                ? `Generated ${generatedCount} image${generatedCount === 1 ? "" : "s"}.`
+                : ""),
+            sentAt: Date.now(),
+            attachments: response.images.map((image, index) => ({
+              fileName: image.file_name || `generated-${index + 1}.png`,
+              mimeType: image.mime_type || "image/png",
+              previewUrl: image.data_url,
+            })),
+          },
+          sendSession
+        );
+      } catch (e) {
+        const message = formatUnknownUiError(e, "Failed to generate image.");
+        setError(message);
+        appendAssistantNotice(`I couldn't generate that image: ${message}`, sendSession);
+      } finally {
+        setPendingAttachments([]);
+        setIsLoading(false);
+        setThinkingStatus(null);
+      }
+      return;
+    }
+
     const liveClient = clientRef.current;
     if (!liveClient || !liveClient.isConnected()) {
       if (!connectInFlightRef.current) {
@@ -3982,6 +4194,45 @@ export function Chat({
     onNavigate?.("files");
   }
 
+  async function saveGeneratedImageToWorkspace(
+    message: Message,
+    attachment: MessageAttachment,
+    index: number,
+  ) {
+    if (!attachment.previewUrl) return;
+    const actionKey = imageAttachmentActionKey(message.id, index);
+    const existingPath = savedWorkspaceImagePaths[actionKey];
+    if (existingPath) {
+      await handoffWorkspacePathToDesktop({
+        path: existingPath,
+        action: "open",
+        looksLikeFile: true,
+      });
+      return;
+    }
+
+    const fileName = buildWorkspaceImageFileName(attachment.fileName, attachment.mimeType);
+    const workspacePath = `${GENERATED_IMAGES_DEST_PATH}/${fileName}`;
+    setSavingWorkspaceImageKeys((prev) => ({ ...prev, [actionKey]: true }));
+    try {
+      await invoke("upload_workspace_file", {
+        fileName,
+        base64: stripDataUrlPrefix(attachment.previewUrl),
+        destPath: GENERATED_IMAGES_DEST_PATH,
+      });
+      setSavedWorkspaceImagePaths((prev) => ({ ...prev, [actionKey]: workspacePath }));
+      setError(null);
+    } catch (e) {
+      setError(formatUnknownUiError(e, "Failed to save image to workspace."));
+    } finally {
+      setSavingWorkspaceImageKeys((prev) => {
+        const next = { ...prev };
+        delete next[actionKey];
+        return next;
+      });
+    }
+  }
+
   function renderTerminalResult(message: Message) {
     const result = message.terminalResult;
     if (!result) return null;
@@ -4011,6 +4262,58 @@ export function Chat({
     );
   }
 
+  function renderMessageAttachments(message: Message) {
+    const attachments = (message.attachments || []).filter((attachment) => attachment.previewUrl);
+    if (attachments.length === 0) {
+      return null;
+    }
+    return (
+      <div className="mb-2 grid gap-2">
+        {attachments.map((attachment, index) => (
+          <div
+            key={imageAttachmentActionKey(message.id, index)}
+            className="overflow-hidden rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)]"
+          >
+            <img
+              src={attachment.previewUrl}
+              alt={attachment.fileName}
+              className="block h-auto max-h-[360px] w-full object-contain"
+            />
+            <div className="flex items-center justify-between gap-3 px-3 py-2 text-xs text-[var(--text-secondary)]">
+              <span className="min-w-0 truncate">{attachment.fileName}</span>
+              {message.role === "assistant" && attachment.mimeType.startsWith("image/") ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void saveGeneratedImageToWorkspace(message, attachment, index);
+                  }}
+                  disabled={Boolean(savingWorkspaceImageKeys[imageAttachmentActionKey(message.id, index)])}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-2 py-1 text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--system-gray-6)] disabled:cursor-not-allowed disabled:opacity-60"
+                  title={
+                    savedWorkspaceImagePaths[imageAttachmentActionKey(message.id, index)]
+                      ? `/data/workspace/${savedWorkspaceImagePaths[imageAttachmentActionKey(message.id, index)]}`
+                      : "Save image to /data/workspace/generated-images"
+                  }
+                >
+                  {savingWorkspaceImageKeys[imageAttachmentActionKey(message.id, index)] ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Download className="h-3.5 w-3.5" />
+                  )}
+                  <span>
+                    {savedWorkspaceImagePaths[imageAttachmentActionKey(message.id, index)]
+                      ? "Open in Workspace"
+                      : "Save to Workspace"}
+                  </span>
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   function renderAssistantContent(message: Message, precomputedPayload?: AssistantRenderPayload) {
     if (message.kind === "toolResult" && message.toolName === "/run" && message.terminalResult) {
       return renderTerminalResult(message);
@@ -4031,6 +4334,7 @@ export function Chat({
     if (!payload.events.length && !payload.errors.length) {
       return (
         <div className="min-w-0 max-w-full">
+          {renderMessageAttachments(message)}
           <MarkdownContent
             content={payload.cleanText}
             onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
@@ -4045,11 +4349,15 @@ export function Chat({
           {message.toolName ? <span className="text-[var(--text-quaternary)]">{message.toolName}</span> : null}
         </div>
         {payload.cleanText ? (
-          <MarkdownContent
-            content={payload.cleanText}
-            onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
-          />
+          <div>
+            {renderMessageAttachments(message)}
+            <MarkdownContent
+              content={payload.cleanText}
+              onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
+            />
+          </div>
         ) : null}
+        {!payload.cleanText ? renderMessageAttachments(message) : null}
         {payload.events.length > 0 && (
           <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-3 shadow-sm">
             <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)] mb-2">
@@ -4374,12 +4682,12 @@ export function Chat({
       });
 
     return (
-      <div className="h-full flex flex-col items-center justify-center p-6 text-center animate-fade-in">
+      <div className="h-full flex flex-col items-center justify-center p-4 text-center animate-fade-in">
         <div className="max-w-2xl">
           <h2 className="text-3xl font-semibold mb-2 text-[var(--text-primary)] tracking-tight">
             Hey {userName}
           </h2>
-          <p className="text-[var(--text-secondary)] mb-10 text-[15px]">
+          <p className="text-[var(--text-secondary)] mb-6 text-[15px]">
             What are we working on?
           </p>
           {builderSuggestions.length > 0 && (
@@ -4528,16 +4836,23 @@ export function Chat({
     return (
       <div key={msg.id} className={clsx("flex min-w-0", msg.role === "user" ? "justify-end" : "justify-start")}>
         <div className={clsx("min-w-0 max-w-[85%]")}>
-          <div className={clsx("px-4 py-2.5 rounded-2xl",
+          <div className={clsx("px-3.5 py-2 rounded-2xl",
             msg.role === "user"
               ? "bg-[var(--chat-user-bg)] text-[var(--chat-user-text)]"
               : "bg-[var(--chat-assistant-bg)] text-[var(--chat-assistant-text)] border border-[var(--chat-assistant-border)]")}>
-            {msg.role === "assistant" ? renderAssistantContent(msg) : <p className="whitespace-pre-wrap break-words">{bodyContent}</p>}
+            {msg.role === "assistant" ? (
+              renderAssistantContent(msg)
+            ) : (
+              <div>
+                {renderMessageAttachments(msg)}
+                <p className="whitespace-pre-wrap break-words">{bodyContent}</p>
+              </div>
+            )}
           </div>
           {messageTime ? (
             <div
               className={clsx(
-                "mt-1 px-1 text-[11px] text-[var(--text-tertiary)]",
+                "mt-0.5 px-1 text-[11px] text-[var(--text-tertiary)]",
                 msg.role === "user" ? "text-right" : "text-left"
               )}
             >
@@ -4551,7 +4866,7 @@ export function Chat({
 
   const loadingIndicator = useMemo(() => isLoading ? (
     <div className="flex justify-start">
-      <div className="px-4 py-2.5 rounded-2xl bg-[var(--chat-assistant-bg)] border border-[var(--chat-assistant-border)] flex items-center gap-2">
+      <div className="px-3.5 py-2 rounded-2xl bg-[var(--chat-assistant-bg)] border border-[var(--chat-assistant-border)] flex items-center gap-2">
         <Loader2 className="w-4 h-4 animate-spin text-[var(--purple-accent)]" />
         <span className="text-sm text-[var(--text-secondary)] animate-pulse">
           {thinkingStatus || "Thinking"}
@@ -4563,7 +4878,9 @@ export function Chat({
   const activeDraft = currentSession
     ? activeComposerMode === "shell"
       ? shellDraftsBySession[currentSession] || ""
-      : draftsBySession[currentSession] || ""
+      : activeComposerMode === "image"
+        ? imageDraftsBySession[currentSession] || ""
+        : draftsBySession[currentSession] || ""
     : "";
 
   useEffect(() => {
@@ -4668,8 +4985,8 @@ export function Chat({
       )}
 
       {/* Messages or Welcome */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4">
-        <div className={clsx("min-w-0 space-y-4", wideLayout ? "w-full max-w-none" : "mx-auto max-w-3xl")}>
+      <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 pt-3 pb-2">
+        <div className={clsx("min-w-0 space-y-3", wideLayout ? "w-full max-w-none" : "mx-auto max-w-3xl")}>
           {messages.length === 0 && showWelcome ? (
             renderWelcome()
           ) : messages.length === 0 && !hasInlineAssistantCard ? (
@@ -4687,8 +5004,8 @@ export function Chat({
       </div>
 
       {/* Input Area */}
-      <div className="flex-shrink-0 p-4 bg-[var(--composer-bg)] border-t border-[var(--composer-border)]">
-        <div className={clsx("min-w-0 space-y-3", wideLayout ? "w-full max-w-none" : "mx-auto max-w-3xl")}>
+      <div className="flex-shrink-0 px-4 pb-3 pt-1">
+        <div className={clsx("min-w-0 space-y-2", wideLayout ? "w-full max-w-none" : "mx-auto max-w-3xl")}>
           {pendingAttachments.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {pendingAttachments.map((attachment) => (
@@ -4730,11 +5047,12 @@ export function Chat({
               event.currentTarget.value = "";
             }}
           />
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="inline-flex items-center rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-1 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="inline-flex items-center gap-1">
               {([
                 { key: "chat", label: "Chat", icon: Bot },
                 { key: "shell", label: "Shell", icon: Terminal },
+                { key: "image", label: "Image", icon: ImageIcon },
               ] as const).map((mode) => {
                 const Icon = mode.icon;
                 const active = activeComposerMode === mode.key;
@@ -4749,10 +5067,10 @@ export function Chat({
                       requestAnimationFrame(() => textareaRef.current?.focus());
                     }}
                     className={clsx(
-                      "inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
+                      "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors",
                       active
-                        ? "bg-[#1A1A2E] text-white"
-                        : "text-[var(--text-secondary)] hover:bg-[var(--border-subtle)]"
+                        ? "text-[var(--text-primary)]"
+                        : "text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]"
                     )}
                     aria-pressed={active}
                   >
@@ -4764,7 +5082,7 @@ export function Chat({
             </div>
             {activeComposerMode === "shell" ? (
               <div className="min-w-0 text-[11px] text-[var(--text-tertiary)]">
-                <div className="inline-flex min-w-0 max-w-full items-center gap-2 rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] px-2.5 py-1">
+                <div className="inline-flex min-w-0 max-w-full items-center gap-2 px-1 py-0.5">
                   <Terminal className="h-3.5 w-3.5 shrink-0" />
                   <span className="shrink-0 font-medium text-[var(--text-secondary)]">/run</span>
                   <span
@@ -4775,16 +5093,29 @@ export function Chat({
                   </span>
                 </div>
               </div>
+            ) : activeComposerMode === "image" ? (
+              <div className="min-w-0 text-[11px] text-[var(--text-tertiary)]">
+                <div className="inline-flex min-w-0 max-w-full items-center gap-2 px-1 py-0.5">
+                  <ImageIcon className="h-3.5 w-3.5 shrink-0" />
+                  <span className="shrink-0 font-medium text-[var(--text-secondary)]">model</span>
+                  <span
+                    className="truncate font-mono text-[var(--text-primary)]"
+                    title={imageGenerationModel}
+                  >
+                    {imageGenerationModel}
+                  </span>
+                </div>
+              </div>
             ) : null}
           </div>
           <div className="flex items-end gap-2">
-            {activeComposerMode === "chat" ? (
+            {activeComposerMode !== "shell" ? (
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isLoading}
                 className="btn-secondary !p-2.5"
-                title="Attach image"
-                aria-label="Attach image"
+                title={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
+                aria-label={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
               >
                 <Paperclip className="w-4 h-4" />
               </button>
@@ -4801,6 +5132,11 @@ export function Chat({
                 const nextValue = e.target.value;
                 if (activeComposerMode === "shell") {
                   setShellDraftsBySession((prev) => {
+                    if ((prev[sessionKey] || "") === nextValue) return prev;
+                    return { ...prev, [sessionKey]: nextValue };
+                  });
+                } else if (activeComposerMode === "image") {
+                  setImageDraftsBySession((prev) => {
                     if ((prev[sessionKey] || "") === nextValue) return prev;
                     return { ...prev, [sessionKey]: nextValue };
                   });
@@ -4821,7 +5157,9 @@ export function Chat({
               placeholder={
                 activeComposerMode === "shell"
                   ? "Run a command in the workspace shell"
-                  : "Message your assistant"
+                  : activeComposerMode === "image"
+                    ? "Describe the image you want to generate"
+                    : "Message your assistant"
               }
               rows={1}
               className="form-input flex-1 resize-none leading-tight"
@@ -4836,7 +5174,7 @@ export function Chat({
             </button>
           </div>
         </div>
-        {dragActive && activeComposerMode === "chat" && (
+        {dragActive && activeComposerMode !== "shell" && (
           <div className="absolute inset-0 bg-[var(--border-default)] border-2 border-dashed border-white/50 flex items-center justify-center font-medium text-white">
             Drop files to attach
           </div>

@@ -1,7 +1,9 @@
 use crate::runtime::{
-    entropic_colima_home_path, macos_docker_socket_candidates, Platform, Runtime, RuntimeStatus,
-    ENTROPIC_QEMU_PROFILE, ENTROPIC_VZ_PROFILE, ENTROPIC_WSL_DEV_DISTRO,
-    ENTROPIC_WSL_PROD_DISTRO, LEGACY_NOVA_QEMU_PROFILE, LEGACY_NOVA_VZ_PROFILE,
+    entropic_colima_home_path, macos_docker_socket_candidates, Platform, Runtime,
+    RuntimeStatus, RuntimeVmConfig, DEFAULT_RUNTIME_VM_CPU, DEFAULT_RUNTIME_VM_DISK_GB,
+    DEFAULT_RUNTIME_VM_MEMORY_GB, ENTROPIC_QEMU_PROFILE, ENTROPIC_VZ_PROFILE,
+    ENTROPIC_WSL_DEV_DISTRO, ENTROPIC_WSL_PROD_DISTRO, LEGACY_NOVA_QEMU_PROFILE,
+    LEGACY_NOVA_VZ_PROFILE,
 };
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -38,6 +40,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
 
 const ENTROPIC_PROXY_DEV_ORIGIN: &str = "http://host.docker.internal:5174";
+const ENTROPIC_PROXY_HOST_DEV_ORIGIN: &str = "http://127.0.0.1:5174";
 const ENTROPIC_PROXY_ALLOWED_HOSTS: &[&str] = &[
     "entropic.qu.ai",
     "host.docker.internal",
@@ -102,6 +105,26 @@ pub struct ChatTerminalRunResult {
     pub stderr: String,
     pub exit_code: Option<i32>,
     pub cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatImageGenerationAttachment {
+    pub file_name: String,
+    pub mime_type: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatGeneratedImage {
+    pub file_name: String,
+    pub mime_type: String,
+    pub data_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatImageGenerationResult {
+    pub text: String,
+    pub images: Vec<ChatGeneratedImage>,
 }
 
 struct DesktopTerminalSession {
@@ -288,6 +311,120 @@ pub struct NativeApiRequest {
 pub struct NativeApiResponse {
     status: u16,
     body: serde_json::Value,
+}
+
+fn chat_image_modalities(model: &str) -> serde_json::Value {
+    if model.trim().starts_with("google/") {
+        serde_json::json!(["image", "text"])
+    } else {
+        serde_json::json!(["image"])
+    }
+}
+
+fn infer_image_mime_from_data_url(data_url: &str) -> Option<String> {
+    let trimmed = data_url.trim();
+    let rest = trimmed.strip_prefix("data:")?;
+    let mime = rest.split(';').next()?.trim();
+    if mime.is_empty() {
+        None
+    } else {
+        Some(mime.to_string())
+    }
+}
+
+fn infer_image_extension(mime_type: &str) -> &'static str {
+    match mime_type {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/svg+xml" => "svg",
+        _ => "png",
+    }
+}
+
+fn extract_openrouter_generated_image_url(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    let obj = value.as_object()?;
+    for candidate in [
+        obj.get("url"),
+        obj.get("data_url"),
+        obj.get("dataUrl"),
+        obj.get("image_url")
+            .and_then(|nested| nested.get("url")),
+        obj.get("imageUrl")
+            .and_then(|nested| nested.get("url")),
+    ] {
+        if let Some(text) = candidate.and_then(|candidate| candidate.as_str()) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_openrouter_message_text(message: &serde_json::Value) -> String {
+    if let Some(text) = message.get("content").and_then(|content| content.as_str()) {
+        return text.trim().to_string();
+    }
+    if let Some(parts) = message.get("content").and_then(|content| content.as_array()) {
+        let mut chunks = Vec::new();
+        for part in parts {
+            if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    chunks.push(trimmed.to_string());
+                }
+            }
+        }
+        return chunks.join("\n\n").trim().to_string();
+    }
+    if let Some(text) = message.get("text").and_then(|value| value.as_str()) {
+        return text.trim().to_string();
+    }
+    String::new()
+}
+
+fn extract_openrouter_generated_images(message: &serde_json::Value) -> Vec<ChatGeneratedImage> {
+    let mut urls = Vec::new();
+
+    if let Some(images) = message.get("images").and_then(|value| value.as_array()) {
+        for image in images {
+            if let Some(url) = extract_openrouter_generated_image_url(image) {
+                urls.push(url);
+            }
+        }
+    }
+
+    if urls.is_empty() {
+        if let Some(content) = message.get("content").and_then(|value| value.as_array()) {
+            for part in content {
+                if let Some(url) = extract_openrouter_generated_image_url(part) {
+                    urls.push(url);
+                }
+            }
+        }
+    }
+
+    urls.into_iter()
+        .enumerate()
+        .map(|(index, data_url)| {
+            let mime_type =
+                infer_image_mime_from_data_url(&data_url).unwrap_or_else(|| "image/png".to_string());
+            let extension = infer_image_extension(&mime_type);
+            ChatGeneratedImage {
+                file_name: format!("generated-image-{}.{}", index + 1, extension),
+                mime_type,
+                data_url,
+            }
+        })
+        .collect()
 }
 
 fn client_log_path() -> PathBuf {
@@ -727,6 +864,22 @@ fn resolve_container_openai_base(proxy_base: &str) -> String {
         return ENTROPIC_PROXY_DEV_ORIGIN.to_string();
     }
     format!("{}/v1", trimmed)
+}
+
+fn resolve_host_proxy_base(proxy_base: &str) -> Result<String, String> {
+    let trimmed = proxy_base.trim();
+    if trimmed.is_empty() {
+        return Ok(format!("{}/api/v1", ENTROPIC_PROXY_HOST_DEV_ORIGIN));
+    }
+
+    let mut url = Url::parse(trimmed)
+        .map_err(|_| "Invalid proxy base URL. Restart the sandbox and try again.".to_string())?;
+
+    if matches!(url.host_str(), Some("host.docker.internal")) {
+        let _ = url.set_host(Some("127.0.0.1"));
+    }
+
+    Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
 /// Find the docker binary.
@@ -2745,6 +2898,9 @@ pub struct AgentProfileState {
     pub memory_long_term: bool,
     pub memory_qmd_enabled: bool,
     pub memory_sessions_enabled: bool,
+    pub runtime_cpu: u8,
+    pub runtime_memory_gb: u16,
+    pub runtime_disk_gb: u16,
     pub capabilities: Vec<CapabilityState>,
     pub discord_enabled: bool,
     pub discord_token: String,
@@ -2775,6 +2931,20 @@ pub struct AgentProfileState {
     pub bridge_device_count: usize,
     pub bridge_online_count: usize,
     pub bridge_paired: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuntimeResourceUsage {
+    pub running: bool,
+    pub container: Option<String>,
+    pub vm_cpu_count: Option<u32>,
+    pub vm_memory_total_bytes: Option<u64>,
+    pub cpu_percent: Option<f64>,
+    pub memory_used_bytes: Option<u64>,
+    pub memory_limit_bytes: Option<u64>,
+    pub disk_used_bytes: Option<u64>,
+    pub disk_total_bytes: Option<u64>,
+    pub data_used_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3063,6 +3233,9 @@ struct StoredAgentSettings {
     memory_long_term: bool,
     memory_qmd_enabled: bool,
     memory_sessions_enabled: bool,
+    runtime_cpu: u8,
+    runtime_memory_gb: u16,
+    runtime_disk_gb: u16,
     capabilities: Vec<CapabilityState>,
     identity_name: String,
     identity_avatar: Option<String>,
@@ -3107,6 +3280,9 @@ impl Default for StoredAgentSettings {
             memory_long_term: false,
             memory_qmd_enabled: false,
             memory_sessions_enabled: true,
+            runtime_cpu: DEFAULT_RUNTIME_VM_CPU,
+            runtime_memory_gb: DEFAULT_RUNTIME_VM_MEMORY_GB,
+            runtime_disk_gb: DEFAULT_RUNTIME_VM_DISK_GB,
             capabilities: vec![
                 CapabilityState {
                     id: "web".to_string(),
@@ -3174,7 +3350,8 @@ impl Default for StoredAuth {
 
 fn get_runtime(app: &AppHandle) -> Runtime {
     let resource_dir = app.path().resource_dir().unwrap_or_default();
-    Runtime::new(resource_dir)
+    let settings = load_agent_settings(app);
+    Runtime::new(resource_dir, runtime_vm_config_from_settings(&settings))
 }
 
 const OPENCLAW_CONTAINER: &str = "entropic-openclaw";
@@ -3936,6 +4113,127 @@ fn docker_exec_output(args: &[&str]) -> Result<String, String> {
         return Err(stderr.to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn parse_percent_value(raw: &str) -> Option<f64> {
+    raw.trim().trim_end_matches('%').trim().parse::<f64>().ok()
+}
+
+fn parse_human_size_to_bytes(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let number_len = trimmed
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .count();
+    if number_len == 0 {
+        return None;
+    }
+    let value = trimmed[..number_len].parse::<f64>().ok()?;
+    let unit = trimmed[number_len..].trim().to_ascii_lowercase();
+    let multiplier = match unit.as_str() {
+        "" | "b" => 1_f64,
+        "kib" => 1024_f64,
+        "mib" => 1024_f64.powi(2),
+        "gib" => 1024_f64.powi(3),
+        "tib" => 1024_f64.powi(4),
+        "kb" => 1000_f64,
+        "mb" => 1000_f64.powi(2),
+        "gb" => 1000_f64.powi(3),
+        "tb" => 1000_f64.powi(4),
+        _ => return None,
+    };
+    Some((value * multiplier).round() as u64)
+}
+
+fn read_runtime_resource_usage(container: &str) -> Result<RuntimeResourceUsage, String> {
+    let stats_output = docker_command()
+        .args([
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.CPUPerc}}\t{{.MemUsage}}",
+            container,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to read docker stats: {}", e))?;
+    if !stats_output.status.success() {
+        let stderr = String::from_utf8_lossy(&stats_output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "Failed to read docker stats".to_string()
+        } else {
+            stderr
+        });
+    }
+    let stats_line = String::from_utf8_lossy(&stats_output.stdout)
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .to_string();
+    let mut cpu_percent = None;
+    let mut memory_used_bytes = None;
+    let mut memory_limit_bytes = None;
+    if !stats_line.is_empty() {
+        let mut parts = stats_line.splitn(2, '\t');
+        cpu_percent = parts.next().and_then(parse_percent_value);
+        if let Some(mem_usage) = parts.next() {
+            let mut mem_parts = mem_usage.split('/');
+            memory_used_bytes = mem_parts.next().and_then(parse_human_size_to_bytes);
+            memory_limit_bytes = mem_parts.next().and_then(parse_human_size_to_bytes);
+        }
+    }
+
+    let disk_line = docker_exec_output(&[
+        "exec",
+        container,
+        "sh",
+        "-lc",
+        "df -B1 /data | awk 'NR==2 {print $3\"\\t\"$2}'",
+    ])?;
+    let mut disk_parts = disk_line.trim().split('\t');
+    let disk_used_bytes = disk_parts.next().and_then(|v| v.trim().parse::<u64>().ok());
+    let disk_total_bytes = disk_parts.next().and_then(|v| v.trim().parse::<u64>().ok());
+
+    let data_used_bytes = docker_exec_output(&[
+        "exec",
+        container,
+        "sh",
+        "-lc",
+        "du -sb /data 2>/dev/null | awk '{print $1}'",
+    ])?
+    .trim()
+    .parse::<u64>()
+    .ok();
+
+    let vm_cpu_count = docker_exec_output(&["exec", container, "nproc"])?
+        .trim()
+        .parse::<u32>()
+        .ok();
+    let vm_memory_total_bytes = docker_exec_output(&[
+        "exec",
+        container,
+        "sh",
+        "-lc",
+        "awk '/MemTotal:/ {print $2 * 1024}' /proc/meminfo",
+    ])?
+    .trim()
+    .parse::<u64>()
+    .ok();
+
+    Ok(RuntimeResourceUsage {
+        running: true,
+        container: Some(container.to_string()),
+        vm_cpu_count,
+        vm_memory_total_bytes,
+        cpu_percent,
+        memory_used_bytes,
+        memory_limit_bytes,
+        disk_used_bytes,
+        disk_total_bytes,
+        data_used_bytes,
+    })
 }
 
 fn ensure_qmd_runtime_dependencies() -> Result<(), String> {
@@ -8497,6 +8795,14 @@ fn default_agent_settings() -> StoredAgentSettings {
     StoredAgentSettings::default()
 }
 
+fn runtime_vm_config_from_settings(settings: &StoredAgentSettings) -> RuntimeVmConfig {
+    RuntimeVmConfig {
+        cpu: settings.runtime_cpu.clamp(1, 16),
+        memory_gb: settings.runtime_memory_gb.clamp(2, 64),
+        disk_gb: settings.runtime_disk_gb.clamp(20, 500),
+    }
+}
+
 fn load_agent_settings(app: &AppHandle) -> StoredAgentSettings {
     let stored = load_auth(app);
     stored.agent_settings.unwrap_or_else(default_agent_settings)
@@ -10320,6 +10626,9 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         },
         memory_qmd_enabled,
         memory_sessions_enabled,
+        runtime_cpu: stored.runtime_cpu.clamp(1, 16),
+        runtime_memory_gb: stored.runtime_memory_gb.clamp(2, 64),
+        runtime_disk_gb: stored.runtime_disk_gb.clamp(20, 500),
         capabilities,
         discord_enabled,
         discord_token,
@@ -10351,6 +10660,49 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         bridge_online_count,
         bridge_paired,
     })
+}
+
+#[tauri::command]
+pub async fn set_runtime_resources(
+    app: AppHandle,
+    cpu_count: u8,
+    memory_gb: u16,
+    disk_gb: u16,
+) -> Result<(), String> {
+    if !(1..=16).contains(&cpu_count) {
+        return Err("CPU count must be between 1 and 16".to_string());
+    }
+    if !(2..=64).contains(&memory_gb) {
+        return Err("Memory must be between 2 GB and 64 GB".to_string());
+    }
+    if !(20..=500).contains(&disk_gb) {
+        return Err("Disk must be between 20 GB and 500 GB".to_string());
+    }
+
+    let mut settings = load_agent_settings(&app);
+    settings.runtime_cpu = cpu_count;
+    settings.runtime_memory_gb = memory_gb;
+    settings.runtime_disk_gb = disk_gb;
+    save_agent_settings(&app, settings)
+}
+
+#[tauri::command]
+pub async fn get_runtime_resource_usage() -> Result<RuntimeResourceUsage, String> {
+    let Some(container) = running_gateway_container_name() else {
+        return Ok(RuntimeResourceUsage {
+            running: false,
+            container: None,
+            vm_cpu_count: None,
+            vm_memory_total_bytes: None,
+            cpu_percent: None,
+            memory_used_bytes: None,
+            memory_limit_bytes: None,
+            disk_used_bytes: None,
+            disk_total_bytes: None,
+            data_used_bytes: None,
+        });
+    };
+    read_runtime_resource_usage(container)
 }
 
 #[tauri::command]
@@ -12534,11 +12886,12 @@ async fn run_first_time_setup_internal(
 
             // Start Colima in a background thread so we can monitor progress.
             let resources_dir = app.path().resource_dir().unwrap_or_default();
+            let vm_config = runtime_vm_config_from_settings(&load_agent_settings(&app));
             let colima_result =
                 std::sync::Arc::new(std::sync::Mutex::new(None::<Result<(), String>>));
             let colima_result_writer = colima_result.clone();
             let colima_thread = std::thread::spawn(move || {
-                let rt = Runtime::new(resources_dir);
+                let rt = Runtime::new(resources_dir, vm_config);
                 let result = rt.start_colima().map_err(|e| format!("{}", e));
                 *colima_result_writer.lock().unwrap() = Some(result);
             });
@@ -13386,6 +13739,134 @@ pub async fn run_chat_terminal_command(
     parsed.stdout = stdout.trim_end().to_string();
     parsed.exit_code = parsed.exit_code.or(output.status.code());
     Ok(parsed)
+}
+
+#[tauri::command]
+pub async fn generate_chat_image(
+    model: String,
+    prompt: String,
+    attachments: Vec<ChatImageGenerationAttachment>,
+) -> Result<ChatImageGenerationResult, String> {
+    let _container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
+    if read_container_env("ENTROPIC_PROXY_MODE").as_deref() != Some("1") {
+        return Err("Image generation currently requires proxy mode in Settings.".to_string());
+    }
+
+    let gateway_token = read_container_env("OPENROUTER_API_KEY")
+        .ok_or_else(|| "Proxy auth is unavailable. Restart the sandbox and try again.".to_string())?;
+    let proxy_base = read_container_env("ENTROPIC_PROXY_BASE_URL")
+        .ok_or_else(|| "Proxy base URL is unavailable. Restart the sandbox and try again.".to_string())?;
+    let host_proxy_base = resolve_host_proxy_base(&proxy_base)?;
+
+    let model = model.trim().to_string();
+    if model.is_empty() {
+        return Err("Image generation model is not configured.".to_string());
+    }
+
+    let normalized_prompt = if prompt.trim().is_empty() {
+        if attachments.is_empty() {
+            "Generate an image.".to_string()
+        } else {
+            "Use the attached reference image(s).".to_string()
+        }
+    } else {
+        prompt.trim().to_string()
+    };
+
+    let content = if attachments.is_empty() {
+        serde_json::Value::String(normalized_prompt.clone())
+    } else {
+        let mut parts = Vec::with_capacity(attachments.len() + 1);
+        parts.push(serde_json::json!({
+            "type": "text",
+            "text": normalized_prompt,
+        }));
+        for attachment in attachments {
+            let mime = attachment.mime_type.trim();
+            let data_url = format!("data:{};base64,{}", mime, attachment.content.trim());
+            parts.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": data_url
+                }
+            }));
+        }
+        serde_json::Value::Array(parts)
+    };
+
+    let endpoint = format!("{}/chat/completions", host_proxy_base.trim_end_matches('/'));
+    let payload = serde_json::json!({
+        "model": model,
+        "modalities": chat_image_modalities(&model),
+        "messages": [
+            {
+                "role": "user",
+                "content": content
+            }
+        ],
+        "stream": false
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("Failed to create image generation client: {}", e))?;
+    let response = client
+        .post(&endpoint)
+        .bearer_auth(gateway_token)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Image generation request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| String::new());
+        let detail = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value.get("error").and_then(|error| {
+                    error
+                        .get("message")
+                        .and_then(|value| value.as_str())
+                        .map(|text| text.to_string())
+                        .or_else(|| error.as_str().map(|text| text.to_string()))
+                })
+            })
+            .unwrap_or_else(|| body.trim().to_string());
+        let suffix = if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", detail)
+        };
+        return Err(format!("Image generation failed ({}{})", status, suffix));
+    }
+
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Invalid image generation response: {}", e))?;
+    let message = payload
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let images = extract_openrouter_generated_images(&message);
+    if images.is_empty() {
+        return Err("The selected model did not return an image.".to_string());
+    }
+
+    Ok(ChatImageGenerationResult {
+        text: extract_openrouter_message_text(&message),
+        images,
+    })
 }
 
 #[tauri::command]

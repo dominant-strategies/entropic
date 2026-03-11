@@ -61,10 +61,32 @@ pub struct RuntimeStatus {
     pub docker_ready: bool,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeVmConfig {
+    pub cpu: u8,
+    pub memory_gb: u16,
+    pub disk_gb: u16,
+}
+
+pub const DEFAULT_RUNTIME_VM_CPU: u8 = 2;
+pub const DEFAULT_RUNTIME_VM_MEMORY_GB: u16 = 4;
+pub const DEFAULT_RUNTIME_VM_DISK_GB: u16 = 20;
+
+impl Default for RuntimeVmConfig {
+    fn default() -> Self {
+        Self {
+            cpu: DEFAULT_RUNTIME_VM_CPU,
+            memory_gb: DEFAULT_RUNTIME_VM_MEMORY_GB,
+            disk_gb: DEFAULT_RUNTIME_VM_DISK_GB,
+        }
+    }
+}
+
 pub struct Runtime {
     resources_dir: PathBuf,
     #[allow(dead_code)]
     platform: Platform,
+    vm_config: RuntimeVmConfig,
 }
 
 /// Isolated Colima home directory used by Entropic to avoid conflicts with
@@ -406,15 +428,20 @@ impl Platform {
 }
 
 impl Runtime {
-    pub fn new(resources_dir: PathBuf) -> Self {
+    pub fn new(resources_dir: PathBuf, vm_config: RuntimeVmConfig) -> Self {
         debug_log("=== Runtime::new() called ===");
         debug_log(&format!("resources_dir: {:?}", resources_dir));
         debug_log(&format!("resources_dir exists: {}", resources_dir.exists()));
         let platform = Platform::detect();
         debug_log(&format!("Platform detected: {:?}", platform));
+        debug_log(&format!(
+            "Colima config cpu={} memory_gb={} disk_gb={}",
+            vm_config.cpu, vm_config.memory_gb, vm_config.disk_gb
+        ));
         Self {
             resources_dir,
             platform,
+            vm_config,
         }
     }
 
@@ -538,20 +565,15 @@ impl Runtime {
         profile: &str,
         vm_type: &str,
     ) -> Result<std::process::Output, std::io::Error> {
-        self.run_colima(
-            profile,
-            &[
-                "start",
-                "--vm-type",
-                vm_type,
-                "--cpu",
-                "2",
-                "--memory",
-                "4",
-                "--disk",
-                "20",
-            ],
-        )
+        let mut cmd = self.colima_command();
+        cmd.arg("--profile").arg(profile);
+        cmd.arg("start");
+        cmd.arg("--vm-type").arg(vm_type);
+        cmd.arg("--cpu").arg(self.vm_config.cpu.to_string());
+        cmd.arg("--memory")
+            .arg(self.vm_config.memory_gb.to_string());
+        cmd.arg("--disk").arg(self.vm_config.disk_gb.to_string());
+        cmd.output()
     }
 
     fn run_limactl(&self, args: &[&str]) -> Result<std::process::Output, std::io::Error> {

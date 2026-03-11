@@ -27,7 +27,11 @@ import {
   stopIntegrationRefreshLoop,
 } from "../lib/integrations";
 import { getGatewayStatusCached } from "../lib/gateway-status";
-import { LOCAL_MODEL_IDS, PROXY_MODEL_IDS } from "../components/ModelSelector";
+import {
+  LOCAL_MODEL_IDS,
+  PROXY_IMAGE_GENERATION_MODEL_IDS,
+  PROXY_MODEL_IDS,
+} from "../components/ModelSelector";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { hideEmbeddedPreviewWebview } from "../lib/nativePreview";
 
@@ -46,8 +50,77 @@ type Props = {
 // Default models per mode
 const DEFAULT_PROXY_MODEL = "openai/gpt-5.4";
 const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
+const DEFAULT_PROXY_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
 const GATEWAY_FAILURE_THRESHOLD = 3;
 const FEEDBACK_FORM_URL = "https://entropic.qu.ai/feedback";
+
+function stripModelParams(model: string) {
+  return model.split(":")[0] || model;
+}
+
+function remapModelForMode(model: string, useLocalKeys: boolean): string {
+  if (useLocalKeys) {
+    if (LOCAL_MODEL_IDS.has(model)) {
+      return model;
+    }
+    const base = stripModelParams(model);
+    if (LOCAL_MODEL_IDS.has(base)) {
+      return base;
+    }
+    if (base.startsWith("anthropic/")) {
+      return DEFAULT_LOCAL_MODEL;
+    }
+    if (base.startsWith("google/")) {
+      return "google/gemini-2.5-pro";
+    }
+    if (base.startsWith("openai/")) {
+      const openaiModel = base.slice("openai/".length);
+      const candidate = `openai-codex/${openaiModel}:reasoning=medium`;
+      if (LOCAL_MODEL_IDS.has(candidate)) {
+        return candidate;
+      }
+      if (openaiModel.includes("codex")) {
+        const codexCandidate = `openai-codex/${openaiModel}:reasoning=medium`;
+        if (LOCAL_MODEL_IDS.has(codexCandidate)) {
+          return codexCandidate;
+        }
+      }
+    }
+    if (base.startsWith("openai-codex/")) {
+      const openaiModel = base.slice("openai-codex/".length);
+      const candidate = `openai-codex/${openaiModel}:reasoning=medium`;
+      if (LOCAL_MODEL_IDS.has(candidate)) {
+        return candidate;
+      }
+    }
+    return DEFAULT_LOCAL_MODEL;
+  }
+
+  if (PROXY_MODEL_IDS.has(model)) {
+    return model;
+  }
+  const base = stripModelParams(model);
+  if (PROXY_MODEL_IDS.has(base)) {
+    return base;
+  }
+  if (base.startsWith("openai-codex/")) {
+    const openaiModel = base.slice("openai-codex/".length);
+    const candidate = `openai/${openaiModel}`;
+    if (PROXY_MODEL_IDS.has(candidate)) {
+      return candidate;
+    }
+  }
+  if (base.startsWith("anthropic/")) {
+    return "anthropic/claude-opus-4-6:thinking";
+  }
+  if (base.startsWith("google/")) {
+    return "google/gemini-3.1-pro-preview";
+  }
+  if (base.startsWith("openai/") || base.startsWith("openai-codex/")) {
+    return "openai/gpt-5.2";
+  }
+  return DEFAULT_PROXY_MODEL;
+}
 
 export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const { isAuthenticated, isAuthConfigured, refreshBalance } = useAuth();
@@ -69,6 +142,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [selectedModel, setSelectedModel] = useState(DEFAULT_PROXY_MODEL);
   const [codeModel, setCodeModel] = useState("openai/gpt-5.3-codex");
   const [imageModel, setImageModel] = useState("google/gemini-3.1-flash-image-preview");
+  const [imageGenerationModel, setImageGenerationModel] = useState(
+    DEFAULT_PROXY_IMAGE_GENERATION_MODEL,
+  );
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [currentChatSession, setCurrentChatSession] = useState<string | null>(null);
   const [pendingChatSession, setPendingChatSession] = useState<string | null>(null);
@@ -149,14 +225,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
         const saved = await store.get("selectedModel") as string | null;
         if (saved) {
-          // If the saved model doesn't match the current mode, pick a sensible default
-          if (isLocal && !LOCAL_MODEL_IDS.has(saved)) {
-            setSelectedModel(DEFAULT_LOCAL_MODEL);
-          } else if (!isLocal && !PROXY_MODEL_IDS.has(saved)) {
-            setSelectedModel(DEFAULT_PROXY_MODEL);
-          } else {
-            setSelectedModel(saved);
-          }
+          setSelectedModel(remapModelForMode(saved, isLocal));
         } else {
           setSelectedModel(isLocal ? DEFAULT_LOCAL_MODEL : DEFAULT_PROXY_MODEL);
         }
@@ -165,6 +234,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         if (savedCode) setCodeModel(savedCode);
         const savedImage = await store.get("imageModel") as string | null;
         if (savedImage) setImageModel(savedImage);
+        const savedImageGeneration = await store.get("imageGenerationModel") as string | null;
+        if (savedImageGeneration && PROXY_IMAGE_GENERATION_MODEL_IDS.has(savedImageGeneration)) {
+          setImageGenerationModel(savedImageGeneration);
+        }
       } catch (error) {
         console.error("[Entropic] Failed to load model preference:", error);
       } finally {
@@ -1215,6 +1288,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         selectedModel={selectedModel}
         onModelChange={handleModelChange}
         imageModel={imageModel}
+        imageGenerationModel={imageGenerationModel}
         integrationsSyncing={integrationsSyncing}
         integrationsMissing={integrationsMissing}
         onNavigate={setCurrentPage}
@@ -1273,7 +1347,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             onUseLocalKeysChange={setUseLocalKeys}
             codeModel={codeModel}
             imageModel={imageModel}
+            imageGenerationModel={imageGenerationModel}
             onCodeModelChange={setCodeModel}
+            onImageGenerationModelChange={setImageGenerationModel}
             onImageModelChange={setImageModel}
           />
         );
@@ -1300,11 +1376,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
               setIsTogglingGateway(true);
               setUseLocalKeys(value);
 
-              // Reset model if current selection doesn't exist in the target mode
-              const validIds = value ? LOCAL_MODEL_IDS : PROXY_MODEL_IDS;
-              const newModel = validIds.has(selectedModel)
-                ? selectedModel
-                : value ? DEFAULT_LOCAL_MODEL : DEFAULT_PROXY_MODEL;
+              const newModel = remapModelForMode(selectedModel, value);
               if (newModel !== selectedModel) {
                 setSelectedModel(newModel);
               }
@@ -1335,6 +1407,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             }}
             codeModel={codeModel}
             imageModel={imageModel}
+            imageGenerationModel={imageGenerationModel}
             onCodeModelChange={async (value) => {
               setCodeModel(value);
               try {
@@ -1343,6 +1416,16 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
                 await store.save();
               } catch (error) {
                 console.error("[Entropic] Failed to save codeModel:", error);
+              }
+            }}
+            onImageGenerationModelChange={async (value) => {
+              setImageGenerationModel(value);
+              try {
+                const store = await TauriStore.load("entropic-settings.json");
+                await store.set("imageGenerationModel", value);
+                await store.save();
+              } catch (error) {
+                console.error("[Entropic] Failed to save imageGenerationModel:", error);
               }
             }}
             onImageModelChange={async (value) => {

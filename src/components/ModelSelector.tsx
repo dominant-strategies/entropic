@@ -3,7 +3,7 @@ import { ChevronDown, Zap, Star, Brain, Sparkles } from "lucide-react";
 import { Model } from "../lib/auth";
 
 // Proxy-mode models (routed through Entropic backend)
-const PROXY_MODELS: Model[] = [
+export const PROXY_MODELS: Model[] = [
   { id: "openrouter/free", name: "OpenRouter Free (Router)", provider: "OpenRouter", tier: "fast" },
   { id: "anthropic/claude-opus-4-6:thinking", name: "Claude Opus 4.6 (Thinking)", provider: "Anthropic", tier: "premium" },
   { id: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6", provider: "Anthropic", tier: "premium" },
@@ -18,7 +18,7 @@ const PROXY_MODELS: Model[] = [
 ];
 
 // Local-keys models (direct provider API access)
-const LOCAL_MODELS: Model[] = [
+export const LOCAL_MODELS: Model[] = [
   // Anthropic — thinking-enabled variants first
   { id: "anthropic/claude-opus-4-6:thinking", name: "Claude Opus 4.6 (Thinking)", provider: "Anthropic", tier: "premium" },
   { id: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6", provider: "Anthropic", tier: "premium" },
@@ -47,9 +47,45 @@ const LOCAL_MODELS: Model[] = [
   { id: "google/gemini-2.0-flash", name: "Gemini 2.0 Flash", provider: "Google", tier: "fast" },
 ];
 
+export const PROXY_IMAGE_GENERATION_MODELS: Model[] = [
+  {
+    id: "google/gemini-3.1-flash-image-preview",
+    name: "Gemini 3.1 Flash Image Preview",
+    provider: "Google",
+    tier: "recommended",
+  },
+  {
+    id: "sourceful/riverflow-v2-pro",
+    name: "Riverflow V2 Pro",
+    provider: "Sourceful",
+    tier: "premium",
+  },
+  {
+    id: "sourceful/riverflow-v2-fast",
+    name: "Riverflow V2 Fast",
+    provider: "Sourceful",
+    tier: "fast",
+  },
+  {
+    id: "bytedance-seed/seedream-4.5",
+    name: "Seedream 4.5",
+    provider: "ByteDance Seed",
+    tier: "premium",
+  },
+  {
+    id: "black-forest-labs/flux.2-pro",
+    name: "FLUX.2 Pro",
+    provider: "Black Forest Labs",
+    tier: "premium",
+  },
+];
+
 // Exported ID sets for mode-mismatch detection in Dashboard
 export const PROXY_MODEL_IDS = new Set(PROXY_MODELS.map(m => m.id));
 export const LOCAL_MODEL_IDS = new Set(LOCAL_MODELS.map(m => m.id));
+export const PROXY_IMAGE_GENERATION_MODEL_IDS = new Set(
+  PROXY_IMAGE_GENERATION_MODELS.map((m) => m.id),
+);
 
 // Map provider display names to auth provider IDs
 const PROVIDER_AUTH_ID: Record<string, string> = {
@@ -88,14 +124,22 @@ interface ModelSelectorProps {
   onModelChange: (modelId: string) => void;
   compact?: boolean;
   useLocalKeys?: boolean;
+  models?: Model[];
   /** Provider IDs that have keys configured (e.g. ["anthropic", "openai"]). When set, only matching providers are shown. */
   connectedProviders?: string[];
 }
 
-export function ModelSelector({ selectedModel, onModelChange, compact = false, useLocalKeys = false, connectedProviders }: ModelSelectorProps) {
-  const allModels = useLocalKeys ? LOCAL_MODELS : PROXY_MODELS;
+export function ModelSelector({
+  selectedModel,
+  onModelChange,
+  compact = false,
+  useLocalKeys = false,
+  models,
+  connectedProviders,
+}: ModelSelectorProps) {
+  const allModels = models ?? (useLocalKeys ? LOCAL_MODELS : PROXY_MODELS);
   // Filter to only show models from providers the user has connected
-  const models = connectedProviders && connectedProviders.length > 0
+  const availableModels = connectedProviders && connectedProviders.length > 0
     ? allModels.filter(m => connectedProviders.includes(PROVIDER_AUTH_ID[m.provider] ?? m.provider.toLowerCase()))
     : allModels;
   const [isOpen, setIsOpen] = useState(false);
@@ -108,11 +152,11 @@ export function ModelSelector({ selectedModel, onModelChange, compact = false, u
     setIsOpen(false);
   };
 
-  const currentModel = models.find(m => m.id === selectedModel) || models[0];
+  const currentModel = availableModels.find(m => m.id === selectedModel) || availableModels[0];
   const TierIcon = TIER_ICONS[currentModel?.tier || "recommended"] || Star;
 
   // Group models by provider
-  const groupedModels = models.reduce((acc, model) => {
+  const groupedModels = availableModels.reduce((acc, model) => {
     if (!acc[model.provider]) {
       acc[model.provider] = [];
     }
