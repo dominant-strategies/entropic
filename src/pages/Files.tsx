@@ -111,7 +111,6 @@ type BrowserSnapshot = {
   url: string;
   title: string;
   live_ws_url?: string | null;
-  remote_desktop_url?: string | null;
   text: string;
   screenshot_base64: string;
   screenshot_width: number;
@@ -135,7 +134,6 @@ type BrowserLiveState = {
   url: string;
   title: string;
   live_ws_url?: string | null;
-  remote_desktop_url?: string | null;
   viewport_width: number;
   viewport_height: number;
   can_go_back: boolean;
@@ -1699,9 +1697,6 @@ export function Files({
     : browserLiveState?.can_go_forward ?? browserSnapshot?.can_go_forward ?? false;
   const browserViewportWidth = browserLiveState?.viewport_width ?? browserSnapshot?.screenshot_width ?? 1440;
   const browserViewportHeight = browserLiveState?.viewport_height ?? browserSnapshot?.screenshot_height ?? 900;
-  const browserRemoteDesktopUrl =
-    browserLiveState?.remote_desktop_url || browserSnapshot?.remote_desktop_url || null;
-  const browserHasRemoteDesktop = Boolean(browserRemoteDesktopUrl);
   const browserSnapshotImage =
     browserSnapshot?.screenshot_base64 ? `data:image/png;base64,${browserSnapshot.screenshot_base64}` : null;
   const browserEmbeddedPreviewSnapshotTarget = browserEmbeddedPreview?.url
@@ -1713,7 +1708,6 @@ export function Files({
     presentBrowserUrl(browserSnapshot.url) === browserEmbeddedPreviewSnapshotTarget
   );
   const browserHasRenderableImage = browserLiveHasFrame || Boolean(browserSnapshotImage);
-  const browserUsingEmbeddedRemoteDesktop = browserHasRemoteDesktop && !browserHasRenderableImage;
   const browserTitle =
     browserEmbeddedPreview?.title ||
     browserLiveState?.title ||
@@ -2119,7 +2113,7 @@ export function Files({
       try {
         const message = JSON.parse(String(event.data)) as
           | { type: "frame"; data: string; format?: string }
-          | { type: "state"; url: string; title: string; can_go_back: boolean; can_go_forward: boolean; viewport_width: number; viewport_height: number; session_id: string; live_ws_url?: string | null; remote_desktop_url?: string | null; }
+          | { type: "state"; url: string; title: string; can_go_back: boolean; can_go_forward: boolean; viewport_width: number; viewport_height: number; session_id: string; live_ws_url?: string | null; }
           | { type: "clipboard_copy"; text: string }
           | { type: "error"; error: string };
 
@@ -2166,7 +2160,7 @@ export function Files({
   }, [browserOpen, browserSessionId, browserSnapshot?.live_ws_url, browserUsingEmbeddedPreview]);
 
   useEffect(() => {
-    if (!browserOpen || !browserSessionId || !browserLiveConnected || browserUsingEmbeddedRemoteDesktop) {
+    if (!browserOpen || !browserSessionId || !browserLiveConnected) {
       browserLiveSizeRef.current = "";
       return;
     }
@@ -2210,7 +2204,7 @@ export function Files({
         window.cancelAnimationFrame(rafId);
       }
     };
-  }, [browserOpen, browserSessionId, browserLiveConnected, browserUsingEmbeddedRemoteDesktop]);
+  }, [browserOpen, browserSessionId, browserLiveConnected]);
 
   function browserViewportPoint(clientX: number, clientY: number) {
     const target = browserLiveConnected ? browserViewportRef.current : browserLiveImageRef.current;
@@ -4000,8 +3994,6 @@ export function Files({
                         ref={browserViewportRef}
                         className={browserUsingEmbeddedPreview
                           ? "flex-1 min-h-0 overflow-hidden bg-[var(--bg-card)]"
-                          : browserUsingEmbeddedRemoteDesktop
-                          ? "flex-1 min-h-0 overflow-hidden bg-[#f4f4f5]"
                           : browserLiveConnected
                           ? "flex-1 min-h-0 overflow-hidden bg-[#0b0b0c] flex items-center justify-center"
                           : "flex-1 min-h-0 overflow-auto bg-[#f5f5f5]"}
@@ -4021,36 +4013,6 @@ export function Files({
                                 Local preview is loading...
                               </div>
                             ) : null}
-                          </div>
-                        ) : browserUsingEmbeddedRemoteDesktop && browserRemoteDesktopUrl ? (
-                          <div className="relative w-full h-full overflow-hidden bg-[var(--bg-card)]">
-                            <iframe
-                              key={browserRemoteDesktopUrl}
-                              src={browserRemoteDesktopUrl}
-                              title={browserTitle}
-                              className="absolute left-0 w-full border-0 bg-[var(--bg-card)]"
-                              allow="clipboard-read; clipboard-write"
-                              style={{
-                                top: -44,
-                                height: "calc(100% + 44px)",
-                                pointerEvents: browserLiveConnected ? "none" : undefined,
-                              }}
-                            />
-                            {browserLiveConnected && (
-                              <div
-                                className="absolute inset-0 z-10 cursor-default"
-                                tabIndex={0}
-                                onFocus={() => sendBrowserLiveMessage({ type: "focus" })}
-                                onMouseMove={handleBrowserViewportMouseMove}
-                                onMouseDown={handleBrowserViewportMouseDown}
-                                onMouseUp={handleBrowserViewportMouseUp}
-                                onWheel={handleBrowserViewportWheel}
-                                onKeyDown={handleBrowserViewportKeyDown}
-                                onPaste={handleBrowserViewportPaste}
-                                onCopy={handleBrowserViewportCopy}
-                                onContextMenu={(e) => e.preventDefault()}
-                              />
-                            )}
                           </div>
                         ) : browserHasRenderableImage ? (
                           <div

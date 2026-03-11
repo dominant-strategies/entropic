@@ -49,9 +49,6 @@ const ENTROPIC_PROXY_ALLOWED_HOSTS: &[&str] = &[
 ];
 const BROWSER_SERVICE_PORT: &str = "19791";
 const BROWSER_SERVICE_HOST_PORT: &str = "19792";
-const BROWSER_DESKTOP_PORT: &str = "19793";
-const BROWSER_DESKTOP_HOST_PORT: &str = "19793";
-const BROWSER_REMOTE_DESKTOP_UI: &str = "0";
 const BROWSER_ALLOW_UNSAFE_NO_SANDBOX: &str = "0";
 const BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS: &str = "0";
 const BROWSER_SERVICE_PATH: &str = "/app/browser-service/server.mjs";
@@ -5212,8 +5209,6 @@ pub struct BrowserSnapshot {
     pub title: String,
     #[serde(default)]
     pub live_ws_url: Option<String>,
-    #[serde(default)]
-    pub remote_desktop_url: Option<String>,
     pub text: String,
     pub screenshot_base64: String,
     pub screenshot_width: f64,
@@ -9515,10 +9510,6 @@ pub async fn start_gateway(
         let current_schema = read_container_env("ENTROPIC_GATEWAY_SCHEMA_VERSION");
         let current_model = read_container_env("OPENCLAW_MODEL");
         let current_browser_host_port = read_container_env("ENTROPIC_BROWSER_HOST_PORT");
-        let current_browser_desktop_host_port =
-            read_container_env("ENTROPIC_BROWSER_DESKTOP_HOST_PORT");
-        let current_browser_remote_desktop_ui =
-            read_container_env("ENTROPIC_BROWSER_REMOTE_DESKTOP_UI");
         let current_browser_headful = read_container_env("ENTROPIC_BROWSER_HEADFUL");
         let current_browser_allow_unsafe_no_sandbox =
             read_container_env("ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX");
@@ -9553,8 +9544,6 @@ pub async fn start_gateway(
             && current_schema.as_deref() == Some(ENTROPIC_GATEWAY_SCHEMA_VERSION)
             && current_model.as_deref() == Some(base_model)
             && current_browser_host_port.as_deref() == Some(BROWSER_SERVICE_HOST_PORT)
-            && current_browser_desktop_host_port.as_deref() == Some(BROWSER_DESKTOP_HOST_PORT)
-            && current_browser_remote_desktop_ui.as_deref() == Some(BROWSER_REMOTE_DESKTOP_UI)
             && current_browser_headful.as_deref() == Some("1")
             && current_browser_allow_unsafe_no_sandbox.as_deref()
                 == Some(BROWSER_ALLOW_UNSAFE_NO_SANDBOX)
@@ -9640,15 +9629,6 @@ pub async fn start_gateway(
         ("ENTROPIC_BROWSER_SERVICE_PORT", BROWSER_SERVICE_PORT),
         ("ENTROPIC_BROWSER_HOST_PORT", BROWSER_SERVICE_HOST_PORT),
         ("ENTROPIC_BROWSER_HEADFUL", "1"),
-        ("ENTROPIC_BROWSER_DESKTOP_PORT", BROWSER_DESKTOP_PORT),
-        (
-            "ENTROPIC_BROWSER_DESKTOP_HOST_PORT",
-            BROWSER_DESKTOP_HOST_PORT,
-        ),
-        (
-            "ENTROPIC_BROWSER_REMOTE_DESKTOP_UI",
-            BROWSER_REMOTE_DESKTOP_UI,
-        ),
         (
             "ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX",
             BROWSER_ALLOW_UNSAFE_NO_SANDBOX,
@@ -9734,11 +9714,6 @@ pub async fn start_gateway(
         format!(
             "127.0.0.1:{}:{}",
             BROWSER_SERVICE_HOST_PORT, BROWSER_SERVICE_PORT
-        ),
-        "-p".to_string(),
-        format!(
-            "127.0.0.1:{}:{}",
-            BROWSER_DESKTOP_HOST_PORT, BROWSER_DESKTOP_PORT
         ),
         "openclaw-runtime:latest".to_string(),
     ]);
@@ -9927,15 +9902,6 @@ pub async fn start_gateway_with_proxy(
             ("ENTROPIC_BROWSER_SERVICE_PORT", BROWSER_SERVICE_PORT),
             ("ENTROPIC_BROWSER_HOST_PORT", BROWSER_SERVICE_HOST_PORT),
             ("ENTROPIC_BROWSER_HEADFUL", "1"),
-            ("ENTROPIC_BROWSER_DESKTOP_PORT", BROWSER_DESKTOP_PORT),
-            (
-                "ENTROPIC_BROWSER_DESKTOP_HOST_PORT",
-                BROWSER_DESKTOP_HOST_PORT,
-            ),
-            (
-                "ENTROPIC_BROWSER_REMOTE_DESKTOP_UI",
-                BROWSER_REMOTE_DESKTOP_UI,
-            ),
             (
                 "ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX",
                 BROWSER_ALLOW_UNSAFE_NO_SANDBOX,
@@ -9997,16 +9963,6 @@ pub async fn start_gateway_with_proxy(
             ),
             "openclaw-runtime:latest".to_string(),
         ]);
-        if BROWSER_REMOTE_DESKTOP_UI == "1" {
-            docker_args.insert(
-                docker_args.len() - 1,
-                format!(
-                    "127.0.0.1:{}:{}",
-                    BROWSER_DESKTOP_HOST_PORT, BROWSER_DESKTOP_PORT
-                ),
-            );
-            docker_args.insert(docker_args.len() - 1, "-p".to_string());
-        }
 
         if let Ok(source) = std::env::var("ENTROPIC_DEV_OPENCLAW_SOURCE") {
             let trimmed = source.trim();
@@ -10040,10 +9996,6 @@ pub async fn start_gateway_with_proxy(
         let current_model = read_container_env("OPENCLAW_MODEL");
         let current_image = read_container_env("OPENCLAW_IMAGE_MODEL");
         let current_browser_host_port = read_container_env("ENTROPIC_BROWSER_HOST_PORT");
-        let current_browser_desktop_host_port =
-            read_container_env("ENTROPIC_BROWSER_DESKTOP_HOST_PORT");
-        let current_browser_remote_desktop_ui =
-            read_container_env("ENTROPIC_BROWSER_REMOTE_DESKTOP_UI");
         let current_browser_headful = read_container_env("ENTROPIC_BROWSER_HEADFUL");
         let current_browser_allow_unsafe_no_sandbox =
             read_container_env("ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX");
@@ -10079,8 +10031,6 @@ pub async fn start_gateway_with_proxy(
             && container_image_matches_latest
             && token_matches
             && current_browser_host_port.as_deref() == Some(BROWSER_SERVICE_HOST_PORT)
-            && current_browser_desktop_host_port.as_deref() == Some(BROWSER_DESKTOP_HOST_PORT)
-            && current_browser_remote_desktop_ui.as_deref() == Some(BROWSER_REMOTE_DESKTOP_UI)
             && current_browser_headful.as_deref() == Some("1")
             && current_browser_allow_unsafe_no_sandbox.as_deref()
                 == Some(BROWSER_ALLOW_UNSAFE_NO_SANDBOX)

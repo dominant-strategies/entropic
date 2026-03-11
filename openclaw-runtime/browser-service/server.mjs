@@ -10,8 +10,6 @@ import { WebSocketServer, WebSocket } from "ws";
 
 const PORT = Number(process.env.ENTROPIC_BROWSER_SERVICE_PORT || 19791);
 const HOST_PORT = Number(process.env.ENTROPIC_BROWSER_HOST_PORT || 19792);
-const DESKTOP_PORT = Number(process.env.ENTROPIC_BROWSER_DESKTOP_PORT || 19793);
-const DESKTOP_HOST_PORT = Number(process.env.ENTROPIC_BROWSER_DESKTOP_HOST_PORT || DESKTOP_PORT);
 const LISTEN_HOST = process.env.ENTROPIC_BROWSER_BIND || "0.0.0.0";
 const PROFILE_ROOT = process.env.ENTROPIC_BROWSER_PROFILE || "/data/browser/profile";
 const WORKSPACE_ROOT = process.env.ENTROPIC_WORKSPACE_PATH || "/data/workspace";
@@ -44,7 +42,6 @@ const BROWSER_DEVICE_SCALE_FACTOR = Math.max(
 );
 const DISPLAY_AVAILABLE = typeof process.env.DISPLAY === "string" && process.env.DISPLAY.trim() !== "";
 const USE_HEADFUL_DISPLAY = (process.env.ENTROPIC_BROWSER_HEADFUL ?? "1") !== "0" && DISPLAY_AVAILABLE;
-const EXPOSE_REMOTE_DESKTOP_UI = (process.env.ENTROPIC_BROWSER_REMOTE_DESKTOP_UI ?? "0") === "1";
 const ALLOW_UNSAFE_NO_SANDBOX = (process.env.ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX ?? "0") === "1";
 const ALLOW_INSECURE_SECURE_CONTEXTS =
   (process.env.ENTROPIC_BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS ?? "0") === "1";
@@ -655,20 +652,6 @@ function liveWsUrl(sessionId) {
   return `ws://127.0.0.1:${HOST_PORT}/live/${sessionId}?token=${encodeURIComponent(BROWSER_CONTROL_TOKEN)}`;
 }
 
-function desktopViewerUrl() {
-  if (!USE_HEADFUL_DISPLAY || !EXPOSE_REMOTE_DESKTOP_UI) {
-    return null;
-  }
-  const params = new URLSearchParams({
-    autoconnect: "1",
-    resize: "scale",
-    reconnect: "1",
-    view_only: "0",
-    path: "websockify",
-  });
-  return `http://127.0.0.1:${DESKTOP_HOST_PORT}/vnc_lite.html?${params.toString()}`;
-}
-
 function normalizeViewport(width, height) {
   const minWidth = USE_HEADFUL_DISPLAY ? HEADFUL_MIN_VIEWPORT.width : 320;
   const minHeight = USE_HEADFUL_DISPLAY ? HEADFUL_MIN_VIEWPORT.height : 240;
@@ -722,7 +705,6 @@ async function buildSessionState(session) {
     url: page.url(),
     title,
     live_ws_url: liveWsUrl(session.id),
-    remote_desktop_url: desktopViewerUrl(),
     viewport_width: session.viewport.width,
     viewport_height: session.viewport.height,
     can_go_back: session.historyIndex > 0,
@@ -1034,7 +1016,6 @@ async function buildSnapshot(session) {
     url: page.url(),
     title,
     live_ws_url: liveWsUrl(session.id),
-    remote_desktop_url: desktopViewerUrl(),
     text: trimText(pageData.text),
     screenshot_base64: screenshot.toString("base64"),
     screenshot_width: Math.max(1, Number(pageData.pageWidth) || 1440),
@@ -1061,7 +1042,6 @@ async function buildLiveSnapshot(session) {
     url: state.url,
     title: state.title,
     live_ws_url: state.live_ws_url,
-    remote_desktop_url: state.remote_desktop_url,
     text: "",
     screenshot_base64: "",
     screenshot_width: state.viewport_width,

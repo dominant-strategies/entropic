@@ -143,8 +143,6 @@ if [ "${ENTROPIC_BROWSER_HEADFUL:-1}" != "0" ]; then
   export LIBGL_ALWAYS_SOFTWARE=1
 
   BROWSER_SCREEN_SIZE="${ENTROPIC_BROWSER_SCREEN_SIZE:-1280x800x24}"
-  BROWSER_DESKTOP_PORT="${ENTROPIC_BROWSER_DESKTOP_PORT:-19793}"
-  export ENTROPIC_BROWSER_DESKTOP_PORT="$BROWSER_DESKTOP_PORT"
   X_DISPLAY_NUM="$(printf '%s' "$DISPLAY" | sed 's/^://; s/\..*$//')"
   X_SOCKET="/tmp/.X11-unix/X${X_DISPLAY_NUM}"
 
@@ -169,58 +167,6 @@ if [ "${ENTROPIC_BROWSER_HEADFUL:-1}" != "0" ]; then
       if [ -f /data/browser/xvfb.log ]; then
           tail -n 40 /data/browser/xvfb.log >&2 || true
       fi
-  elif [ "${ENTROPIC_BROWSER_REMOTE_DESKTOP_UI:-0}" = "1" ]; then
-      if ! command -v x11vnc >/dev/null 2>&1 || ! command -v websockify >/dev/null 2>&1 || [ ! -d /usr/share/novnc ]; then
-          echo "[entrypoint] Remote desktop UI requested but x11vnc/websockify/noVNC assets are not installed; skipping."
-      else
-      x11vnc -display "$DISPLAY" -forever -shared -nopw -rfbport 5900 -localhost >/data/browser/x11vnc.log 2>&1 &
-      x11vnc_pid="$!"
-      x11vnc_ready=0
-      x11vnc_attempt=0
-      while [ "$x11vnc_attempt" -lt 30 ]; do
-          if python3 -c 'import socket,sys; s=socket.socket(); s.settimeout(0.2); s.connect(("127.0.0.1", 5900)); s.close()' >/dev/null 2>&1; then
-              x11vnc_ready=1
-              break
-          fi
-          if ! kill -0 "$x11vnc_pid" >/dev/null 2>&1; then
-              break
-          fi
-          x11vnc_attempt=$((x11vnc_attempt + 1))
-          sleep 0.2
-      done
-
-      if [ "$x11vnc_ready" -ne 1 ]; then
-          echo "[entrypoint] x11vnc failed to become ready on localhost:5900" >&2
-          if [ -f /data/browser/x11vnc.log ]; then
-              tail -n 40 /data/browser/x11vnc.log >&2 || true
-          fi
-      else
-          websockify --web /usr/share/novnc/ "$BROWSER_DESKTOP_PORT" 127.0.0.1:5900 >/data/browser/websockify.log 2>&1 &
-          websockify_pid="$!"
-          websockify_ready=0
-          websockify_attempt=0
-          while [ "$websockify_attempt" -lt 30 ]; do
-              if curl -fsS "http://127.0.0.1:${BROWSER_DESKTOP_PORT}/vnc_lite.html" >/dev/null 2>&1; then
-                  websockify_ready=1
-                  break
-              fi
-              if ! kill -0 "$websockify_pid" >/dev/null 2>&1; then
-                  break
-              fi
-              websockify_attempt=$((websockify_attempt + 1))
-              sleep 0.2
-          done
-
-          if [ "$websockify_ready" -ne 1 ]; then
-              echo "[entrypoint] websockify failed to become ready on localhost:${BROWSER_DESKTOP_PORT}" >&2
-              if [ -f /data/browser/websockify.log ]; then
-                  tail -n 40 /data/browser/websockify.log >&2 || true
-              fi
-          fi
-      fi
-      fi
-  else
-      echo "[entrypoint] Remote desktop UI disabled; skipping x11vnc/websockify startup"
   fi
 fi
 
