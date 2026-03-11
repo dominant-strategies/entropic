@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import clsx from "clsx";
 import { CheckCircle2, Loader2, Search, ShieldCheck, Download, Star, ExternalLink, Box, Puzzle, Sparkles, ChevronRight, Info, X } from "lucide-react";
+import quaiLogo from "../assets/quai-logo.png";
 import {
   getIntegrations,
   getIntegrationsCached,
@@ -37,6 +38,10 @@ type Plugin = {
   managed?: boolean;
   category: "tools" | "integrations" | "memory" | "agents";
 };
+
+type PluginIconSpec =
+  | { kind: "component"; component: ComponentType<{ className?: string }> }
+  | { kind: "image"; src: string; alt: string };
 
 type GoogleIntegration = {
   id: IntegrationProvider;
@@ -193,13 +198,14 @@ const MemoryLogo = ({ className }: { className?: string }) => (
   </svg>
 );
 
-const PLUGIN_ICONS: Record<string, ComponentType<{ className?: string }>> = {
-  discord: DiscordLogo,
-  telegram: TelegramLogo,
-  slack: SlackLogo,
-  "entropic-x": XLogo,
-  "memory-lancedb": MemoryLogo,
-  "memory-core": MemoryLogo,
+const PLUGIN_ICONS: Record<string, PluginIconSpec> = {
+  discord: { kind: "component", component: DiscordLogo },
+  telegram: { kind: "component", component: TelegramLogo },
+  slack: { kind: "component", component: SlackLogo },
+  "entropic-x": { kind: "component", component: XLogo },
+  "entropic-quai-builder": { kind: "image", src: quaiLogo, alt: "Quai Network" },
+  "memory-lancedb": { kind: "component", component: MemoryLogo },
+  "memory-core": { kind: "component", component: MemoryLogo },
 };
 
 const META: Record<string, Partial<Plugin>> = {
@@ -209,6 +215,7 @@ const META: Record<string, Partial<Plugin>> = {
   telegram: { name: "Telegram", description: "Run your agent as a Telegram bot.", category: "integrations" },
   slack: { name: "Slack", description: "Connect Entropic to Slack workspaces.", category: "integrations" },
   "entropic-x": { name: "Entropic X Skill", description: "Search public posts and fetch profile/thread context from X." },
+  "entropic-quai-builder": { name: "Quai Network Builder", description: "Learn and build on Quai Network." },
 };
 
 const GOOGLE_INTEGRATIONS: Omit<GoogleIntegration, "connected" | "email">[] = [
@@ -234,6 +241,8 @@ const INTEGRATION_NAMES: Record<IntegrationProvider, string> = {
 
 const SYNC_REQUIRED = new Set<IntegrationProvider>(["google_calendar", "google_email"]);
 const ENTROPIC_X_SKILL_ID = "entropic-x";
+const ENTROPIC_QUAI_SKILL_ID = "entropic-quai-builder";
+const MANAGED_SKILL_PLUGIN_IDS = new Set([ENTROPIC_X_SKILL_ID, ENTROPIC_QUAI_SKILL_ID]);
 const MESSAGING_PLUGIN_IDS = new Set([
   "discord",
   "telegram",
@@ -263,19 +272,19 @@ const CATEGORIES = [
 
 function scanBadge(result: PluginScanResult | null) {
   if (!result) {
-    return { label: "Not Scanned", className: "bg-gray-100 text-gray-500" };
+    return { label: "Not Scanned", className: "bg-[var(--bg-tertiary)] text-[var(--text-secondary)]" };
   }
   if (!result.scanner_available) {
-    return { label: "Scanner Unavailable", className: "bg-amber-50 text-amber-700" };
+    return { label: "Scanner Unavailable", className: "bg-amber-500/10 text-amber-500" };
   }
   if (result.is_safe) {
-    return { label: "Safe", className: "bg-green-50 text-green-700" };
+    return { label: "Safe", className: "bg-green-500/10 text-green-500" };
   }
   return {
     label: `${result.max_severity} (${result.findings_count})`,
     className: result.max_severity === "CRITICAL" || result.max_severity === "HIGH"
-      ? "bg-red-50 text-red-700"
-      : "bg-yellow-50 text-yellow-700",
+      ? "bg-red-500/10 text-red-500"
+      : "bg-yellow-500/10 text-yellow-500",
   };
 }
 
@@ -895,10 +904,13 @@ export function Store({
     setClawhubDetailError(null);
   }
 
-  const pluginsSansEntropicX = useMemo(() => plugins.filter((p) => p.id !== ENTROPIC_X_SKILL_ID), [plugins]);
+  const pluginsSansManagedSkills = useMemo(
+    () => plugins.filter((p) => !MANAGED_SKILL_PLUGIN_IDS.has(p.id)),
+    [plugins]
+  );
   const visiblePlugins = useMemo(
-    () => pluginsSansEntropicX.filter((p) => !MESSAGING_PLUGIN_IDS.has(p.id) && !HIDDEN_PLUGIN_IDS.has(p.id)),
-    [pluginsSansEntropicX]
+    () => pluginsSansManagedSkills.filter((p) => !MESSAGING_PLUGIN_IDS.has(p.id) && !HIDDEN_PLUGIN_IDS.has(p.id)),
+    [pluginsSansManagedSkills]
   );
 
   const filteredPlugins = useMemo(
@@ -932,6 +944,15 @@ export function Store({
         integrationProvider: "x",
         pluginId: ENTROPIC_X_SKILL_ID,
         connected: xConnected,
+        managed: true,
+      },
+      {
+        id: ENTROPIC_QUAI_SKILL_ID,
+        name: "Quai Network Builder",
+        description: "Default Entropic skill for learning and building on Quai Network.",
+        sourceLabel: "Entropic Default",
+        tags: ["quai", "qi", "wallets", "contracts", "default"],
+        pluginId: ENTROPIC_QUAI_SKILL_ID,
         managed: true,
       },
       ...workspaceSkills.map((skill) => ({
@@ -997,7 +1018,7 @@ export function Store({
     const installed = installedWorkspaceSkillIds.has(skill.slug) || justInstalledSlugs.has(skill.slug);
 
     return (
-      <div key={skill.slug} className="group bg-white rounded-xl p-4 shadow-sm border border-[var(--border-subtle)] hover:shadow-md transition-all duration-300 flex flex-col h-full">
+      <div key={skill.slug} className="group bg-[var(--bg-card)] rounded-xl p-4 shadow-sm border border-[var(--border-subtle)] hover:shadow-md transition-all duration-300 flex flex-col h-full">
         <div className="flex items-start justify-between gap-4 mb-4">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1">
@@ -1025,7 +1046,7 @@ export function Store({
                   ? "bg-[var(--system-gray-6)] text-[var(--text-tertiary)] cursor-default"
                   : clawhubBusySlug === skill.slug
                     ? "bg-[var(--system-blue)]/80 text-white"
-                    : "bg-[var(--system-blue)] text-white shadow-md shadow-blue-100 hover:brightness-95"
+                    : "bg-[var(--system-blue)] text-white shadow-md shadow-blue-500/20 hover:brightness-95"
               )}
             >
               {installed ? (
@@ -1084,7 +1105,7 @@ export function Store({
             <input
               value={skillQuery}
               onChange={(e) => setSkillQuery(e.target.value)}
-              className="w-full sm:w-[260px] pl-9 pr-3 py-2.5 rounded-lg border border-[var(--border-default)] bg-white text-sm focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
+              className="w-full sm:w-[260px] pl-9 pr-3 py-2.5 rounded-lg border border-[var(--border-default)] bg-[var(--bg-card)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
               placeholder="Search skills..."
             />
           </div>
@@ -1106,9 +1127,9 @@ export function Store({
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
                   {installedSkillCards.map((skill) => {
                     const badge = skill.managed
-                      ? { label: "Managed", className: "bg-blue-50 text-blue-600 border-blue-100" }
+                      ? { label: "Managed", className: "bg-blue-500/10 text-blue-500 border-blue-500/20" }
                       : scanBadge(skillScanResults[skill.id] || null);
-                    const Icon = skill.pluginId ? PLUGIN_ICONS[skill.pluginId] : null;
+                    const icon = skill.pluginId ? PLUGIN_ICONS[skill.pluginId] : null;
                     const integrationEntry = skill.integrationProvider
                       ? integrations.find((entry) => entry.provider === skill.integrationProvider)
                       : null;
@@ -1120,11 +1141,15 @@ export function Store({
                     );
 
                     return (
-                      <div key={skill.id} className="bg-white rounded-xl p-4 shadow-sm border border-[var(--border-subtle)] hover:shadow-md transition-all duration-300 flex flex-col">
+                      <div key={skill.id} className="bg-[var(--bg-card)] rounded-xl p-4 shadow-sm border border-[var(--border-subtle)] hover:shadow-md transition-all duration-300 flex flex-col">
                         <div className="flex items-start gap-4 mb-4">
-                          {Icon && (
+                          {icon && (
                               <div className="w-12 h-12 rounded-xl bg-[var(--system-gray-6)] flex items-center justify-center shrink-0 border border-[var(--border-subtle)]">
-                              <Icon className="w-7 h-7" />
+                              {icon.kind === "component" ? (
+                                <icon.component className="w-7 h-7" />
+                              ) : (
+                                <img src={icon.src} alt={icon.alt} className="w-7 h-7 object-contain" />
+                              )}
                             </div>
                           )}
                           <div className="min-w-0 flex-1">
@@ -1142,7 +1167,8 @@ export function Store({
                           {!skill.managed && (
                             <button
                               onClick={() => handleAuditSkill(skill)}
-                              className="w-full py-2 bg-gray-50 text-gray-600 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-gray-100 transition-colors border border-gray-100"
+                              disabled={isScanning}
+                              className="w-full py-2 bg-[var(--bg-muted)] text-[var(--text-secondary)] rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-[var(--bg-tertiary)] transition-colors border border-[var(--border-subtle)] disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                               Audit
                             </button>
@@ -1158,8 +1184,8 @@ export function Store({
                               className={clsx(
                                 "w-full py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-all",
                                 integrationConnected
-                                  ? "bg-green-50 text-green-600"
-                                  : "bg-blue-600 text-white shadow-lg shadow-blue-100"
+                                  ? "bg-green-500/10 text-green-500"
+                                  : "bg-blue-600 text-white shadow-lg shadow-blue-500/20"
                               )}
                             >
                               {connecting === skill.integrationProvider
@@ -1174,7 +1200,7 @@ export function Store({
                             <button
                               onClick={() => handleRemoveWorkspaceSkill(skill.workspaceSkillId as string)}
                               disabled={removingSkill === skill.workspaceSkillId}
-                              className="w-full py-2 bg-red-50 text-red-600 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-red-100 transition-colors border border-red-100"
+                              className="w-full py-2 bg-red-500/10 text-red-500 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-red-500/15 transition-colors border border-red-500/20"
                             >
                               Remove
                             </button>
@@ -1188,9 +1214,9 @@ export function Store({
             )}
 
             {/* Marketplace */}
-            <div className="rounded-2xl border border-blue-100 bg-gradient-to-b from-blue-50/60 via-white to-white p-4 md:p-6">
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] p-4 md:p-6">
               {/* Security Banner */}
-              <div className="relative overflow-hidden bg-white border border-[var(--border-subtle)] rounded-xl p-5 mb-8 shadow-sm">
+              <div className="relative overflow-hidden bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl p-5 mb-8 shadow-sm">
                 <div className="relative z-10 flex flex-col md:flex-row md:items-center gap-6">
                   <div className="w-12 h-12 rounded-xl bg-[var(--system-blue)] flex items-center justify-center shrink-0">
                     <ShieldCheck className="w-6 h-6 text-white" strokeWidth={2.5} />
@@ -1203,7 +1229,7 @@ export function Store({
                   </div>
                   <button
                     onClick={() => open("https://github.com/cisco-ai-defense/skill-scanner")}
-                    className="px-4 py-2 bg-white rounded-lg text-xs font-semibold border border-[var(--border-default)] hover:bg-[var(--system-gray-6)] transition-all flex items-center gap-2 shrink-0"
+                    className="px-4 py-2 bg-[var(--bg-card)] rounded-lg text-xs font-semibold border border-[var(--border-default)] hover:bg-[var(--system-gray-6)] transition-all flex items-center gap-2 shrink-0"
                   >
                     <Info className="w-4 h-4 text-[var(--system-blue)]" />
                     Scanner Specs
@@ -1214,7 +1240,7 @@ export function Store({
               <div className="mb-10">
                 <div className="flex items-center gap-4 mb-4">
                   <h2 className="text-[13px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">Featured Skills</h2>
-                  <div className="px-2.5 py-0.5 bg-amber-50 text-amber-600 rounded-full text-[10px] font-bold uppercase tracking-widest border border-amber-100">Editor's Choice</div>
+                  <div className="px-2.5 py-0.5 bg-amber-500/10 text-amber-500 rounded-full text-[10px] font-bold uppercase tracking-widest border border-amber-500/20">Editor's Choice</div>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {featuredSkills.map((skill) => renderClawhubSkillCard(skill))}
@@ -1245,7 +1271,7 @@ export function Store({
                     <p className="text-[var(--text-tertiary)] font-semibold uppercase tracking-wide text-[10px]">Loading catalog...</p>
                   </div>
                 ) : clawhubLookupError ? (
-                  <div className="bg-red-50 border border-red-100 rounded-xl p-8 text-center text-red-600">
+                  <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-8 text-center text-red-500">
                     <p className="font-semibold">{clawhubLookupError}</p>
                   </div>
                 ) : (
@@ -1295,12 +1321,13 @@ export function Store({
         <div
           className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4"
           onClick={closeClawhubDetailsModal}
+          onKeyDown={(e) => { if (e.key === "Escape") closeClawhubDetailsModal(); }}
         >
           <div
-            className="w-full max-w-4xl max-h-[88vh] overflow-y-auto rounded-2xl border border-[var(--border-subtle)] bg-white shadow-2xl"
+            className="w-full max-w-4xl max-h-[88vh] overflow-y-auto rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-card)] shadow-2xl"
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="sticky top-0 z-10 bg-white/95 backdrop-blur border-b border-[var(--border-subtle)] px-6 py-4 flex items-start justify-between gap-4">
+            <div className="sticky top-0 z-10 bg-[var(--glass-bg-hover)] backdrop-blur border-b border-[var(--border-subtle)] px-6 py-4 flex items-start justify-between gap-4">
               <div className="min-w-0">
                 <p className="text-xs uppercase tracking-wide font-semibold text-[var(--text-tertiary)] mb-1">ClawHub Skill</p>
                 <h2 className="text-xl font-semibold text-[var(--text-primary)] truncate">
@@ -1364,7 +1391,7 @@ export function Store({
                   </div>
 
                   {clawhubDetailError && (
-                    <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700">
+                    <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2.5 text-sm text-red-500">
                       {clawhubDetailError}
                     </div>
                   )}
@@ -1390,7 +1417,7 @@ export function Store({
               )}
             </div>
 
-            <div className="sticky bottom-0 z-10 border-t border-[var(--border-subtle)] bg-white/95 backdrop-blur px-6 py-4 flex items-center justify-end gap-3">
+            <div className="sticky bottom-0 z-10 border-t border-[var(--border-subtle)] bg-[var(--glass-bg-hover)] backdrop-blur px-6 py-4 flex items-center justify-end gap-3">
               <button
                 onClick={closeClawhubDetailsModal}
                 className="btn btn-secondary"
@@ -1430,22 +1457,23 @@ export function Store({
       )}
 
       {setupProvider && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/40 backdrop-blur-sm">
-          <div className="w-full max-w-sm rounded-[32px] bg-white p-8 shadow-2xl border border-gray-100 animate-in zoom-in-95 duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/40 backdrop-blur-sm"
+          onKeyDown={(e) => { if (e.key === "Escape" && !setupVerifying) { setSetupProvider(null); setSetupStage("authorizing"); } }}>
+          <div className="w-full max-w-sm rounded-[32px] bg-[var(--bg-card)] p-8 shadow-2xl border border-[var(--border-subtle)] animate-in zoom-in-95 duration-200">
             <div className="flex flex-col items-center text-center">
-              <div className="w-16 h-16 rounded-3xl bg-blue-50 flex items-center justify-center mb-6">
-                <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+              <div className="w-16 h-16 rounded-3xl bg-blue-500/10 flex items-center justify-center mb-6">
+                <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
               </div>
-              <h2 className="text-xl font-bold text-gray-900 mb-2">
+              <h2 className="text-xl font-bold text-[var(--text-primary)] mb-2">
                 Setting up {INTEGRATION_NAMES[setupProvider]}
               </h2>
-              <p className="text-sm text-gray-500 font-medium leading-relaxed mb-3">
+              <p className="text-sm text-[var(--text-secondary)] font-medium leading-relaxed mb-3">
                 {setupStage === "authorizing"
                   ? "Finish authorization in your browser. We'll update Entropic as soon as it's complete."
                   : "Syncing your credentials with Entropic..."}
               </p>
               {setupTimedOut && !setupError && (
-                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mb-3 w-full">
+                <p className="text-xs text-amber-500 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2 mb-3 w-full">
                   This is taking longer than expected. If your browser didn&apos;t open, use the buttons below to open or copy the link manually.
                 </p>
               )}
@@ -1453,9 +1481,9 @@ export function Store({
                 const isAuthError = isAuthConfigured && !isAuthenticated ||
                   /not authenticated|session expired|unauthorized/i.test(setupError);
                 return isAuthError ? (
-                  <div className="w-full mb-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-left">
-                    <p className="text-xs font-semibold text-amber-800 mb-1">Sign in required</p>
-                    <p className="text-xs text-amber-700 mb-3 leading-relaxed">
+                  <div className="w-full mb-3 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-3 text-left">
+                    <p className="text-xs font-semibold text-[var(--text-primary)] mb-1">Sign in required</p>
+                    <p className="text-xs text-[var(--text-secondary)] mb-3 leading-relaxed">
                       You need an Entropic account to connect X (Twitter). Sign in or create a free account to continue.
                     </p>
                     <button
@@ -1471,7 +1499,7 @@ export function Store({
                     </button>
                   </div>
                 ) : (
-                  <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2 mb-3 w-full">
+                  <p className="text-xs text-red-500 bg-red-500/10 border border-red-500/20 rounded-xl px-3 py-2 mb-3 w-full">
                     {setupError}
                   </p>
                 );
@@ -1487,7 +1515,7 @@ export function Store({
                     Open in Browser
                   </button>
                   <button
-                    className="w-full py-2 bg-gray-50 border border-gray-200 text-gray-600 rounded-2xl text-[12px] font-medium hover:bg-gray-100 transition-colors px-3"
+                    className="w-full py-2 bg-[var(--bg-muted)] border border-[var(--border-default)] text-[var(--text-secondary)] rounded-2xl text-[12px] font-medium hover:bg-[var(--bg-tertiary)] transition-colors px-3"
                     title={setupLaunchUrl}
                     onClick={() => {
                       void navigator.clipboard.writeText(setupLaunchUrl).then(() => {
@@ -1511,7 +1539,7 @@ export function Store({
                 </button>
               )}
               <button
-                className="w-full py-2.5 mb-3 bg-white border border-gray-200 text-gray-900 rounded-2xl text-[13px] font-bold hover:bg-gray-50 transition-colors"
+                className="w-full py-2.5 mb-3 bg-[var(--bg-card)] border border-[var(--border-default)] text-[var(--text-primary)] rounded-2xl text-[13px] font-bold hover:bg-[var(--bg-muted)] transition-colors"
                 onClick={() => {
                   void verifySetupComplete();
                 }}
@@ -1520,7 +1548,7 @@ export function Store({
                 {setupVerifying ? "Checking..." : "I've Completed Setup"}
               </button>
               <button
-                className="w-full py-3 bg-gray-100 text-gray-900 rounded-2xl text-[14px] font-bold hover:bg-gray-200 transition-colors"
+                className="w-full py-3 bg-[var(--bg-tertiary)] text-[var(--text-primary)] rounded-2xl text-[14px] font-bold hover:bg-[var(--bg-secondary)] transition-colors"
                 onClick={() => {
                   setSetupProvider(null);
                   setSetupTimedOut(false);

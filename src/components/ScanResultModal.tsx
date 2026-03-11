@@ -37,11 +37,11 @@ type Props = {
 };
 
 const SEVERITY_COLORS: Record<string, string> = {
-  CRITICAL: "text-red-600 bg-red-100",
-  HIGH: "text-red-500 bg-red-50",
-  MEDIUM: "text-yellow-600 bg-yellow-50",
-  LOW: "text-blue-600 bg-blue-50",
-  INFO: "text-gray-600 bg-gray-100",
+  CRITICAL: "text-red-500 bg-red-500/15",
+  HIGH: "text-red-500 bg-red-500/10",
+  MEDIUM: "text-yellow-500 bg-yellow-500/10",
+  LOW: "text-blue-500 bg-blue-500/10",
+  INFO: "text-[var(--text-secondary)] bg-[var(--bg-tertiary)]",
 };
 
 export function ScanResultModal({
@@ -110,15 +110,16 @@ export function ScanResultModal({
 
   return (
     <div className="fixed inset-0 bg-black/20 flex items-center justify-center z-50"
-         onClick={onClose}>
-      <div className="bg-white p-6 w-full max-w-lg m-4 max-h-[80vh] overflow-y-auto rounded-2xl shadow-xl border border-[var(--border-subtle)]"
+         onClick={onClose}
+         onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}>
+      <div className="bg-[var(--bg-card)] p-6 w-full max-w-lg m-4 max-h-[80vh] overflow-y-auto rounded-2xl shadow-xl border border-[var(--border-subtle)]"
            onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold text-[var(--text-primary)]">
             {isScanning ? `Installing ${targetName}` : `Security Scan: ${targetName}`}
           </h3>
-          <button onClick={onClose}
+          <button onClick={onClose} aria-label="Close"
             className="p-1.5 text-[var(--text-tertiary)] hover:text-[var(--text-primary)] rounded-md hover:bg-black/5">
             <X className="w-5 h-5" />
           </button>
@@ -164,17 +165,17 @@ export function ScanResultModal({
                     className={clsx(
                       "rounded-lg border px-3 py-2.5 flex items-start gap-2.5 transition-colors",
                       complete
-                        ? "border-green-100 bg-green-50"
+                        ? "border-green-500/20 bg-green-500/10"
                         : active
-                          ? "border-blue-100 bg-blue-50"
-                          : "border-[var(--border-subtle)] bg-white"
+                          ? "border-blue-500/20 bg-blue-500/10"
+                          : "border-[var(--border-subtle)] bg-[var(--bg-card)]"
                     )}
                   >
                     <div className="mt-0.5">
                       {complete ? (
-                        <CheckCircle2 className="w-4 h-4 text-green-600" />
+                        <CheckCircle2 className="w-4 h-4 text-green-500" />
                       ) : active ? (
-                        <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
+                        <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />
                       ) : (
                         <Circle className="w-4 h-4 text-[var(--text-tertiary)]" />
                       )}
@@ -203,20 +204,20 @@ export function ScanResultModal({
           <>
             {/* Summary badge */}
             <div className={clsx("rounded-lg p-4 mb-4 flex items-center gap-3",
-              scannerUnavailable ? "bg-amber-50" : scanResult.is_safe ? "bg-green-50" : isBlocked ? "bg-red-50" : "bg-yellow-50"
+              scannerUnavailable ? "bg-amber-500/10" : scanResult.is_safe ? "bg-green-500/10" : isBlocked ? "bg-red-500/10" : "bg-yellow-500/10"
             )}>
               {scannerUnavailable ? (
-                <AlertTriangle className="w-6 h-6 text-amber-600 shrink-0" />
+                <AlertTriangle className="w-6 h-6 text-amber-500 shrink-0" />
               ) : scanResult.is_safe ? (
-                <ShieldCheck className="w-6 h-6 text-green-600 shrink-0" />
+                <ShieldCheck className="w-6 h-6 text-green-500 shrink-0" />
               ) : isBlocked ? (
-                <ShieldAlert className="w-6 h-6 text-red-600 shrink-0" />
+                <ShieldAlert className="w-6 h-6 text-red-500 shrink-0" />
               ) : (
-                <AlertTriangle className="w-6 h-6 text-yellow-600 shrink-0" />
+                <AlertTriangle className="w-6 h-6 text-yellow-500 shrink-0" />
               )}
               <div>
                 <p className={clsx("font-medium",
-                  scannerUnavailable ? "text-amber-700" : scanResult.is_safe ? "text-green-700" : isBlocked ? "text-red-700" : "text-yellow-700"
+                  scannerUnavailable ? "text-amber-500" : scanResult.is_safe ? "text-green-500" : isBlocked ? "text-red-500" : "text-yellow-500"
                 )}>
                   {scannerUnavailable
                     ? "Scanner unavailable"
@@ -238,12 +239,12 @@ export function ScanResultModal({
                 {scanResult.findings.map((finding, idx) => (
                   <div key={idx} className="border border-[var(--border-subtle)] rounded-lg overflow-hidden">
                     <button onClick={() => toggleFinding(idx)}
-                      className="w-full flex items-center gap-2 p-3 text-left hover:bg-black/5">
+                      className="w-full flex items-center gap-2 p-3 text-left hover:bg-[var(--border-subtle)]">
                       {expandedFindings.has(idx)
                         ? <ChevronDown className="w-4 h-4 shrink-0" />
                         : <ChevronRight className="w-4 h-4 shrink-0" />}
                       <span className={clsx("text-xs font-medium px-2 py-0.5 rounded",
-                        SEVERITY_COLORS[finding.severity] || "text-gray-600 bg-gray-100"
+                        SEVERITY_COLORS[finding.severity] || "text-[var(--text-secondary)] bg-[var(--bg-tertiary)]"
                       )}>
                         {finding.severity}
                       </span>
@@ -265,7 +266,7 @@ export function ScanResultModal({
                           </pre>
                         )}
                         {finding.remediation && (
-                          <p className="text-xs text-blue-600">{finding.remediation}</p>
+                          <p className="text-xs text-blue-500">{finding.remediation}</p>
                         )}
                       </div>
                     )}
@@ -284,7 +285,7 @@ export function ScanResultModal({
               )}
               {onConfirm && !scanResult.is_safe && scanResult.scanner_available && isBlocked && (
                 <button onClick={onConfirm}
-                  className="btn btn-secondary !text-red-600 !border-red-200">
+                  className="btn btn-secondary !text-red-500 !border-red-500/20">
                   {confirmAnywayLabel}
                 </button>
               )}

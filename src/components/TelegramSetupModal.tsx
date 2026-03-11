@@ -191,9 +191,10 @@ export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) 
     <div
       className="fixed inset-0 bg-black/25 flex items-center justify-center z-50 p-4"
       onClick={onClose}
+      onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}
     >
       <div
-        className="w-full max-w-md rounded-2xl bg-white border border-[var(--border-subtle)] shadow-xl p-5"
+        className="w-full max-w-md rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] shadow-xl p-5"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-4">
@@ -203,7 +204,7 @@ export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) 
             </div>
             <h3 className="text-lg font-semibold text-[var(--text-primary)]">Setup Telegram messaging</h3>
           </div>
-          <button onClick={onClose} className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)]">
+          <button onClick={onClose} aria-label="Close" className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)]">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -255,16 +256,16 @@ export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) 
               </div>
             ) : null}
 
-            {errorMsg ? <p className="text-xs text-red-600">{errorMsg}</p> : null}
+            {errorMsg ? <p className="text-xs text-red-500">{errorMsg}</p> : null}
             {statusMsg ? (
-              <p className="text-xs text-green-700 flex items-center gap-1">
+              <p className="text-xs text-green-500 flex items-center gap-1">
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 {statusMsg}
               </p>
             ) : null}
 
             <div className="flex gap-2 pt-1">
-              <button onClick={verifyConnection} className="btn-secondary !text-xs !py-1.5">
+              <button onClick={verifyConnection} disabled={loadingState} className="btn-secondary !text-xs !py-1.5 disabled:opacity-50">
                 Check connection
               </button>
               {connected ? (

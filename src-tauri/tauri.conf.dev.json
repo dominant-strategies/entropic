@@ -47,7 +47,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/openclaw-runtime.tar.gz"
+      "resources/bin/*",
+      "resources/share/**/*"
     ],
     "category": "DeveloperTool",
     "shortDescription": "AI assistant with secure sandboxing",

@@ -23,7 +23,7 @@ function BillingGroup({ title, children }: { title?: string, children: React.Rea
           {title}
         </h3>
       )}
-      <div className="bg-white border border-[var(--border-subtle)] rounded-xl overflow-hidden shadow-sm">
+      <div className="bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl overflow-hidden shadow-sm">
         {children}
       </div>
     </div>
@@ -168,6 +168,7 @@ export function Billing() {
             </div>
             <button
               onClick={refreshBalance}
+              aria-label="Refresh balance"
               className="p-2 rounded-full hover:bg-[var(--system-gray-6)] transition-colors text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
             >
               <RefreshCw className="w-4 h-4" />
@@ -186,7 +187,7 @@ export function Billing() {
                 className={`flex-1 py-3 px-4 rounded-lg font-medium text-sm transition-all border
                           ${selectedAmount === cents
                             ? "bg-[var(--system-blue)] border-transparent text-white shadow-sm"
-                            : "bg-white border-[var(--border-default)] text-[var(--text-primary)] hover:bg-[var(--system-gray-6)]"
+                            : "bg-[var(--bg-card)] border-[var(--border-default)] text-[var(--text-primary)] hover:bg-[var(--system-gray-6)]"
                           }`}
               >
                 {label}
@@ -197,7 +198,7 @@ export function Billing() {
           <button
             onClick={handleAddCredits}
             disabled={isAddingCredits}
-            className="w-full py-3 bg-black text-white rounded-lg font-medium text-sm hover:bg-gray-800 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+            className="w-full py-3 bg-[var(--purple-accent)] text-white rounded-lg font-medium text-sm hover:bg-[var(--purple-accent-hover)] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
           >
             {isAddingCredits ? (
               <>

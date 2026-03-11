@@ -213,7 +213,7 @@ const CHAT_WORKSPACE_PREFIXES = [
   "/home/node/.openclaw/workspace",
 ];
 const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/node\/\.openclaw\/workspace)(?:\/[^\s`"'<>]+)?)/g;
-const DEFAULT_BROWSER_URL = "https://clawhub.ai/skills";
+const DEFAULT_BROWSER_URL = "https://www.google.com";
 const DEFAULT_BROWSER_LIVE_WS_BASE = "ws://127.0.0.1:19792/live";
 const CONTAINER_LOCAL_BROWSER_BASE = "http://container.localhost:19791";
 const WORKSPACE_FOLDER_REFRESH_MS = 1500;
@@ -224,6 +224,7 @@ const LOCAL_BROWSER_INPUT_RE = /^(?:container\.localhost|runtime\.localhost|loca
 const BROWSER_DESKTOP_MIN_VIEWPORT_WIDTH = 1180;
 const BROWSER_DESKTOP_MIN_VIEWPORT_HEIGHT = 760;
 const BROWSER_DESKTOP_VIEWPORT_SCALE = 1.08;
+const EMBEDDED_PREVIEW_FRAME_INSET = 8;
 const DESKTOP_TERMINAL_EVENT = "desktop-terminal-output";
 const PANEL_FALLBACK = (
   <div className="p-4 text-xs text-[var(--text-tertiary)]">Loading…</div>
@@ -319,6 +320,11 @@ function createBrowserTabState(overrides: Partial<BrowserTabState> = {}): Browse
     liveError: overrides.liveError ?? null,
     loading: overrides.loading ?? false,
   };
+}
+
+function browserTabTargetUrl(tab?: BrowserTabState | null): string {
+  if (!tab) return DEFAULT_BROWSER_URL;
+  return tab.embeddedPreview?.url || tab.liveState?.url || tab.snapshot?.url || tab.urlInput || DEFAULT_BROWSER_URL;
 }
 
 function persistBrowserTabState(tab: BrowserTabState): PersistedBrowserTab {
@@ -675,27 +681,25 @@ function AppWindow({
 
   return (
     <div
-      className="absolute flex flex-col rounded-xl overflow-hidden animate-scale-in"
+      className="absolute flex flex-col rounded-xl overflow-hidden animate-scale-in bg-[var(--bg-card)]"
       style={{
         top: position.y,
         left: position.x,
         width: size.w,
         height: size.h,
         zIndex,
-        background: glass ? "rgba(248,248,248,0.92)" : "#f6f1e8",
         backdropFilter: glass ? "blur(18px)" : "none",
         WebkitBackdropFilter: glass ? "blur(18px)" : "none",
-        boxShadow: "0 24px 70px rgba(0,0,0,0.28), 0 0 0 0.5px rgba(255,255,255,0.6)",
-        border: "1px solid rgba(255,255,255,0.65)",
+        boxShadow: "0 24px 70px rgba(0,0,0,0.28), 0 0 0 0.5px var(--border-subtle)",
+        border: "1px solid var(--border-subtle)",
       }}
       onMouseDownCapture={onFocus}
       onClick={(e) => e.stopPropagation()}
     >
       <div
-        className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing"
+        className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing bg-[var(--bg-secondary)]"
         style={{
-          background: glass ? "rgba(255,255,255,0.9)" : "#f9f4ec",
-          borderBottom: "1px solid rgba(0,0,0,0.08)",
+          borderBottom: "1px solid var(--border-subtle)",
         }}
         onMouseDown={onDragStart}
       >
@@ -713,16 +717,15 @@ function AppWindow({
         </div>
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="flex items-center gap-2">
-            <Icon className="w-3.5 h-3.5" style={{ color: "#7c3aed" }} />
-            <span className="text-xs font-medium" style={{ color: "#2b2b2b" }}>
+            <Icon className="w-3.5 h-3.5" style={{ color: "var(--purple-accent)" }} />
+            <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>
               {title}
             </span>
           </div>
         </div>
       </div>
       <div
-        className="flex-1 overflow-hidden"
-        style={{ background: glass ? "rgba(255,255,255,0.94)" : "#f6f1e8" }}
+        className="flex-1 overflow-hidden bg-[var(--bg-app)]"
       >
         <div className="h-full overflow-auto">{children}</div>
       </div>
@@ -925,7 +928,7 @@ export function Files({
       if (typeof saved.finderOpen === "boolean") setFinderOpen(saved.finderOpen);
       if (typeof saved.chatOpen === "boolean") setChatOpen(saved.chatOpen);
       if (typeof saved.chatNavCollapsed === "boolean") setChatNavCollapsed(saved.chatNavCollapsed);
-      if (typeof saved.browserOpen === "boolean") setBrowserOpen(saved.browserOpen);
+      const savedBrowserOpen = saved.browserOpen === true;
       if (typeof saved.terminalOpen === "boolean") setTerminalOpen(saved.terminalOpen);
       if (typeof saved.pluginsOpen === "boolean") setPluginsOpen(saved.pluginsOpen);
       if (typeof saved.skillsOpen === "boolean") setSkillsOpen(saved.skillsOpen);
@@ -1013,6 +1016,12 @@ export function Files({
             : null,
         );
       }
+      const savedLegacyBrowserTarget =
+        typeof saved.browserEmbeddedPreviewUrl === "string" && saved.browserEmbeddedPreviewUrl
+          ? saved.browserEmbeddedPreviewUrl
+          : typeof saved.browserUrlInput === "string"
+            ? saved.browserUrlInput
+            : "";
       if (Array.isArray(saved.browserTabs) && saved.browserTabs.length > 0) {
         const restoredTabs = saved.browserTabs
           .map((value) => {
@@ -1036,17 +1045,55 @@ export function Files({
               : restoredTabs[0]?.id ?? null;
           const activeTab =
             restoredTabs.find((tab) => tab.id === nextActiveTabId) ?? restoredTabs[0] ?? null;
-          setBrowserTabs(restoredTabs);
-          setActiveBrowserTabId(activeTab?.id ?? null);
-          if (activeTab) {
-            setBrowserUrlInput(presentBrowserUrl(activeTab.urlInput));
-            setBrowserSessionId(activeTab.sessionId);
-            setBrowserEmbeddedPreview(activeTab.embeddedPreview);
-            setBrowserSnapshot(activeTab.snapshot);
-            setBrowserLiveState(activeTab.liveState);
-            setBrowserLiveError(activeTab.liveError);
-            setBrowserLoading(activeTab.loading);
+          const activeTarget = browserTabTargetUrl(activeTab);
+          if (isTrustedLocalPreviewUrl(activeTarget)) {
+            const fallbackTab = createBrowserTabState({
+              title: null,
+              urlInput: DEFAULT_BROWSER_URL,
+            });
+            setBrowserTabs([fallbackTab]);
+            setActiveBrowserTabId(fallbackTab.id);
+            setBrowserUrlInput(DEFAULT_BROWSER_URL);
+            setBrowserSessionId(null);
+            setBrowserEmbeddedPreview(null);
+            setBrowserSnapshot(null);
+            setBrowserLiveState(null);
+            setBrowserLiveError(null);
+            setBrowserLoading(false);
+            setBrowserOpen(false);
+          } else {
+            setBrowserTabs(restoredTabs);
+            setActiveBrowserTabId(activeTab?.id ?? null);
+            setBrowserOpen(savedBrowserOpen);
+            if (activeTab) {
+              setBrowserUrlInput(presentBrowserUrl(activeTab.urlInput));
+              setBrowserSessionId(activeTab.sessionId);
+              setBrowserEmbeddedPreview(activeTab.embeddedPreview);
+              setBrowserSnapshot(activeTab.snapshot);
+              setBrowserLiveState(activeTab.liveState);
+              setBrowserLiveError(activeTab.liveError);
+              setBrowserLoading(activeTab.loading);
+            }
           }
+        }
+      } else {
+        if (savedLegacyBrowserTarget && isTrustedLocalPreviewUrl(savedLegacyBrowserTarget)) {
+          const fallbackTab = createBrowserTabState({
+            title: null,
+            urlInput: DEFAULT_BROWSER_URL,
+          });
+          setBrowserTabs([fallbackTab]);
+          setActiveBrowserTabId(fallbackTab.id);
+          setBrowserUrlInput(DEFAULT_BROWSER_URL);
+          setBrowserSessionId(null);
+          setBrowserEmbeddedPreview(null);
+          setBrowserSnapshot(null);
+          setBrowserLiveState(null);
+          setBrowserLiveError(null);
+          setBrowserLoading(false);
+          setBrowserOpen(false);
+        } else {
+          setBrowserOpen(savedBrowserOpen);
         }
       }
       const nextDesktopIcons = asDesktopIcons(saved.desktopIcons);
@@ -1739,6 +1786,28 @@ export function Files({
       setBrowserOpen(true);
     }
     focusWindow("browser");
+  }
+
+  function openFreshBrowserWindow(targetUrl: string = DEFAULT_BROWSER_URL) {
+    const normalizedTarget = normalizeBrowserUrl(targetUrl) || DEFAULT_BROWSER_URL;
+    const nextTab = createBrowserTabState({
+      title: null,
+      urlInput: normalizedTarget,
+      embeddedPreview:
+        isTrustedLocalPreviewUrl(normalizedTarget)
+          ? { url: normalizedTarget, title: null }
+          : null,
+      loading: false,
+    });
+    setBrowserTabs([nextTab]);
+    setActiveBrowserTabId(nextTab.id);
+    applyBrowserTabState(nextTab);
+    setBrowserOpen(true);
+    setBrowserLoadError(null);
+    focusWindow("browser");
+    if (!isTrustedLocalPreviewUrl(normalizedTarget)) {
+      void navigateBrowser(normalizedTarget);
+    }
   }
 
   async function closeBrowserTab(tabId: string) {
@@ -3053,13 +3122,18 @@ export function Files({
       if (rect.width <= 0 || rect.height <= 0) {
         return;
       }
+      const previewInset = EMBEDDED_PREVIEW_FRAME_INSET;
+      const embeddedPreviewX = rect.left + previewInset;
+      const embeddedPreviewY = rect.top + previewInset;
+      const embeddedPreviewWidth = Math.max(rect.width - previewInset * 2, 1);
+      const embeddedPreviewHeight = Math.max(rect.height - previewInset * 2, 1);
 
       const nextKey = [
         browserEmbeddedPreview.url,
-        Math.round(rect.left),
-        Math.round(rect.top),
-        Math.round(rect.width),
-        Math.round(rect.height),
+        Math.round(embeddedPreviewX),
+        Math.round(embeddedPreviewY),
+        Math.round(embeddedPreviewWidth),
+        Math.round(embeddedPreviewHeight),
       ].join("|");
       if (browserEmbeddedPreviewSyncKeyRef.current === nextKey) {
         return;
@@ -3069,10 +3143,10 @@ export function Files({
       try {
         const resolved = await syncEmbeddedPreviewWebview({
           url: browserEmbeddedPreview.url,
-          x: rect.left,
-          y: rect.top,
-          width: rect.width,
-          height: rect.height,
+          x: embeddedPreviewX,
+          y: embeddedPreviewY,
+          width: embeddedPreviewWidth,
+          height: embeddedPreviewHeight,
           visible: true,
         });
         if (cancelled) return;
@@ -3566,19 +3640,19 @@ export function Files({
                 )
               }
             >
-              <div className="h-full min-w-0 flex bg-[#f4f0ea] text-[var(--text-primary)]">
+              <div className="h-full min-w-0 flex bg-[var(--bg-app)] text-[var(--text-primary)]">
                 <aside
                   className={`${chatNavCollapsed ? "w-[78px]" : "w-[280px]"} shrink-0 border-r flex flex-col transition-[width] duration-200`}
-                  style={{ borderColor: "rgba(0,0,0,0.08)", background: "linear-gradient(180deg, rgba(255,250,243,0.98) 0%, rgba(244,238,228,0.98) 100%)" }}
+                  style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
                 >
-                  <div className="p-3 border-b" style={{ borderColor: "rgba(0,0,0,0.08)" }}>
+                  <div className="p-3 border-b" style={{ borderColor: "var(--border-subtle)" }}>
                     <div className={`flex items-center gap-2 ${chatNavCollapsed ? "flex-col" : "justify-between mb-3"}`}>
                       <div className={`min-w-0 ${chatNavCollapsed ? "flex flex-col items-center gap-2 w-full" : ""}`}>
                         <button
                           type="button"
                           onClick={() => setChatNavCollapsed((prev) => !prev)}
-                          className="h-8 w-8 rounded-xl border flex items-center justify-center transition-colors hover:bg-black/5"
-                          style={{ borderColor: "rgba(36,26,18,0.1)", color: "#241a12" }}
+                          className="h-8 w-8 rounded-xl border flex items-center justify-center transition-colors hover:bg-[var(--border-subtle)]"
+                          style={{ borderColor: "var(--border-subtle)", color: "var(--text-primary)" }}
                           title={chatNavCollapsed ? "Expand conversations" : "Collapse conversations"}
                           aria-label={chatNavCollapsed ? "Expand conversations" : "Collapse conversations"}
                         >
@@ -3590,10 +3664,10 @@ export function Files({
                         </button>
                         {!chatNavCollapsed && (
                           <>
-                            <p className="text-[11px] uppercase tracking-[0.24em]" style={{ color: "rgba(36,26,18,0.46)" }}>
+                            <p className="text-[11px] uppercase tracking-[0.24em]" style={{ color: "var(--text-tertiary)" }}>
                               Conversations
                             </p>
-                            <p className="text-[12px] mt-1" style={{ color: "rgba(36,26,18,0.68)" }}>
+                            <p className="text-[12px] mt-1" style={{ color: "var(--text-secondary)" }}>
                               {activeChatSession ? desktopChatSessionTitle(activeChatSession) : "Shared with main chat"}
                             </p>
                           </>
@@ -3603,7 +3677,7 @@ export function Files({
                         type="button"
                         onClick={createNewChatSession}
                         className={`h-8 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 ${chatNavCollapsed ? "w-8 px-0" : "px-3"}`}
-                        style={{ background: "rgba(36,26,18,0.92)", color: "#fff8ef", border: "1px solid rgba(36,26,18,0.1)" }}
+                        style={{ background: "var(--text-primary)", color: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}
                         title="New chat"
                       >
                         <Plus className="w-3.5 h-3.5" />
@@ -3617,14 +3691,14 @@ export function Files({
                         onChange={(e) => setChatSessionQuery(e.target.value)}
                         placeholder="Search history"
                         className="w-full h-9 px-3 rounded-xl text-xs outline-none"
-                        style={{ background: "rgba(255,255,255,0.78)", color: "#241a12", border: "1px solid rgba(36,26,18,0.1)" }}
+                        style={{ background: "var(--bg-card)", color: "var(--text-primary)", border: "1px solid var(--border-subtle)" }}
                       />
                     )}
                   </div>
                   <div className={`flex-1 overflow-auto ${chatNavCollapsed ? "p-2 space-y-2" : "p-2 space-y-1.5"}`}>
                     {visibleChatSessions.length === 0 ? (
                       <div className="px-3 py-5 text-center">
-                        <p className="text-xs" style={{ color: "rgba(36,26,18,0.58)" }}>No matching chats</p>
+                        <p className="text-xs" style={{ color: "var(--text-tertiary)" }}>No matching chats</p>
                       </div>
                     ) : chatNavCollapsed ? visibleChatSessions.slice(0, 8).map((session) => {
                       const isActive = session.key === chatCurrentSession;
@@ -3636,9 +3710,9 @@ export function Files({
                           onClick={() => selectChatSession(session.key)}
                           className="w-full h-11 rounded-2xl border flex items-center justify-center transition-colors"
                           style={{
-                            background: isActive ? "rgba(109,40,217,0.12)" : "rgba(255,255,255,0.56)",
-                            borderColor: isActive ? "rgba(109,40,217,0.18)" : "rgba(36,26,18,0.06)",
-                            color: "#241a12",
+                            background: isActive ? "rgba(139,92,246,0.15)" : "var(--bg-tertiary)",
+                            borderColor: isActive ? "rgba(139,92,246,0.25)" : "var(--border-subtle)",
+                            color: "var(--text-primary)",
                           }}
                           title={desktopChatSessionTitle(session)}
                         >
@@ -3654,20 +3728,20 @@ export function Files({
                             onClick={() => selectChatSession(session.key)}
                             className="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-2xl text-left transition-colors min-w-0"
                             style={{
-                              background: isActive ? "rgba(109,40,217,0.12)" : "rgba(255,255,255,0.56)",
-                              border: isActive ? "1px solid rgba(109,40,217,0.18)" : "1px solid rgba(36,26,18,0.06)",
+                              background: isActive ? "rgba(139,92,246,0.15)" : "var(--bg-tertiary)",
+                              border: isActive ? "1px solid rgba(139,92,246,0.25)" : "1px solid var(--border-subtle)",
                             }}
                           >
                             {session.pinned ? (
-                              <Pin className="w-3.5 h-3.5 shrink-0" style={{ color: "rgba(36,26,18,0.54)" }} />
+                              <Pin className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--text-secondary)" }} />
                             ) : (
-                              <MessageSquare className="w-3.5 h-3.5 shrink-0" style={{ color: "rgba(36,26,18,0.54)" }} />
+                              <MessageSquare className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--text-secondary)" }} />
                             )}
                             <div className="min-w-0 flex-1">
-                              <p className="truncate text-[12px] font-semibold" style={{ color: "#241a12" }}>
+                              <p className="truncate text-[12px] font-semibold" style={{ color: "var(--text-primary)" }}>
                                 {desktopChatSessionTitle(session)}
                               </p>
-                              <p className="mt-1 text-[10px]" style={{ color: "rgba(36,26,18,0.48)" }}>
+                              <p className="mt-1 text-[10px]" style={{ color: "var(--text-tertiary)" }}>
                                 {typeof session.updatedAt === "number"
                                   ? formatDate(Math.floor(session.updatedAt / 1000))
                                   : "Saved conversation"}
@@ -3681,8 +3755,8 @@ export function Files({
                               e.stopPropagation();
                               setOpenChatSessionMenuKey((prev) => (prev === session.key ? null : session.key));
                             }}
-                            className="p-1.5 rounded-lg transition-colors hover:bg-black/5"
-                            style={{ color: "rgba(36,26,18,0.54)" }}
+                            className="p-1.5 rounded-lg transition-colors hover:bg-[var(--border-subtle)]"
+                            style={{ color: "var(--text-secondary)" }}
                             title="Chat options"
                             aria-label="Chat options"
                           >
@@ -3693,8 +3767,8 @@ export function Files({
                               data-desktop-chat-session-menu
                               className="absolute right-0 top-10 z-30 w-40 rounded-xl border p-1.5 shadow-lg"
                               style={{
-                                background: "rgba(255,250,243,0.98)",
-                                borderColor: "rgba(36,26,18,0.1)",
+                                background: "var(--bg-card)",
+                                borderColor: "var(--border-subtle)",
                               }}
                             >
                               <button
@@ -3708,8 +3782,8 @@ export function Files({
                                   });
                                   setOpenChatSessionMenuKey(null);
                                 }}
-                                className="w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] text-left transition-colors hover:bg-black/5"
-                                style={{ color: "#241a12" }}
+                                className="w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] text-left transition-colors hover:bg-[var(--border-subtle)]"
+                                style={{ color: "var(--text-primary)" }}
                               >
                                 <Pin className="w-3.5 h-3.5" />
                                 {session.pinned ? "Unpin" : "Pin"}
@@ -3721,7 +3795,7 @@ export function Files({
                                   requestChatSessionAction({ type: "delete", key: session.key });
                                   setOpenChatSessionMenuKey(null);
                                 }}
-                                className="w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] text-left transition-colors hover:bg-red-50"
+                                className="w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] text-left transition-colors hover:bg-red-500/10"
                                 style={{ color: "#dc2626" }}
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
@@ -3735,20 +3809,20 @@ export function Files({
                   </div>
                 </aside>
 
-                <div className="min-w-0 flex-1 flex flex-col bg-[rgba(255,255,255,0.62)]">
+                <div className="min-w-0 flex-1 flex flex-col bg-[var(--bg-app)]">
                   <div
                     className="px-4 py-3 border-b flex items-center justify-between gap-3"
-                    style={{ borderColor: "rgba(0,0,0,0.08)", background: "rgba(255,250,243,0.82)" }}
+                    style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
                   >
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold" style={{ color: "#241a12" }}>
+                      <p className="truncate text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
                         {activeChatSession ? desktopChatSessionTitle(activeChatSession) : DEFAULT_DESKTOP_CHAT_TITLE}
                       </p>
-                      <p className="mt-1 text-[11px]" style={{ color: "rgba(36,26,18,0.56)" }}>
+                      <p className="mt-1 text-[11px]" style={{ color: "var(--text-secondary)" }}>
                         Same sessions, drafts, and history as the main chat view
                       </p>
                     </div>
-                    <div className="shrink-0 px-2.5 py-1 rounded-full text-[10px] font-medium" style={{ background: "rgba(36,26,18,0.06)", color: "rgba(36,26,18,0.56)" }}>
+                    <div className="shrink-0 px-2.5 py-1 rounded-full text-[10px] font-medium" style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}>
                       {chatSessions.length} session{chatSessions.length === 1 ? "" : "s"}
                     </div>
                   </div>
@@ -3815,8 +3889,8 @@ export function Files({
                 )
               }
             >
-              <div className="h-full flex flex-col bg-white">
-                <div className="flex items-center gap-2 px-2 py-2 border-b border-[var(--border-subtle)] bg-[#f7f3eb]">
+              <div className="h-full flex flex-col bg-[var(--bg-card)]">
+                <div className="flex items-center gap-2 px-2 py-2 border-b border-[var(--border-subtle)] bg-[var(--bg-secondary)]">
                   <div className="flex-1 min-w-0 flex items-center gap-2 overflow-x-auto">
                     {browserTabs.map((tab) => {
                       const isActive = tab.id === activeBrowserTabId;
@@ -3827,10 +3901,10 @@ export function Files({
                           onClick={() => selectBrowserTab(tab.id)}
                           className={`group min-w-0 max-w-[240px] h-9 px-3 rounded-xl border flex items-center gap-2 text-sm transition-colors ${
                             isActive
-                              ? "bg-white text-[var(--text-primary)] shadow-sm"
-                              : "bg-white/55 text-[var(--text-secondary)] hover:bg-white/80"
+                              ? "bg-[var(--bg-card)] text-[var(--text-primary)] shadow-sm"
+                              : "bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
                           }`}
-                          style={{ borderColor: isActive ? "rgba(24,34,48,0.12)" : "rgba(24,34,48,0.08)" }}
+                          style={{ borderColor: isActive ? "var(--border-default)" : "var(--border-subtle)" }}
                           title={browserTabLabel(tab)}
                         >
                           <Globe className="w-3.5 h-3.5 shrink-0" />
@@ -3844,7 +3918,7 @@ export function Files({
                               e.stopPropagation();
                               void closeBrowserTab(tab.id);
                             }}
-                            className="shrink-0 rounded-md p-0.5 text-[var(--text-tertiary)] hover:bg-black/5 hover:text-[var(--text-primary)]"
+                            className="shrink-0 rounded-md p-0.5 text-[var(--text-tertiary)] hover:bg-[var(--border-subtle)] hover:text-[var(--text-primary)]"
                             aria-label={`Close ${browserTabLabel(tab)}`}
                           >
                             <X className="w-3.5 h-3.5" />
@@ -3856,7 +3930,7 @@ export function Files({
                   <button
                     type="button"
                     onClick={() => createBrowserTab()}
-                    className="h-9 w-9 shrink-0 rounded-xl border border-[var(--border-subtle)] bg-white text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                    className="h-9 w-9 shrink-0 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     title="New tab"
                     aria-label="New tab"
                   >
@@ -3875,7 +3949,7 @@ export function Files({
                       type="button"
                       onClick={() => { void goBrowserBack(); }}
                       disabled={!browserCanGoBack || browserLoading}
-                      className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-white text-[var(--text-secondary)] disabled:opacity-40"
+                      className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] disabled:opacity-40"
                       title="Back"
                     >
                       <ChevronLeft className="w-4 h-4 mx-auto" />
@@ -3884,7 +3958,7 @@ export function Files({
                       type="button"
                       onClick={() => { void goBrowserForward(); }}
                       disabled={!browserCanGoForward || browserLoading}
-                      className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-white text-[var(--text-secondary)] disabled:opacity-40"
+                      className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] disabled:opacity-40"
                       title="Forward"
                     >
                       <ChevronRight className="w-4 h-4 mx-auto" />
@@ -3892,7 +3966,7 @@ export function Files({
                     <button
                       type="button"
                       onClick={() => { void reloadBrowser(); }}
-                      className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-white text-[var(--text-secondary)]"
+                      className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)]"
                       title="Reload"
                     >
                       {browserLoading ? (
@@ -3905,7 +3979,7 @@ export function Files({
                       type="text"
                       value={browserUrlInput}
                       onChange={(e) => setBrowserUrlInput(e.target.value)}
-                      className="flex-1 h-8 px-3 rounded-lg border border-[var(--border-subtle)] bg-white text-sm outline-none"
+                      className="flex-1 h-8 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-sm outline-none"
                       placeholder="Enter URL"
                     />
                     <button
@@ -3917,13 +3991,13 @@ export function Files({
                     <button
                       type="button"
                       onClick={() => openBrowserExternally(browserUrlInput)}
-                      className="h-8 px-3 rounded-lg border border-[var(--border-subtle)] bg-white text-sm font-medium text-[var(--text-primary)]"
+                      className="h-8 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-sm font-medium text-[var(--text-primary)]"
                     >
                       Open
                     </button>
                   </form>
                 </div>
-                <div className="relative flex-1 bg-white">
+                <div className="relative flex-1 bg-[var(--bg-card)]">
                   {browserLoading && !browserSnapshot && !browserLiveState && !browserUsingEmbeddedPreview ? (
                     <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
                       <div className="flex items-center gap-2">
@@ -3936,7 +4010,7 @@ export function Files({
                       <div
                         ref={browserViewportRef}
                         className={browserUsingEmbeddedPreview
-                          ? "flex-1 min-h-0 overflow-hidden bg-white"
+                          ? "flex-1 min-h-0 overflow-hidden bg-[var(--bg-card)]"
                           : browserUsingEmbeddedRemoteDesktop
                           ? "flex-1 min-h-0 overflow-hidden bg-[#f4f4f5]"
                           : browserLiveConnected
@@ -3944,7 +4018,7 @@ export function Files({
                           : "flex-1 min-h-0 overflow-auto bg-[#f5f5f5]"}
                       >
                         {browserUsingEmbeddedPreview ? (
-                          <div className="relative w-full h-full overflow-hidden bg-white">
+                          <div className="relative w-full h-full overflow-hidden bg-[var(--bg-card)]">
                             {browserEmbeddedPreviewCovered && browserSnapshotImage ? (
                               <img
                                 src={browserSnapshotImage}
@@ -3960,12 +4034,12 @@ export function Files({
                             ) : null}
                           </div>
                         ) : browserUsingEmbeddedRemoteDesktop && browserRemoteDesktopUrl ? (
-                          <div className="relative w-full h-full overflow-hidden bg-white">
+                          <div className="relative w-full h-full overflow-hidden bg-[var(--bg-card)]">
                             <iframe
                               key={browserRemoteDesktopUrl}
                               src={browserRemoteDesktopUrl}
                               title={browserTitle}
-                              className="absolute left-0 w-full border-0 bg-white"
+                              className="absolute left-0 w-full border-0 bg-[var(--bg-card)]"
                               allow="clipboard-read; clipboard-write"
                               style={{
                                 top: -44,
@@ -4407,8 +4481,8 @@ export function Files({
             <button
               onClick={() => {
                 if (!browserOpen) {
-                  setBrowserOpen(true);
-                  void navigateBrowser(browserUrlInput || DEFAULT_BROWSER_URL);
+                  openFreshBrowserWindow(DEFAULT_BROWSER_URL);
+                  return;
                 }
                 focusWindow("browser");
               }}

@@ -160,6 +160,7 @@ export function Logs({ compact = false, className = "" }: LogsProps) {
           <button
             onClick={refreshLogs}
             disabled={loading}
+            aria-label="Refresh logs"
             className="p-2 rounded-lg transition-all duration-200"
             style={{ color: 'var(--text-tertiary)' }}
             onMouseEnter={(e) => {
@@ -176,6 +177,7 @@ export function Logs({ compact = false, className = "" }: LogsProps) {
           <button
             onClick={handleCopyLogs}
             disabled={copying || !rawLogText.trim()}
+            aria-label="Copy logs"
             className="p-2 rounded-lg transition-all duration-200 disabled:opacity-40"
             style={{ color: 'var(--text-tertiary)' }}
             onMouseEnter={(e) => {
@@ -192,6 +194,7 @@ export function Logs({ compact = false, className = "" }: LogsProps) {
           <button
             onClick={handleExportLogs}
             disabled={exporting || !rawLogText.trim()}
+            aria-label="Export logs"
             className="p-2 rounded-lg transition-all duration-200 disabled:opacity-40"
             style={{ color: 'var(--text-tertiary)' }}
             onMouseEnter={(e) => {
@@ -208,6 +211,7 @@ export function Logs({ compact = false, className = "" }: LogsProps) {
           <button
             onClick={clearLogs}
             disabled={clearing || !rawLogText.trim()}
+            aria-label="Clear logs"
             className="p-2 rounded-lg transition-all duration-200"
             style={{ color: 'var(--text-tertiary)' }}
             onMouseEnter={(e) => {

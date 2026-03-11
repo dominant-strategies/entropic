@@ -11,7 +11,7 @@ function ChannelGroup({ title, children }: { title: string; children: ReactNode 
   return (
     <div className="mb-10">
       <h2 className="text-xl font-bold text-[var(--text-primary)] mb-4">{title}</h2>
-      <div className="bg-white rounded-2xl shadow-sm border border-[var(--border-subtle)] p-6 space-y-6">
+      <div className="bg-[var(--bg-card)] rounded-2xl shadow-sm border border-[var(--border-subtle)] p-6 space-y-6">
         {children}
       </div>
     </div>
@@ -32,7 +32,7 @@ function TelegramConnectionStatus({
   if (!tokenSaved) {
     return (
       <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-        <WifiOff className="w-4 h-4 text-gray-400" />
+        <WifiOff className="w-4 h-4 text-[var(--text-tertiary)]" />
         <span>Not configured</span>
       </div>
     );
@@ -40,7 +40,7 @@ function TelegramConnectionStatus({
 
   if (connected) {
     return (
-      <div className="flex items-center gap-2 text-xs text-green-700">
+      <div className="flex items-center gap-2 text-xs text-green-500">
         <Wifi className="w-4 h-4" />
         <span className="font-medium">Connected</span>
       </div>
@@ -50,14 +50,14 @@ function TelegramConnectionStatus({
   if (!gatewayRunning) {
     return (
       <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-        <WifiOff className="w-4 h-4 text-gray-400" />
+        <WifiOff className="w-4 h-4 text-[var(--text-tertiary)]" />
         <span>Gateway offline</span>
       </div>
     );
   }
 
   return (
-    <div className="flex items-center gap-2 text-xs text-amber-700">
+    <div className="flex items-center gap-2 text-xs text-amber-500">
       {checking ? (
         <Loader2 className="w-4 h-4 animate-spin" />
       ) : (
@@ -527,7 +527,7 @@ export function Channels() {
           <h1 className="text-3xl font-bold text-[var(--text-primary)] mb-2 tracking-tight">Telegram Setup</h1>
           <p className="text-lg text-[var(--text-secondary)]">Configure your Telegram bot to enable messaging.</p>
         </div>
-        <div className="bg-white rounded-2xl shadow-sm border border-[var(--border-subtle)] p-8 flex items-center gap-3 text-sm text-[var(--text-secondary)]">
+        <div className="bg-[var(--bg-card)] rounded-2xl shadow-sm border border-[var(--border-subtle)] p-8 flex items-center gap-3 text-sm text-[var(--text-secondary)]">
           <Loader2 className="w-4 h-4 animate-spin text-[var(--text-tertiary)]" />
           Loading Telegram configuration...
         </div>
@@ -567,13 +567,13 @@ export function Channels() {
                 )}
               </div>
 
-              <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <h4 className="text-sm font-semibold text-blue-900 mb-2">Setup Instructions:</h4>
-                <ol className="text-sm text-blue-800 space-y-1 list-decimal list-inside">
-                  <li>Open Telegram and message <span className="font-mono bg-blue-100 px-1 rounded">@BotFather</span></li>
-                  <li>Send <span className="font-mono bg-blue-100 px-1 rounded">/newbot</span> and follow prompts to create your bot</li>
+              <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+                <h4 className="text-sm font-semibold text-[var(--text-primary)] mb-2">Setup Instructions:</h4>
+                <ol className="text-sm text-[var(--text-secondary)] space-y-1 list-decimal list-inside">
+                  <li>Open Telegram and message <span className="font-mono bg-blue-500/15 px-1 rounded text-[var(--text-primary)]">@BotFather</span></li>
+                  <li>Send <span className="font-mono bg-blue-500/15 px-1 rounded text-[var(--text-primary)]">/newbot</span> and follow prompts to create your bot</li>
                   <li>Copy the bot token and paste it below, then click "Save Bot Token"</li>
-                  <li>Message your new bot and send <span className="font-mono bg-blue-100 px-1 rounded">/start</span></li>
+                  <li>Message your new bot and send <span className="font-mono bg-blue-500/15 px-1 rounded text-[var(--text-primary)]">/start</span></li>
                   <li>Check your Telegram messages for the pairing token, paste it below, then click "Approve"</li>
                 </ol>
               </div>
@@ -590,22 +590,22 @@ export function Channels() {
                   <button
                     onClick={() => saveMessagingSetup("token")}
                     disabled={savingSetup || telegramToken.trim().length === 0}
-                    className="px-4 py-2 bg-black text-white rounded-lg text-sm font-semibold hover:bg-gray-800 disabled:opacity-50 flex items-center gap-2"
+                    className="px-4 py-2 bg-[#1A1A2E] text-white rounded-lg text-sm font-semibold hover:opacity-80 disabled:opacity-50 flex items-center gap-2"
                   >
                     {savingSetup && <Loader2 className="w-4 h-4 animate-spin" />}
                     {savingSetup ? "Validating..." : "Save Bot Token"}
                   </button>
                 </div>
-                {saveError && <p className="text-sm text-red-600">{saveError}</p>}
+                {saveError && <p className="text-sm text-red-500">{saveError}</p>}
                 {saveMessage && (
-                  <p className="text-sm text-green-700 flex items-center gap-1">
+                  <p className="text-sm text-green-500 flex items-center gap-1">
                     <CheckCircle2 className="w-4 h-4" />
                     {saveMessage}
                   </p>
                 )}
                 {restartPending && (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 flex items-center justify-between gap-3">
-                    <p className="text-xs text-amber-800">
+                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 flex items-center justify-between gap-3">
+                    <p className="text-xs text-[var(--text-secondary)]">
                       Telegram changes are saved. Restart gateway to apply them now.
                     </p>
                     <button
@@ -642,12 +642,12 @@ export function Channels() {
                         value={telegramPairingCode}
                         onChange={(e) => setTelegramPairingCode(e.target.value)}
                         placeholder="Pairing code from Telegram"
-                        className="flex-1 px-4 py-2 bg-white border border-[var(--border-subtle)] rounded-lg focus:ring-2 focus:ring-[var(--system-blue)]/20 outline-none text-sm"
+                        className="flex-1 px-4 py-2 bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-lg focus:ring-2 focus:ring-[var(--system-blue)]/20 outline-none text-sm"
                       />
                       <button
                         onClick={approveTelegramPairing}
                         disabled={telegramPairingCode.trim().length === 0}
-                        className="px-4 py-2 bg-black text-white rounded-lg text-sm font-semibold hover:bg-gray-800 disabled:opacity-50"
+                        className="px-4 py-2 bg-[#1A1A2E] text-white rounded-lg text-sm font-semibold hover:opacity-80 disabled:opacity-50"
                       >
                         Approve
                       </button>
@@ -656,7 +656,7 @@ export function Channels() {
                     <button
                       onClick={disconnectTelegram}
                       disabled={savingSetup}
-                      className="text-xs text-red-500 hover:text-red-700 transition-colors disabled:opacity-50 text-left"
+                      className="text-xs text-red-500 hover:text-red-400 transition-colors disabled:opacity-50 text-left"
                     >
                       Remove bot token
                     </button>
@@ -664,18 +664,18 @@ export function Channels() {
                 )}
 
                 {telegramTokenSaved && telegramConnected && (
-                  <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3">
+                  <div className="rounded-lg border border-green-500/20 bg-green-500/10 px-4 py-3">
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
-                        <CheckCircle2 className="w-4 h-4 text-green-700" />
-                        <p className="text-xs font-medium text-green-800">
+                        <CheckCircle2 className="w-4 h-4 text-green-500" />
+                        <p className="text-xs font-medium text-[var(--text-primary)]">
                           Telegram bot is connected and ready to receive messages
                         </p>
                       </div>
                       <button
                         onClick={disconnectTelegram}
                         disabled={savingSetup}
-                        className="px-3 py-1.5 text-xs font-medium rounded-lg text-red-600 hover:bg-red-100 transition-colors disabled:opacity-50 whitespace-nowrap"
+                        className="px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-50 whitespace-nowrap"
                       >
                         Disconnect
                       </button>
@@ -695,7 +695,7 @@ export function Channels() {
                             e.stopPropagation();
                             setShowAdvancedHelp(true);
                           }}
-                          className="w-6 h-6 rounded-full border border-[var(--border-subtle)] text-xs font-bold text-[var(--text-secondary)] hover:bg-white"
+                          className="w-6 h-6 rounded-full border border-[var(--border-subtle)] text-xs font-bold text-[var(--text-secondary)] hover:bg-[var(--bg-card)]"
                           aria-label="Explain advanced Telegram settings"
                           title="Explain advanced Telegram settings"
                         >
@@ -713,7 +713,7 @@ export function Channels() {
                           <select
                             value={telegramDmPolicy}
                             onChange={(e) => setTelegramDmPolicy(normalizeTelegramDmPolicy(e.target.value))}
-                            className="mt-1 w-full px-3 py-2 bg-white border border-[var(--border-subtle)] rounded-md text-sm text-[var(--text-primary)]"
+                            className="mt-1 w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-md text-sm text-[var(--text-primary)]"
                           >
                             <option value="pairing">pairing</option>
                             <option value="allowlist">allowlist</option>
@@ -726,7 +726,7 @@ export function Channels() {
                           <select
                             value={telegramGroupPolicy}
                             onChange={(e) => setTelegramGroupPolicy(normalizeTelegramGroupPolicy(e.target.value))}
-                            className="mt-1 w-full px-3 py-2 bg-white border border-[var(--border-subtle)] rounded-md text-sm text-[var(--text-primary)]"
+                            className="mt-1 w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-md text-sm text-[var(--text-primary)]"
                           >
                             <option value="allowlist">allowlist</option>
                             <option value="open">open</option>
@@ -738,7 +738,7 @@ export function Channels() {
                           <select
                             value={telegramReplyToMode}
                             onChange={(e) => setTelegramReplyToMode(normalizeTelegramReplyToMode(e.target.value))}
-                            className="mt-1 w-full px-3 py-2 bg-white border border-[var(--border-subtle)] rounded-md text-sm text-[var(--text-primary)]"
+                            className="mt-1 w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-md text-sm text-[var(--text-primary)]"
                           >
                             <option value="off">off</option>
                             <option value="first">first</option>
@@ -783,7 +783,7 @@ export function Channels() {
                           type="button"
                           onClick={() => saveMessagingSetup("settings")}
                           disabled={savingSetup || telegramToken.trim().length === 0}
-                          className="px-4 py-2 bg-black text-white rounded-lg text-sm font-semibold hover:bg-gray-800 disabled:opacity-50"
+                          className="px-4 py-2 bg-[#1A1A2E] text-white rounded-lg text-sm font-semibold hover:opacity-80 disabled:opacity-50"
                         >
                           {savingSetup ? "Saving..." : "Save Settings"}
                         </button>
@@ -802,9 +802,10 @@ export function Channels() {
         <div
           className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
           onClick={() => setShowAdvancedHelp(false)}
+          onKeyDown={(e) => { if (e.key === "Escape") setShowAdvancedHelp(false); }}
         >
           <div
-            className="w-full max-w-xl bg-white rounded-xl border border-[var(--border-subtle)] shadow-xl"
+            className="w-full max-w-xl bg-[var(--bg-card)] rounded-xl border border-[var(--border-subtle)] shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-4 py-3 border-b border-[var(--border-subtle)] flex items-center justify-between">

@@ -150,7 +150,7 @@ export function ModelSelector({ selectedModel, onModelChange, compact = false, u
         <button
           onClick={() => setIsOpen(!isOpen)}
           className="flex items-center gap-2 px-3 py-1.5 rounded-lg
-                   bg-white border border-[var(--border-subtle)] shadow-sm
+                   bg-[var(--bg-card)] border border-[var(--border-subtle)] shadow-sm
                    hover:bg-[var(--system-gray-6)]
                    text-[13px] text-[var(--text-primary)] font-medium transition-all"
         >
@@ -163,7 +163,7 @@ export function ModelSelector({ selectedModel, onModelChange, compact = false, u
           <>
             <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
             <div className="absolute right-0 mt-2 w-72 max-h-96 overflow-y-auto z-50
-                          bg-white border border-[var(--border-subtle)]
+                          bg-[var(--bg-card)] border border-[var(--border-subtle)]
                           rounded-xl shadow-2xl animate-scale-in">
               {Object.entries(groupedModels).map(([provider, providerModels]) => (
                 <div key={provider}>
@@ -211,7 +211,7 @@ export function ModelSelector({ selectedModel, onModelChange, compact = false, u
       <button
         onClick={() => setIsOpen(!isOpen)}
         className="w-full flex items-center justify-between gap-3 px-4 py-3
-                 bg-white hover:bg-[var(--system-gray-6)]
+                 bg-[var(--bg-card)] hover:bg-[var(--system-gray-6)]
                  rounded-xl border border-[var(--border-subtle)] shadow-sm transition-all"
       >
         <div className="flex items-center gap-3">
@@ -233,7 +233,7 @@ export function ModelSelector({ selectedModel, onModelChange, compact = false, u
           <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
           <div
             style={menuStyle ?? undefined}
-            className="overflow-y-auto bg-white border border-[var(--border-subtle)] rounded-xl shadow-2xl animate-scale-in"
+            className="overflow-y-auto bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl shadow-2xl animate-scale-in"
           >
             {Object.entries(groupedModels).map(([provider, providerModels]) => (
               <div key={provider}>

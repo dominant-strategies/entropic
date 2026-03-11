@@ -9,8 +9,8 @@ use base64::{
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use http;
-use rand::RngCore;
 use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,11 +23,11 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Webview,
-    WebviewBuilder, WebviewUrl,
-};
 use tauri::webview::NewWindowResponse;
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Webview, WebviewBuilder,
+    WebviewUrl,
+};
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -137,10 +137,7 @@ fn trim_terminal_buffer(buffer: &mut String) {
     buffer.drain(..remove_at);
 }
 
-async fn append_terminal_buffer(
-    session: &DesktopTerminalSession,
-    chunk: &str,
-) {
+async fn append_terminal_buffer(session: &DesktopTerminalSession, chunk: &str) {
     if chunk.is_empty() {
         return;
     }
@@ -2801,6 +2798,7 @@ const MANAGED_PLUGIN_IDS: &[&str] = &[
     "nova-integrations",
     "entropic-x",
     "nova-x",
+    "entropic-quai-builder",
 ];
 static GATEWAY_START_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 static APPLIED_AGENT_SETTINGS_FINGERPRINT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -4064,7 +4062,8 @@ async fn scan_directory_with_scanner(scanner_dir: &str) -> Result<PluginScanResu
             }
             Err(e) => {
                 last_err = format!("{}", e);
-                let is_connect = e.is_connect() || e.is_request()
+                let is_connect = e.is_connect()
+                    || e.is_request()
                     || last_err.contains("connection closed")
                     || last_err.contains("Connection refused");
                 if !is_connect {
@@ -4074,7 +4073,10 @@ async fn scan_directory_with_scanner(scanner_dir: &str) -> Result<PluginScanResu
         }
     }
     let res = res_ok.ok_or_else(|| {
-        format!("Scan request failed after retries (scanner may not be ready): {}", last_err)
+        format!(
+            "Scan request failed after retries (scanner may not be ready): {}",
+            last_err
+        )
     })?;
 
     if !res.status().is_success() {
@@ -4208,9 +4210,12 @@ fn parse_browser_service_http_output(raw: &str) -> Result<(u16, String), String>
         .ok_or_else(|| "Failed to parse browser service HTTP status".to_string())?;
     let body = raw[..marker_index].to_string();
     let status_text = raw[marker_index + STATUS_MARKER.len()..].trim();
-    let status = status_text
-        .parse::<u16>()
-        .map_err(|e| format!("Invalid browser service HTTP status `{}`: {}", status_text, e))?;
+    let status = status_text.parse::<u16>().map_err(|e| {
+        format!(
+            "Invalid browser service HTTP status `{}`: {}",
+            status_text, e
+        )
+    })?;
     Ok((status, body))
 }
 
@@ -4329,9 +4334,8 @@ fn wait_for_browser_service(container: &str) -> Result<(), String> {
 }
 
 fn browser_service_exec(method: &str, path: &str, payload: Option<&str>) -> Result<String, String> {
-    let container = running_gateway_container_name().ok_or_else(|| {
-        "Gateway container is not running. Start the sandbox first.".to_string()
-    })?;
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "Gateway container is not running. Start the sandbox first.".to_string())?;
 
     wait_for_browser_service(container)?;
 
@@ -5780,14 +5784,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
         }
     }
 
-    // Enable x plugin if it exists (entropic-x or legacy nova-x).
-    let x_plugin_id = resolve_managed_plugin_id("entropic-x", "nova-x");
-    remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "entropic-x"]);
-    remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "nova-x"]);
-    let mut has_x_plugin = false;
-    let mut x_plugin_path: Option<String> = None;
-    if let Some(plugin_id) = x_plugin_id {
-        has_x_plugin = true;
+    let resolve_managed_plugin_path = |plugin_id: &str| -> Option<String> {
         if let Some(skills_root) = read_container_env("ENTROPIC_SKILLS_PATH") {
             let base = format!("{}/{}", skills_root.trim_end_matches('/'), plugin_id);
             let current = format!("{}/current", base);
@@ -5797,30 +5794,56 @@ Use it for durable decisions, preferences, and facts that should persist across 
                 base
             };
             if container_path_exists(&candidate) {
-                x_plugin_path = Some(candidate);
+                return Some(candidate);
             }
         }
+        None
+    };
+    let ensure_plugin_load_path = |cfg: &mut serde_json::Value, path: String| {
+        let load_paths = cfg
+            .pointer_mut("/plugins/load/paths")
+            .and_then(|v| v.as_array_mut());
+        if let Some(list) = load_paths {
+            let exists = list.iter().any(|v| v.as_str() == Some(&path));
+            if !exists {
+                list.push(serde_json::json!(path));
+            }
+        } else {
+            set_openclaw_config_value(
+                cfg,
+                &["plugins", "load", "paths"],
+                serde_json::json!([path]),
+            );
+        }
+    };
+
+    // Enable x plugin if it exists (entropic-x or legacy nova-x).
+    let x_plugin_id = resolve_managed_plugin_id("entropic-x", "nova-x");
+    remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "entropic-x"]);
+    remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "nova-x"]);
+    let mut has_x_plugin = false;
+    if let Some(plugin_id) = x_plugin_id {
+        has_x_plugin = true;
         set_openclaw_config_value(
             &mut cfg,
             &["plugins", "entries", plugin_id, "enabled"],
             serde_json::json!(true),
         );
-        if let Some(path) = x_plugin_path {
-            let load_paths = cfg
-                .pointer_mut("/plugins/load/paths")
-                .and_then(|v| v.as_array_mut());
-            if let Some(list) = load_paths {
-                let exists = list.iter().any(|v| v.as_str() == Some(&path));
-                if !exists {
-                    list.push(serde_json::json!(path));
-                }
-            } else {
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &["plugins", "load", "paths"],
-                    serde_json::json!([path]),
-                );
-            }
+        if let Some(path) = resolve_managed_plugin_path(plugin_id) {
+            ensure_plugin_load_path(&mut cfg, path);
+        }
+    }
+
+    // Enable managed Quai builder skill pack when available.
+    remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "entropic-quai-builder"]);
+    if container_plugin_exists("entropic-quai-builder") {
+        set_openclaw_config_value(
+            &mut cfg,
+            &["plugins", "entries", "entropic-quai-builder", "enabled"],
+            serde_json::json!(true),
+        );
+        if let Some(path) = resolve_managed_plugin_path("entropic-quai-builder") {
+            ensure_plugin_load_path(&mut cfg, path);
         }
     }
 
@@ -6077,9 +6100,18 @@ Use it for durable decisions, preferences, and facts that should persist across 
         // fresh re-auth tokens.
         if let Some(ref container) = container_profiles {
             if let Some(container_cred) = container.pointer("/profiles/anthropic:entropic") {
-                let container_refresh = container_cred.get("refresh").and_then(|v| v.as_str()).unwrap_or("");
-                let container_access = container_cred.get("access").and_then(|v| v.as_str()).unwrap_or("");
-                let container_expires_ms = container_cred.get("expires").and_then(|v| v.as_u64()).unwrap_or(0);
+                let container_refresh = container_cred
+                    .get("refresh")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let container_access = container_cred
+                    .get("access")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let container_expires_ms = container_cred
+                    .get("expires")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 if let Some(meta) = stored.oauth_metadata.get("anthropic") {
                     if !container_refresh.is_empty()
                         && container_refresh != meta.refresh_token
@@ -6098,7 +6130,9 @@ Use it for durable decisions, preferences, and facts that should persist across 
                             },
                         );
                         if !container_access.is_empty() {
-                            stored.keys.insert("anthropic".to_string(), container_access.to_string());
+                            stored
+                                .keys
+                                .insert("anthropic".to_string(), container_access.to_string());
                         }
                         let _ = save_auth(app, &stored);
                     }
@@ -6107,9 +6141,18 @@ Use it for durable decisions, preferences, and facts that should persist across 
 
             // Sync refreshed OpenAI Codex tokens from container → app store
             if let Some(container_cred) = container.pointer("/profiles/openai-codex:entropic") {
-                let container_refresh = container_cred.get("refresh").and_then(|v| v.as_str()).unwrap_or("");
-                let container_access = container_cred.get("access").and_then(|v| v.as_str()).unwrap_or("");
-                let container_expires_ms = container_cred.get("expires").and_then(|v| v.as_u64()).unwrap_or(0);
+                let container_refresh = container_cred
+                    .get("refresh")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let container_access = container_cred
+                    .get("access")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let container_expires_ms = container_cred
+                    .get("expires")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 if let Some(meta) = stored.oauth_metadata.get("openai") {
                     if !container_refresh.is_empty()
                         && container_refresh != meta.refresh_token
@@ -6128,7 +6171,9 @@ Use it for durable decisions, preferences, and facts that should persist across 
                             },
                         );
                         if !container_access.is_empty() {
-                            stored.keys.insert("openai".to_string(), container_access.to_string());
+                            stored
+                                .keys
+                                .insert("openai".to_string(), container_access.to_string());
                         }
                         let _ = save_auth(app, &stored);
                     }
@@ -6186,8 +6231,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
             "version": 1,
             "profiles": serde_json::Value::Object(profiles)
         });
-        let payload = serde_json::to_string_pretty(&auth_profiles)
-            .map_err(|e| e.to_string())?;
+        let payload = serde_json::to_string_pretty(&auth_profiles).map_err(|e| e.to_string())?;
         if let Err(e) = write_container_file(
             "/home/node/.openclaw/agents/main/agent/auth-profiles.json",
             &payload,
@@ -8267,7 +8311,9 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
                 .output();
             if let Err(e) = fs::remove_dir_all(dir) {
                 cleanup_log.push(format!(
-                    "Warning: Failed to remove {}: {}", dir.display(), e
+                    "Warning: Failed to remove {}: {}",
+                    dir.display(),
+                    e
                 ));
             } else {
                 cleanup_log.push(format!("Removed {}", dir.display()));
@@ -8732,7 +8778,10 @@ pub async fn start_gateway(
         "-p".to_string(),
         gateway_bind.to_string(),
         "-p".to_string(),
-        format!("127.0.0.1:{}:{}", BROWSER_SERVICE_HOST_PORT, BROWSER_SERVICE_PORT),
+        format!(
+            "127.0.0.1:{}:{}",
+            BROWSER_SERVICE_HOST_PORT, BROWSER_SERVICE_PORT
+        ),
         "-p".to_string(),
         format!(
             "127.0.0.1:{}:{}",
@@ -8970,7 +9019,10 @@ pub async fn start_gateway_with_proxy(
             "-p".to_string(),
             gateway_bind.to_string(),
             "-p".to_string(),
-            format!("127.0.0.1:{}:{}", BROWSER_SERVICE_HOST_PORT, BROWSER_SERVICE_PORT),
+            format!(
+                "127.0.0.1:{}:{}",
+                BROWSER_SERVICE_HOST_PORT, BROWSER_SERVICE_PORT
+            ),
             "openclaw-runtime:latest".to_string(),
         ]);
         if BROWSER_REMOTE_DESKTOP_UI == "1" {
@@ -10112,7 +10164,10 @@ process.stdout.write('ok');
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             match wait_for_gateway_health_strict(&token, 12).await {
                 Ok(()) => eprintln!("[set_channels_config] Gateway healthy after config update"),
-                Err(e) => eprintln!("[set_channels_config] Gateway health wait timed out (non-fatal): {}", e),
+                Err(e) => eprintln!(
+                    "[set_channels_config] Gateway health wait timed out (non-fatal): {}",
+                    e
+                ),
             }
         }
     }
@@ -10401,11 +10456,16 @@ pub async fn restart_gateway_in_place(
     // Wait for the gateway to come back healthy so callers (and the frontend)
     // don't see a jarring disconnect/error when navigating back to chat.
     if let Ok(token) = effective_gateway_token(&app) {
-        eprintln!("[Entropic] restart_gateway_in_place: waiting for gateway health after config apply...");
+        eprintln!(
+            "[Entropic] restart_gateway_in_place: waiting for gateway health after config apply..."
+        );
         tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
         match wait_for_gateway_health_strict(&token, 20).await {
             Ok(()) => eprintln!("[Entropic] restart_gateway_in_place: gateway healthy"),
-            Err(e) => eprintln!("[Entropic] restart_gateway_in_place: health wait timed out (non-fatal): {}", e),
+            Err(e) => eprintln!(
+                "[Entropic] restart_gateway_in_place: health wait timed out (non-fatal): {}",
+                e
+            ),
         }
     }
 
@@ -10999,7 +11059,7 @@ pub async fn remove_workspace_skill(id: String) -> Result<(), String> {
     if !is_safe_component(&skill_id) {
         return Err("Invalid skill id".to_string());
     }
-    if skill_id == "entropic-x" {
+    if MANAGED_PLUGIN_IDS.contains(&skill_id.as_str()) {
         return Err("Entropic-managed skills cannot be removed".to_string());
     }
 
@@ -11129,7 +11189,11 @@ pub async fn get_clawhub_catalog(
         for line in raw.lines() {
             let line = line.trim();
             // Skip spinner / status lines
-            if line.is_empty() || line.starts_with('-') || line.starts_with('✔') || line.starts_with('✖') {
+            if line.is_empty()
+                || line.starts_with('-')
+                || line.starts_with('✔')
+                || line.starts_with('✖')
+            {
                 continue;
             }
             // Split on two-or-more spaces to separate columns
@@ -12334,7 +12398,9 @@ pub async fn browser_session_create(
     viewport_width: Option<u32>,
     viewport_height: Option<u32>,
 ) -> Result<BrowserSnapshot, String> {
-    let normalized_url = url.map(|raw| normalize_browser_target_url(&raw)).transpose()?;
+    let normalized_url = url
+        .map(|raw| normalize_browser_target_url(&raw))
+        .transpose()?;
     let mut payload = serde_json::Map::new();
     if let Some(normalized) = normalized_url {
         payload.insert("url".to_string(), serde_json::Value::String(normalized));
@@ -12505,7 +12571,8 @@ pub async fn desktop_terminal_create(app: AppHandle) -> Result<DesktopTerminalSn
                             code,
                             format!(
                                 "\n[terminal session ended with code {}]\n",
-                                code.map(|value| value.to_string()).unwrap_or_else(|| "unknown".to_string())
+                                code.map(|value| value.to_string())
+                                    .unwrap_or_else(|| "unknown".to_string())
                             ),
                         )
                     }
@@ -14065,8 +14132,7 @@ fn gateway_device_identity_path(app: &AppHandle) -> Result<PathBuf, String> {
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
-    fs::create_dir_all(&app_dir)
-        .map_err(|e| format!("Failed to create app data dir: {}", e))?;
+    fs::create_dir_all(&app_dir).map_err(|e| format!("Failed to create app data dir: {}", e))?;
     Ok(app_dir.join("gateway-device-identity.json"))
 }
 

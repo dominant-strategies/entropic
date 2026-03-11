@@ -71,26 +71,26 @@ export function DockerInstall({ onDockerReady }: Props) {
   }
 
   return (
-    <div className="h-screen w-screen flex flex-col items-center justify-center bg-gradient-to-b from-gray-50 to-gray-100 p-8">
+    <div className="h-screen w-screen flex flex-col items-center justify-center bg-gradient-to-b from-[var(--bg-muted)] to-[var(--bg-tertiary)] p-8">
       {/* Header */}
       <div className="mb-8 text-center">
         <div className="w-16 h-16 bg-blue-500 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg">
           <Terminal className="w-8 h-8 text-white" />
         </div>
-        <h1 className="text-2xl font-semibold text-gray-900 mb-2">
+        <h1 className="text-2xl font-semibold text-[var(--text-primary)] mb-2">
           Install Docker
         </h1>
-        <p className="text-gray-500 max-w-md">
+        <p className="text-[var(--text-secondary)] max-w-md">
           Entropic needs Docker to run AI commands in a secure sandbox.
           This is a one-time setup.
         </p>
       </div>
 
       {/* Install Card */}
-      <div className="bg-white rounded-2xl shadow-xl p-6 max-w-xl w-full">
+      <div className="bg-[var(--bg-card)] rounded-2xl shadow-xl p-6 max-w-xl w-full">
         {/* Distro Selector */}
         <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
+          <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">
             Select your Linux distribution:
           </label>
           <div className="flex flex-wrap gap-2">
@@ -101,8 +101,8 @@ export function DockerInstall({ onDockerReady }: Props) {
                 className={clsx(
                   "px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
                   distro === d
-                    ? "bg-blue-100 text-blue-700 border-2 border-blue-300"
-                    : "bg-gray-100 text-gray-600 border-2 border-transparent hover:bg-gray-200"
+                    ? "bg-blue-500/15 text-blue-500 border-2 border-blue-500/30"
+                    : "bg-[var(--bg-tertiary)] text-[var(--text-secondary)] border-2 border-transparent hover:bg-[var(--bg-secondary)]"
                 )}
               >
                 {d.charAt(0).toUpperCase() + d.slice(1)}
@@ -114,12 +114,12 @@ export function DockerInstall({ onDockerReady }: Props) {
         {/* Commands */}
         <div className="mb-4">
           <div className="flex items-center justify-between mb-2">
-            <label className="block text-sm font-medium text-gray-700">
+            <label className="block text-sm font-medium text-[var(--text-secondary)]">
               Run in terminal:
             </label>
             <button
               onClick={copyToClipboard}
-              className="flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700"
+              className="flex items-center gap-1 text-sm text-blue-500 hover:text-blue-400"
             >
               {copied ? (
                 <>
@@ -134,7 +134,7 @@ export function DockerInstall({ onDockerReady }: Props) {
               )}
             </button>
           </div>
-          <div className="bg-gray-900 rounded-lg p-4 font-mono text-sm overflow-x-auto">
+          <div className="bg-[#1A1A2E] rounded-lg p-4 font-mono text-sm overflow-x-auto">
             {commands.map((cmd, i) => (
               <div key={i} className="text-gray-100">
                 <span className="text-green-400">$</span> {cmd}
@@ -144,8 +144,8 @@ export function DockerInstall({ onDockerReady }: Props) {
         </div>
 
         {/* Important Note */}
-        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
-          <p className="text-sm text-amber-800">
+        <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 mb-4">
+          <p className="text-sm text-[var(--text-secondary)]">
             <strong>Important:</strong> After running these commands, you need to{" "}
             <strong>log out and log back in</strong> (or restart) for the group
             change to take effect.
@@ -170,7 +170,7 @@ export function DockerInstall({ onDockerReady }: Props) {
           href="https://docs.docker.com/engine/install/"
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center justify-center gap-1 mt-4 text-sm text-gray-500 hover:text-gray-700"
+          className="flex items-center justify-center gap-1 mt-4 text-sm text-[var(--text-secondary)] hover:text-[var(--text-secondary)]"
         >
           <ExternalLink className="w-4 h-4" />
           Official Docker installation docs

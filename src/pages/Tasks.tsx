@@ -83,10 +83,10 @@ function describeSchedule(schedule: CronSchedule): string {
 }
 
 function statusBadge(job: CronJob) {
-  if (!job.enabled) return { label: "Disabled", className: "bg-gray-100 text-gray-500 border-gray-200" };
-  if (job.state === "running") return { label: "Running", className: "bg-amber-50 text-amber-600 border-amber-100" };
-  if (job.state === "error") return { label: "Error", className: "bg-red-50 text-red-600 border-red-100" };
-  return { label: "Active", className: "bg-green-50 text-green-600 border-green-100" };
+  if (!job.enabled) return { label: "Disabled", className: "bg-[var(--bg-tertiary)] text-[var(--text-secondary)] border-[var(--border-default)]" };
+  if (job.state === "running") return { label: "Running", className: "bg-amber-500/10 text-amber-500 border-amber-500/20" };
+  if (job.state === "error") return { label: "Error", className: "bg-red-500/10 text-red-500 border-red-500/20" };
+  return { label: "Active", className: "bg-green-500/10 text-green-500 border-green-500/20" };
 }
 
 function formatRunTime(run: CronRunLogEntry): string {
@@ -519,10 +519,10 @@ const TASK_BOARD_PRIORITY_ORDER: TaskBoardPriority[] = [
 ];
 
 const TASK_BOARD_COLUMN_META: Record<TaskBoardStatus, { label: string; accent: string }> = {
-  todo: { label: "TODO", accent: "text-blue-600" },
+  todo: { label: "TODO", accent: "text-blue-500" },
   in_progress: { label: "IN PROGRESS", accent: "text-indigo-600" },
   blocked: { label: "BLOCKED", accent: "text-rose-600" },
-  done: { label: "DONE", accent: "text-emerald-600" },
+  done: { label: "DONE", accent: "text-emerald-500" },
 };
 
 type BoardCleanupAction = "remove_done" | "remove_in_progress" | "remove_todo" | "clear_all";
@@ -582,14 +582,14 @@ function formatTaskDueDate(value?: string): string | null {
 function taskPriorityClass(priority: TaskBoardPriority): string {
   switch (priority) {
     case "critical":
-      return "bg-red-50 text-red-600 border-red-100";
+      return "bg-red-500/10 text-red-500 border-red-500/20";
     case "high":
-      return "bg-orange-50 text-orange-600 border-orange-100";
+      return "bg-orange-500/10 text-orange-500 border-orange-500/20";
     case "low":
-      return "bg-slate-100 text-slate-500 border-slate-200";
+      return "bg-slate-500/10 text-slate-500 border-slate-500/20";
     case "medium":
     default:
-      return "bg-blue-50 text-blue-600 border-blue-100";
+      return "bg-blue-500/10 text-blue-500 border-blue-500/20";
   }
 }
 
@@ -2084,7 +2084,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                 : "Run and manage cron automation."}
           </p>
           {showTabs && (
-            <div className="mt-3 inline-flex rounded-xl border border-[var(--border-default)] bg-white p-1 shadow-sm">
+            <div className="mt-3 inline-flex rounded-xl border border-[var(--border-default)] bg-[var(--bg-card)] p-1 shadow-sm">
               <button
                 onClick={() => setPlannerTab("tasks")}
                 className={clsx(
@@ -2141,18 +2141,18 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
         {activeTab === "tasks" ? (
           <>
             {!gatewayRunning && (
-              <div className="mb-6 p-4 bg-amber-50 border border-amber-100 rounded-xl flex items-center gap-4">
-                <div className="w-10 h-10 rounded-lg bg-white border border-amber-100 flex items-center justify-center shrink-0">
+              <div className="mb-6 p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-center gap-4">
+                <div className="w-10 h-10 rounded-lg bg-[var(--bg-card)] border border-amber-500/20 flex items-center justify-center shrink-0">
                   <AlertCircle className="w-5 h-5 text-amber-500" />
                 </div>
                 <div>
-                  <h2 className="text-sm font-semibold text-amber-900">Secure Sandbox is Offline</h2>
-                  <p className="text-sm text-amber-700">Task board sync requires the gateway to be online.</p>
+                  <h2 className="text-sm font-semibold text-[var(--text-primary)]">Secure Sandbox is Offline</h2>
+                  <p className="text-sm text-[var(--text-secondary)]">Task board sync requires the gateway to be online.</p>
                 </div>
               </div>
             )}
 
-            <div className="mb-6 p-5 rounded-xl border border-[var(--border-default)] bg-white shadow-sm">
+            <div className="mb-6 p-5 rounded-xl border border-[var(--border-default)] bg-[var(--bg-card)] shadow-sm">
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-semibold text-[var(--text-primary)]">Agent Task Board</h2>
@@ -2188,19 +2188,19 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                   <button
                     onClick={() => void applyBoardCleanupAction("remove_done")}
                     disabled={!gatewayRunning || boardSaving}
-                    className="px-2.5 py-2 rounded-lg border border-[var(--border-default)] bg-white text-[11px] font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50"
+                    className="px-2.5 py-2 rounded-lg border border-[var(--border-default)] bg-[var(--bg-card)] text-[11px] font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50"
                   >
                     Remove all from DONE
                   </button>
                   <button
                     onClick={openCleanupConversation}
                     disabled={!gatewayRunning || boardSaving || cleanupLoading}
-                    className="px-2.5 py-2 rounded-lg border border-[var(--border-default)] bg-white text-[11px] font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50"
+                    className="px-2.5 py-2 rounded-lg border border-[var(--border-default)] bg-[var(--bg-card)] text-[11px] font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50"
                   >
                     Clean up my board
                   </button>
                   {boardSaving ? (
-                    <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-default)] bg-white px-2.5 py-1 text-[11px] text-[var(--text-tertiary)]">
+                    <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-card)] px-2.5 py-1 text-[11px] text-[var(--text-tertiary)]">
                       <Loader2 className="w-3 h-3 animate-spin" />
                       Syncing
                     </span>
@@ -2210,13 +2210,13 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
             </div>
 
             {boardNotice ? (
-              <div className="mb-4 p-3 rounded-lg bg-emerald-50 border border-emerald-100 text-sm text-emerald-700">
+              <div className="mb-4 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-sm text-emerald-500">
                 {boardNotice}
               </div>
             ) : null}
 
             {boardError ? (
-              <div className="mb-4 p-3 rounded-lg bg-red-50 border border-red-100 text-sm text-red-600">
+              <div className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-500">
                 {boardError}
               </div>
             ) : null}
@@ -2237,7 +2237,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                     return (
                       <div
                         key={status}
-                        className="w-[248px] shrink-0 rounded-xl border border-[var(--border-subtle)] bg-white/85 shadow-sm min-h-[540px] max-h-[70vh] flex flex-col"
+                        className="w-[248px] shrink-0 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] shadow-sm min-h-[540px] max-h-[70vh] flex flex-col"
                         onDragOver={(event) => {
                           event.preventDefault();
                           event.dataTransfer.dropEffect = "move";
@@ -2287,10 +2287,10 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                                   event.dataTransfer.effectAllowed = "move";
                                 }}
                                 onDragEnd={() => setDraggingTask(null)}
-                                className="rounded-lg border border-[var(--border-subtle)] bg-white p-3 shadow-sm cursor-grab active:cursor-grabbing"
+                                className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] p-3 shadow-sm cursor-grab active:cursor-grabbing"
                               >
-                                <div className="flex items-start justify-between gap-2">
-                                  <h3 className="text-sm font-semibold text-[var(--text-primary)] leading-tight">
+                                <div className="flex items-start justify-between gap-2 min-w-0">
+                                  <h3 className="text-sm font-semibold text-[var(--text-primary)] leading-tight min-w-0 break-words">
                                     {task.title}
                                   </h3>
                                   <div className="flex flex-col items-end gap-1">
@@ -2327,7 +2327,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                                     </span>
                                   ))}
                                   {task.dueAt ? (
-                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-100">
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-500 border border-amber-500/20">
                                       Due {formatTaskDueDate(task.dueAt)}
                                     </span>
                                   ) : null}
@@ -2341,7 +2341,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                                   </button>
                                   <button
                                     onClick={() => void deleteBoardTask(task)}
-                                    className="text-[11px] text-red-600 font-semibold hover:underline"
+                                    className="text-[11px] text-red-500 font-semibold hover:underline"
                                   >
                                     Delete
                                   </button>
@@ -2361,31 +2361,31 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
           <div className="max-w-6xl mx-auto">
             {/* Offline Warning */}
             {!gatewayRunning && (
-              <div className="mb-6 p-4 bg-amber-50 border border-amber-100 rounded-xl flex items-center gap-4">
-                <div className="w-10 h-10 rounded-lg bg-white border border-amber-100 flex items-center justify-center shrink-0">
+              <div className="mb-6 p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-center gap-4">
+                <div className="w-10 h-10 rounded-lg bg-[var(--bg-card)] border border-amber-500/20 flex items-center justify-center shrink-0">
                   <AlertCircle className="w-5 h-5 text-amber-500" />
                 </div>
                 <div>
-                  <h2 className="text-sm font-semibold text-amber-900">Secure Sandbox is Offline</h2>
-                  <p className="text-sm text-amber-700">Scheduled jobs will not execute until the gateway is started.</p>
+                  <h2 className="text-sm font-semibold text-[var(--text-primary)]">Secure Sandbox is Offline</h2>
+                  <p className="text-sm text-[var(--text-secondary)]">Scheduled jobs will not execute until the gateway is started.</p>
                 </div>
               </div>
             )}
 
             {/* Compact Informational Banner */}
-            <div className="mb-8 p-5 bg-[var(--text-primary)] rounded-xl text-white relative overflow-hidden shadow-sm">
+            <div className="mb-8 p-5 bg-[#1A1A2E] rounded-xl text-white relative overflow-hidden shadow-sm">
               <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
                 <div className="flex items-center gap-4">
                   <div className="w-10 h-10 rounded-xl bg-[var(--system-blue)] flex items-center justify-center shrink-0">
                     <Smartphone className="w-5 h-5 text-white" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-semibold">Keep Jobs Running</h3>
+                    <h3 className="text-sm font-semibold text-white">Keep Jobs Running</h3>
                     <p className="text-sm text-white/75 mt-1">
                       Jobs execute only when this computer is awake.
                     </p>
-                    <p className="text-xs text-white/65 mt-1">
-                      Try the "Task board progress template" job to advance tasks and surface BLOCKED items.
+                    <p className="text-xs text-white/60 mt-1">
+                      Try the &ldquo;Task board progress template&rdquo; job to advance tasks and surface BLOCKED items.
                     </p>
                   </div>
                 </div>
@@ -2393,11 +2393,11 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-x-8 gap-y-3 pt-4 lg:pt-0 lg:border-l lg:border-white/10 lg:pl-8">
                   <div>
                     <p className="text-[10px] font-semibold uppercase tracking-wide text-blue-300 mb-0.5">macOS</p>
-                    <p className="text-[12px] text-white/80">Displays → Advanced → Prevent Sleep</p>
+                    <p className="text-[12px] text-white/80">Displays &rarr; Advanced &rarr; Prevent Sleep</p>
                   </div>
                   <div>
                     <p className="text-[10px] font-semibold uppercase tracking-wide text-green-300 mb-0.5">Windows</p>
-                    <p className="text-[12px] text-white/80">Power → Plugged in, Never Sleep</p>
+                    <p className="text-[12px] text-white/80">Power &rarr; Plugged in, Never Sleep</p>
                   </div>
                   <div>
                     <p className="text-[10px] font-semibold uppercase tracking-wide text-purple-300 mb-0.5">Linux</p>
@@ -2416,22 +2416,22 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pb-20">
               {gatewayRunning && loading && jobs.length === 0 ? (
                 <div className="col-span-full py-32 flex flex-col items-center gap-4">
-                  <Loader2 className="w-10 h-10 animate-spin text-blue-600" />
-                  <p className="text-gray-400 font-bold uppercase tracking-widest text-[10px]">Syncing jobs...</p>
+                  <Loader2 className="w-10 h-10 animate-spin text-blue-500" />
+                  <p className="text-[var(--text-tertiary)] font-bold uppercase tracking-widest text-[10px]">Syncing jobs...</p>
                 </div>
               ) : gatewayRunning && jobs.length === 0 ? (
-                <div className="col-span-full py-20 text-center bg-white rounded-xl border border-dashed border-[var(--border-default)]">
-                  <CalendarClock className="w-16 h-16 mx-auto mb-6 text-gray-200" strokeWidth={1.5} />
+                <div className="col-span-full py-20 text-center bg-[var(--bg-card)] rounded-xl border border-dashed border-[var(--border-default)]">
+                  <CalendarClock className="w-16 h-16 mx-auto mb-6 text-[var(--text-quaternary)]" strokeWidth={1.5} />
                   <h3 className="text-xl font-semibold text-[var(--text-primary)] mb-2">No jobs scheduled</h3>
                   <p className="text-[var(--text-secondary)] mb-6">Ready to automate? Create your first scheduled job or start with a suggestion below.</p>
-                  <button onClick={openCreate} className="px-6 py-2.5 bg-[var(--text-primary)] text-white rounded-lg font-semibold text-sm hover:opacity-90 transition-all">Create First Job</button>
+                  <button onClick={openCreate} className="px-6 py-2.5 bg-[var(--purple-accent)] text-white rounded-lg font-semibold text-sm hover:bg-[var(--purple-accent-hover)] transition-all">Create First Job</button>
                   <div className="mt-8 mx-auto w-full max-w-md text-left rounded-xl border border-[var(--border-default)] bg-[var(--system-gray-6)]/60 p-4">
                     <h4 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-secondary)] mb-2">
                       Suggested first jobs
                     </h4>
                     <button
                       onClick={openTaskBoardProgressTemplate}
-                      className="w-full rounded-lg border border-[var(--border-default)] bg-white px-3 py-2 text-left hover:bg-[var(--system-gray-6)] transition-colors"
+                      className="w-full rounded-lg border border-[var(--border-default)] bg-[var(--bg-card)] px-3 py-2 text-left hover:bg-[var(--system-gray-6)] transition-colors"
                     >
                       <p className="text-sm font-semibold text-[var(--text-primary)]">Task board progress template</p>
                       <p className="text-xs text-[var(--text-secondary)] mt-0.5">
@@ -2444,15 +2444,15 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                 jobs.map((job) => {
                   const isManuallyRunning = runningJobIds.has(job.id) || job.state === "running";
                   const badge = isManuallyRunning
-                    ? { label: "Running", className: "bg-amber-50 text-amber-600 border-amber-100" }
+                    ? { label: "Running", className: "bg-amber-500/10 text-amber-500 border-amber-500/20" }
                     : statusBadge(job);
                   return (
-                    <div key={job.id} className="group bg-white rounded-xl p-5 shadow-sm border border-[var(--border-subtle)] hover:shadow-md transition-all duration-300 flex flex-col">
+                    <div key={job.id} className="group bg-[var(--bg-card)] rounded-xl p-5 shadow-sm border border-[var(--border-subtle)] hover:shadow-md transition-all duration-300 flex flex-col">
                       <div className="flex items-start justify-between gap-4 mb-6">
                         <div className="flex items-start gap-4">
                           <div className={clsx(
                             "w-12 h-12 rounded-xl flex items-center justify-center border transition-all duration-300 shrink-0",
-                            job.enabled ? "bg-blue-50 border-blue-100 text-blue-600" : "bg-gray-50 border-gray-100 text-gray-400"
+                            job.enabled ? "bg-blue-500/10 border-blue-500/20 text-blue-500" : "bg-[var(--bg-muted)] border-[var(--border-subtle)] text-[var(--text-tertiary)]"
                           )}>
                             <CalendarClock className="w-6 h-6" />
                           </div>
@@ -2474,11 +2474,11 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                           onClick={() => handleToggle(job)}
                           className={clsx(
                             "relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
-                            job.enabled ? "bg-blue-600" : "bg-gray-200"
+                            job.enabled ? "bg-blue-600" : "bg-[var(--bg-secondary)]"
                           )}
                         >
                           <span className={clsx(
-                            "pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out",
+                            "pointer-events-none inline-block h-6 w-6 transform rounded-full bg-[var(--bg-card)] shadow-lg ring-0 transition duration-200 ease-in-out",
                             job.enabled ? "translate-x-5" : "translate-x-0"
                           )} />
                         </button>
@@ -2502,8 +2502,8 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                             className={clsx(
                               "px-3 py-1.5 rounded-lg transition-all border border-[var(--border-subtle)] inline-flex items-center gap-1.5 text-xs font-medium",
                               job.state === "running" || runningJobIds.has(job.id)
-                                ? "bg-amber-50 text-amber-600 border-amber-200 cursor-not-allowed"
-                                : "bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:bg-green-50 hover:text-green-600"
+                                ? "bg-amber-500/10 text-amber-500 border-amber-500/20 cursor-not-allowed"
+                                : "bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:bg-green-500/10 hover:text-green-500"
                             )}
                           >
                             {job.state === "running" || runningJobIds.has(job.id) ? (
@@ -2520,7 +2520,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                           </button>
                           <button
                             onClick={() => openEdit(job)}
-                            className="px-3 py-1.5 rounded-lg bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:bg-blue-50 hover:text-blue-600 transition-all border border-[var(--border-subtle)] inline-flex items-center gap-1.5 text-xs font-medium"
+                            className="px-3 py-1.5 rounded-lg bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:bg-blue-500/10 hover:text-blue-500 transition-all border border-[var(--border-subtle)] inline-flex items-center gap-1.5 text-xs font-medium"
                           >
                             <Pencil className="w-3.5 h-3.5" />
                             Edit
@@ -2535,7 +2535,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                         </div>
                         <button
                           onClick={() => handleDelete(job)}
-                          className="p-2 rounded-lg bg-[var(--system-gray-6)] text-[var(--text-tertiary)] hover:bg-red-50 hover:text-red-600 transition-all border border-[var(--border-subtle)]"
+                          className="p-2 rounded-lg bg-[var(--system-gray-6)] text-[var(--text-tertiary)] hover:bg-red-500/10 hover:text-red-500 transition-all border border-[var(--border-subtle)]"
                           title="Delete"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -2552,8 +2552,11 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
 
       {/* ── Editor Modal ────────────────────────────────────────── */}
       {activeTab === "jobs" && editorOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 backdrop-blur-sm px-4">
-          <div className="w-full max-w-2xl max-h-[90vh] bg-white rounded-2xl border border-[var(--border-subtle)] shadow-xl flex flex-col animate-in zoom-in-95 duration-200">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 backdrop-blur-sm px-4"
+          onKeyDown={(e) => { if (e.key === "Escape") setEditorOpen(false); }}
+        >
+          <div className="w-full max-w-2xl max-h-[90vh] bg-[var(--bg-card)] rounded-2xl border border-[var(--border-subtle)] shadow-xl flex flex-col animate-in zoom-in-95 duration-200">
             <div className="px-6 py-4 border-b border-[var(--border-subtle)] flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-lg font-semibold text-[var(--text-primary)]">
@@ -2566,6 +2569,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
               <button
                 onClick={() => setEditorOpen(false)}
                 className="p-2 rounded-lg hover:bg-[var(--system-gray-6)] text-[var(--text-tertiary)] transition-colors"
+                aria-label="Close"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -2578,8 +2582,9 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                   <label className="block text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide mb-2 ml-1">Job Name</label>
                   <input
                     type="text"
-                    className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
+                    className="w-full px-4 py-3 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                     placeholder="Morning Briefing, Inbox Triage, etc."
+                    maxLength={120}
                     value={editor.name}
                     onChange={(e) => updateEditor({ name: e.target.value })}
                   />
@@ -2588,8 +2593,9 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                   <label className="block text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide mb-2 ml-1">Goal (optional)</label>
                   <input
                     type="text"
-                    className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
+                    className="w-full px-4 py-3 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                     placeholder="What is this task trying to achieve?"
+                    maxLength={500}
                     value={editor.description}
                     onChange={(e) => updateEditor({ description: e.target.value })}
                   />
@@ -2609,7 +2615,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                         "px-3 py-2 rounded-lg text-xs font-semibold transition-all border",
                         editor.schedulePreset === preset.id
                           ? "bg-[var(--system-blue)] text-white border-[var(--system-blue)]"
-                          : "bg-white text-[var(--text-secondary)] border-[var(--border-default)] hover:bg-[var(--system-gray-6)]"
+                          : "bg-[var(--bg-card)] text-[var(--text-secondary)] border-[var(--border-default)] hover:bg-[var(--system-gray-6)]"
                       )}
                     >
                       {preset.label}
@@ -2624,7 +2630,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                       <label className="text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide ml-1">Execution Time</label>
                       <input
                         type="time"
-                        className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm font-semibold text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
+                        className="w-full px-4 py-3 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-lg text-sm font-semibold text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                         value={editor.scheduleTime}
                         onChange={(e) => {
                           const nextTime = e.target.value || defaultEditor.scheduleTime;
@@ -2646,7 +2652,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                       <label className="text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide ml-1">Date & Time</label>
                       <input
                         type="datetime-local"
-                        className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm font-semibold text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
+                        className="w-full px-4 py-3 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-lg text-sm font-semibold text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                         value={editor.atDate ? editor.atDate.slice(0, 16) : ""}
                         onChange={(e) =>
                           updateEditor({
@@ -2663,7 +2669,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                       <input
                         type="number"
                         min="1"
-                        className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm font-semibold text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
+                        className="w-full px-4 py-3 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-lg text-sm font-semibold text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                         value={editor.intervalMinutes}
                         onChange={(e) => updateEditor({ scheduleType: "every", intervalMinutes: e.target.value })}
                       />
@@ -2674,7 +2680,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                       <label className="text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide ml-1">Cron Expression</label>
                       <input
                         type="text"
-                        className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm font-mono text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
+                        className="w-full px-4 py-3 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-lg text-sm font-mono text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                         placeholder="0 * * * *"
                         value={editor.cronExpr}
                         onChange={(e) => updateEditor({ scheduleType: "cron", cronExpr: e.target.value })}
@@ -2710,7 +2716,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                           }}
                           className={clsx(
                             "px-3 py-1.5 rounded-full text-[11px] font-semibold transition-all border",
-                            sel ? "bg-[var(--system-blue)]/10 text-[var(--system-blue)] border-[var(--system-blue)]/20" : "bg-white text-[var(--text-secondary)] border-[var(--border-default)] hover:bg-[var(--system-gray-6)]"
+                            sel ? "bg-[var(--system-blue)]/10 text-[var(--system-blue)] border-[var(--system-blue)]/20" : "bg-[var(--bg-card)] text-[var(--text-secondary)] border-[var(--border-default)] hover:bg-[var(--system-gray-6)]"
                           )}
                         >
                           {skill.label}
@@ -2738,7 +2744,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                   </button>
                 </div>
                 <textarea
-                  className="w-full px-4 py-3.5 bg-white border border-[var(--border-default)] rounded-xl text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20 min-h-[160px] leading-relaxed"
+                  className="w-full px-4 py-3.5 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-xl text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20 min-h-[160px] leading-relaxed"
                   placeholder={`Tell ${agentName} exactly what steps to execute on each run...`}
                   value={editor.message}
                   onChange={(e) => updateEditor({ message: e.target.value })}
@@ -2749,7 +2755,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
             </div>
 
             {/* Modal Footer */}
-            <div className="px-6 py-4 border-t border-[var(--border-subtle)] bg-white flex items-center gap-3">
+            <div className="px-6 py-4 border-t border-[var(--border-subtle)] bg-[var(--bg-card)] flex items-center gap-3">
               <button
                 onClick={() => setEditorOpen(false)}
                 className="flex-1 py-2.5 text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] rounded-lg transition-colors"
@@ -2770,8 +2776,8 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
 
       {/* ── Cleanup Modal ─────────────────────────────────────────── */}
       {activeTab === "tasks" && cleanupModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 backdrop-blur-sm px-4">
-          <div className="w-full max-w-2xl max-h-[90vh] bg-white rounded-2xl border border-[var(--border-subtle)] shadow-xl flex flex-col animate-in zoom-in-95 duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 backdrop-blur-sm px-4" onKeyDown={(e) => { if (e.key === "Escape") setCleanupModalOpen(false); }}>
+          <div className="w-full max-w-2xl max-h-[90vh] bg-[var(--bg-card)] rounded-2xl border border-[var(--border-subtle)] shadow-xl flex flex-col animate-in zoom-in-95 duration-200">
             <div className="px-6 py-4 border-b border-[var(--border-subtle)] flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-lg font-semibold text-[var(--text-primary)]">Clean up task board</h2>
@@ -2782,6 +2788,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
               <button
                 onClick={closeCleanupConversation}
                 className="p-2 rounded-lg hover:bg-[var(--system-gray-6)] text-[var(--text-tertiary)] transition-colors"
+                aria-label="Close"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -2796,13 +2803,13 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                       closeCleanupConversation();
                     })();
                   }}
-                  className="px-3 py-1.5 rounded-full text-[11px] font-semibold border border-[var(--border-default)] bg-white text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
+                  className="px-3 py-1.5 rounded-full text-[11px] font-semibold border border-[var(--border-default)] bg-[var(--bg-card)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
                 >
                   Remove all from DONE
                 </button>
                 <button
                   onClick={() => setCleanupPrompt("Suggest the safest cleanup action for this board right now.")}
-                  className="px-3 py-1.5 rounded-full text-[11px] font-semibold border border-[var(--border-default)] bg-white text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
+                  className="px-3 py-1.5 rounded-full text-[11px] font-semibold border border-[var(--border-default)] bg-[var(--bg-card)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
                 >
                   Suggest safest cleanup
                 </button>
@@ -2813,7 +2820,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                   Cleanup request
                 </label>
                 <textarea
-                  className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20 min-h-[120px]"
+                  className="w-full px-4 py-3 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20 min-h-[120px]"
                   placeholder="Ask OpenClaw what should be cleaned up."
                   value={cleanupPrompt}
                   onChange={(event) => setCleanupPrompt(event.target.value)}
@@ -2838,7 +2845,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                         closeCleanupConversation();
                       })();
                     }}
-                    className="px-4 py-2 rounded-lg border border-[var(--border-default)] bg-white text-sm font-semibold text-[var(--text-primary)] hover:bg-[var(--system-gray-6)]"
+                    className="px-4 py-2 rounded-lg border border-[var(--border-default)] bg-[var(--bg-card)] text-sm font-semibold text-[var(--text-primary)] hover:bg-[var(--system-gray-6)]"
                   >
                     Apply suggestion: {BOARD_CLEANUP_ACTION_LABEL[cleanupSuggestedAction]}
                   </button>
@@ -2846,7 +2853,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
               </div>
 
               {cleanupError ? (
-                <div className="p-3 rounded-lg bg-red-50 border border-red-100 text-sm text-red-600">
+                <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-500">
                   {cleanupError}
                 </div>
               ) : null}
@@ -2868,8 +2875,8 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
 
       {/* ── Quick Task Create Modal ────────────────────────────────── */}
       {activeTab === "tasks" && boardQuickCreateOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 backdrop-blur-sm px-4">
-          <div className="w-full max-w-xl bg-white rounded-2xl border border-[var(--border-subtle)] shadow-xl flex flex-col animate-in zoom-in-95 duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 backdrop-blur-sm px-4" onKeyDown={(e) => { if (e.key === "Escape") setBoardQuickCreateOpen(false); }}>
+          <div className="w-full max-w-xl bg-[var(--bg-card)] rounded-2xl border border-[var(--border-subtle)] shadow-xl flex flex-col animate-in zoom-in-95 duration-200">
             <div className="px-6 py-4 border-b border-[var(--border-subtle)] flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-lg font-semibold text-[var(--text-primary)]">New Task</h2>
@@ -2880,6 +2887,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
               <button
                 onClick={closeBoardQuickCreate}
                 className="p-2 rounded-lg hover:bg-[var(--system-gray-6)] text-[var(--text-tertiary)] transition-colors"
+                aria-label="Close"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -2890,7 +2898,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                   What needs to be done?
                 </label>
                 <textarea
-                  className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20 min-h-[140px]"
+                  className="w-full px-4 py-3 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20 min-h-[140px]"
                   placeholder="Example: Follow up with design on dashboard polish and move blocked API items forward this week."
                   value={boardQuickPrompt}
                   onChange={(event) => {
@@ -2906,19 +2914,19 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                 </div>
               ) : null}
               {boardQuickSuccess ? (
-                <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-100 text-sm text-emerald-700 flex items-center gap-2">
+                <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-sm text-emerald-500 flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4" />
                   {boardQuickSuccess}
                 </div>
               ) : null}
               {boardQuickError ? (
-                <div className="p-3 rounded-lg bg-red-50 border border-red-100 text-sm text-red-600 space-y-3">
+                <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-500 space-y-3">
                   <p>{boardQuickError.message}</p>
                   {boardQuickError.kind === "billing" ? (
                     <button
                       type="button"
                       onClick={openBillingFromQuickTask}
-                      className="px-3 py-1.5 rounded-lg border border-red-200 bg-white text-[12px] font-semibold text-red-700 hover:bg-red-100/60"
+                      className="px-3 py-1.5 rounded-lg border border-red-500/20 bg-[var(--bg-card)] text-[12px] font-semibold text-red-500 hover:bg-red-500/10"
                     >
                       Open Billing
                     </button>
@@ -2927,7 +2935,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                     <button
                       type="button"
                       onClick={requestSignInFromQuickTask}
-                      className="px-3 py-1.5 rounded-lg border border-red-200 bg-white text-[12px] font-semibold text-red-700 hover:bg-red-100/60"
+                      className="px-3 py-1.5 rounded-lg border border-red-500/20 bg-[var(--bg-card)] text-[12px] font-semibold text-red-500 hover:bg-red-500/10"
                     >
                       Sign In
                     </button>
@@ -2935,7 +2943,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                 </div>
               ) : null}
             </div>
-            <div className="px-6 py-4 border-t border-[var(--border-subtle)] bg-white flex items-center gap-3">
+            <div className="px-6 py-4 border-t border-[var(--border-subtle)] bg-[var(--bg-card)] flex items-center gap-3">
               <button
                 onClick={closeBoardQuickCreate}
                 className="flex-1 py-2.5 text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] rounded-lg transition-colors"
@@ -2968,8 +2976,8 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
 
       {/* ── Board Task Modal ───────────────────────────────────────── */}
       {activeTab === "tasks" && boardEditorOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 backdrop-blur-sm px-4">
-          <div className="w-full max-w-xl bg-white rounded-2xl border border-[var(--border-subtle)] shadow-xl flex flex-col animate-in zoom-in-95 duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 backdrop-blur-sm px-4" onKeyDown={(e) => { if (e.key === "Escape") setBoardEditorOpen(false); }}>
+          <div className="w-full max-w-xl bg-[var(--bg-card)] rounded-2xl border border-[var(--border-subtle)] shadow-xl flex flex-col animate-in zoom-in-95 duration-200">
             <div className="px-6 py-4 border-b border-[var(--border-subtle)] flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-lg font-semibold text-[var(--text-primary)]">Edit Task</h2>
@@ -2980,6 +2988,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
               <button
                 onClick={closeBoardEditor}
                 className="p-2 rounded-lg hover:bg-[var(--system-gray-6)] text-[var(--text-tertiary)] transition-colors"
+                aria-label="Close"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -2991,7 +3000,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                 </label>
                 <input
                   type="text"
-                  className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
+                  className="w-full px-4 py-3 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                   placeholder="What needs to happen?"
                   value={boardEditor.title}
                   onChange={(event) => setBoardEditor((prev) => ({ ...prev, title: event.target.value }))}
@@ -3002,7 +3011,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                   Description
                 </label>
                 <textarea
-                  className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20 min-h-[110px]"
+                  className="w-full px-4 py-3 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20 min-h-[110px]"
                   placeholder="Context, acceptance criteria, or implementation notes."
                   value={boardEditor.description}
                   onChange={(event) => setBoardEditor((prev) => ({ ...prev, description: event.target.value }))}
@@ -3074,7 +3083,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                   </label>
                   <input
                     type="datetime-local"
-                    className="w-full px-4 py-2.5 bg-white border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
+                    className="w-full px-4 py-2.5 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                     value={boardEditor.dueAt}
                     onChange={(event) => setBoardEditor((prev) => ({ ...prev, dueAt: event.target.value }))}
                   />
@@ -3086,14 +3095,14 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                 </label>
                 <input
                   type="text"
-                  className="w-full px-4 py-2.5 bg-white border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
+                  className="w-full px-4 py-2.5 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                   placeholder="comma, separated, labels"
                   value={boardEditor.labelsInput}
                   onChange={(event) => setBoardEditor((prev) => ({ ...prev, labelsInput: event.target.value }))}
                 />
               </div>
             </div>
-            <div className="px-6 py-4 border-t border-[var(--border-subtle)] bg-white flex items-center gap-3">
+            <div className="px-6 py-4 border-t border-[var(--border-subtle)] bg-[var(--bg-card)] flex items-center gap-3">
               <button
                 onClick={closeBoardEditor}
                 className="flex-1 py-2.5 text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] rounded-lg transition-colors"
@@ -3115,15 +3124,16 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
       {/* ── History Modal ───────────────────────────────────────── */}
       {activeTab === "jobs" && historyJobId !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/40 backdrop-blur-md px-4" onClick={() => setHistoryJobId(null)}>
-          <div className="bg-white p-8 w-full max-w-xl max-h-[80vh] flex flex-col rounded-[36px] shadow-2xl border border-gray-100 animate-in zoom-in-95 duration-200" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-[var(--bg-card)] p-8 w-full max-w-xl max-h-[80vh] flex flex-col rounded-[36px] shadow-2xl border border-[var(--border-subtle)] animate-in zoom-in-95 duration-200" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-8">
               <div>
-                <h2 className="text-2xl font-bold text-gray-900 tracking-tight">Run History</h2>
-                <p className="text-sm text-gray-500 font-medium mt-1">{historyJobName}</p>
+                <h2 className="text-2xl font-bold text-[var(--text-primary)] tracking-tight">Run History</h2>
+                <p className="text-sm text-[var(--text-secondary)] font-medium mt-1">{historyJobName}</p>
               </div>
               <button
                 onClick={() => setHistoryJobId(null)}
-                className="p-2 rounded-full hover:bg-gray-100 text-gray-400 transition-colors"
+                className="p-2 rounded-full hover:bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] transition-colors"
+                aria-label="Close"
               >
                 <X className="w-6 h-6" />
               </button>
@@ -3132,19 +3142,19 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
             <div className="flex-1 overflow-auto space-y-3 pr-2 custom-scrollbar">
               {historyLoading ? (
                 <div className="py-24 flex flex-col items-center gap-4">
-                  <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
-                  <p className="text-gray-400 font-bold uppercase tracking-widest text-[10px]">Loading logs...</p>
+                  <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+                  <p className="text-[var(--text-tertiary)] font-bold uppercase tracking-widest text-[10px]">Loading logs...</p>
                 </div>
               ) : runs.length === 0 ? (
                 <div className="py-24 text-center">
-                  <Clock className="w-12 h-12 mx-auto mb-4 text-gray-200" strokeWidth={1.5} />
-                  <p className="text-gray-500 font-medium">No execution logs found for this job.</p>
+                  <Clock className="w-12 h-12 mx-auto mb-4 text-[var(--text-quaternary)]" strokeWidth={1.5} />
+                  <p className="text-[var(--text-secondary)] font-medium">No execution logs found for this job.</p>
                 </div>
               ) : (
                 runs.map((run) => (
                   <div
                     key={run.id}
-                    className="p-5 rounded-[22px] bg-gray-50 border border-gray-100 group hover:bg-white hover:shadow-md transition-all duration-300"
+                    className="p-5 rounded-[22px] bg-[var(--bg-muted)] border border-[var(--border-subtle)] group hover:bg-[var(--bg-card)] hover:shadow-md transition-all duration-300"
                   >
                     <div className="flex items-center justify-between mb-3">
                       <div className="flex items-center gap-2">
@@ -3152,21 +3162,21 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                           "w-2 h-2 rounded-full",
                           run.status === "ok" ? "bg-green-500" : run.status === "skipped" ? "bg-gray-400" : "bg-red-500"
                         )} />
-                        <span className="text-[14px] font-bold text-gray-900">{formatRunTime(run)}</span>
+                        <span className="text-[14px] font-bold text-[var(--text-primary)]">{formatRunTime(run)}</span>
                       </div>
                       <span
                         className={clsx(
                           "text-[10px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-md border",
-                          run.status === "ok" ? "bg-green-50 text-green-600 border-green-100" : 
-                          run.status === "skipped" ? "bg-gray-100 text-gray-500 border-gray-200" : 
-                          "bg-red-50 text-red-600 border-red-100"
+                          run.status === "ok" ? "bg-green-500/10 text-green-500 border-green-500/20" :
+                          run.status === "skipped" ? "bg-[var(--bg-tertiary)] text-[var(--text-secondary)] border-[var(--border-default)]" :
+                          "bg-red-500/10 text-red-500 border-red-500/20"
                         )}
                       >
                         {run.status}
                       </span>
                     </div>
                     
-                    <div className="flex items-center gap-4 text-xs text-gray-400 font-medium">
+                    <div className="flex items-center gap-4 text-xs text-[var(--text-tertiary)] font-medium">
                       {formatRunDuration(run) && (
                         <div className="flex items-center gap-1.5">
                           <Clock className="w-3 h-3" />
@@ -3176,12 +3186,12 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                     </div>
 
                     {run.error && (
-                      <div className="mt-4 p-3 bg-red-50 rounded-xl border border-red-100 text-[13px] text-red-600 font-medium leading-relaxed">
+                      <div className="mt-4 p-3 bg-red-500/10 rounded-xl border border-red-500/20 text-[13px] text-red-500 font-medium leading-relaxed">
                         {run.error}
                       </div>
                     )}
                     {!run.error && run.summary && (
-                      <div className="mt-4 text-[13px] text-gray-600 font-medium leading-relaxed line-clamp-3 group-hover:line-clamp-none transition-all">
+                      <div className="mt-4 text-[13px] text-[var(--text-secondary)] font-medium leading-relaxed line-clamp-3 group-hover:line-clamp-none transition-all">
                         {run.summary}
                       </div>
                     )}

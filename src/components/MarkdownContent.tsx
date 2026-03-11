@@ -285,19 +285,19 @@ function buildComponents(
         </a>
       );
     },
-    hr: () => <hr className="border-[var(--glass-border)] my-3" />,
+    hr: () => <hr className="border-[var(--border-subtle)] my-3" />,
     table: ({ children }) => (
       <div className="overflow-x-auto my-2">
         <table className="text-sm border-collapse w-full">{children}</table>
       </div>
     ),
     th: ({ children }) => (
-      <th className="text-left font-semibold px-2 py-1 border-b border-[var(--glass-border)]">
+      <th className="text-left font-semibold px-2 py-1 border-b border-[var(--border-default)]">
         {children}
       </th>
     ),
     td: ({ children }) => (
-      <td className="px-2 py-1 border-b border-[var(--glass-border-subtle)]">{children}</td>
+      <td className="px-2 py-1 border-b border-[var(--border-subtle)]">{children}</td>
     ),
   };
 }

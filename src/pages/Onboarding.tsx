@@ -114,28 +114,28 @@ export function Onboarding({ onComplete }: Props) {
         className="absolute top-0 left-0 right-0 h-12"
       />
 
-      <div className="w-full max-w-xl bg-white border border-gray-100 rounded-3xl shadow-xl p-8 text-center animate-scale-in">
-        <div className="mb-6 p-4 bg-gray-50 rounded-2xl inline-flex">
+      <main className="w-full max-w-xl bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-2xl shadow-xl p-8 text-center animate-scale-in">
+        <div className="mb-6 p-4 bg-[var(--system-gray-6)] rounded-xl inline-flex">
           <Sparkles className="w-7 h-7 text-[var(--purple-accent)]" />
         </div>
 
-        <h1 className="text-3xl font-bold text-gray-900 tracking-tight mb-3">
+        <h1 className="text-3xl font-bold text-[var(--text-primary)] tracking-tight mb-3">
           Welcome to Entropic
         </h1>
-        <p className="text-gray-600 mb-8">
+        <p className="text-[var(--text-secondary)] mb-8">
           Entropic runs a secure local runtime for tools and coding workflows. We&apos;ll finish setup next.
         </p>
 
-        <div className="text-left rounded-2xl bg-gray-50 border border-gray-100 p-4 mb-8">
-          <p className="text-sm font-semibold text-gray-800 mb-2">What happens next</p>
-          <ul className="text-sm text-gray-600 space-y-1 list-disc pl-5">
+        <div className="text-left rounded-xl bg-[var(--system-gray-6)] border border-[var(--border-subtle)] p-4 mb-8">
+          <p className="text-sm font-semibold text-[var(--text-primary)] mb-2">What happens next</p>
+          <ul className="text-sm text-[var(--text-secondary)] space-y-1 list-disc pl-5">
             <li>Set up Docker/Colima runtime once</li>
             <li>Start a secure OpenClaw sandbox locally</li>
             <li>Begin with free credits and sign in later if needed</li>
           </ul>
         </div>
 
-        <div className="w-full flex items-center justify-center gap-2 px-6 py-4 bg-black text-white rounded-2xl font-semibold">
+        <div className="w-full flex items-center justify-center gap-2 px-6 py-4 bg-[#1A1A2E] text-white rounded-xl font-semibold">
           <Loader2 className="w-4 h-4 animate-spin" />
           <span>{submitStage || "Preparing..."}</span>
         </div>
@@ -152,7 +152,7 @@ export function Onboarding({ onComplete }: Props) {
             </button>
           </div>
         )}
-      </div>
+      </main>
     </div>
   );
 }

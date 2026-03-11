@@ -1,8 +1,12 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
-import { Loader2, CheckCircle2 } from "lucide-react";
 import { Layout, Page } from "../components/Layout";
+import {
+  SANDBOX_STARTUP_FACTS,
+  SandboxStartupOverlay,
+  type GatewayStartupStage,
+} from "../components/SandboxStartupOverlay";
 import { Chat, type ChatSession, type ChatSessionActionRequest } from "./Chat";
 import { Store } from "./Store";
 import { Channels } from "./Channels";
@@ -25,6 +29,7 @@ import {
 import { getGatewayStatusCached } from "../lib/gateway-status";
 import { LOCAL_MODEL_IDS, PROXY_MODEL_IDS } from "../components/ModelSelector";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
+import { hideEmbeddedPreviewWebview } from "../lib/nativePreview";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -43,15 +48,6 @@ const DEFAULT_PROXY_MODEL = "openai/gpt-5.4";
 const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
 const GATEWAY_FAILURE_THRESHOLD = 3;
 const FEEDBACK_FORM_URL = "https://entropic.qu.ai/feedback";
-const SANDBOX_STARTUP_FACTS = [
-  "Secure Execution: Entropic runs all shell commands in an isolated sandbox to protect your local system.",
-  "Custom Providers: Add your own API keys in Settings for direct access to the latest models.",
-  "Deep Context: Stage logs or documentation in 'Files' so Entropic can analyze them with full technical detail.",
-  "Tasks + Jobs: Plan and track work in Tasks, then automate routines from Jobs.",
-  "Codebase Awareness: Ask Entropic to 'read the repo' to generate precise implementation roadmaps.",
-  "Seamless Integrations: Connect GitHub, Slack, or Linear via Integrations to extend Entropic's capabilities.",
-  "One-click Workflow: Quickly initialize projects or deploy environments with a single command.",
-];
 
 export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const { isAuthenticated, isAuthConfigured, refreshBalance } = useAuth();
@@ -60,7 +56,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [gatewayRunning, setGatewayRunning] = useState(false);
   const [isTogglingGateway, setIsTogglingGateway] = useState(false);
   const [showGatewayStartup, setShowGatewayStartup] = useState(false);
-  const [gatewayStartupStage, setGatewayStartupStage] = useState<"idle" | "credits" | "token" | "launch" | "health">("idle");
+  const [gatewayStartupStage, setGatewayStartupStage] = useState<GatewayStartupStage>("idle");
   const [startupError, setStartupError] = useState<{
     message: string;
     actions?: Array<{ label: string; onClick: () => void }>;
@@ -1084,6 +1080,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
   }
 
+  useEffect(() => {
+    if (currentPage === "files") return;
+    void hideEmbeddedPreviewWebview().catch(() => {});
+  }, [currentPage]);
+
   function renderChatPage() {
     const gatewayStarting =
       showGatewayStartup || (isTogglingGateway && !gatewayRunning) || gatewayRetryIn !== null;
@@ -1292,20 +1293,20 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     >
       {providerSwitchConfirm && (
         <div className="absolute inset-0 z-50 flex items-center justify-center">
-          <div className="w-full max-w-sm mx-4 rounded-2xl bg-white border border-[var(--border-subtle)] shadow-xl p-6">
+          <div className="w-full max-w-sm mx-4 rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] shadow-xl p-6">
             <h2 className="text-sm font-semibold text-[var(--text-primary)]">Switch provider?</h2>
             <p className="text-xs text-[var(--text-secondary)] mt-2">
               Switching from <strong>{providerSwitchConfirm.oldProvider}</strong> to <strong>{providerSwitchConfirm.newProvider}</strong> will restart the sandbox container. Any running tasks will be interrupted.
             </p>
             <div className="mt-4 flex justify-end gap-2">
               <button
-                className="rounded-full border border-[var(--border-subtle)] bg-white px-4 py-1.5 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-muted)]"
+                className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-card)] px-4 py-1.5 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-muted)]"
                 onClick={() => setProviderSwitchConfirm(null)}
               >
                 Cancel
               </button>
               <button
-                className="rounded-full bg-[var(--text-primary)] px-4 py-1.5 text-xs text-white hover:opacity-90"
+                className="rounded-full bg-[#1A1A2E] px-4 py-1.5 text-xs text-white hover:opacity-90"
                 onClick={() => executeModelChange(providerSwitchConfirm.newModel)}
               >
                 Switch Provider
@@ -1315,121 +1316,30 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         </div>
       )}
       {showGatewayStartup && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center">
-          <div className="w-full max-w-sm mx-4 rounded-2xl bg-white border border-[var(--border-subtle)] shadow-xl p-6">
-            <div className="flex items-start gap-3">
-              <div className="mt-0.5 rounded-full bg-[var(--system-gray-6)] p-2">
-                <Loader2 className="w-4 h-4 animate-spin text-[var(--text-primary)]" />
-              </div>
-              <div>
-                <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-                  {gatewayRetryIn ? "Reconnecting Sandbox" : "Starting Secure Sandbox"}
-                </h2>
-                <p className="text-xs text-[var(--text-secondary)] mt-1 leading-relaxed">
-                  {gatewayRetryIn
-                    ? `Retrying in ${gatewayRetryIn}s. We’ll keep trying until the environment is ready.`
-                    : "Entropic is initializing an isolated environment to safely run tools and plugins."}
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-5 rounded-xl border border-violet-100 bg-violet-50/70 p-4">
-              <div className="text-[10px] uppercase tracking-wider text-violet-700 font-bold mb-2">
-                Did you know?
-              </div>
-              <div className="text-xs leading-relaxed text-violet-900 font-medium">
-                {SANDBOX_STARTUP_FACTS[startupFactIndex]}
-              </div>
-            </div>
-
-            <div className="mt-6 pt-4 border-t border-[var(--border-subtle)]">
-              <div className="flex items-center justify-between text-[10px] text-[var(--text-tertiary)] uppercase tracking-widest font-semibold mb-3">
-                System Status
-                {gatewayStartupStage === "health" ? (
-                  <span className="text-green-600">Ready</span>
-                ) : (
-                  <span className="animate-pulse">Initializing...</span>
-                )}
-              </div>
-              <div className="space-y-2.5">
-                <div className="flex items-center gap-2.5 text-[11px] text-[var(--text-secondary)]">
-                  {gatewayStartupStage === "credits" || gatewayStartupStage === "token" ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-500" />
-                  ) : gatewayStartupStage === "launch" || gatewayStartupStage === "health" ? (
-                    <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
-                  ) : (
-                    <div className="w-3.5 h-3.5 rounded-full border border-[var(--border-subtle)]" />
-                  )}
-                  <span className={gatewayStartupStage === "credits" || gatewayStartupStage === "token" ? "font-medium text-[var(--text-primary)]" : ""}>
-                    Securing gateway credentials
-                  </span>
-                </div>
-                <div className="flex items-center gap-2.5 text-[11px] text-[var(--text-secondary)]">
-                  {gatewayStartupStage === "launch" ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-500" />
-                  ) : gatewayStartupStage === "health" ? (
-                    <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
-                  ) : (
-                    <div className="w-3.5 h-3.5 rounded-full border border-[var(--border-subtle)]" />
-                  )}
-                  <span className={gatewayStartupStage === "launch" ? "font-medium text-[var(--text-primary)]" : ""}>
-                    Provisioning isolated container
-                  </span>
-                </div>
-                <div className="flex items-center gap-2.5 text-[11px] text-[var(--text-secondary)]">
-                  {gatewayStartupStage === "health" ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-500" />
-                  ) : (
-                    <div className="w-3.5 h-3.5 rounded-full border border-[var(--border-subtle)]" />
-                  )}
-                  <span className={gatewayStartupStage === "health" ? "font-medium text-[var(--text-primary)]" : ""}>
-                    Verifying sandbox health
-                  </span>
-                </div>
-              </div>
-            </div>
-            {!gatewayRetryIn && (
-              <div className="mt-4 text-[10px] text-[var(--text-tertiary)] text-center italic">
-                First-time setup may take a few seconds.
-              </div>
-            )}
-            {startupError && (
-              <div className="mt-3 text-xs text-red-600">
-                {startupError.message}
-                {startupError.actions && startupError.actions.length > 0 && (
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {startupError.actions.map((action) => (
-                      <button
-                        key={action.label}
-                        className="rounded-full border border-[var(--border-subtle)] bg-white px-3 py-1 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-muted)]"
-                        onClick={action.onClick}
-                      >
-                        {action.label}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
+        <SandboxStartupOverlay
+          stage={gatewayStartupStage}
+          retryIn={gatewayRetryIn}
+          factIndex={startupFactIndex}
+          startupError={startupError}
+          showFirstTimeHint
+        />
       )}
       {!showGatewayStartup && startupError && (
-        <div className="absolute right-4 top-4 z-40 w-[min(28rem,calc(100%-2rem))] rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800 shadow-lg">
+        <div className="absolute right-4 top-4 z-40 w-[min(28rem,calc(100%-2rem))] rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-sm text-[var(--text-primary)] shadow-lg">
           <div className="font-medium">Gateway Start Failed</div>
           <div className="mt-1 text-xs">{startupError.message}</div>
           <div className="mt-3 flex flex-wrap gap-2">
             {startupError.actions && startupError.actions.length > 0 && startupError.actions.map((action) => (
               <button
                 key={action.label}
-                className="rounded-full border border-red-200 bg-white px-3 py-1 text-xs text-red-700 hover:bg-red-100"
+                className="rounded-full border border-red-500/20 bg-[var(--bg-card)] px-3 py-1 text-xs text-red-500 hover:bg-red-500/10"
                 onClick={action.onClick}
               >
                 {action.label}
               </button>
             ))}
             <button
-              className="rounded-full border border-red-200 bg-white px-3 py-1 text-xs text-red-700 hover:bg-red-100"
+              className="rounded-full border border-red-500/20 bg-[var(--bg-card)] px-3 py-1 text-xs text-red-500 hover:bg-red-500/10"
               onClick={() => setStartupError(null)}
             >
               Dismiss

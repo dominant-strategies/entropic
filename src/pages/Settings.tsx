@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { Key, Shield, Sparkles, Cpu, Image, ChevronRight, User, Palette, ChevronDown, ScrollText, LogIn, LogOut, Loader2, Trash2, AlertTriangle, Copy, Download } from "lucide-react";
+import { Key, Shield, Sparkles, Cpu, Image, ChevronRight, User, Palette, ChevronDown, ScrollText, LogIn, LogOut, Loader2, Trash2, AlertTriangle, Copy, Download, Sun, Moon, Monitor } from "lucide-react";
 import clsx from "clsx";
 import {
   getProfileInitials,
@@ -87,7 +87,7 @@ function SettingsGroup({ title, children }: { title?: string, children: React.Re
           {title}
         </h3>
       )}
-      <div className="bg-white border border-[var(--border-subtle)] rounded-xl overflow-hidden shadow-sm divide-y divide-[var(--border-subtle)]">
+      <div className="bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl overflow-hidden shadow-sm divide-y divide-[var(--border-subtle)]">
         {children}
       </div>
     </div>
@@ -172,6 +172,8 @@ export function Settings({
   const [gatewayConfigError, setGatewayConfigError] = useState<string | null>(null);
   const [gatewayConfigNotice, setGatewayConfigNotice] = useState<string | null>(null);
   const [runtimeVersionInfo, setRuntimeVersionInfo] = useState<RuntimeVersionInfo | null>(null);
+  const [runtimeVersionLoading, setRuntimeVersionLoading] = useState(false);
+  const [authMetaLoading, setAuthMetaLoading] = useState(false);
   const [runtimeFetchLoading, setRuntimeFetchLoading] = useState(false);
   const appliedRuntimeDigest =
     runtimeVersionInfo?.applied_runtime_image_id
@@ -184,6 +186,31 @@ export function Settings({
   const profileAvatarDataUrl = isRenderableAvatarDataUrl(profile.avatarDataUrl)
     ? profile.avatarDataUrl.trim()
     : undefined;
+
+  // Theme state
+  type ThemeMode = "system" | "light" | "dark";
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    try {
+      return (localStorage.getItem("entropic.theme") as ThemeMode) || "system";
+    } catch {
+      return "system";
+    }
+  });
+
+  function applyTheme(mode: ThemeMode) {
+    setThemeMode(mode);
+    try {
+      localStorage.setItem("entropic.theme", mode);
+    } catch {}
+    const root = document.documentElement;
+    root.classList.remove("dark", "light");
+    if (mode === "dark") {
+      root.classList.add("dark");
+    } else if (mode === "light") {
+      root.classList.add("light");
+    }
+    // "system" uses neither class — CSS media query handles it
+  }
 
   // Wallpaper state
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
@@ -238,9 +265,62 @@ export function Settings({
       const cwp = (await store.get("desktopCustomWallpaper")) as string | null;
       if (cwp) setCustomWallpaper(cwp);
     }).catch(() => {});
-    invoke<RuntimeVersionInfo>("get_runtime_version_info").then(setRuntimeVersionInfo).catch(() => {});
-    invoke<Record<string, string>>("get_oauth_status").then(setOauthStatus).catch(() => {});
-    invoke<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>("get_auth_state").then(setAuthState).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let rafId: number | null = null;
+    let timeoutId: number | null = null;
+
+    const loadDeferredSettingsData = () => {
+      setRuntimeVersionLoading(true);
+      setAuthMetaLoading(true);
+
+      void invoke<RuntimeVersionInfo>("get_runtime_version_info")
+        .then((value) => {
+          if (!cancelled) {
+            setRuntimeVersionInfo(value);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) {
+            setRuntimeVersionLoading(false);
+          }
+        });
+
+      void Promise.allSettled([
+        invoke<Record<string, string>>("get_oauth_status"),
+        invoke<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>("get_auth_state"),
+      ]).then((results) => {
+        if (cancelled) return;
+        const [oauthResult, authResult] = results;
+        if (oauthResult.status === "fulfilled") {
+          setOauthStatus(oauthResult.value);
+        }
+        if (authResult.status === "fulfilled") {
+          setAuthState(authResult.value);
+        }
+      }).finally(() => {
+        if (!cancelled) {
+          setAuthMetaLoading(false);
+        }
+      });
+    };
+
+    rafId = window.requestAnimationFrame(() => {
+      timeoutId = window.setTimeout(loadDeferredSettingsData, 0);
+    });
+
+    return () => {
+      cancelled = true;
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -540,14 +620,22 @@ export function Settings({
 
   return (
     <div className="max-w-3xl mx-auto py-8 px-4">
-      <h1 className="text-2xl font-bold mb-8 px-1">Settings</h1>
+      <div className="mb-8 px-1">
+        <h1 className="text-2xl font-bold">Settings</h1>
+        {runtimeVersionLoading || authMetaLoading ? (
+          <div className="mt-2 inline-flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            Loading runtime and account details…
+          </div>
+        ) : null}
+      </div>
 
       {gatewayConfigInvalid && (
-        <div className="mb-6 rounded-xl border border-amber-300 bg-amber-50 p-4">
+        <div className="mb-6 rounded-xl border border-amber-500/20 bg-amber-500/10 p-4">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-amber-900">Gateway config warning</div>
-              <div className="text-xs text-amber-800 mt-1">
+              <div className="text-sm font-semibold text-[var(--text-primary)]">Gateway config warning</div>
+              <div className="text-xs text-[var(--text-secondary)] mt-1">
                 {gatewayConfigHealth?.summary || "Gateway config is invalid."}
               </div>
             </div>
@@ -556,7 +644,7 @@ export function Settings({
                 type="button"
                 onClick={refreshGatewayConfigHealth}
                 disabled={gatewayConfigLoading || gatewayConfigActionLoading}
-                className="px-3 py-1.5 text-xs font-medium rounded-md border border-amber-300 text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+                className="px-3 py-1.5 text-xs font-medium rounded-md border border-amber-500/30 text-[var(--text-primary)] hover:bg-amber-500/10 disabled:opacity-50"
               >
                 {gatewayConfigLoading ? "Checking..." : "Recheck"}
               </button>
@@ -564,14 +652,14 @@ export function Settings({
                 type="button"
                 onClick={healGatewayConfig}
                 disabled={gatewayConfigLoading || gatewayConfigActionLoading}
-                className="px-3 py-1.5 text-xs font-semibold rounded-md bg-amber-700 text-white hover:bg-amber-800 disabled:opacity-50"
+                className="px-3 py-1.5 text-xs font-semibold rounded-md bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
               >
                 {gatewayConfigActionLoading ? "Healing..." : "Heal Config"}
               </button>
             </div>
           </div>
           {gatewayConfigHealth?.issues?.length ? (
-            <ul className="mt-3 text-xs text-amber-900 space-y-1 list-disc list-inside">
+            <ul className="mt-3 text-xs text-[var(--text-secondary)] space-y-1 list-disc list-inside">
               {gatewayConfigHealth.issues.slice(0, 4).map((issue) => (
                 <li key={issue}>{issue}</li>
               ))}
@@ -599,6 +687,11 @@ export function Settings({
               onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (!file) return;
+                if (file.size > 5 * 1024 * 1024) {
+                  alert("Image must be under 5 MB.");
+                  e.target.value = "";
+                  return;
+                }
                 const reader = new FileReader();
                 reader.onload = () => {
                   const avatarDataUrl = reader.result as string;
@@ -637,6 +730,7 @@ export function Settings({
                     avatarDataUrl: profileAvatarDataUrl ?? null,
                   }).catch(() => {});
                 }}
+                maxLength={64}
                 className="w-full bg-transparent text-xl font-bold text-[var(--text-primary)] focus:outline-none border-b border-transparent focus:border-[var(--system-blue)] transition-colors placeholder:text-[var(--text-tertiary)]"
                 placeholder="Name your agent"
               />
@@ -673,7 +767,7 @@ export function Settings({
                     value={soul} 
                     onChange={e => setSoul(e.target.value)}
                     onBlur={() => invoke("set_personality", { soul })}
-                    className="w-full p-3 rounded-xl bg-[var(--system-gray-6)] border-transparent focus:bg-white focus:ring-2 focus:ring-[var(--system-blue)]/20 transition-all text-sm text-[var(--text-primary)] resize-none"
+                    className="w-full p-3 rounded-xl bg-[var(--system-gray-6)] border-transparent focus:bg-[var(--bg-card)] focus:ring-2 focus:ring-[var(--system-blue)]/20 transition-all text-sm text-[var(--text-primary)] resize-none"
                     rows={4}
                     placeholder="Describe how your assistant should behave..."
                     autoFocus
@@ -697,7 +791,7 @@ export function Settings({
                 onClick={async () => {
                   try { await signOut(); } catch (e) { console.warn("[Settings] signOut failed:", e); }
                 }}
-                className="flex items-center gap-1.5 text-[12px] font-medium text-red-500 hover:text-red-600 transition-colors"
+                className="flex items-center gap-1.5 text-[12px] font-medium text-red-500 hover:text-red-400 transition-colors"
               >
                 <LogOut className="w-3.5 h-3.5" />
                 Sign Out
@@ -708,9 +802,41 @@ export function Settings({
       </SettingsGroup>
 
       <SettingsGroup title="Appearance">
-        <SettingsRow 
-          label="Desktop Wallpaper" 
-          icon={Palette} 
+        <SettingsRow
+          label="Theme"
+          icon={themeMode === "dark" ? Moon : themeMode === "light" ? Sun : Monitor}
+          description={themeMode === "system" ? "Follows system preference" : themeMode === "dark" ? "Always dark" : "Always light"}
+        >
+          <div className="inline-flex items-center rounded-lg border border-[var(--border-default)] bg-[var(--bg-tertiary)] p-0.5">
+            {([
+              { key: "system" as ThemeMode, icon: Monitor, label: "Auto" },
+              { key: "light" as ThemeMode, icon: Sun, label: "Light" },
+              { key: "dark" as ThemeMode, icon: Moon, label: "Dark" },
+            ]).map((opt) => {
+              const Icon = opt.icon;
+              const active = themeMode === opt.key;
+              return (
+                <button
+                  key={opt.key}
+                  onClick={() => applyTheme(opt.key)}
+                  className={clsx(
+                    "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
+                    active
+                      ? "bg-[var(--bg-card)] text-[var(--text-primary)] shadow-sm"
+                      : "text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]"
+                  )}
+                  title={opt.label}
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                  <span>{opt.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          label="Desktop Wallpaper"
+          icon={Palette}
           description="Customize the background"
           onClick={() => setWallpaperPickerOpen(true)}
         >
@@ -742,7 +868,7 @@ export function Settings({
           >
             <span
               className={clsx(
-                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-[var(--bg-card)] shadow ring-0 transition duration-200 ease-in-out",
                 (gatewayRunning || isTogglingGateway) ? "translate-x-5" : "translate-x-0"
               )}
             />
@@ -769,14 +895,14 @@ export function Settings({
           >
             <span
               className={clsx(
-                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-[var(--bg-card)] shadow ring-0 transition duration-200 ease-in-out",
                 memoryQmdEnabled && !saving ? "translate-x-5" : "translate-x-0"
               )}
             />
           </button>
         </SettingsRow>
         {memoryQmdError && (
-          <div className="px-4 pb-4 pt-2 text-xs text-red-600">{memoryQmdError}</div>
+          <div className="px-4 pb-4 pt-2 text-xs text-red-500">{memoryQmdError}</div>
         )}
 
         <SettingsRow
@@ -801,14 +927,14 @@ export function Settings({
           >
             <span
               className={clsx(
-                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-[var(--bg-card)] shadow ring-0 transition duration-200 ease-in-out",
                 memorySessionIndexing && !saving ? "translate-x-5" : "translate-x-0"
               )}
             />
           </button>
         </SettingsRow>
         {memorySessionIndexingError && (
-          <div className="px-4 pb-4 pt-2 text-xs text-red-600">{memorySessionIndexingError}</div>
+          <div className="px-4 pb-4 pt-2 text-xs text-red-500">{memorySessionIndexingError}</div>
         )}
 
         <SettingsRow
@@ -821,7 +947,7 @@ export function Settings({
               type="button"
               onClick={refreshGatewayConfigHealth}
               disabled={gatewayConfigLoading || gatewayConfigActionLoading}
-              className="px-3 py-1.5 text-xs font-medium rounded-md border border-[var(--border-subtle)] bg-white hover:bg-[var(--system-gray-6)] disabled:opacity-50"
+              className="px-3 py-1.5 text-xs font-medium rounded-md border border-[var(--border-subtle)] bg-[var(--bg-card)] hover:bg-[var(--system-gray-6)] disabled:opacity-50"
             >
               {gatewayConfigLoading ? "Checking..." : "Check"}
             </button>
@@ -829,17 +955,17 @@ export function Settings({
               type="button"
               onClick={healGatewayConfig}
               disabled={gatewayConfigLoading || gatewayConfigActionLoading}
-              className="px-3 py-1.5 text-xs font-semibold rounded-md bg-black text-white hover:bg-gray-800 disabled:opacity-50"
+              className="px-3 py-1.5 text-xs font-semibold rounded-md bg-[#1A1A2E] text-white hover:opacity-80 disabled:opacity-50"
             >
               {gatewayConfigActionLoading ? "Healing..." : "Heal"}
             </button>
           </div>
         </SettingsRow>
         {gatewayConfigError && (
-          <div className="px-4 pb-4 pt-2 text-xs text-red-600">{gatewayConfigError}</div>
+          <div className="px-4 pb-4 pt-2 text-xs text-red-500">{gatewayConfigError}</div>
         )}
         {gatewayConfigNotice && (
-          <div className="px-4 pb-4 pt-2 text-xs text-green-700">{gatewayConfigNotice}</div>
+          <div className="px-4 pb-4 pt-2 text-xs text-green-500">{gatewayConfigNotice}</div>
         )}
       </SettingsGroup>
 
@@ -891,7 +1017,7 @@ export function Settings({
           >
             <span
               className={clsx(
-                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-[var(--bg-card)] shadow ring-0 transition duration-200 ease-in-out",
                 useLocalKeys ? "translate-x-5" : "translate-x-0"
               )}
             />
@@ -928,7 +1054,7 @@ export function Settings({
                     ) : isConnected ? (
                       <button
                         onClick={() => handleOAuthDisconnect("anthropic")}
-                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-red-600 hover:bg-red-50 transition-colors"
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 transition-colors"
                       >
                         <LogOut className="w-3.5 h-3.5" />
                         Disconnect
@@ -999,7 +1125,7 @@ export function Settings({
                   ) : isConnected ? (
                     <button
                       onClick={() => handleOAuthDisconnect("openai")}
-                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-red-600 hover:bg-red-50 transition-colors"
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 transition-colors"
                     >
                       <LogOut className="w-3.5 h-3.5" />
                       Disconnect
@@ -1018,7 +1144,7 @@ export function Settings({
             })()}
 
             {oauthError && (
-              <div className="px-4 pb-3 pt-1 text-xs text-red-600">{oauthError}</div>
+              <div className="px-4 pb-3 pt-1 text-xs text-red-500">{oauthError}</div>
             )}
           </>
         )}
@@ -1073,7 +1199,7 @@ export function Settings({
                 </button>
                 <button
                   onClick={handleClearGatewayDiagnostics}
-                  className="px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 hover:bg-red-50"
+                  className="px-2 py-1 text-xs rounded-md border border-red-500/20 text-red-500 hover:bg-red-500/10"
                 >
                   Clear
                 </button>
@@ -1112,9 +1238,9 @@ export function Settings({
                       <span
                         className={clsx(
                           "shrink-0 uppercase text-[10px] font-semibold px-1.5 py-0.5 rounded",
-                          entry.type === "info" && "bg-blue-100 text-blue-700",
-                          entry.type === "warn" && "bg-amber-100 text-amber-700",
-                          entry.type === "error" && "bg-red-100 text-red-700",
+                          entry.type === "info" && "bg-blue-500/15 text-blue-500",
+                          entry.type === "warn" && "bg-amber-500/15 text-amber-500",
+                          entry.type === "error" && "bg-red-500/15 text-red-500",
                         )}
                       >
                         {entry.type}
@@ -1160,7 +1286,7 @@ export function Settings({
       <SettingsGroup title="Data Management">
         <div className="p-4 space-y-4">
           <div className="flex items-start gap-3">
-            <div className="w-7 h-7 rounded-md bg-blue-50 text-blue-600 flex items-center justify-center flex-shrink-0">
+            <div className="w-7 h-7 rounded-md bg-blue-500/10 text-blue-500 flex items-center justify-center flex-shrink-0">
               <Cpu className="w-4 h-4" />
             </div>
             <div className="flex-1">
@@ -1199,7 +1325,7 @@ export function Settings({
           </div>
 
           <div className="flex items-start gap-3">
-            <div className="w-7 h-7 rounded-md bg-amber-50 text-amber-600 flex items-center justify-center flex-shrink-0">
+            <div className="w-7 h-7 rounded-md bg-amber-500/10 text-amber-500 flex items-center justify-center flex-shrink-0">
               <AlertTriangle className="w-4 h-4" />
             </div>
             <div className="flex-1">
@@ -1254,7 +1380,7 @@ export function Settings({
                   }
                 }}
                 disabled={legacyUpgradeLoading}
-                className="mt-2 px-4 py-2 bg-gray-700 hover:bg-gray-800 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                className="mt-2 px-4 py-2 bg-gray-700 hover:opacity-80 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 {legacyUpgradeLoading && <Loader2 className="w-4 h-4 animate-spin" />}
                 {legacyUpgradeLoading
@@ -1265,7 +1391,7 @@ export function Settings({
           </div>
 
           <div className="flex items-start gap-3">
-            <div className="w-7 h-7 rounded-md bg-red-50 text-red-600 flex items-center justify-center flex-shrink-0">
+            <div className="w-7 h-7 rounded-md bg-red-500/10 text-red-500 flex items-center justify-center flex-shrink-0">
               <Trash2 className="w-4 h-4" />
             </div>
             <div className="flex-1">
@@ -1328,7 +1454,7 @@ export function Settings({
 
           <div className="border-t border-[var(--border-subtle)] pt-4">
             <div className="flex items-start gap-3">
-              <div className="w-7 h-7 rounded-md bg-gray-100 text-gray-600 flex items-center justify-center flex-shrink-0">
+              <div className="w-7 h-7 rounded-md bg-[var(--bg-tertiary)] text-[var(--text-secondary)] flex items-center justify-center flex-shrink-0">
                 <LogOut className="w-4 h-4" />
               </div>
               <div className="flex-1">
@@ -1336,9 +1462,9 @@ export function Settings({
                 <div className="text-[12px] text-[var(--text-secondary)] mb-3">
                   Clean up all data and quit the app. After this, you can move Entropic to trash.
                 </div>
-                <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg mb-3">
-                  <AlertTriangle className="w-4 h-4 text-blue-600 flex-shrink-0" />
-                  <p className="text-xs text-blue-800">
+                <div className="flex items-center gap-2 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg mb-3">
+                  <AlertTriangle className="w-4 h-4 text-blue-500 flex-shrink-0" />
+                  <p className="text-xs text-[var(--text-secondary)]">
                     This will delete everything including your settings. Use "Reset Application" instead if you plan to reinstall.
                   </p>
                 </div>
@@ -1431,9 +1557,10 @@ export function Settings({
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/20"
           onClick={() => setWallpaperPickerOpen(false)}
+          onKeyDown={(e) => { if (e.key === "Escape") setWallpaperPickerOpen(false); }}
         >
           <div
-            className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-4xl max-h-[85vh] overflow-auto border border-[var(--border-subtle)]"
+            className="bg-[var(--bg-card)] rounded-xl shadow-2xl p-6 w-full max-w-4xl max-h-[85vh] overflow-auto border border-[var(--border-subtle)]"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-6">

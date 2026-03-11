@@ -68,36 +68,54 @@ import { getLocalCreditBalance } from "../lib/localCredits";
 import { signInWithDiscord, signInWithEmail, signInWithGoogle, signUpWithEmail, createCheckout, getBalance } from "../lib/auth";
 import entropicLogo from "../assets/entropic-logo.png";
 import type { Page } from "../components/Layout";
+import {
+  type Message,
+  type MessageAttachment,
+  type CalendarEvent,
+  type ToolError,
+  type TerminalCommandResult,
+  type AssistantPayload,
+  type ChatSession,
+  INTERNAL_USER_PROMPT_PREFIX,
+  CHANNEL_SESSION_KEY_MARKERS,
+  UI_SESSION_KEY_RE,
+  BILLING_RECOVERY_MESSAGE,
+  parseRunSlashCommand,
+  extractJsonBlocks,
+  isToolTransportPayload,
+  stripExternalUntrustedSections,
+  sanitizeAuthStoreDetails,
+  isBillingIssueMessage,
+  isPolicyMessageRemovedError,
+  isContainerRestartingError,
+  sanitizeGatewayErrorMessage,
+  formatAssistantErrorTextForUi,
+  extractAssistantErrorFromGatewayMessage,
+  parseToolPayloads,
+  stripConversationMetadata,
+  stripInlineClawdbotMetadata,
+  stripOpenClawStatusLines,
+  sanitizeAssistantDisplayContent,
+  buildAssistantPayload,
+  normalizeCachedMessage,
+  parseUtcBracketTimestamp,
+  toTimestampMs,
+  extractMessageTimestamp,
+  normalizeUserContent,
+  summarizeSessionTitleFromMessages,
+  isGenericConversationTitle,
+  titleDedupKey,
+  sessionTitleHint,
+  formatMessageTime,
+  formatEventRange,
+  extractMessageText,
+  isChannelOrSystemSessionKey,
+  shouldDisplayGatewaySession,
+  isChannelOriginGatewayMessage,
+  normalizeGatewayMessage,
+} from "../lib/chatMessageUtils";
 
-// NOTE: Most type definitions are omitted for brevity in this example
-type MessageAttachment = {
-  fileName: string;
-  mimeType: string;
-  previewUrl: string;
-};
-type Message = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  kind?: "toolResult";
-  toolName?: string;
-  sentAt?: number | null;
-  attachments?: MessageAttachment[];
-  terminalResult?: TerminalCommandResult;
-  assistantPayload?: {
-    events: CalendarEvent[];
-    errors: ToolError[];
-    hadToolPayload: boolean;
-  };
-};
-export type ChatSession = {
-  key: string;
-  label?: string;
-  displayName?: string;
-  derivedTitle?: string;
-  updatedAt?: number | null;
-  pinned?: boolean;
-};
+export type { ChatSession };
 export type ChatSessionActionRequest =
   | { id: string; type: "delete"; key: string }
   | { id: string; type: "pin"; key: string; pinned: boolean }
@@ -111,8 +129,6 @@ type PendingAttachment = {
   previewUrl?: string;
 };
 type AuthState = { active_provider: string | null; providers: Array<{ id: string; has_key: boolean }> };
-type CalendarEvent = { id?: string; summary?: string; start?: string; end?: string; attendees?: Array<{ email?: string; displayName?: string }> };
-type ToolError = { tool?: string; error?: string; status?: string };
 type WorkspaceChatReference = {
   key: string;
   path: string;
@@ -129,13 +145,6 @@ type DesktopHandoff = {
 type ComposerMode = "chat" | "shell";
 type ChatTerminalState = {
   cwd: string;
-};
-type TerminalCommandResult = {
-  command: string;
-  cwd: string;
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
 };
 type ChatTerminalRunResponse = {
   stdout: string;
@@ -202,24 +211,8 @@ function extractWorkspaceChatReferences(content: string): WorkspaceChatReference
   return refs;
 }
 
-function GoogleIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24">
-      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-    </svg>
-  );
-}
-
-function DiscordIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor">
-      <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
-    </svg>
-  );
-}
+// OAuth icons imported from shared component
+import { GoogleIcon, DiscordIcon } from "../components/OAuthIcons";
 
 // ── Default avatar colors ──────────────────────────────────────
 const AVATAR_COLORS = [
@@ -462,714 +455,7 @@ async function loadPersistedChatData(): Promise<PersistedChatData | null> {
   }
 }
 
-function parseRunSlashCommand(raw: string): string | null {
-  const match = raw.match(/^\/run(?:\s+|\n)([\s\S]+)$/i);
-  if (!match) {
-    return raw.trim().toLowerCase() === "/run" ? "" : null;
-  }
-  return match[1].trimEnd();
-}
-
-function extractJsonBlocks(text: string): Array<{ jsonText: string; start: number; end: number }> {
-  const blocks: Array<{ jsonText: string; start: number; end: number }> = [];
-  const codeFence = /```json\\s*([\\s\\S]*?)```/gi;
-  let match: RegExpExecArray | null = null;
-  const fencedRanges: Array<{ start: number; end: number }> = [];
-  while ((match = codeFence.exec(text))) {
-    const start = match.index;
-    const end = match.index + match[0].length;
-    blocks.push({ jsonText: match[1].trim(), start, end });
-    fencedRanges.push({ start, end });
-  }
-
-  const inFence = (pos: number) => fencedRanges.some(range => pos >= range.start && pos < range.end);
-  let i = 0;
-  while (i < text.length) {
-    if (inFence(i)) {
-      i += 1;
-      continue;
-    }
-    if (text[i] !== "{") {
-      i += 1;
-      continue;
-    }
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-    const start = i;
-    for (let j = i; j < text.length; j++) {
-      const ch = text[j];
-      if (inString) {
-        if (escape) {
-          escape = false;
-        } else if (ch === "\\\\") {
-          escape = true;
-        } else if (ch === "\"") {
-          inString = false;
-        }
-        continue;
-      }
-      if (ch === "\"") {
-        inString = true;
-        continue;
-      }
-      if (ch === "{") depth += 1;
-      if (ch === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          blocks.push({ jsonText: text.slice(start, j + 1), start, end: j + 1 });
-          i = j;
-          break;
-        }
-      }
-    }
-    i += 1;
-  }
-
-  return blocks.sort((a, b) => a.start - b.start);
-}
-
-function isToolTransportPayload(value: unknown): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj);
-
-  const hasWebFetchShape =
-    ("url" in obj || "finalUrl" in obj) &&
-    "status" in obj &&
-    ("contentType" in obj || "extractMode" in obj || "extractor" in obj);
-  const hasWebSearchShape =
-    "query" in obj &&
-    "provider" in obj &&
-    ("content" in obj || "citations" in obj || "model" in obj);
-  const hasToolErrorShape = "error" in obj && ("message" in obj || "docs" in obj) && keys.length <= 8;
-  const wrappedExternalInText =
-    typeof obj.text === "string" &&
-    (obj.text.includes("SECURITY NOTICE:") || obj.text.includes("<<<EXTERNAL_UNTRUSTED_CONTENT>>>"));
-  const wrappedExternalInContent =
-    typeof obj.content === "string" &&
-    (obj.content.includes("SECURITY NOTICE:") || obj.content.includes("<<<EXTERNAL_UNTRUSTED_CONTENT>>>"));
-
-  return (
-    hasWebFetchShape ||
-    hasWebSearchShape ||
-    hasToolErrorShape ||
-    wrappedExternalInText ||
-    wrappedExternalInContent
-  );
-}
-
-function stripExternalUntrustedSections(raw: string): string {
-  if (!raw) return "";
-  let text = raw;
-  text = text.replace(
-    /SECURITY NOTICE:[\s\S]*?<<<EXTERNAL_UNTRUSTED_CONTENT>>>[\s\S]*?<<<END_EXTERNAL_UNTRUSTED_CONTENT>>>/gi,
-    ""
-  );
-  text = text.replace(/<<<EXTERNAL_UNTRUSTED_CONTENT>>>[\s\S]*?<<<END_EXTERNAL_UNTRUSTED_CONTENT>>>/gi, "");
-  return text.trim();
-}
-
-function sanitizeAuthStoreDetails(raw: string): string {
-  if (!raw) return "";
-  return raw
-    .replace(/Auth store:\s*[^\n]+/g, "Auth store: [hidden]")
-    .replace(/\(agentDir:\s*[^)]+\)/g, "(agentDir: [hidden])");
-}
-
-const BILLING_RECOVERY_MESSAGE = "You're out of credits. Add credits to continue using Entropic in proxy mode.";
-
-function isBillingIssueMessage(raw?: string | null): boolean {
-  if (!raw) return false;
-  const message = raw.toLowerCase();
-  return (
-    message.includes("insufficient credits") ||
-    message.includes("out of credits") ||
-    message.includes("out of free credits") ||
-    message.includes("trial credits") ||
-    message.includes("add more credits") ||
-    message.includes("payment required") ||
-    message.includes("billing issue")
-  );
-}
-
-function isPolicyMessageRemovedError(raw?: string | null): boolean {
-  if (!raw) return false;
-  const text = raw.toLowerCase();
-  return (
-    text.includes("all messages were removed by policy") ||
-    text.includes("messages were removed by policy")
-  );
-}
-
-function isContainerRestartingError(raw?: string | null): boolean {
-  if (!raw) return false;
-  const text = raw.toLowerCase();
-  return (
-    (text.includes("container") && (text.includes("restarting") || text.includes("restart"))) ||
-    (text.includes("is restarting") && text.includes("wait"))
-  );
-}
-
-function formatAssistantErrorTextForUi(raw?: string | null): string {
-  const message = sanitizeGatewayErrorMessage(raw || "");
-  if (isBillingIssueMessage(message)) {
-    return `${BILLING_RECOVERY_MESSAGE} Open Billing to add funds.`;
-  }
-  if (isPolicyMessageRemovedError(raw)) {
-    return "The conversation context was cleared by the provider. Starting fresh — please resend your message.";
-  }
-  if (isContainerRestartingError(raw)) {
-    return "The AI model is reloading. Please wait a moment and try again.";
-  }
-  if (/^connection error\.?$/i.test(message)) {
-    return "The AI provider connection failed. Check your network, auth, and billing setup, then retry.";
-  }
-  if (/failed to authenticate request with clerk/i.test(message)) {
-    return "Entropic backend authentication failed. Sign out and sign back in, then retry.";
-  }
-  return message;
-}
-
-function sanitizeGatewayErrorMessage(raw?: string | null): string {
-  const message = (raw || "").trim();
-  if (!message) return "Chat error";
-
-  const providerMatches = [...message.matchAll(/No API key found for provider "([^"]+)"/g)];
-  const providers = [...new Set(providerMatches.map((m) => m[1]).filter(Boolean))];
-  if (providers.length > 0) {
-    return `Missing API key for ${providers.join(", ")}. Add provider keys in Settings, or disable Use Local Keys.`;
-  }
-
-  return sanitizeAuthStoreDetails(message);
-}
-
-function extractAssistantErrorFromGatewayMessage(message: GatewayMessage): string | null {
-  const stopReason = typeof message?.stopReason === "string" ? message.stopReason.toLowerCase() : "";
-  const errorMessage =
-    typeof message?.errorMessage === "string" ? message.errorMessage.trim() : "";
-  if (stopReason !== "error" && !errorMessage) return null;
-  return formatAssistantErrorTextForUi(errorMessage || "LLM request failed with an unknown error.");
-}
-
-function parseToolPayloads(raw: string): {
-  cleanText: string;
-  events: CalendarEvent[];
-  errors: ToolError[];
-  hadToolPayload: boolean;
-} {
-  try {
-    const direct = JSON.parse(raw);
-    if (typeof direct === "string") {
-      return parseToolPayloads(direct);
-    }
-    if (isToolTransportPayload(direct)) {
-      return { cleanText: "", events: [], errors: [], hadToolPayload: true };
-    }
-    if (direct && typeof direct === "object") {
-      const events = Array.isArray((direct as any).events) ? (direct as any).events as CalendarEvent[] : [];
-      const errors = (direct as any).tool || (direct as any).status === "error"
-        ? [{ tool: (direct as any).tool, error: (direct as any).error, status: (direct as any).status }]
-        : [];
-      if (events.length || errors.length) {
-        return { cleanText: "", events, errors, hadToolPayload: true };
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  const blocks = extractJsonBlocks(raw);
-  if (blocks.length === 0) {
-    return { cleanText: sanitizeAuthStoreDetails(raw), events: [], errors: [], hadToolPayload: false };
-  }
-
-  const events: CalendarEvent[] = [];
-  const errors: ToolError[] = [];
-  const removalRanges: Array<{ start: number; end: number }> = [];
-
-  for (const block of blocks) {
-    try {
-      const parsed = JSON.parse(block.jsonText);
-      if (isToolTransportPayload(parsed)) {
-        removalRanges.push({ start: block.start, end: block.end });
-        continue;
-      }
-      if (parsed && typeof parsed === "object") {
-        if (Array.isArray((parsed as any).events)) {
-          events.push(...(parsed as any).events);
-          removalRanges.push({ start: block.start, end: block.end });
-          continue;
-        }
-        if ((parsed as any).tool || (parsed as any).status === "error") {
-          errors.push({
-            tool: (parsed as any).tool,
-            error: sanitizeGatewayErrorMessage((parsed as any).error),
-            status: (parsed as any).status,
-          });
-          removalRanges.push({ start: block.start, end: block.end });
-          continue;
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  if (removalRanges.length === 0) {
-    return { cleanText: sanitizeAuthStoreDetails(raw), events: [], errors: [], hadToolPayload: false };
-  }
-
-  let clean = "";
-  let cursor = 0;
-  for (const range of removalRanges) {
-    if (range.start > cursor) {
-      clean += raw.slice(cursor, range.start);
-    }
-    cursor = Math.max(cursor, range.end);
-  }
-  if (cursor < raw.length) {
-    clean += raw.slice(cursor);
-  }
-
-  return { cleanText: sanitizeAuthStoreDetails(clean.trim()), events, errors, hadToolPayload: true };
-}
-
-function stripConversationMetadata(raw: string): string {
-  if (!raw) return "";
-  let text = raw;
-  const prefix = /^\s*Conversation info\s*\(untrusted metadata\)\s*:/i;
-  if (!prefix.test(text)) {
-    return text;
-  }
-
-  // Remove optional fenced JSON metadata block at the beginning.
-  text = text.replace(
-    /^\s*Conversation info\s*\(untrusted metadata\)\s*:\s*```json[\s\S]*?```\s*/i,
-    ""
-  );
-
-  // Fallback for non-fenced leading JSON metadata.
-  text = text.replace(
-    /^\s*Conversation info\s*\(untrusted metadata\)\s*:\s*\{[\s\S]*?\}\s*/i,
-    ""
-  );
-
-  // If only the header line is present, remove it.
-  text = text.replace(/^\s*Conversation info\s*\(untrusted metadata\)\s*:\s*/i, "");
-
-  return text.trimStart();
-}
-
-function stripInlineClawdbotMetadata(raw: string): string {
-  let result = "";
-  let cursor = 0;
-
-  while (cursor < raw.length) {
-    const remaining = raw.slice(cursor);
-    const match = /metadata\s*:/i.exec(remaining);
-    if (!match) {
-      result += remaining;
-      break;
-    }
-
-    const matchStart = cursor + match.index;
-    const labelEnd = matchStart + match[0].length;
-    result += raw.slice(cursor, matchStart);
-
-    let i = labelEnd;
-    while (i < raw.length && /\s/.test(raw[i])) i += 1;
-    if (raw[i] !== "{") {
-      result += raw.slice(matchStart, labelEnd);
-      cursor = labelEnd;
-      continue;
-    }
-
-    const objectStart = i;
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-    let objectEnd = -1;
-
-    for (; i < raw.length; i += 1) {
-      const ch = raw[i];
-      if (inString) {
-        if (escape) {
-          escape = false;
-        } else if (ch === "\\") {
-          escape = true;
-        } else if (ch === "\"") {
-          inString = false;
-        }
-        continue;
-      }
-      if (ch === "\"") {
-        inString = true;
-        continue;
-      }
-      if (ch === "{") depth += 1;
-      if (ch === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          objectEnd = i;
-          break;
-        }
-      }
-    }
-
-    if (objectEnd < 0) {
-      result += raw.slice(matchStart);
-      break;
-    }
-
-    const objectText = raw.slice(objectStart, objectEnd + 1);
-    if (/[\"']?clawdbot[\"']?\s*:/i.test(objectText)) {
-      cursor = objectEnd + 1;
-      while (cursor < raw.length && raw[cursor] === " ") cursor += 1;
-      continue;
-    }
-
-    result += raw.slice(matchStart, objectEnd + 1);
-    cursor = objectEnd + 1;
-  }
-
-  return result;
-}
-
-const OPENCLAW_STATUS_LINE_PATTERNS: RegExp[] = [
-  /^\s*🦞\s*OpenClaw\b.*$/i,
-  /^\s*🕒\s*Time:\s*.*$/i,
-  /^\s*🧠\s*Model:\s*.*$/i,
-  /^\s*📚\s*Context:\s*.*$/i,
-  /^\s*🧹\s*Compactions:\s*.*$/i,
-  /^\s*🧵\s*Session:\s*.*$/i,
-  /^\s*⚙️?\s*Runtime:\s*.*$/i,
-  /^\s*🪢\s*Queue:\s*.*$/i,
-];
-
-function stripOpenClawStatusLines(raw: string): string {
-  if (!raw) return "";
-  return raw
-    .split(/\r?\n/)
-    .filter((line) => !OPENCLAW_STATUS_LINE_PATTERNS.some((pattern) => pattern.test(line.trim())))
-    .join("\n");
-}
-
-function sanitizeAssistantDisplayContent(raw: string): string {
-  if (!raw) return "";
-  let text = stripConversationMetadata(raw);
-  text = stripExternalUntrustedSections(text);
-  text = stripOpenClawStatusLines(text);
-
-  try {
-    const direct = JSON.parse(text);
-    if (isToolTransportPayload(direct)) {
-      return "";
-    }
-  } catch {
-    // ignore non-JSON
-  }
-
-  try {
-    const direct = JSON.parse(text);
-    if (direct && typeof direct === "object" && !Array.isArray(direct)) {
-      const error = (direct as Record<string, unknown>).error;
-      if (typeof error === "string" && /No API key found for provider/i.test(error)) {
-        return sanitizeGatewayErrorMessage(error);
-      }
-    }
-  } catch {
-    // ignore non-JSON
-  }
-
-  // Hide OpenClaw internal skill manifest metadata payloads (machine format).
-  text = text.replace(
-    /^\s*metadata:\s*\{[\s\S]*?"clawdbot"[\s\S]*?\}\s*$/gim,
-    ""
-  );
-  text = text.replace(
-    /^\s*metadata:\s*(?:\r?\n[ \t]+[^\n]*)+/gim,
-    (block) => (/(?:^|\n)\s*clawdbot\s*:/i.test(block) ? "" : block)
-  );
-  text = stripInlineClawdbotMetadata(text);
-
-  text = sanitizeAuthStoreDetails(text);
-  return text.replace(/\n{3,}/g, "\n\n").trim();
-}
-
-function buildAssistantPayload(raw: string) {
-  const cleaned = sanitizeAssistantDisplayContent(raw);
-  const parsed = parseToolPayloads(cleaned);
-  return {
-    content: parsed.cleanText,
-    assistantPayload: {
-      events: parsed.events,
-      errors: parsed.errors,
-      hadToolPayload: parsed.hadToolPayload,
-    },
-  };
-}
-
-function normalizeCachedMessage(message: Message): Message {
-  if (message.role !== "assistant") return message;
-  const prepared = buildAssistantPayload(message.content || "");
-  if (!prepared.content && prepared.assistantPayload.events.length === 0 && prepared.assistantPayload.errors.length === 0) {
-    return { ...message, content: "", assistantPayload: prepared.assistantPayload };
-  }
-  return {
-    ...message,
-    content: prepared.content,
-    assistantPayload: prepared.assistantPayload,
-  };
-}
-
-function parseUtcBracketTimestamp(raw: string): { text: string; sentAt: number | null } {
-  if (!raw) return { text: "", sentAt: null };
-  const match = raw.match(/^\s*\[[A-Za-z]{3}\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)\s+UTC\]\s*/);
-  if (!match) return { text: raw, sentAt: null };
-  const iso = `${match[1]}T${match[2]}Z`;
-  const parsed = Date.parse(iso);
-  return {
-    text: raw.slice(match[0].length),
-    sentAt: Number.isNaN(parsed) ? null : parsed,
-  };
-}
-
-function toTimestampMs(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-    return value < 1_000_000_000_000 ? Math.round(value * 1000) : Math.round(value);
-  }
-  if (typeof value === "string") {
-    const numeric = Number(value);
-    if (Number.isFinite(numeric) && numeric > 0) {
-      return numeric < 1_000_000_000_000 ? Math.round(numeric * 1000) : Math.round(numeric);
-    }
-    const parsed = Date.parse(value);
-    if (!Number.isNaN(parsed)) return parsed;
-  }
-  return null;
-}
-
-function extractMessageTimestamp(message: GatewayMessage): number | null {
-  const candidates = [
-    message.createdAt,
-    message.created_at,
-    message.timestamp,
-    message.sentAt,
-    message.sent_at,
-    message.time,
-    message.ts,
-  ];
-  for (const candidate of candidates) {
-    const timestamp = toTimestampMs(candidate);
-    if (timestamp) return timestamp;
-  }
-  return null;
-}
-
-function normalizeUserContent(content: string, fallbackTimestamp?: number | null): { content: string; sentAt: number | null } {
-  const withoutMeta = stripConversationMetadata(content).trim();
-  if (withoutMeta.startsWith(INTERNAL_USER_PROMPT_PREFIX)) {
-    return {
-      content: "",
-      sentAt: fallbackTimestamp ?? null,
-    };
-  }
-  const parsedPrefix = parseUtcBracketTimestamp(withoutMeta);
-  return {
-    content: parsedPrefix.text.trim(),
-    sentAt: fallbackTimestamp ?? parsedPrefix.sentAt ?? null,
-  };
-}
-
-function summarizeSessionTitleFromMessages(messages: Message[]): string | null {
-  for (const message of messages) {
-    if (message.role !== "user") continue;
-    const normalized = normalizeUserContent(message.content || "", message.sentAt);
-    const text = normalized.content.replace(/\s+/g, " ").trim();
-    if (!text) continue;
-    const maxLen = 72;
-    return text.length > maxLen ? `${text.slice(0, maxLen - 1).trimEnd()}…` : text;
-  }
-  return null;
-}
-
-function isGenericConversationTitle(value: string | null | undefined): boolean {
-  const title = (value || "").trim();
-  if (!title) return true;
-  const lowered = title.toLocaleLowerCase();
-  if (lowered === "entropic desktop") return true;
-  if (lowered === "new chat" || lowered === "conversation" || lowered === "chat") return true;
-  if (/^chat\s+[a-f0-9]{8,}$/i.test(title)) return true;
-  return false;
-}
-
-function titleDedupKey(value: string): string {
-  return value.trim().replace(/\s+\(\d+\)\s*$/u, "").toLocaleLowerCase();
-}
-
-function sessionTitleHint(session: ChatSession): string | null {
-  const candidate =
-    session.label?.trim() ||
-    session.derivedTitle?.trim() ||
-    session.displayName?.trim() ||
-    "";
-  if (!candidate || isGenericConversationTitle(candidate)) return null;
-  return candidate;
-}
-
-function formatMessageTime(sentAt?: number | null): string {
-  if (!sentAt) return "";
-  const date = new Date(sentAt);
-  if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(date);
-}
-
-function formatEventRange(start?: string, end?: string): { date?: string; time?: string } {
-  if (!start) return {};
-  const startDate = new Date(start);
-  if (Number.isNaN(startDate.getTime())) return { date: start, time: end };
-  const dateFmt = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
-  const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
-  const date = dateFmt.format(startDate);
-  let time = timeFmt.format(startDate);
-  if (end) {
-    const endDate = new Date(end);
-    if (!Number.isNaN(endDate.getTime())) {
-      time = `${time} - ${timeFmt.format(endDate)}`;
-    }
-  }
-  return { date, time };
-}
-
-function extractMessageText(message: GatewayMessage): { text: string; hasText: boolean; hasNonText: boolean } {
-  if (!message) return { text: "", hasText: false, hasNonText: false };
-  if (typeof message.content === "string") {
-    const trimmed = message.content.trim();
-    return { text: message.content, hasText: trimmed.length > 0, hasNonText: false };
-  }
-  if (typeof message.text === "string") {
-    const trimmed = message.text.trim();
-    return { text: message.text, hasText: trimmed.length > 0, hasNonText: false };
-  }
-  if (Array.isArray(message.content)) {
-    const parts: string[] = [];
-    let hasNonText = false;
-    for (const block of message.content) {
-      if (!block || typeof block !== "object") continue;
-      const entry = block as { type?: unknown; text?: unknown };
-      if (typeof entry.text === "string") {
-        parts.push(entry.text);
-      } else if (typeof entry.type === "string") {
-        hasNonText = true;
-      }
-    }
-    const text = parts.join("");
-    return { text, hasText: text.trim().length > 0, hasNonText };
-  }
-  return { text: "", hasText: false, hasNonText: false };
-}
-
-function isChannelOrSystemSessionKey(rawKey: string | null | undefined): boolean {
-  const key = (rawKey || "").trim().toLowerCase();
-  if (!key) return true;
-  // agent:main:main is the gateway's internal primary session — never show it in the UI.
-  if (key === "agent:main:main") return true;
-  // Other agent:main:* keys are user chat sessions — don't filter them out.
-  if (key.startsWith("agent:main:")) return false;
-  if (key.startsWith("agent:") || key.startsWith("cron:") || key.startsWith("system:")) {
-    return true;
-  }
-  return CHANNEL_SESSION_KEY_MARKERS.some(
-    (marker) => key.startsWith(`${marker}:`) || key.includes(`:${marker}:`),
-  );
-}
-
-function shouldDisplayGatewaySession(rawKey: string | null | undefined): boolean {
-  const key = (rawKey || "").trim();
-  if (!key) return false;
-  if (UI_SESSION_KEY_RE.test(key)) return true;
-  return !isChannelOrSystemSessionKey(key);
-}
-
-function isChannelOriginGatewayMessage(message: GatewayMessage): boolean {
-  const channelKeys = ["channel", "provider", "surface", "originatingChannel"] as const;
-  for (const key of channelKeys) {
-    const raw = message?.[key];
-    if (typeof raw !== "string") continue;
-    const normalized = raw.trim().toLowerCase();
-    if (!normalized) continue;
-    if (CHANNEL_SESSION_KEY_MARKERS.includes(normalized)) {
-      return true;
-    }
-  }
-  const sessionKey =
-    typeof message?.sessionKey === "string"
-      ? message.sessionKey
-      : typeof message?.session_id === "string"
-        ? message.session_id
-        : "";
-  if (!sessionKey) return false;
-  return isChannelOrSystemSessionKey(sessionKey);
-}
-
-function normalizeGatewayMarker(value: unknown): string {
-  return typeof value === "string" ? value.trim().toLowerCase() : "";
-}
-
-function normalizeGatewayMessage(message: GatewayMessage, id: string): Message | null {
-  if (isChannelOriginGatewayMessage(message)) {
-    return null;
-  }
-  const roleRaw = typeof message?.role === "string" ? message.role.toLowerCase() : "assistant";
-  const providerTag = normalizeGatewayMarker(message?.provider);
-  const modelTag = normalizeGatewayMarker(message?.model);
-  if (providerTag === "openclaw" || modelTag === "gateway-injected") {
-    return null;
-  }
-  const { text, hasText, hasNonText } = extractMessageText(message);
-  const messageTimestamp = extractMessageTimestamp(message);
-  if (roleRaw === "user") {
-    if (!hasText) return null;
-    const normalized = normalizeUserContent(text, messageTimestamp);
-    if (!normalized.content) return null;
-    return { id, role: "user", content: normalized.content, sentAt: normalized.sentAt };
-  }
-  if (roleRaw === "assistant") {
-    const assistantError = extractAssistantErrorFromGatewayMessage(message);
-    if (!hasText && !hasNonText && !assistantError) return null;
-    if (!hasText) {
-      if (!assistantError) return null;
-      return {
-        id,
-        role: "assistant",
-        content: assistantError,
-        sentAt: messageTimestamp ?? Date.now(),
-      };
-    }
-    const prepared = buildAssistantPayload(text);
-    const resolvedContent = prepared.content || assistantError || "";
-    if (!resolvedContent && prepared.assistantPayload.events.length === 0 && prepared.assistantPayload.errors.length === 0) {
-      return null;
-    }
-    return {
-      id,
-      role: "assistant",
-      content: resolvedContent,
-      assistantPayload: prepared.assistantPayload,
-      sentAt: messageTimestamp,
-    };
-  }
-  if (roleRaw === "toolresult" || roleRaw === "tool_result" || roleRaw === "tool") {
-    return null;
-  }
-  return null;
-}
+// Message parsing/sanitization functions imported from ../lib/chatMessageUtils
 
 const PROVIDERS: Provider[] = [
   { id: "anthropic", name: "Anthropic", icon: "A", placeholder: "sk-ant-...", keyUrl: "https://console.anthropic.com/settings/keys" },
@@ -1182,19 +468,6 @@ const HISTORY_LIMIT = 500;
 const ACTIVE_RUN_IDLE_TIMEOUT_MS = 120_000;
 const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 4;
 const MAX_IMAGE_ATTACHMENT_BYTES = 5_000_000;
-const UI_SESSION_KEY_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const CHANNEL_SESSION_KEY_MARKERS = [
-  "telegram",
-  "slack",
-  "discord",
-  "whatsapp",
-  "signal",
-  "matrix",
-  "googlechat",
-  "google_chat",
-];
-const INTERNAL_USER_PROMPT_PREFIX = "[[ENTROPIC_INTERNAL_PROMPT]]";
 
 const QUICK_ACTION_ICONS: Record<ChatQuickActionIcon, typeof Mail> = {
   mail: Mail,
@@ -4218,7 +3491,7 @@ export function Chat({
     return (
       <div className="flex justify-start">
         <div className="max-w-[92%] sm:max-w-[80%]">
-          <div className="px-4 py-3 rounded-2xl bg-white/85 text-[var(--text-primary)] border border-[var(--glass-border-subtle)] shadow-sm backdrop-blur-sm">
+          <div className="px-4 py-3 rounded-2xl bg-[var(--glass-bg-hover)] text-[var(--text-primary)] border border-[var(--glass-border-subtle)] shadow-sm backdrop-blur-sm">
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-center gap-2">
                 <img src={entropicLogo} alt="Entropic" className="w-5 h-5 rounded-md" />
@@ -4239,7 +3512,7 @@ export function Chat({
               <p className="text-xs text-[var(--text-secondary)]">
                 {config.summary}
               </p>
-              <span className="inline-flex items-center rounded-full border border-[var(--glass-border-subtle)] bg-white px-2 py-0.5 text-[11px] text-[var(--text-tertiary)] whitespace-nowrap">
+              <span className="inline-flex items-center rounded-full border border-[var(--glass-border-subtle)] bg-[var(--bg-card)] px-2 py-0.5 text-[11px] text-[var(--text-tertiary)] whitespace-nowrap">
                 {selectedCount} selected
               </span>
             </div>
@@ -4254,7 +3527,7 @@ export function Chat({
                       "flex items-start gap-2 rounded-xl border px-3 py-2.5 cursor-pointer transition-colors",
                       checked
                         ? "border-[var(--purple-accent)] bg-violet-50/70 shadow-sm"
-                        : "border-[var(--glass-border-subtle)] bg-white/70 hover:bg-white"
+                        : "border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] hover:bg-[var(--bg-card)]"
                     )}
                   >
                     <input
@@ -4274,7 +3547,7 @@ export function Chat({
               })}
             </div>
 
-            {checklist.error ? <p className="text-xs text-red-600 mt-2">{checklist.error}</p> : null}
+            {checklist.error ? <p className="text-xs text-red-500 mt-2">{checklist.error}</p> : null}
 
             <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
               <p className="text-[11px] text-[var(--text-tertiary)]">
@@ -4334,7 +3607,7 @@ export function Chat({
             </div>
 
             <div className="flex flex-wrap gap-2 mt-3">
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--glass-border-subtle)] bg-white/70 px-2 py-1 text-[11px] text-[var(--text-secondary)]">
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] px-2 py-1 text-[11px] text-[var(--text-secondary)]">
                 <RequirementLogo className="w-3.5 h-3.5 text-[var(--text-primary)]" />
                 Plugin: {integrationRequirementLabel(setup.requirement)}
               </span>
@@ -4354,7 +3627,7 @@ export function Chat({
               <li>Return here and click Verify connection.</li>
             </ol>
 
-            {setup.error ? <p className="text-xs text-red-600 mt-2">{setup.error}</p> : null}
+            {setup.error ? <p className="text-xs text-red-500 mt-2">{setup.error}</p> : null}
 
             <div className="flex flex-wrap gap-2 mt-3">
               <button
@@ -4406,12 +3679,12 @@ export function Chat({
 
             <div className="flex flex-wrap gap-2 mt-3">
               {RequirementLogo && requirement ? (
-                <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--glass-border-subtle)] bg-white/70 px-2 py-1 text-[11px] text-[var(--text-secondary)]">
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] px-2 py-1 text-[11px] text-[var(--text-secondary)]">
                   <RequirementLogo className="w-3.5 h-3.5 text-[var(--text-primary)]" />
                   Plugin: {integrationRequirementLabel(requirement)}
                 </span>
               ) : null}
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--glass-border-subtle)] bg-white/70 px-2 py-1 text-[11px] text-[var(--text-secondary)]">
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] px-2 py-1 text-[11px] text-[var(--text-secondary)]">
                 <Calendar className="w-3.5 h-3.5 text-[var(--text-primary)]" />
                 Job schedule: {getTaskPresetLabel(quick.taskPreset)}
               </span>
@@ -4459,7 +3732,7 @@ export function Chat({
               </select>
             </div>
 
-            {quick.error ? <p className="text-xs text-red-600 mt-2">{quick.error}</p> : null}
+            {quick.error ? <p className="text-xs text-red-500 mt-2">{quick.error}</p> : null}
 
             <div className="flex flex-wrap gap-2 mt-3">
               <button
@@ -4621,8 +3894,8 @@ export function Chat({
           <span className={clsx(
             "rounded-full px-2 py-0.5 font-medium",
             result.exitCode === 0
-              ? "bg-emerald-500/10 text-emerald-700"
-              : "bg-red-500/10 text-red-700"
+              ? "bg-emerald-500/10 text-emerald-500"
+              : "bg-red-500/10 text-red-500"
           )}>
             exit {result.exitCode ?? "?"}
           </span>
@@ -4733,16 +4006,16 @@ export function Chat({
       <>
         <div className="h-full flex flex-col items-center justify-center p-6 text-center">
           <div className={accountSignInAvailable
-            ? "w-full max-w-[420px] bg-white rounded-3xl shadow-xl p-10 border border-gray-100/60"
-            : "glass-card p-8 max-w-md"}
+            ? "w-full max-w-[420px] bg-[var(--bg-card)] rounded-3xl shadow-xl p-10 border border-[var(--border-subtle)]"
+            : "bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-2xl shadow-sm p-8 max-w-md"}
           >
             {accountSignInAvailable ? (
               <div className="text-center mb-8">
                 <div className="w-20 h-20 rounded-[2rem] bg-transparent mx-auto flex items-center justify-center mb-6">
                   <img src={entropicLogo} alt="Entropic" className="w-20 h-20 rounded-[2rem] shadow-xl" />
                 </div>
-                <h2 className="text-3xl font-bold text-gray-900 mb-3 tracking-tight">Continue with Entropic</h2>
-                <p className="text-sm text-gray-500">
+                <h2 className="text-3xl font-bold text-[var(--text-primary)] mb-3 tracking-tight">Continue with Entropic</h2>
+                <p className="text-sm text-[var(--text-secondary)]">
                   {trialCreditsExhausted
                     ? "Your free credits are used. Sign in to continue, or use your own provider."
                     : "Sign in with your Entropic account, or use your own provider."}
@@ -4759,19 +4032,19 @@ export function Chat({
             {accountSignInAvailable ? (
               <div className="space-y-3 mb-6">
                 {authError ? (
-                  <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 text-center">
+                  <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-500 text-center">
                     {authError}
                   </div>
                 ) : null}
                 {authNotice ? (
-                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700 text-center">
+                  <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-500 text-center">
                     {authNotice}
                   </div>
                 ) : null}
                 <button
                   onClick={() => handleEntropicOAuthSignIn("google")}
                   disabled={authLoading !== null || oauthLoading !== null}
-                  className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-white hover:bg-gray-50 text-gray-700 font-medium rounded-2xl border border-gray-200 transition-all hover:border-gray-300 active:scale-95 duration-200 disabled:opacity-50"
+                  className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[var(--bg-card)] hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)] font-medium rounded-2xl border border-[var(--border-default)] transition-all hover:border-[var(--border-primary)] active:scale-95 duration-200 disabled:opacity-50"
                 >
                   <GoogleIcon className="w-5 h-5" />
                   {authLoading === "google" ? "Opening Google..." : "Continue with Google"}
@@ -4786,10 +4059,10 @@ export function Chat({
                 </button>
                 <div className="relative py-2">
                   <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-gray-100" />
+                    <div className="w-full border-t border-[var(--border-subtle)]" />
                   </div>
                   <div className="relative flex justify-center text-[10px] uppercase tracking-wider">
-                    <span className="bg-white px-2 text-gray-400">or</span>
+                    <span className="bg-[var(--bg-card)] px-2 text-[var(--text-tertiary)]">or</span>
                   </div>
                 </div>
                 <button
@@ -4799,19 +4072,19 @@ export function Chat({
                     setAuthNotice(null);
                   }}
                   disabled={authLoading !== null || oauthLoading !== null}
-                  className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-gray-50 hover:bg-gray-100 text-gray-900 font-medium rounded-2xl transition-all active:scale-95 duration-200 disabled:opacity-50"
+                  className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[var(--bg-tertiary)] hover:bg-[var(--bg-secondary)] text-[var(--text-primary)] font-medium rounded-2xl transition-all active:scale-95 duration-200 disabled:opacity-50"
                 >
-                  <Mail className="w-5 h-5 text-gray-500" />
+                  <Mail className="w-5 h-5 text-[var(--text-secondary)]" />
                   <span>Continue with Email</span>
                 </button>
                 {showEmailAuth ? (
-                  <form onSubmit={handleEntropicEmailAuthSubmit} className="space-y-3 rounded-2xl bg-gray-50 p-4 text-left">
+                  <form onSubmit={handleEntropicEmailAuthSubmit} className="space-y-3 rounded-2xl bg-[var(--bg-tertiary)] p-4 text-left">
                     <input
                       type="email"
                       value={authEmail}
                       onChange={(event) => setAuthEmail(event.target.value)}
                       placeholder="name@example.com"
-                      className="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:ring-2 focus:ring-black/5 focus:outline-none text-gray-900 placeholder:text-gray-400 text-sm transition-all"
+                      className="w-full px-4 py-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border-default)] focus:ring-2 focus:ring-[var(--purple-accent-subtle)] focus:outline-none text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] text-sm transition-all"
                       required
                     />
                     <input
@@ -4819,7 +4092,7 @@ export function Chat({
                       value={authPassword}
                       onChange={(event) => setAuthPassword(event.target.value)}
                       placeholder={emailAuthMode === "signup" ? "Create password" : "Password"}
-                      className="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:ring-2 focus:ring-black/5 focus:outline-none text-gray-900 placeholder:text-gray-400 text-sm transition-all"
+                      className="w-full px-4 py-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border-default)] focus:ring-2 focus:ring-[var(--purple-accent-subtle)] focus:outline-none text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] text-sm transition-all"
                       required
                       minLength={emailAuthMode === "signup" ? 8 : undefined}
                     />
@@ -4827,7 +4100,7 @@ export function Chat({
                       <button
                         type="submit"
                         disabled={authLoading !== null}
-                        className="px-4 py-2.5 rounded-xl bg-black hover:bg-gray-800 text-white text-xs font-semibold transition-all disabled:opacity-50"
+                        className="px-4 py-2.5 rounded-xl bg-[#1A1A2E] hover:opacity-80 text-white text-xs font-semibold transition-all disabled:opacity-50"
                       >
                         {emailAuthMode === "signup"
                           ? authLoading === "email-signup"
@@ -4844,7 +4117,7 @@ export function Chat({
                           setAuthError(null);
                           setAuthNotice(null);
                         }}
-                        className="text-xs text-gray-500 hover:text-gray-700 transition-colors"
+                        className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
                       >
                         {emailAuthMode === "signup"
                           ? "Have an account? Sign in"
@@ -4859,7 +4132,7 @@ export function Chat({
             <button
               onClick={() => setShowOwnProviderOptions((prev) => !prev)}
               className={accountSignInAvailable
-                ? "w-full mb-2 flex flex-col items-center justify-center gap-0.5 text-[11px] uppercase tracking-[0.16em] text-gray-400 hover:text-gray-600 transition-colors"
+                ? "w-full mb-2 flex flex-col items-center justify-center gap-0.5 text-[11px] uppercase tracking-[0.16em] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors"
                 : "w-full mb-2 flex flex-col items-center justify-center gap-0.5 text-[11px] uppercase tracking-[0.16em] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors"}
             >
               <span>Use your own provider</span>
@@ -4874,7 +4147,7 @@ export function Chat({
               <>
                 <div className="space-y-2 mb-4">
                   {anthropicCodePending ? (
-                    <div className="p-3 rounded-lg bg-black/[0.03]">
+                    <div className="p-3 rounded-lg bg-[var(--border-subtle)]">
                       <p className="text-sm font-medium text-[var(--text-primary)] mb-1">Paste the code from your browser</p>
                       <p className="text-xs text-[var(--text-tertiary)] mb-3">After authorizing in your browser, copy the code and paste it below.</p>
                       <div className="flex gap-2">
@@ -4884,7 +4157,7 @@ export function Chat({
                           onChange={(e) => setAnthropicCodeInput(e.target.value)}
                           onKeyDown={(e) => { if (e.key === "Enter") submitAnthropicCode(); }}
                           placeholder="Paste code here..."
-                          className="flex-1 px-3 py-2 text-sm rounded-lg border border-black/10 bg-white text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--purple-accent)]"
+                          className="flex-1 px-3 py-2 text-sm rounded-lg border border-black/10 bg-[var(--bg-card)] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--purple-accent)]"
                           autoFocus
                         />
                         <button
@@ -4906,7 +4179,7 @@ export function Chat({
                     <button
                       onClick={() => connectWithOAuth("anthropic")}
                       disabled={oauthLoading !== null}
-                      className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors bg-black/[0.03] hover:bg-black/[0.07] disabled:opacity-50"
+                      className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors bg-[var(--border-subtle)] hover:bg-[var(--border-default)] disabled:opacity-50"
                     >
                       <div className="w-9 h-9 rounded-md bg-[var(--purple-accent)]/10 flex items-center justify-center font-semibold text-[var(--purple-accent)]">
                         A
@@ -4926,7 +4199,7 @@ export function Chat({
                   <button
                     onClick={() => connectWithOAuth("openai")}
                     disabled={oauthLoading !== null}
-                    className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors bg-black/[0.03] hover:bg-black/[0.07] disabled:opacity-50"
+                    className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors bg-[var(--border-subtle)] hover:bg-[var(--border-default)] disabled:opacity-50"
                   >
                     <div className="w-9 h-9 rounded-md bg-[var(--purple-accent)]/10 flex items-center justify-center font-semibold text-[var(--purple-accent)]">
                       O
@@ -4944,16 +4217,16 @@ export function Chat({
                 </div>
 
                 <div className="flex items-center gap-3 my-4">
-                  <div className="flex-1 h-px bg-black/10" />
+                  <div className="flex-1 h-px bg-[var(--border-default)]" />
                   <span className="text-xs text-[var(--text-tertiary)] font-medium">or use an API key</span>
-                  <div className="flex-1 h-px bg-black/10" />
+                  <div className="flex-1 h-px bg-[var(--border-default)]" />
                 </div>
 
                 <div className="space-y-2">
                   {PROVIDERS.map(p => (
                     <button key={p.id} onClick={() => { setSelectedProvider(p); setShowKeyModal(true); }}
-                      className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors hover:bg-black/5">
-                      <div className="w-9 h-9 rounded-md bg-black/5 flex items-center justify-center font-semibold text-[var(--text-accent)]">
+                      className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors hover:bg-[var(--border-subtle)]">
+                      <div className="w-9 h-9 rounded-md bg-[var(--border-subtle)] flex items-center justify-center font-semibold text-[var(--text-accent)]">
                         {p.icon}
                       </div>
                       <div className="flex-1">
@@ -4967,11 +4240,11 @@ export function Chat({
               </>
             ) : null}
 
-            <p className="text-xs text-center text-gray-400 mt-6 pt-4 border-t border-gray-100 leading-relaxed">
+            <p className="text-xs text-center text-[var(--text-tertiary)] mt-6 pt-4 border-t border-[var(--border-subtle)] leading-relaxed">
               By continuing, you agree to the{" "}
-              <button type="button" onClick={() => open("https://entropic.qu.ai/terms")} className="underline text-gray-500 hover:text-gray-700">Terms of Service</button>
+              <button type="button" onClick={() => open("https://entropic.qu.ai/terms")} className="underline text-[var(--text-secondary)] hover:text-[var(--text-secondary)]">Terms of Service</button>
               {" "}and{" "}
-              <button type="button" onClick={() => open("https://entropic.qu.ai/privacy")} className="underline text-gray-500 hover:text-gray-700">Privacy Policy</button>.
+              <button type="button" onClick={() => open("https://entropic.qu.ai/privacy")} className="underline text-[var(--text-secondary)] hover:text-[var(--text-secondary)]">Privacy Policy</button>.
             </p>
           </div>
         </div>
@@ -4998,30 +4271,29 @@ export function Chat({
       });
 
     return (
-      <div className="h-full flex flex-col items-center justify-center p-6 text-center">
+      <div className="h-full flex flex-col items-center justify-center p-6 text-center animate-fade-in">
         <div className="max-w-2xl">
-          <div className="w-16 h-16 rounded-2xl bg-[var(--purple-accent)] mx-auto flex items-center justify-center mb-6">
-            <Sparkles className="w-8 h-8 text-white" />
-          </div>
-          <h2 className="text-2xl font-semibold mb-2 text-[var(--text-primary)]">
-            Hello {userName}, welcome to Entropic.
+          <h2 className="text-3xl font-semibold mb-2 text-[var(--text-primary)] tracking-tight">
+            Hey {userName}
           </h2>
-          <p className="text-[var(--text-secondary)] mb-8">
-            What would you like me to help you with?
+          <p className="text-[var(--text-secondary)] mb-10 text-[15px]">
+            What are we working on?
           </p>
-          <div className="flex flex-wrap justify-center gap-3 mb-3">
-            {builderSuggestions.map((suggestion, index) => (
-              <SuggestionChip
-                key={`builder-${index}`}
-                icon={QUICK_ACTION_ICONS[suggestion.icon]}
-                label={suggestion.label}
-                action={{ type: "quick_action", actionId: suggestion.id }}
-                onClick={handleSuggestionClick}
-                variant="builder"
-              />
-            ))}
-          </div>
-          <div className="flex flex-wrap justify-center gap-3">
+          {builderSuggestions.length > 0 && (
+            <div className="flex flex-wrap justify-center gap-2.5 mb-3">
+              {builderSuggestions.map((suggestion, index) => (
+                <SuggestionChip
+                  key={`builder-${index}`}
+                  icon={QUICK_ACTION_ICONS[suggestion.icon]}
+                  label={suggestion.label}
+                  action={{ type: "quick_action", actionId: suggestion.id }}
+                  onClick={handleSuggestionClick}
+                  variant="builder"
+                />
+              ))}
+            </div>
+          )}
+          <div className="flex flex-wrap justify-center gap-2.5">
             {secondarySuggestions.map((suggestion, index) => (
               <SuggestionChip
                 key={`secondary-${index}`}
@@ -5038,14 +4310,14 @@ export function Chat({
   };
 
   const ApiKeyModal = () => (
-    <div className="fixed inset-0 bg-black/20 flex items-center justify-center z-50"
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50"
       onClick={() => setShowKeyModal(false)}>
-      <div className="bg-white p-6 w-full max-w-md m-4 rounded-2xl shadow-xl border border-[var(--border-subtle)]" onClick={e => e.stopPropagation()}>
+      <div className="bg-[var(--bg-card)] p-6 w-full max-w-md m-4 rounded-2xl shadow-xl border border-[var(--border-subtle)]" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold text-[var(--text-primary)]">Connect {selectedProvider?.name}</h3>
           <button onClick={() => setShowKeyModal(false)} className="p-1 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"><X className="w-5 h-5" /></button>
         </div>
-        <div className="mb-4 p-4 rounded-lg bg-black/5">
+        <div className="mb-4 p-4 rounded-lg bg-[var(--border-subtle)]">
           <p className="text-sm font-medium mb-2 text-[var(--text-secondary)]">Step 1: Get your API key</p>
           <button onClick={() => open(selectedProvider!.keyUrl)} className="btn-secondary w-full justify-center">
             <ExternalLink className="w-4 h-4 mr-2" /> Open {selectedProvider?.name} Console
@@ -5154,7 +4426,9 @@ export function Chat({
       <div key={msg.id} className={clsx("flex min-w-0", msg.role === "user" ? "justify-end" : "justify-start")}>
         <div className={clsx("min-w-0 max-w-[85%]")}>
           <div className={clsx("px-4 py-2.5 rounded-2xl",
-            msg.role === "user" ? "bg-[var(--purple-accent)] text-white" : "bg-[var(--bg-tertiary)] text-[var(--text-primary)]")}>
+            msg.role === "user"
+              ? "bg-[var(--chat-user-bg)] text-[var(--chat-user-text)]"
+              : "bg-[var(--chat-assistant-bg)] text-[var(--chat-assistant-text)] border border-[var(--chat-assistant-border)]")}>
             {msg.role === "assistant" ? renderAssistantContent(msg) : <p className="whitespace-pre-wrap break-words">{bodyContent}</p>}
           </div>
           {messageTime ? (
@@ -5174,8 +4448,8 @@ export function Chat({
 
   const loadingIndicator = useMemo(() => isLoading ? (
     <div className="flex justify-start">
-      <div className="px-4 py-2.5 rounded-2xl bg-[var(--bg-tertiary)] flex items-center gap-2">
-        <Loader2 className="w-4 h-4 animate-spin text-[var(--text-tertiary)]" />
+      <div className="px-4 py-2.5 rounded-2xl bg-[var(--chat-assistant-bg)] border border-[var(--chat-assistant-border)] flex items-center gap-2">
+        <Loader2 className="w-4 h-4 animate-spin text-[var(--purple-accent)]" />
         <span className="text-sm text-[var(--text-secondary)] animate-pulse">
           {thinkingStatus || "Thinking"}
         </span>
@@ -5240,7 +4514,7 @@ export function Chat({
 
 
       {(gatewayStarting || autoStartExpected) && (
-        <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-600">
+        <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-500">
           {gatewayRetryIn
             ? `Gateway reconnecting — retrying in ${gatewayRetryIn}s.`
             : "Gateway starting…"}
@@ -5249,7 +4523,7 @@ export function Chat({
 
 
       {!gatewayRunning && !gatewayStarting && !autoStartExpected && (
-        <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-600 flex items-center justify-center gap-3">
+        <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-500 flex items-center justify-center gap-3">
           <span>Gateway offline — start the sandbox to chat.</span>
           {onStartGateway && (
             <button
@@ -5293,11 +4567,8 @@ export function Chat({
           {messages.length === 0 && showWelcome ? (
             renderWelcome()
           ) : messages.length === 0 && !hasInlineAssistantCard ? (
-            <div className="h-full flex items-center justify-center text-center text-[var(--text-tertiary)]">
-              <div>
-                <Sparkles className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                <p>Start a conversation</p>
-              </div>
+            <div className="h-full flex items-center justify-center text-center text-[var(--text-tertiary)] animate-fade-in">
+              <p className="text-[15px]">Start a conversation</p>
             </div>
           ) : null}
           {renderedMessages}
@@ -5310,12 +4581,7 @@ export function Chat({
       </div>
 
       {/* Input Area */}
-      <div className="flex-shrink-0 p-4" style={{
-          background: 'var(--glass-bg)',
-          borderTop: '1px solid var(--glass-border-subtle)',
-          backdropFilter: 'blur(12px)',
-          WebkitBackdropFilter: 'blur(12px)'
-        }}>
+      <div className="flex-shrink-0 p-4 bg-[var(--composer-bg)] border-t border-[var(--composer-border)]">
         <div className="mx-auto min-w-0 max-w-3xl space-y-3">
           {pendingAttachments.length > 0 && (
             <div className="flex flex-wrap gap-2">
@@ -5331,7 +4597,7 @@ export function Chat({
                       className="w-8 h-8 rounded object-cover"
                     />
                   ) : (
-                    <div className="w-8 h-8 rounded bg-black/5" />
+                    <div className="w-8 h-8 rounded bg-[var(--border-subtle)]" />
                   )}
                   <span className="text-xs text-[var(--text-secondary)] max-w-[180px] truncate">
                     {attachment.fileName}
@@ -5379,8 +4645,8 @@ export function Chat({
                     className={clsx(
                       "inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
                       active
-                        ? "bg-[var(--text-primary)] text-white"
-                        : "text-[var(--text-secondary)] hover:bg-black/5"
+                        ? "bg-[#1A1A2E] text-white"
+                        : "text-[var(--text-secondary)] hover:bg-[var(--border-subtle)]"
                     )}
                     aria-pressed={active}
                   >
@@ -5458,14 +4724,14 @@ export function Chat({
             <button
               onClick={() => handleSend()}
               disabled={(!activeDraft.trim() && pendingAttachments.length === 0) || isLoading}
-              className="btn-primary !p-2.5 !bg-[var(--purple-accent)] hover:!bg-purple-700 text-white"
+              className="btn-primary !p-2.5 !bg-[var(--purple-accent)] hover:!bg-[var(--purple-accent-hover)] !text-white"
             >
               <Send className="w-5 h-5" />
             </button>
           </div>
         </div>
         {dragActive && activeComposerMode === "chat" && (
-          <div className="absolute inset-0 bg-black/10 border-2 border-dashed border-white/50 flex items-center justify-center font-medium text-white">
+          <div className="absolute inset-0 bg-[var(--border-default)] border-2 border-dashed border-white/50 flex items-center justify-center font-medium text-white">
             Drop files to attach
           </div>
         )}
@@ -5474,11 +4740,11 @@ export function Chat({
       {/* Out of Credits Modal */}
       {showOutOfCreditsModal && (
         <div
-          className="fixed inset-0 bg-black/20 flex items-center justify-center z-50"
+          className="fixed inset-0 bg-black/30 flex items-center justify-center z-50"
           onClick={() => setShowOutOfCreditsModal(false)}
         >
           <div
-            className="bg-white w-full max-w-sm m-4 rounded-2xl shadow-xl border border-[var(--border-subtle)] p-6"
+            className="bg-[var(--bg-card)] w-full max-w-sm m-4 rounded-2xl shadow-xl border border-[var(--border-subtle)] p-6"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
@@ -5493,7 +4759,7 @@ export function Chat({
               </div>
               <button
                 onClick={() => setShowOutOfCreditsModal(false)}
-                className="p-1.5 text-[var(--text-tertiary)] hover:text-[var(--text-primary)] rounded-md hover:bg-black/5"
+                className="p-1.5 text-[var(--text-tertiary)] hover:text-[var(--text-primary)] rounded-md hover:bg-[var(--border-subtle)]"
               >
                 <X className="w-5 h-5" />
               </button>

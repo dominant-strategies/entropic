@@ -9,6 +9,7 @@ import { DockerInstall } from "./pages/DockerInstall";
 import { Dashboard } from "./pages/Dashboard";
 import { Onboarding } from "./pages/Onboarding";
 import { SignIn } from "./pages/SignIn";
+import { DevScreenPreview } from "./components/DevScreenPreview";
 import {
   isOnboardingComplete,
   saveOnboardingData,
@@ -299,6 +300,10 @@ function AppContent() {
 }
 
 function App() {
+  const devScreen = import.meta.env.DEV
+    ? new URLSearchParams(window.location.search).get("devScreen")
+    : null;
+
   useEffect(() => {
     try {
       const os = platform();
@@ -313,6 +318,10 @@ function App() {
       document.body.classList.remove("platform-macos");
     };
   }, []);
+
+  if (devScreen) {
+    return <DevScreenPreview />;
+  }
 
   return (
     <AuthProvider>

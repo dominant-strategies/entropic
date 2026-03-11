@@ -8,6 +8,31 @@ json_escape() {
     node -e 'const v = process.argv[1] ?? ""; process.stdout.write(JSON.stringify(v).slice(1,-1));' "$1"
 }
 
+resolve_entropic_skill_path() {
+    plugin_id="$1"
+
+    if [ -d "${ENTROPIC_SKILLS_PATH}/${plugin_id}/current" ]; then
+        printf '%s' "${ENTROPIC_SKILLS_PATH}/${plugin_id}/current"
+    elif [ -d "${ENTROPIC_SKILLS_PATH}/${plugin_id}" ]; then
+        printf '%s' "${ENTROPIC_SKILLS_PATH}/${plugin_id}"
+    elif [ -d "/data/entropic-skills/${plugin_id}" ]; then
+        printf '%s' "/data/entropic-skills/${plugin_id}"
+    fi
+}
+
+append_plugin_load_path() {
+    raw_path="$1"
+    if [ -z "$raw_path" ]; then
+        return
+    fi
+
+    escaped_path="$(json_escape "${raw_path}")"
+    if [ -n "${PLUGIN_LOAD_PATHS}" ]; then
+        PLUGIN_LOAD_PATHS="${PLUGIN_LOAD_PATHS}, "
+    fi
+    PLUGIN_LOAD_PATHS="${PLUGIN_LOAD_PATHS}\"${escaped_path}\""
+}
+
 append_auth_profile() {
     key="$1"
     provider="$2"
@@ -295,11 +320,17 @@ fi
 
 PLUGIN_ENTRIES="\"entropic-integrations\": { \"enabled\": true }"
 ALSO_ALLOW="\"entropic-integrations\""
+PLUGIN_LOAD_PATHS=""
 
 if [ -d "/app/extensions/entropic-x" ] || [ -d "/data/entropic-skills/entropic-x" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-x" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-x/current" ]; then
     PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"entropic-x\": { \"enabled\": true }"
     ALSO_ALLOW="${ALSO_ALLOW}, \"x_search\", \"x_profile\", \"x_thread\", \"x_user_tweets\""
 fi
+if [ -d "/app/extensions/entropic-quai-builder" ] || [ -d "/data/entropic-skills/entropic-quai-builder" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-quai-builder" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-quai-builder/current" ]; then
+    PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"entropic-quai-builder\": { \"enabled\": true }"
+fi
+append_plugin_load_path "$(resolve_entropic_skill_path "entropic-x")"
+append_plugin_load_path "$(resolve_entropic_skill_path "entropic-quai-builder")"
 if [ -n "$MEMORY_CONFIG" ]; then
     PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, ${MEMORY_CONFIG}"
 fi
@@ -341,15 +372,9 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
 
     MODELS_BLOCK=""
     LOAD_PATHS_BLOCK=""
-    if [ -d "${ENTROPIC_SKILLS_PATH}/entropic-x/current" ]; then
+    if [ -n "${PLUGIN_LOAD_PATHS}" ]; then
         LOAD_PATHS_BLOCK=",
-    \"load\": { \"paths\": [\"${ENTROPIC_SKILLS_PATH}/entropic-x/current\"] }"
-    elif [ -d "${ENTROPIC_SKILLS_PATH}/entropic-x" ]; then
-        LOAD_PATHS_BLOCK=",
-    \"load\": { \"paths\": [\"${ENTROPIC_SKILLS_PATH}/entropic-x\"] }"
-    elif [ -d "/data/entropic-skills/entropic-x" ]; then
-        LOAD_PATHS_BLOCK=",
-    \"load\": { \"paths\": [\"/data/entropic-skills/entropic-x\"] }"
+    \"load\": { \"paths\": [${PLUGIN_LOAD_PATHS}] }"
     fi
     if [ -n "${ENTROPIC_PROXY_BASE_URL:-}" ]; then
         ENTROPIC_PROXY_BASE_URL_ESC="$(json_escape "${ENTROPIC_PROXY_BASE_URL}")"

@@ -213,13 +213,13 @@ export function Layout({
               <button
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={toggleSidebarCollapsed}
-                className="w-8 h-8 rounded-md bg-black/5 hover:bg-black/10 text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center justify-center transition-colors"
+                className="w-8 h-8 rounded-md bg-[var(--border-subtle)] hover:bg-[var(--border-default)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center justify-center transition-colors"
                 title="Expand navigation"
                 aria-label="Expand navigation"
               >
                 <PanelLeftOpen className="w-4 h-4" />
               </button>
-              <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2.5 py-1 rounded-md bg-gray-900 text-white text-xs font-medium whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
+              <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2.5 py-1 rounded-md bg-[var(--text-primary)] text-[var(--bg-card)] text-xs font-medium whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
                 Expand navigation
               </div>
             </div>
@@ -241,7 +241,7 @@ export function Layout({
             <button
               onMouseDown={(e) => e.stopPropagation()}
               onClick={toggleSidebarCollapsed}
-              className="w-7 h-7 rounded-md bg-black/5 hover:bg-black/10 text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center justify-center transition-colors"
+              className="w-7 h-7 rounded-md bg-[var(--border-subtle)] hover:bg-[var(--border-default)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center justify-center transition-colors"
               title="Collapse navigation"
               aria-label="Collapse navigation"
             >
@@ -283,15 +283,15 @@ export function Layout({
                       "w-full flex items-center rounded-md text-[13px] font-medium transition-all duration-200",
                       sidebarCollapsed ? "justify-center px-1.5 py-2 relative group" : "gap-3 px-3 py-2",
                       isActive
-                      ? "bg-[rgba(0,0,0,0.06)] text-black shadow-sm"
-                      : "text-black/70 hover:bg-[rgba(0,0,0,0.03)] hover:text-black"
+                      ? "bg-[var(--border-subtle)] text-[var(--text-primary)] shadow-sm"
+                      : "text-[var(--text-secondary)] hover:bg-[var(--border-subtle)] hover:text-[var(--text-primary)]"
                     )}
                     aria-label={item.label}
                   >
                   <div
                     className={clsx(
                       "w-8 h-8 rounded-lg flex items-center justify-center transition-colors",
-                      isActive ? "bg-white shadow-sm" : "bg-black/5"
+                      isActive ? "bg-[var(--bg-card)] shadow-sm" : "bg-[var(--border-subtle)]"
                     )}
                   >
                     <Icon
@@ -300,7 +300,7 @@ export function Layout({
                   </div>
                   {!sidebarCollapsed && item.label}
                   {sidebarCollapsed && (
-                    <div className="absolute left-full ml-2 px-2.5 py-1 rounded-md bg-gray-900 text-white text-xs font-medium whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
+                    <div className="absolute left-full ml-2 px-2.5 py-1 rounded-md bg-[var(--text-primary)] text-[var(--bg-card)] text-xs font-medium whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
                       {item.label}
                     </div>
                   )}
@@ -320,7 +320,7 @@ export function Layout({
                             "flex-1 flex items-center gap-2 px-3 py-1 rounded-md text-[12px] transition-colors text-left min-w-0",
                             currentChatSession === session.key
                               ? "bg-[rgba(147,51,234,0.08)] text-[var(--purple-accent)] font-medium"
-                              : "text-[var(--text-secondary)] hover:bg-[rgba(0,0,0,0.03)]"
+                              : "text-[var(--text-secondary)] hover:bg-[var(--border-subtle)]"
                           )}
                         >
                           {session.pinned ? <Pin className="w-3 h-3 text-[var(--text-tertiary)]" /> : null}
@@ -332,7 +332,7 @@ export function Layout({
                             e.stopPropagation();
                             setOpenSessionMenuKey((prev) => (prev === session.key ? null : session.key));
                           }}
-                          className="p-1 rounded-md text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[rgba(0,0,0,0.05)] transition-colors"
+                          className="p-1 rounded-md text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-subtle)] transition-colors"
                           title="Chat options"
                           aria-label="Chat options"
                         >
@@ -341,7 +341,7 @@ export function Layout({
                         {openSessionMenuKey === session.key && (
                           <div
                             data-chat-session-menu
-                            className="absolute right-0 top-7 z-30 w-40 rounded-lg border border-[var(--border-subtle)] bg-white shadow-lg p-1"
+                            className="absolute right-0 top-7 z-30 w-40 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] shadow-lg p-1"
                           >
                             <button
                               onClick={(e) => {
@@ -364,7 +364,7 @@ export function Layout({
                                 onChatSessionAction?.({ type: "delete", key: session.key });
                                 setOpenSessionMenuKey(null);
                               }}
-                              className="w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-left text-red-600 hover:bg-red-50"
+                              className="w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-left text-red-500 hover:bg-red-500/10"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                               Delete
@@ -376,7 +376,7 @@ export function Layout({
                     {hasMoreChatSessions && (
                       <button
                         onClick={() => setShowAllChatSessions((prev) => !prev)}
-                        className="w-full px-3 py-1 text-left rounded-md text-[11px] font-medium text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[rgba(0,0,0,0.03)] transition-colors"
+                        className="w-full px-3 py-1 text-left rounded-md text-[11px] font-medium text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-subtle)] transition-colors"
                       >
                         {showAllChatSessions ? "Show less" : `Show ${sortedChatSessions.length - 5} more`}
                       </button>
@@ -390,17 +390,17 @@ export function Layout({
             <button
               onClick={onOpenFeedback}
               className={clsx(
-                "w-full flex items-center rounded-md text-[13px] font-medium transition-all duration-200 text-black/70 hover:bg-[rgba(0,0,0,0.03)] hover:text-black",
+                "w-full flex items-center rounded-md text-[13px] font-medium transition-all duration-200 text-[var(--text-secondary)] hover:bg-[var(--border-subtle)] hover:text-[var(--text-primary)]",
                 sidebarCollapsed ? "justify-center px-1.5 py-2 relative group mt-2" : "gap-3 px-3 py-2 mt-2"
               )}
               aria-label="Feedback"
             >
-              <div className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors bg-black/5">
+              <div className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors bg-[var(--border-subtle)]">
                 <MessageSquare className="w-5 h-5 text-[var(--text-tertiary)]" />
               </div>
               {!sidebarCollapsed && "Feedback"}
               {sidebarCollapsed && (
-                <div className="absolute left-full ml-2 px-2.5 py-1 rounded-md bg-gray-900 text-white text-xs font-medium whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
+                <div className="absolute left-full ml-2 px-2.5 py-1 rounded-md bg-[var(--text-primary)] text-[var(--bg-card)] text-xs font-medium whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
                   Feedback
                 </div>
               )}
@@ -413,27 +413,27 @@ export function Layout({
           <button
              onClick={() => onNavigate("settings")}
              className={clsx(
-               "w-full flex items-center p-2 rounded-lg hover:bg-[rgba(0,0,0,0.04)] transition-colors text-left group",
+               "w-full flex items-center p-2 rounded-lg hover:bg-[var(--border-subtle)] transition-colors text-left group",
                sidebarCollapsed ? "justify-center relative" : "gap-3"
              )}
              {...(sidebarCollapsed ? { title: profileName, "aria-label": profileName } : {})}
           >
-            <div className="w-8 h-8 rounded-full bg-gray-200 overflow-hidden flex-shrink-0 border border-black/5">
+            <div className="w-8 h-8 rounded-full bg-[var(--system-gray-5)] overflow-hidden flex-shrink-0 border border-[var(--border-subtle)]">
               {profileAvatarUrl ? (
                 <img src={profileAvatarUrl} alt="Avatar" className="w-full h-full object-cover" />
               ) : (
-                <div className="w-full h-full flex items-center justify-center text-xs font-medium text-gray-500">
+                <div className="w-full h-full flex items-center justify-center text-xs font-medium text-[var(--text-secondary)]">
                   {getProfileInitials(profileName, 1)}
                 </div>
               )}
             </div>
             {!sidebarCollapsed && (
               <div className="flex-1 min-w-0">
-                <div className="text-[13px] font-medium text-[var(--text-primary)] truncate group-hover:text-black">
+                <div className="text-[13px] font-medium text-[var(--text-primary)] truncate group-hover:text-[var(--text-primary)]">
                   {profileName}
                 </div>
                 <div className="flex items-center gap-1.5 mt-0.5">
-                  <div className={clsx("w-1.5 h-1.5 rounded-full", gatewayRunning ? "bg-green-500" : "bg-gray-300")} />
+                  <div className={clsx("w-1.5 h-1.5 rounded-full", gatewayRunning ? "bg-green-500" : "bg-[var(--system-gray-3)]")} />
                   <span className="text-[11px] text-[var(--text-tertiary)]">
                     {gatewayRunning ? "Online" : "Offline"}
                   </span>
@@ -444,7 +444,7 @@ export function Layout({
               <Settings className="w-4 h-4 text-[var(--text-tertiary)] opacity-0 group-hover:opacity-100 transition-opacity" />
             )}
             {sidebarCollapsed && (
-              <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2.5 py-1 rounded-md bg-gray-900 text-white text-xs font-medium whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
+              <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2.5 py-1 rounded-md bg-[var(--text-primary)] text-[var(--bg-card)] text-xs font-medium whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
                 {profileName}
               </div>
             )}
@@ -461,7 +461,7 @@ export function Layout({
           className="h-2 flex-shrink-0 ml-2"
         />
         {/* The Card */}
-        <main className="flex-1 bg-white rounded-2xl shadow-sm border border-[var(--border-subtle)] overflow-hidden flex flex-col relative ml-2">
+        <main className="flex-1 bg-[var(--bg-card)] rounded-2xl shadow-sm border border-[var(--border-subtle)] overflow-hidden flex flex-col relative ml-2">
           <div className="absolute inset-0 overflow-y-auto scroll-smooth">
             {children}
           </div>
