@@ -451,6 +451,41 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
 EOF
 fi
 
+# Merge the last app-applied config snapshot back into the boot config.
+# The bootstrap config above only carries env-driven essentials (model, auth,
+# proxy), but user settings such as Telegram/channel state live in openclaw.json
+# and would otherwise be lost whenever the container is recreated.
+if [ -f /data/openclaw.persisted.json ] && [ -f /home/node/.openclaw/openclaw.json ]; then
+    node <<'NODE'
+const fs = require('fs');
+
+const currentPath = '/home/node/.openclaw/openclaw.json';
+const persistedPath = '/data/openclaw.persisted.json';
+
+const isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const mergePreferCurrent = (base, current) => {
+  if (Array.isArray(current)) return current;
+  if (Array.isArray(base)) return current === undefined ? base : current;
+  if (!isObject(base)) return current === undefined ? base : current;
+  if (!isObject(current)) return current === undefined ? base : current;
+  const out = { ...base };
+  for (const [key, value] of Object.entries(current)) {
+    out[key] = mergePreferCurrent(base[key], value);
+  }
+  return out;
+};
+
+try {
+  const current = JSON.parse(fs.readFileSync(currentPath, 'utf8'));
+  const persisted = JSON.parse(fs.readFileSync(persistedPath, 'utf8'));
+  const merged = mergePreferCurrent(persisted, current);
+  fs.writeFileSync(currentPath, JSON.stringify(merged, null, 2));
+} catch (error) {
+  console.error('[entrypoint] Failed to merge persisted openclaw config:', error?.message || error);
+}
+NODE
+fi
+
 # Start the browser service in the background for desktop/browser bridge commands.
 BROWSER_SERVICE_PORT="${ENTROPIC_BROWSER_SERVICE_PORT:-19791}"
 export ENTROPIC_BROWSER_SERVICE_PORT="$BROWSER_SERVICE_PORT"

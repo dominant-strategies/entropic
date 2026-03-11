@@ -2783,6 +2783,7 @@ const SCANNER_CONTAINER: &str = "entropic-skill-scanner";
 const SCANNER_HOST_PORT: &str = "19791";
 const ENTROPIC_GATEWAY_SCHEMA_VERSION: &str = "2026-02-13";
 const OPENCLAW_STATE_ROOT: &str = "/home/node/.openclaw";
+const OPENCLAW_PERSISTED_CONFIG_PATH: &str = "/data/openclaw.persisted.json";
 const ATTACHMENT_TMP_ROOT: &str = "/home/node/.openclaw/uploads/tmp";
 const ATTACHMENT_SAVE_ROOT: &str = "/data/uploads";
 const ATTACHMENT_ID_RANDOM_BYTES: usize = 18;
@@ -4749,7 +4750,13 @@ fn current_local_date() -> String {
 }
 
 fn read_openclaw_config() -> serde_json::Value {
-    let mut cfg = if let Some(raw) = read_container_file(&state_file("openclaw.json")) {
+    let primary_path = state_file("openclaw.json");
+    let mut cfg = if let Some(raw) = read_container_file(&primary_path) {
+        match serde_json::from_str(&raw) {
+            Ok(val) => val,
+            Err(_) => serde_json::json!({}),
+        }
+    } else if let Some(raw) = read_container_file(OPENCLAW_PERSISTED_CONFIG_PATH) {
         match serde_json::from_str(&raw) {
             Ok(val) => val,
             Err(_) => serde_json::json!({}),
@@ -4817,10 +4824,21 @@ fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
     // gateway's config file watcher and causing unnecessary SIGUSR1 restarts.
     if let Some(existing) = read_container_file(&config_path) {
         if existing.trim() == payload.trim() {
-            return Ok(());
+            return write_container_file(OPENCLAW_PERSISTED_CONFIG_PATH, &payload);
         }
     }
-    write_container_file(&config_path, &payload)
+    write_container_files_batch(&[
+        ContainerFileWrite {
+            path: &config_path,
+            content: &payload,
+            only_if_missing: false,
+        },
+        ContainerFileWrite {
+            path: OPENCLAW_PERSISTED_CONFIG_PATH,
+            content: &payload,
+            only_if_missing: false,
+        },
+    ])
 }
 
 /// Send SIGUSR1 to the gateway process to force a config reload.
