@@ -19,7 +19,7 @@ export function SuggestionChip({ icon: Icon, label, action, onClick, variant = "
     "flex items-center gap-2 px-4 py-2.5 rounded-full border transition-all text-sm font-medium";
   const toneClass =
     variant === "builder"
-      ? "bg-[var(--purple-accent-subtle)] border-[var(--purple-accent)]/40 text-[var(--text-accent)] hover:border-[var(--purple-accent)]/60 hover:bg-[var(--purple-accent-subtle)]"
+      ? "bg-[var(--purple-accent-subtle)] border-[var(--purple-accent)] text-[var(--text-accent)] hover:bg-[color-mix(in_oklch,var(--purple-accent)_15%,transparent)]"
       : "bg-[var(--bg-card)] hover:bg-[var(--bg-tertiary)] border-[var(--border-default)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]";
   return (
     <button

@@ -63,11 +63,11 @@ export function SandboxStartupOverlay({
           </div>
         </div>
 
-        <div className="mt-5 rounded-xl border border-violet-100 bg-violet-50/70 p-4">
-          <div className="text-[10px] uppercase tracking-wider text-violet-700 font-bold mb-2">
+        <div className="mt-5 rounded-xl border border-violet-500/20 bg-violet-500/10 p-4">
+          <div className="text-[10px] uppercase tracking-wider text-violet-500 font-bold mb-2">
             Did you know?
           </div>
-          <div className="text-xs leading-relaxed text-violet-900 font-medium">
+          <div className="text-xs leading-relaxed text-[var(--text-secondary)] font-medium">
             {fact}
           </div>
         </div>

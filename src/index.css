@@ -15,7 +15,7 @@
   /* Accent */
   --purple-accent: #8B5CF6;
   --purple-accent-hover: #7C3AED;
-  --purple-accent-subtle: rgba(139, 92, 246, 0.08);
+  --purple-accent-subtle: rgba(139, 92, 246, 0.12);
 
   /* Backgrounds — warm tint instead of pure gray */
   --bg-app: #F4F2EF;
@@ -87,7 +87,7 @@
 
     --purple-accent: #A78BFA;
     --purple-accent-hover: #8B5CF6;
-    --purple-accent-subtle: rgba(167, 139, 250, 0.10);
+    --purple-accent-subtle: rgba(167, 139, 250, 0.15);
 
     --bg-app: #131313;
     --bg-primary: #131313;

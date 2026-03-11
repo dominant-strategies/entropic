@@ -3526,7 +3526,7 @@ export function Chat({
                     className={clsx(
                       "flex items-start gap-2 rounded-xl border px-3 py-2.5 cursor-pointer transition-colors",
                       checked
-                        ? "border-[var(--purple-accent)] bg-violet-50/70 shadow-sm"
+                        ? "border-[var(--purple-accent)] bg-[var(--purple-accent-subtle)] shadow-sm"
                         : "border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] hover:bg-[var(--bg-card)]"
                     )}
                   >
