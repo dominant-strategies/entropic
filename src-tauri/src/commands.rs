@@ -1038,25 +1038,37 @@ struct RuntimeReleaseManifest {
     url: String,
     sha256: String,
     #[serde(default)]
+    url_size_bytes: Option<u64>,
+    #[serde(default)]
     scanner_url: Option<String>,
     #[serde(default)]
     scanner_sha256: Option<String>,
+    #[serde(default)]
+    scanner_size_bytes: Option<u64>,
     #[serde(default)]
     runtime_linux_x86_64_url: Option<String>,
     #[serde(default)]
     runtime_linux_x86_64_sha256: Option<String>,
     #[serde(default)]
+    runtime_linux_x86_64_size_bytes: Option<u64>,
+    #[serde(default)]
     runtime_linux_aarch64_url: Option<String>,
     #[serde(default)]
     runtime_linux_aarch64_sha256: Option<String>,
+    #[serde(default)]
+    runtime_linux_aarch64_size_bytes: Option<u64>,
     #[serde(default)]
     scanner_linux_x86_64_url: Option<String>,
     #[serde(default)]
     scanner_linux_x86_64_sha256: Option<String>,
     #[serde(default)]
+    scanner_linux_x86_64_size_bytes: Option<u64>,
+    #[serde(default)]
     scanner_linux_aarch64_url: Option<String>,
     #[serde(default)]
     scanner_linux_aarch64_sha256: Option<String>,
+    #[serde(default)]
+    scanner_linux_aarch64_size_bytes: Option<u64>,
     #[serde(default)]
     openclaw_commit: Option<String>,
     #[serde(default)]
@@ -1146,17 +1158,19 @@ fn runtime_asset_arch() -> Option<&'static str> {
 }
 
 fn runtime_release_tar_asset_name() -> String {
-    if let Some(arch) = runtime_asset_arch() {
-        return format!("openclaw-runtime-linux-{}.tar.gz", arch);
+    match runtime_asset_arch() {
+        Some("x86_64") => "openclaw-runtime-linux-x86_64.tar.gz".to_string(),
+        Some("aarch64") => "openclaw-runtime.tar.gz".to_string(),
+        _ => "openclaw-runtime.tar.gz".to_string(),
     }
-    "openclaw-runtime.tar.gz".to_string()
 }
 
 fn scanner_release_tar_asset_name() -> String {
-    if let Some(arch) = runtime_asset_arch() {
-        return format!("entropic-skill-scanner-linux-{}.tar.gz", arch);
+    match runtime_asset_arch() {
+        Some("x86_64") => "entropic-skill-scanner-linux-x86_64.tar.gz".to_string(),
+        Some("aarch64") => "entropic-skill-scanner.tar.gz".to_string(),
+        _ => "entropic-skill-scanner.tar.gz".to_string(),
     }
-    "entropic-skill-scanner.tar.gz".to_string()
 }
 
 fn runtime_release_tar_url() -> String {
@@ -1374,6 +1388,7 @@ impl RuntimeReleaseManifest {
                     if !url.trim().is_empty() && !sha.trim().is_empty() {
                         self.url = url.trim().to_string();
                         self.sha256 = sha.trim().to_string();
+                        self.url_size_bytes = self.runtime_linux_x86_64_size_bytes;
                     }
                 }
             }
@@ -1385,6 +1400,7 @@ impl RuntimeReleaseManifest {
                     if !url.trim().is_empty() && !sha.trim().is_empty() {
                         self.url = url.trim().to_string();
                         self.sha256 = sha.trim().to_string();
+                        self.url_size_bytes = self.runtime_linux_aarch64_size_bytes;
                     }
                 }
             }
@@ -1411,6 +1427,22 @@ impl RuntimeReleaseManifest {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
+    }
+
+    fn selected_runtime_size_bytes(&self) -> Option<u64> {
+        self.url_size_bytes
+    }
+
+    fn selected_scanner_size_bytes(&self) -> Option<u64> {
+        match runtime_asset_arch() {
+            Some("x86_64") => self
+                .scanner_linux_x86_64_size_bytes
+                .or(self.scanner_size_bytes),
+            Some("aarch64") => self
+                .scanner_linux_aarch64_size_bytes
+                .or(self.scanner_size_bytes),
+            _ => self.scanner_size_bytes,
+        }
     }
 }
 
@@ -8832,6 +8864,8 @@ pub struct RuntimeVersionInfo {
     pub entropic_version: String,
     pub runtime_version: String,
     pub runtime_openclaw_commit: Option<String>,
+    pub runtime_download_asset_name: Option<String>,
+    pub runtime_download_size_bytes: Option<u64>,
     pub applied_runtime_version: Option<String>,
     pub applied_runtime_openclaw_commit: Option<String>,
     pub applied_runtime_image_id: Option<String>,
@@ -8844,7 +8878,19 @@ pub struct RuntimeFetchResult {
     pub runtime_version: String,
     pub runtime_openclaw_commit: Option<String>,
     pub runtime_sha256: String,
+    pub runtime_download_asset_name: Option<String>,
+    pub runtime_download_size_bytes: Option<u64>,
     pub cache_path: String,
+}
+
+fn asset_name_from_url(raw: &str) -> Option<String> {
+    let parsed = Url::parse(raw).ok()?;
+    parsed
+        .path_segments()?
+        .next_back()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 #[tauri::command]
@@ -8852,6 +8898,8 @@ pub fn fetch_latest_openclaw_runtime() -> Result<RuntimeFetchResult, String> {
     let manifest = fetch_runtime_manifest_to_cache()
         .map_err(|e| format!("Failed to refresh runtime manifest: {}", e))?;
     let tar_path = download_runtime_tar_from_manifest_to_cache(RUNTIME_TAR_MAX_TIME_SECS)?;
+    let runtime_download_asset_name = asset_name_from_url(&manifest.url);
+    let runtime_download_size_bytes = manifest.selected_runtime_size_bytes();
     let runtime_openclaw_commit = manifest
         .openclaw_commit
         .as_ref()
@@ -8862,6 +8910,8 @@ pub fn fetch_latest_openclaw_runtime() -> Result<RuntimeFetchResult, String> {
         runtime_version: manifest.version,
         runtime_openclaw_commit,
         runtime_sha256: manifest.sha256,
+        runtime_download_asset_name,
+        runtime_download_size_bytes,
         cache_path: tar_path.display().to_string(),
     })
 }
@@ -8871,6 +8921,8 @@ pub fn get_runtime_version_info() -> Result<RuntimeVersionInfo, String> {
     let entropic_version = env!("CARGO_PKG_VERSION").to_string();
     let mut runtime_version = runtime_release_tag();
     let mut runtime_openclaw_commit = None;
+    let mut runtime_download_asset_name = asset_name_from_url(&runtime_release_tar_url());
+    let mut runtime_download_size_bytes = None;
     let mut applied_runtime_version = None;
     let mut applied_runtime_openclaw_commit = None;
     let mut applied_runtime_image_id = None;
@@ -8878,11 +8930,13 @@ pub fn get_runtime_version_info() -> Result<RuntimeVersionInfo, String> {
     let mut app_manifest_pub_date = None;
 
     if let Some(manifest) = read_cached_runtime_manifest() {
-        runtime_version = manifest.version;
+        runtime_download_asset_name = asset_name_from_url(&manifest.url);
+        runtime_download_size_bytes = manifest.selected_runtime_size_bytes();
         runtime_openclaw_commit = manifest
             .openclaw_commit
             .map(|commit| commit.trim().to_string())
             .filter(|commit| !commit.is_empty());
+        runtime_version = manifest.version;
     }
 
     match runtime_image_id() {
@@ -8930,6 +8984,8 @@ pub fn get_runtime_version_info() -> Result<RuntimeVersionInfo, String> {
         entropic_version,
         runtime_version,
         runtime_openclaw_commit,
+        runtime_download_asset_name,
+        runtime_download_size_bytes,
         applied_runtime_version,
         applied_runtime_openclaw_commit,
         applied_runtime_image_id,

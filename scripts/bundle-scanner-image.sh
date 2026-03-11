@@ -11,6 +11,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 RUNTIME_COMMON="$SCRIPT_DIR/runtime-common.sh"
 RESOURCES_DIR="$PROJECT_ROOT/src-tauri/resources"
 OUTPUT="${OUTPUT:-$RESOURCES_DIR/entropic-skill-scanner.tar.gz}"
+GZIP_LEVEL="${ENTROPIC_IMAGE_GZIP_LEVEL:-6}"
 
 if [ ! -f "$RUNTIME_COMMON" ]; then
     echo "ERROR: Missing runtime helper: $RUNTIME_COMMON" >&2
@@ -54,6 +55,21 @@ run_docker() {
     fi
 }
 
+normalize_gzip_level() {
+    if [[ ! "$GZIP_LEVEL" =~ ^[1-9]$ ]]; then
+        echo "WARNING: Invalid ENTROPIC_IMAGE_GZIP_LEVEL='$GZIP_LEVEL'; defaulting to 6."
+        GZIP_LEVEL=6
+    fi
+}
+
+compress_stream() {
+    if command -v pigz >/dev/null 2>&1; then
+        pigz "-${GZIP_LEVEL}"
+    else
+        gzip "-${GZIP_LEVEL}"
+    fi
+}
+
 # Determine the scanner image name (matches the tag computed by scanner_image_name() in commands.rs)
 # Default base and pip spec from commands.rs
 SCANNER_BASE_IMAGE="${ENTROPIC_SCANNER_BASE_IMAGE:-python:3.11-slim}"
@@ -91,6 +107,7 @@ if ! run_docker image inspect "$SCANNER_IMAGE" > /dev/null 2>&1; then
 fi
 
 mkdir -p "$(dirname "$OUTPUT")"
+normalize_gzip_level
 
 # Show image size
 IMAGE_SIZE=$(run_docker image inspect "$SCANNER_IMAGE" --format '{{.Size}}')
@@ -98,8 +115,8 @@ IMAGE_SIZE_MB=$((IMAGE_SIZE / 1024 / 1024))
 echo "Image size: ${IMAGE_SIZE_MB}MB (uncompressed)"
 echo ""
 
-echo "Exporting and compressing (this may take a minute)..."
-run_docker save "$SCANNER_IMAGE" | gzip -1 > "$OUTPUT"
+echo "Exporting and compressing with gzip level ${GZIP_LEVEL} (this may take a minute)..."
+run_docker save "$SCANNER_IMAGE" | compress_stream > "$OUTPUT"
 
 OUTPUT_SIZE=$(stat -f%z "$OUTPUT" 2>/dev/null || stat -c%s "$OUTPUT" 2>/dev/null)
 OUTPUT_SIZE_MB=$((OUTPUT_SIZE / 1024 / 1024))

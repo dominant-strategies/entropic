@@ -123,6 +123,7 @@ jobs:
         env:
           OUTPUT: src-tauri/resources/openclaw-runtime-linux-x86_64.tar.gz
           ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
+          ENTROPIC_IMAGE_GZIP_LEVEL: 9
         run: ./scripts/bundle-runtime-image.sh
 
       - name: Build OpenClaw runtime image (linux/arm64)
@@ -137,8 +138,9 @@ jobs:
       - name: Bundle runtime image tar (linux/arm64)
         working-directory: entropic
         env:
-          OUTPUT: src-tauri/resources/openclaw-runtime-linux-aarch64.tar.gz
+          OUTPUT: src-tauri/resources/openclaw-runtime.tar.gz
           ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
+          ENTROPIC_IMAGE_GZIP_LEVEL: 9
         run: ./scripts/bundle-runtime-image.sh
 
       - name: Build skill scanner image (linux/x86_64)
@@ -153,6 +155,7 @@ jobs:
         env:
           OUTPUT: src-tauri/resources/entropic-skill-scanner-linux-x86_64.tar.gz
           ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
+          ENTROPIC_IMAGE_GZIP_LEVEL: 9
         run: ./scripts/bundle-scanner-image.sh
 
       - name: Build skill scanner image (linux/arm64)
@@ -165,8 +168,9 @@ jobs:
       - name: Bundle scanner image tar (linux/arm64)
         working-directory: entropic
         env:
-          OUTPUT: src-tauri/resources/entropic-skill-scanner-linux-aarch64.tar.gz
+          OUTPUT: src-tauri/resources/entropic-skill-scanner.tar.gz
           ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
+          ENTROPIC_IMAGE_GZIP_LEVEL: 9
         run: ./scripts/bundle-scanner-image.sh
 
       - name: Prepare runtime release assets
@@ -174,35 +178,43 @@ jobs:
           GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
-          cp entropic/src-tauri/resources/openclaw-runtime-linux-aarch64.tar.gz openclaw-runtime.tar.gz
+          cp entropic/src-tauri/resources/openclaw-runtime.tar.gz openclaw-runtime.tar.gz
           sha256sum openclaw-runtime.tar.gz > openclaw-runtime.tar.gz.sha256
           RUNTIME_SHA256="$(awk '{print $1}' openclaw-runtime.tar.gz.sha256)"
+          RUNTIME_SIZE="$(stat -c%s openclaw-runtime.tar.gz)"
           cp entropic/src-tauri/resources/openclaw-runtime-linux-x86_64.tar.gz openclaw-runtime-linux-x86_64.tar.gz
           sha256sum openclaw-runtime-linux-x86_64.tar.gz > openclaw-runtime-linux-x86_64.tar.gz.sha256
           RUNTIME_X86_64_SHA256="$(awk '{print $1}' openclaw-runtime-linux-x86_64.tar.gz.sha256)"
-          cp entropic/src-tauri/resources/openclaw-runtime-linux-aarch64.tar.gz openclaw-runtime-linux-aarch64.tar.gz
-          sha256sum openclaw-runtime-linux-aarch64.tar.gz > openclaw-runtime-linux-aarch64.tar.gz.sha256
-          RUNTIME_AARCH64_SHA256="$(awk '{print $1}' openclaw-runtime-linux-aarch64.tar.gz.sha256)"
+          RUNTIME_X86_64_SIZE="$(stat -c%s openclaw-runtime-linux-x86_64.tar.gz)"
+          RUNTIME_AARCH64_SHA256="$RUNTIME_SHA256"
+          RUNTIME_AARCH64_SIZE="$RUNTIME_SIZE"
 
-          cp entropic/src-tauri/resources/entropic-skill-scanner-linux-aarch64.tar.gz entropic-skill-scanner.tar.gz
+          cp entropic/src-tauri/resources/entropic-skill-scanner.tar.gz entropic-skill-scanner.tar.gz
           sha256sum entropic-skill-scanner.tar.gz > entropic-skill-scanner.tar.gz.sha256
           SCANNER_SHA256="$(awk '{print $1}' entropic-skill-scanner.tar.gz.sha256)"
+          SCANNER_SIZE="$(stat -c%s entropic-skill-scanner.tar.gz)"
           cp entropic/src-tauri/resources/entropic-skill-scanner-linux-x86_64.tar.gz entropic-skill-scanner-linux-x86_64.tar.gz
           sha256sum entropic-skill-scanner-linux-x86_64.tar.gz > entropic-skill-scanner-linux-x86_64.tar.gz.sha256
           SCANNER_X86_64_SHA256="$(awk '{print $1}' entropic-skill-scanner-linux-x86_64.tar.gz.sha256)"
-          cp entropic/src-tauri/resources/entropic-skill-scanner-linux-aarch64.tar.gz entropic-skill-scanner-linux-aarch64.tar.gz
-          sha256sum entropic-skill-scanner-linux-aarch64.tar.gz > entropic-skill-scanner-linux-aarch64.tar.gz.sha256
-          SCANNER_AARCH64_SHA256="$(awk '{print $1}' entropic-skill-scanner-linux-aarch64.tar.gz.sha256)"
+          SCANNER_X86_64_SIZE="$(stat -c%s entropic-skill-scanner-linux-x86_64.tar.gz)"
+          SCANNER_AARCH64_SHA256="$SCANNER_SHA256"
+          SCANNER_AARCH64_SIZE="$SCANNER_SIZE"
           export RUNTIME_VERSION="${{ github.event.inputs.release_tag }}"
           export RUNTIME_RELEASE_REPO="${{ github.event.inputs.release_repo }}"
           export OPENCLAW_COMMIT="${{ steps.refs.outputs.openclaw_commit }}"
           export SKILLS_COMMIT="${{ steps.refs.outputs.skills_commit }}"
           export RUNTIME_SHA256
+          export RUNTIME_SIZE
           export RUNTIME_X86_64_SHA256
+          export RUNTIME_X86_64_SIZE
           export RUNTIME_AARCH64_SHA256
+          export RUNTIME_AARCH64_SIZE
           export SCANNER_SHA256
+          export SCANNER_SIZE
           export SCANNER_X86_64_SHA256
+          export SCANNER_X86_64_SIZE
           export SCANNER_AARCH64_SHA256
+          export SCANNER_AARCH64_SIZE
           TMP_DIR="$(mktemp -d)"
           if gh release view "$RUNTIME_VERSION" --repo "$RUNTIME_RELEASE_REPO" &>/dev/null; then
             gh release download "$RUNTIME_VERSION" \
@@ -228,31 +240,37 @@ jobs:
                   os.environ["RUNTIME_VERSION"],
               ),
               "sha256": os.environ["RUNTIME_SHA256"],
+              "url_size_bytes": int(os.environ["RUNTIME_SIZE"]),
               "runtime_linux_x86_64_url": "https://github.com/{}/releases/download/{}/openclaw-runtime-linux-x86_64.tar.gz".format(
                   os.environ["RUNTIME_RELEASE_REPO"],
                   os.environ["RUNTIME_VERSION"],
               ),
               "runtime_linux_x86_64_sha256": os.environ["RUNTIME_X86_64_SHA256"],
-              "runtime_linux_aarch64_url": "https://github.com/{}/releases/download/{}/openclaw-runtime-linux-aarch64.tar.gz".format(
+              "runtime_linux_x86_64_size_bytes": int(os.environ["RUNTIME_X86_64_SIZE"]),
+              "runtime_linux_aarch64_url": "https://github.com/{}/releases/download/{}/openclaw-runtime.tar.gz".format(
                   os.environ["RUNTIME_RELEASE_REPO"],
                   os.environ["RUNTIME_VERSION"],
               ),
               "runtime_linux_aarch64_sha256": os.environ["RUNTIME_AARCH64_SHA256"],
+              "runtime_linux_aarch64_size_bytes": int(os.environ["RUNTIME_AARCH64_SIZE"]),
               "scanner_url": "https://github.com/{}/releases/download/{}/entropic-skill-scanner.tar.gz".format(
                   os.environ["RUNTIME_RELEASE_REPO"],
                   os.environ["RUNTIME_VERSION"],
               ),
               "scanner_sha256": os.environ["SCANNER_SHA256"],
+              "scanner_size_bytes": int(os.environ["SCANNER_SIZE"]),
               "scanner_linux_x86_64_url": "https://github.com/{}/releases/download/{}/entropic-skill-scanner-linux-x86_64.tar.gz".format(
                   os.environ["RUNTIME_RELEASE_REPO"],
                   os.environ["RUNTIME_VERSION"],
               ),
               "scanner_linux_x86_64_sha256": os.environ["SCANNER_X86_64_SHA256"],
-              "scanner_linux_aarch64_url": "https://github.com/{}/releases/download/{}/entropic-skill-scanner-linux-aarch64.tar.gz".format(
+              "scanner_linux_x86_64_size_bytes": int(os.environ["SCANNER_X86_64_SIZE"]),
+              "scanner_linux_aarch64_url": "https://github.com/{}/releases/download/{}/entropic-skill-scanner.tar.gz".format(
                   os.environ["RUNTIME_RELEASE_REPO"],
                   os.environ["RUNTIME_VERSION"],
               ),
               "scanner_linux_aarch64_sha256": os.environ["SCANNER_AARCH64_SHA256"],
+              "scanner_linux_aarch64_size_bytes": int(os.environ["SCANNER_AARCH64_SIZE"]),
               "openclaw_commit": os.environ["OPENCLAW_COMMIT"],
               "entropic_skills_commit": os.environ["SKILLS_COMMIT"],
           }
@@ -293,14 +311,10 @@ jobs:
             openclaw-runtime.tar.gz.sha256
             openclaw-runtime-linux-x86_64.tar.gz
             openclaw-runtime-linux-x86_64.tar.gz.sha256
-            openclaw-runtime-linux-aarch64.tar.gz
-            openclaw-runtime-linux-aarch64.tar.gz.sha256
             entropic-skill-scanner.tar.gz
             entropic-skill-scanner.tar.gz.sha256
             entropic-skill-scanner-linux-x86_64.tar.gz
             entropic-skill-scanner-linux-x86_64.tar.gz.sha256
-            entropic-skill-scanner-linux-aarch64.tar.gz
-            entropic-skill-scanner-linux-aarch64.tar.gz.sha256
             runtime-manifest.json
             openclaw-runtime-metadata.json
 
@@ -316,14 +330,10 @@ jobs:
             "openclaw-runtime.tar.gz.sha256"
             "openclaw-runtime-linux-x86_64.tar.gz"
             "openclaw-runtime-linux-x86_64.tar.gz.sha256"
-            "openclaw-runtime-linux-aarch64.tar.gz"
-            "openclaw-runtime-linux-aarch64.tar.gz.sha256"
             "entropic-skill-scanner.tar.gz"
             "entropic-skill-scanner.tar.gz.sha256"
             "entropic-skill-scanner-linux-x86_64.tar.gz"
             "entropic-skill-scanner-linux-x86_64.tar.gz.sha256"
-            "entropic-skill-scanner-linux-aarch64.tar.gz"
-            "entropic-skill-scanner-linux-aarch64.tar.gz.sha256"
             "runtime-manifest.json"
             "openclaw-runtime-metadata.json"
           )

@@ -73,6 +73,8 @@ type RuntimeVersionInfo = {
   entropic_version: string;
   runtime_version: string;
   runtime_openclaw_commit?: string | null;
+  runtime_download_asset_name?: string | null;
+  runtime_download_size_bytes?: number | null;
   applied_runtime_version?: string | null;
   applied_runtime_openclaw_commit?: string | null;
   applied_runtime_image_id?: string | null;
@@ -84,6 +86,8 @@ type RuntimeFetchResult = {
   runtime_version: string;
   runtime_openclaw_commit?: string | null;
   runtime_sha256: string;
+  runtime_download_asset_name?: string | null;
+  runtime_download_size_bytes?: number | null;
   cache_path: string;
 };
 
@@ -1548,6 +1552,14 @@ export function Settings({
               <div className="text-[12px] text-[var(--text-secondary)] mb-3">
                 Refresh the runtime manifest and cache the newest OpenClaw runtime tar for faster startup and updates.
               </div>
+              {(runtimeVersionInfo?.runtime_download_asset_name || runtimeVersionInfo?.runtime_download_size_bytes != null) && (
+                <div className="text-[11px] text-[var(--text-tertiary)] mb-3">
+                  Selected asset: {runtimeVersionInfo?.runtime_download_asset_name ?? "unknown"}
+                  {runtimeVersionInfo?.runtime_download_size_bytes != null
+                    ? ` · ${formatBytes(runtimeVersionInfo.runtime_download_size_bytes)}`
+                    : ""}
+                </div>
+              )}
               <button
                 onClick={async () => {
                   setRuntimeFetchLoading(true);
@@ -1560,6 +1572,12 @@ export function Settings({
                     alert(
                       "Runtime cache updated.\n\n" +
                         `Version: ${result.runtime_version}${shortCommit}\n` +
+                        (result.runtime_download_asset_name
+                          ? `Asset: ${result.runtime_download_asset_name}\n`
+                          : "") +
+                        (typeof result.runtime_download_size_bytes === "number"
+                          ? `Download: ${formatBytes(result.runtime_download_size_bytes)}\n`
+                          : "") +
                         `SHA256: ${result.runtime_sha256}\n` +
                         `Path: ${result.cache_path}`
                     );
@@ -1797,6 +1815,15 @@ export function Settings({
             ? ` (${runtimeVersionInfo.runtime_openclaw_commit.slice(0, 7)})`
             : ""}
         </div>
+        {(runtimeVersionInfo?.runtime_download_asset_name || runtimeVersionInfo?.runtime_download_size_bytes != null) && (
+          <div>
+            Runtime Download{" "}
+            {runtimeVersionInfo?.runtime_download_asset_name ?? "unknown asset"}
+            {runtimeVersionInfo?.runtime_download_size_bytes != null
+              ? ` · ${formatBytes(runtimeVersionInfo.runtime_download_size_bytes)}`
+              : ""}
+          </div>
+        )}
         <div>
           Applied Runtime{" "}
           {runtimeVersionInfo?.applied_runtime_version

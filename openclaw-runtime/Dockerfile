@@ -38,16 +38,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Additional fonts for realistic browser fingerprint
     fonts-noto-core \
     fonts-dejavu-core \
-    fonts-freefont-ttf \
-    fonts-roboto \
     # Video codec libraries (h264 support for Chromium)
     libavcodec59 \
     libavformat59 \
     libavutil57 \
-    xvfb \
-    x11vnc \
-    novnc \
-    websockify && \
+    xvfb && \
     rm -rf /var/lib/apt/lists/* && \
     # Make `python` resolve to python3 so skills can call either name
     ln -sfn /usr/bin/python3 /usr/local/bin/python && \
@@ -59,7 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 1. Symlink to /usr/bin/chromium (OpenClaw's findChromeExecutableLinux() searches there)
 # 2. Copy browsers to /opt/patchright-browsers/ so entrypoint can symlink into
 #    PLAYWRIGHT_BROWSERS_PATH (/data/playwright/) for patchright's chromium.launch()
-RUN npx patchright@latest install chromium && \
+RUN npx patchright@latest install --no-shell chromium && \
     cp -a /root/.cache/ms-playwright /opt/patchright-browsers && \
     chmod -R a+rX /opt/patchright-browsers && \
     CHROME_BIN=$(find /opt/patchright-browsers -name 'chrome' -type f | head -1) && \

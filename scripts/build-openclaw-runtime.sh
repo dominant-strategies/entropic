@@ -416,6 +416,34 @@ else
     echo "WARNING: 'file' command unavailable; skipping native binary type validation."
 fi
 
+echo "Stripping known non-runtime packages from node_modules..."
+KNOWN_NON_RUNTIME_PATTERNS=(
+    "@node-llama-cpp+mac-arm64-metal@*"
+    "@cloudflare+workers-types@*"
+    "@typescript+native-preview@*"
+    "@types+*"
+    "bun-types@*"
+    "typescript@*"
+)
+KNOWN_NON_RUNTIME_SYMLINKS=(
+    "@cloudflare/workers-types"
+    "@types"
+    "@typescript/native-preview"
+    "bun-types"
+    "typescript"
+)
+STRIPPED_KNOWN_PACKAGES=0
+for pattern in "${KNOWN_NON_RUNTIME_PATTERNS[@]}"; do
+    while IFS= read -r -d '' package_dir; do
+        rm -rf "$package_dir"
+        STRIPPED_KNOWN_PACKAGES=$((STRIPPED_KNOWN_PACKAGES + 1))
+    done < <(find "$STAGING_DIR/node_modules/.pnpm" -maxdepth 1 -mindepth 1 -type d -name "$pattern" -print0 2>/dev/null)
+done
+for symlink_path in "${KNOWN_NON_RUNTIME_SYMLINKS[@]}"; do
+    rm -rf "$STAGING_DIR/node_modules/$symlink_path" 2>/dev/null || true
+done
+echo "Removed $STRIPPED_KNOWN_PACKAGES known non-runtime package directories."
+
 # Security scan - check for actual secrets in config files only
 echo ""
 echo "Running security scan..."
