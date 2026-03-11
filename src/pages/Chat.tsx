@@ -844,6 +844,7 @@ export function Chat({
   onSessionsChange,
   requestedSession,
   requestedSessionAction,
+  wideLayout = false,
 }: {
   isVisible?: boolean;
   gatewayRunning: boolean;
@@ -861,6 +862,7 @@ export function Chat({
   onSessionsChange?: (sessions: ChatSession[], currentKey: string | null) => void;
   requestedSession?: string | null;
   requestedSessionAction?: ChatSessionActionRequest | null;
+  wideLayout?: boolean;
 }) {
   const { isAuthenticated, isAuthConfigured, refreshBalance } = useAuth();
   const [localCreditsCents, setLocalCreditsCents] = useState<number | null>(null);
@@ -906,6 +908,7 @@ export function Chat({
   const [showOutOfCreditsModal, setShowOutOfCreditsModal] = useState(false);
   const [creditsCheckoutLoading, setCreditsCheckoutLoading] = useState(false);
   const [componentMountedAt] = useState(Date.now());
+  const [showGatewayOfflineCta, setShowGatewayOfflineCta] = useState(false);
   const runTimingsRef = useRef<Record<string, {
     startedAt: number;
     ackAt?: number;
@@ -1908,6 +1911,17 @@ export function Chat({
       setError(null);
     }
   }, [isConnecting]);
+
+  useEffect(() => {
+    if (gatewayRunning || gatewayStarting || isConnecting) {
+      setShowGatewayOfflineCta(false);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      setShowGatewayOfflineCta(true);
+    }, 3500);
+    return () => window.clearTimeout(id);
+  }, [gatewayRunning, gatewayStarting, isConnecting]);
 
   useEffect(() => {
     if (!connected) return;
@@ -4554,6 +4568,8 @@ export function Chat({
   if (localTrialLoading) return renderConnecting();
   if (!connectedProvider && !proxyEnabled) return renderNoProvider();
   const autoStartExpected = proxyEnabled && !gatewayRunning;
+  const showGatewayWarmupBanner =
+    gatewayStarting || autoStartExpected || (!gatewayRunning && !showGatewayOfflineCta);
   const showBillingAction = Boolean(error && isBillingIssueMessage(error));
   const showSignInAction = Boolean(
     error && isBillingIssueMessage(error) && !isAuthenticated && isAuthConfigured
@@ -4583,17 +4599,18 @@ export function Chat({
       }}
     >
 
-
-      {(gatewayStarting || autoStartExpected) && (
+      {showGatewayWarmupBanner && (
         <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-500">
           {gatewayRetryIn
             ? `Gateway reconnecting — retrying in ${gatewayRetryIn}s.`
-            : "Gateway starting…"}
+            : gatewayStarting || autoStartExpected
+              ? "Gateway starting…"
+              : "Preparing sandbox…"}
         </div>
       )}
 
 
-      {!gatewayRunning && !gatewayStarting && !autoStartExpected && (
+      {!gatewayRunning && !gatewayStarting && !autoStartExpected && showGatewayOfflineCta && (
         <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-500 flex items-center justify-center gap-3">
           <span>Gateway offline — start the sandbox to chat.</span>
           {onStartGateway && (
@@ -4634,7 +4651,7 @@ export function Chat({
 
       {/* Messages or Welcome */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-4">
-        <div className="mx-auto min-w-0 max-w-3xl space-y-4">
+        <div className={clsx("min-w-0 space-y-4", wideLayout ? "w-full max-w-none" : "mx-auto max-w-3xl")}>
           {messages.length === 0 && showWelcome ? (
             renderWelcome()
           ) : messages.length === 0 && !hasInlineAssistantCard ? (
@@ -4653,7 +4670,7 @@ export function Chat({
 
       {/* Input Area */}
       <div className="flex-shrink-0 p-4 bg-[var(--composer-bg)] border-t border-[var(--composer-border)]">
-        <div className="mx-auto min-w-0 max-w-3xl space-y-3">
+        <div className={clsx("min-w-0 space-y-3", wideLayout ? "w-full max-w-none" : "mx-auto max-w-3xl")}>
           {pendingAttachments.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {pendingAttachments.map((attachment) => (
@@ -4695,7 +4712,7 @@ export function Chat({
               event.currentTarget.value = "";
             }}
           />
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="inline-flex items-center rounded-full border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-1 shadow-sm">
               {([
                 { key: "chat", label: "Chat", icon: Bot },

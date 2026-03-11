@@ -343,8 +343,9 @@ export class GatewayClient {
 
       this.ws.onerror = (e) => {
         this.logError("WebSocket error:", e);
-        this.emit("error", "WebSocket error");
-        rejectOnce(new Error("WebSocket error"));
+        // Browser WebSocket errors are intentionally opaque and are almost
+        // always followed by a close event with better context. Avoid surfacing
+        // a generic "WebSocket error" banner to the user here.
       };
 
       this.ws.onclose = (event) => {

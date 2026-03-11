@@ -2424,7 +2424,7 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
                   <CalendarClock className="w-16 h-16 mx-auto mb-6 text-[var(--text-quaternary)]" strokeWidth={1.5} />
                   <h3 className="text-xl font-semibold text-[var(--text-primary)] mb-2">No jobs scheduled</h3>
                   <p className="text-[var(--text-secondary)] mb-6">Ready to automate? Create your first scheduled job or start with a suggestion below.</p>
-                  <button onClick={openCreate} className="px-6 py-2.5 bg-[var(--purple-accent)] text-white rounded-lg font-semibold text-sm hover:bg-[var(--purple-accent-hover)] transition-all">Create First Job</button>
+                  <button onClick={openCreate} className="px-6 py-2.5 bg-[var(--system-blue)] text-white rounded-lg font-semibold text-sm hover:brightness-95 transition-all">Create First Job</button>
                   <div className="mt-8 mx-auto w-full max-w-md text-left rounded-xl border border-[var(--border-default)] bg-[var(--system-gray-6)]/60 p-4">
                     <h4 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-secondary)] mb-2">
                       Suggested first jobs

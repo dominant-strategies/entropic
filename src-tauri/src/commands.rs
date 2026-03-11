@@ -12838,6 +12838,7 @@ pub async fn sync_embedded_preview_webview(
 
     if request.visible {
         let _ = webview.show();
+        let _ = webview.set_focus();
     } else {
         let _ = webview.hide();
     }

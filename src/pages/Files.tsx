@@ -220,6 +220,10 @@ const WORKSPACE_FOLDER_REFRESH_MS = 1500;
 const BROWSER_DETAILS_PANEL_HEIGHT = 0;
 const BROWSER_APP_WINDOW_TITLEBAR_HEIGHT = 34;
 const BROWSER_TOOLBAR_HEIGHT = 49;
+const CHAT_WINDOW_MIN_SIZE_EXPANDED = { w: 560, h: 420 };
+const CHAT_WINDOW_MIN_SIZE_COLLAPSED = { w: 420, h: 360 };
+const DESKTOP_CONTEXT_MENU_Z = 2000;
+const DESKTOP_MODAL_Z = 2100;
 const LOCAL_BROWSER_INPUT_RE = /^(?:container\.localhost|runtime\.localhost|localhost|127\.0\.0\.1)(?::\d+)?(?:[/?#].*)?$/i;
 const BROWSER_DESKTOP_MIN_VIEWPORT_WIDTH = 1180;
 const BROWSER_DESKTOP_MIN_VIEWPORT_HEIGHT = 760;
@@ -795,6 +799,7 @@ export function Files({
   const [chatPos, setChatPos] = useState({ x: 120, y: 40 });
   const [chatSize, setChatSize] = useState({ w: 860, h: 560 });
   const [chatNavCollapsed, setChatNavCollapsed] = useState(false);
+  const chatMinSize = chatNavCollapsed ? CHAT_WINDOW_MIN_SIZE_COLLAPSED : CHAT_WINDOW_MIN_SIZE_EXPANDED;
   const chatDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
   const chatResizeRef = useRef<WindowResizeState | null>(null);
   const [desktopBounds, setDesktopBounds] = useState({ width: 0, height: 0 });
@@ -1216,7 +1221,7 @@ export function Files({
     };
 
     clampResizableWindow(finderPos, finderSize, { w: 320, h: 240 }, setFinderPos, setFinderSize);
-    clampResizableWindow(chatPos, chatSize, { w: 720, h: 500 }, setChatPos, setChatSize);
+    clampResizableWindow(chatPos, chatSize, chatMinSize, setChatPos, setChatSize);
     clampResizableWindow(browserPos, browserSize, { w: 640, h: 420 }, setBrowserPos, setBrowserSize);
     clampResizableWindow(terminalPos, terminalSize, { w: 680, h: 360 }, setTerminalPos, setTerminalSize);
     clampFixedWindow(pluginsPos, pluginsSize, setPluginsPos);
@@ -1233,6 +1238,7 @@ export function Files({
     finderSize,
     chatPos,
     chatSize,
+    chatMinSize,
     browserPos,
     browserSize,
     terminalPos,
@@ -3190,45 +3196,6 @@ export function Files({
 
   return (
     <div className="h-full w-full min-w-0 flex flex-col select-none relative overflow-hidden">
-      {/* Top toolbar */}
-      <div className="absolute top-0 left-0 right-0 z-20">
-        <div
-          className="flex items-center justify-between gap-2 px-3 py-1.5"
-          style={{
-            background: "rgba(255,255,255,0.9)",
-            backdropFilter: "blur(10px)",
-            WebkitBackdropFilter: "blur(10px)",
-            borderBottom: "1px solid rgba(0,0,0,0.08)",
-            boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
-          }}
-        >
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <span className="text-[12px] font-bold text-[var(--text-primary)]">
-              Home
-            </span>
-            <div
-              className="flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-full border border-black/5 bg-black/5 flex-shrink-0"
-            >
-              <span
-                className="h-1.5 w-1.5 rounded-full"
-                style={{
-                  background: gatewayRunning
-                    ? "#22c55e"
-                    : isTogglingGateway
-                    ? "#f59e0b"
-                    : "#ef4444",
-                }}
-              />
-              <span className="text-[var(--text-secondary)] font-medium">
-                {gatewayRunning ? "Online" : isTogglingGateway ? "Starting" : "Offline"}
-              </span>
-            </div>
-          </div>
-
-          <div className="flex-1" />
-        </div>
-      </div>
-
       {/* Main area */}
       <div className="flex-1 min-w-0 flex overflow-hidden">
 
@@ -3246,7 +3213,7 @@ export function Files({
           <div className="absolute inset-0" style={isWpImage ? { backgroundImage: wallpaperCss, backgroundSize: "cover", backgroundPosition: "center" } : { background: wallpaperCss }} />
 
           {/* Desktop icons */}
-          <div className="relative flex-1 pt-12 px-0 pb-0 h-full">
+          <div className="relative flex-1 pt-4 px-0 pb-0 h-full">
             {(() => {
               const icon = desktopIcons.workspace;
               return (
@@ -3426,7 +3393,7 @@ export function Files({
 
           {/* Context menus */}
           {contextMenu && !contextMenu.entry && (
-            <div className="fixed z-50 py-1 rounded-lg min-w-[180px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, background: "rgba(30,30,30,0.9)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.4)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="fixed py-1 rounded-lg min-w-[180px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, zIndex: DESKTOP_CONTEXT_MENU_Z, background: "rgba(30,30,30,0.9)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.4)" }} onClick={(e) => e.stopPropagation()}>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFolder(finderOpen ? currentPath : ""); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" />New Folder</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openBrowserWindow(); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" />Open Browser</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openTerminalWindow(); setContextMenu(null); }}><Terminal className="w-3.5 h-3.5" />Open Terminal</button>
@@ -3436,7 +3403,7 @@ export function Files({
             </div>
           )}
           {contextMenu && contextMenu.entry && (
-            <div className="fixed z-[55] py-1 rounded-lg min-w-[160px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, background: "rgba(30,30,30,0.95)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="fixed py-1 rounded-lg min-w-[160px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, zIndex: DESKTOP_CONTEXT_MENU_Z + 1, background: "rgba(30,30,30,0.95)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }} onClick={(e) => e.stopPropagation()}>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleEntryDoubleClick(contextMenu.entry!); setContextMenu(null); }}><Folder className="w-3.5 h-3.5" style={{ color: "#888" }} />Open</button>
               {!contextMenu.entry.is_directory && HTML_EXTS.has(contextMenu.entry.name.split(".").pop()?.toLowerCase() || "") && (
                 <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void openWorkspaceFileInBrowser(contextMenu.entry!); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" style={{ color: "#888" }} />Open in Browser</button>
@@ -3550,8 +3517,8 @@ export function Files({
 
           {createFolderOpen && (
             <div
-              className="absolute inset-0 z-[72] flex items-center justify-center"
-              style={{ background: "rgba(0,0,0,0.34)", backdropFilter: "blur(6px)" }}
+              className="absolute inset-0 flex items-center justify-center"
+              style={{ zIndex: DESKTOP_MODAL_Z, background: "rgba(0,0,0,0.34)", backdropFilter: "blur(6px)" }}
               onClick={() => { if (!creatingFolder) setCreateFolderOpen(false); }}
             >
               <div
@@ -3636,90 +3603,62 @@ export function Files({
                   setChatPos,
                   setChatSize,
                   "chat",
-                  { w: 640, h: 420 },
+                  chatMinSize,
                 )
               }
             >
               <div className="h-full min-w-0 flex bg-[var(--bg-app)] text-[var(--text-primary)]">
-                <aside
-                  className={`${chatNavCollapsed ? "w-[78px]" : "w-[280px]"} shrink-0 border-r flex flex-col transition-[width] duration-200`}
-                  style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
-                >
+                {!chatNavCollapsed && (
+                  <aside
+                    className="w-[280px] shrink-0 border-r flex flex-col"
+                    style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
+                  >
                   <div className="p-3 border-b" style={{ borderColor: "var(--border-subtle)" }}>
-                    <div className={`flex items-center gap-2 ${chatNavCollapsed ? "flex-col" : "justify-between mb-3"}`}>
-                      <div className={`min-w-0 ${chatNavCollapsed ? "flex flex-col items-center gap-2 w-full" : ""}`}>
+                    <div className="flex items-center justify-between gap-2 mb-3">
+                      <div className="min-w-0">
                         <button
                           type="button"
                           onClick={() => setChatNavCollapsed((prev) => !prev)}
                           className="h-8 w-8 rounded-xl border flex items-center justify-center transition-colors hover:bg-[var(--border-subtle)]"
                           style={{ borderColor: "var(--border-subtle)", color: "var(--text-primary)" }}
-                          title={chatNavCollapsed ? "Expand conversations" : "Collapse conversations"}
-                          aria-label={chatNavCollapsed ? "Expand conversations" : "Collapse conversations"}
+                          title="Collapse conversations"
+                          aria-label="Collapse conversations"
                         >
-                          {chatNavCollapsed ? (
-                            <PanelLeftOpen className="w-4 h-4" />
-                          ) : (
-                            <PanelLeftClose className="w-4 h-4" />
-                          )}
+                          <PanelLeftClose className="w-4 h-4" />
                         </button>
-                        {!chatNavCollapsed && (
-                          <>
-                            <p className="text-[11px] uppercase tracking-[0.24em]" style={{ color: "var(--text-tertiary)" }}>
-                              Conversations
-                            </p>
-                            <p className="text-[12px] mt-1" style={{ color: "var(--text-secondary)" }}>
-                              {activeChatSession ? desktopChatSessionTitle(activeChatSession) : "Shared with main chat"}
-                            </p>
-                          </>
-                        )}
+                        <p className="text-[11px] uppercase tracking-[0.24em]" style={{ color: "var(--text-tertiary)" }}>
+                          Conversations
+                        </p>
+                        <p className="text-[12px] mt-1" style={{ color: "var(--text-secondary)" }}>
+                          {activeChatSession ? desktopChatSessionTitle(activeChatSession) : "Shared with main chat"}
+                        </p>
                       </div>
                       <button
                         type="button"
                         onClick={createNewChatSession}
-                        className={`h-8 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 ${chatNavCollapsed ? "w-8 px-0" : "px-3"}`}
+                        className="h-8 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 px-3"
                         style={{ background: "var(--text-primary)", color: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}
                         title="New chat"
                       >
                         <Plus className="w-3.5 h-3.5" />
-                        {!chatNavCollapsed && "New"}
+                        New
                       </button>
                     </div>
-                    {!chatNavCollapsed && (
-                      <input
-                        type="text"
-                        value={chatSessionQuery}
-                        onChange={(e) => setChatSessionQuery(e.target.value)}
-                        placeholder="Search history"
-                        className="w-full h-9 px-3 rounded-xl text-xs outline-none"
-                        style={{ background: "var(--bg-card)", color: "var(--text-primary)", border: "1px solid var(--border-subtle)" }}
-                      />
-                    )}
+                    <input
+                      type="text"
+                      value={chatSessionQuery}
+                      onChange={(e) => setChatSessionQuery(e.target.value)}
+                      placeholder="Search history"
+                      className="w-full h-9 px-3 rounded-xl text-xs outline-none"
+                      style={{ background: "var(--bg-card)", color: "var(--text-primary)", border: "1px solid var(--border-subtle)" }}
+                    />
                   </div>
-                  <div className={`flex-1 overflow-auto ${chatNavCollapsed ? "p-2 space-y-2" : "p-2 space-y-1.5"}`}>
+                  <div className="flex-1 overflow-auto p-2 space-y-1.5">
                     {visibleChatSessions.length === 0 ? (
                       <div className="px-3 py-5 text-center">
                         <p className="text-xs" style={{ color: "var(--text-tertiary)" }}>No matching chats</p>
                       </div>
-                    ) : chatNavCollapsed ? visibleChatSessions.slice(0, 8).map((session) => {
-                      const isActive = session.key === chatCurrentSession;
-                      const SessionIcon = session.pinned ? Pin : MessageSquare;
-                      return (
-                        <button
-                          key={session.key}
-                          type="button"
-                          onClick={() => selectChatSession(session.key)}
-                          className="w-full h-11 rounded-2xl border flex items-center justify-center transition-colors"
-                          style={{
-                            background: isActive ? "rgba(139,92,246,0.15)" : "var(--bg-tertiary)",
-                            borderColor: isActive ? "rgba(139,92,246,0.25)" : "var(--border-subtle)",
-                            color: "var(--text-primary)",
-                          }}
-                          title={desktopChatSessionTitle(session)}
-                        >
-                          <SessionIcon className="w-4 h-4" />
-                        </button>
-                      );
-                    }) : visibleChatSessions.map((session) => {
+                    ) : visibleChatSessions.map((session) => {
                       const isActive = session.key === chatCurrentSession;
                       return (
                         <div key={session.key} className="relative flex items-center gap-1">
@@ -3807,25 +3746,28 @@ export function Files({
                       );
                     })}
                   </div>
-                </aside>
+                  </aside>
+                )}
 
-                <div className="min-w-0 flex-1 flex flex-col bg-[var(--bg-app)]">
-                  <div
-                    className="px-4 py-3 border-b flex items-center justify-between gap-3"
-                    style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
-                        {activeChatSession ? desktopChatSessionTitle(activeChatSession) : DEFAULT_DESKTOP_CHAT_TITLE}
-                      </p>
-                      <p className="mt-1 text-[11px]" style={{ color: "var(--text-secondary)" }}>
-                        Same sessions, drafts, and history as the main chat view
-                      </p>
-                    </div>
-                    <div className="shrink-0 px-2.5 py-1 rounded-full text-[10px] font-medium" style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}>
-                      {chatSessions.length} session{chatSessions.length === 1 ? "" : "s"}
-                    </div>
-                  </div>
+                <div className="min-w-0 flex-1 flex flex-col bg-[var(--bg-app)] relative">
+                  {chatNavCollapsed && (
+                    <button
+                      type="button"
+                      onClick={() => setChatNavCollapsed(false)}
+                      className="absolute left-3 top-3 z-20 h-9 w-9 rounded-xl border shadow-sm flex items-center justify-center transition-colors hover:bg-[var(--bg-secondary)]"
+                      style={{
+                        borderColor: "var(--border-subtle)",
+                        background: "color-mix(in srgb, var(--bg-card) 92%, transparent)",
+                        color: "var(--text-primary)",
+                        backdropFilter: "blur(10px)",
+                        WebkitBackdropFilter: "blur(10px)",
+                      }}
+                      title="Show conversations"
+                      aria-label="Show conversations"
+                    >
+                      <PanelLeftOpen className="w-4 h-4" />
+                    </button>
+                  )}
                   <div className="min-w-0 flex-1 overflow-hidden">
                     <Chat
                       isVisible={chatOpen}
@@ -3855,6 +3797,7 @@ export function Files({
                       }}
                       requestedSession={chatRequestedSession}
                       requestedSessionAction={chatRequestedAction}
+                      wideLayout={chatNavCollapsed}
                     />
                   </div>
                 </div>
@@ -3890,53 +3833,46 @@ export function Files({
               }
             >
               <div className="h-full flex flex-col bg-[var(--bg-card)]">
-                <div className="flex items-center gap-2 px-2 py-2 border-b border-[var(--border-subtle)] bg-[var(--bg-secondary)]">
-                  <div className="flex-1 min-w-0 flex items-center gap-2 overflow-x-auto">
-                    {browserTabs.map((tab) => {
-                      const isActive = tab.id === activeBrowserTabId;
-                      return (
-                        <button
-                          key={tab.id}
-                          type="button"
-                          onClick={() => selectBrowserTab(tab.id)}
-                          className={`group min-w-0 max-w-[240px] h-9 px-3 rounded-xl border flex items-center gap-2 text-sm transition-colors ${
-                            isActive
-                              ? "bg-[var(--bg-card)] text-[var(--text-primary)] shadow-sm"
-                              : "bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
-                          }`}
-                          style={{ borderColor: isActive ? "var(--border-default)" : "var(--border-subtle)" }}
-                          title={browserTabLabel(tab)}
-                        >
-                          <Globe className="w-3.5 h-3.5 shrink-0" />
-                          <span className="min-w-0 flex-1 truncate text-left">
-                            {browserTabLabel(tab)}
-                          </span>
-                          <span
-                            role="button"
-                            tabIndex={-1}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void closeBrowserTab(tab.id);
-                            }}
-                            className="shrink-0 rounded-md p-0.5 text-[var(--text-tertiary)] hover:bg-[var(--border-subtle)] hover:text-[var(--text-primary)]"
-                            aria-label={`Close ${browserTabLabel(tab)}`}
+                {browserTabs.length > 1 && (
+                  <div className="flex items-center gap-2 px-2 py-2 border-b border-[var(--border-subtle)] bg-[var(--bg-secondary)]">
+                    <div className="flex-1 min-w-0 flex items-center gap-2 overflow-x-auto">
+                      {browserTabs.map((tab) => {
+                        const isActive = tab.id === activeBrowserTabId;
+                        return (
+                          <button
+                            key={tab.id}
+                            type="button"
+                            onClick={() => selectBrowserTab(tab.id)}
+                            className={`group min-w-0 max-w-[240px] h-9 px-3 rounded-xl border flex items-center gap-2 text-sm transition-colors ${
+                              isActive
+                                ? "bg-[var(--bg-card)] text-[var(--text-primary)] shadow-sm"
+                                : "bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
+                            }`}
+                            style={{ borderColor: isActive ? "var(--border-default)" : "var(--border-subtle)" }}
+                            title={browserTabLabel(tab)}
                           >
-                            <X className="w-3.5 h-3.5" />
-                          </span>
-                        </button>
-                      );
-                    })}
+                            <Globe className="w-3.5 h-3.5 shrink-0" />
+                            <span className="min-w-0 flex-1 truncate text-left">
+                              {browserTabLabel(tab)}
+                            </span>
+                            <span
+                              role="button"
+                              tabIndex={-1}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void closeBrowserTab(tab.id);
+                              }}
+                              className="shrink-0 rounded-md p-0.5 text-[var(--text-tertiary)] hover:bg-[var(--border-subtle)] hover:text-[var(--text-primary)]"
+                              aria-label={`Close ${browserTabLabel(tab)}`}
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => createBrowserTab()}
-                    className="h-9 w-9 shrink-0 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                    title="New tab"
-                    aria-label="New tab"
-                  >
-                    <Plus className="w-4 h-4 mx-auto" />
-                  </button>
-                </div>
+                )}
                 <div className="px-3 py-2 border-b border-[var(--border-subtle)] bg-[var(--system-gray-6)]/70">
                   <form
                     className="flex items-center gap-2"
@@ -3994,6 +3930,15 @@ export function Files({
                       className="h-8 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-sm font-medium text-[var(--text-primary)]"
                     >
                       Open
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => createBrowserTab()}
+                      className="h-8 w-8 shrink-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                      title="New tab"
+                      aria-label="New tab"
+                    >
+                      <Plus className="w-4 h-4 mx-auto" />
                     </button>
                   </form>
                 </div>

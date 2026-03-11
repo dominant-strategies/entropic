@@ -198,7 +198,7 @@ export function Billing() {
           <button
             onClick={handleAddCredits}
             disabled={isAddingCredits}
-            className="w-full py-3 bg-[var(--purple-accent)] text-white rounded-lg font-medium text-sm hover:bg-[var(--purple-accent-hover)] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+            className="w-full py-3 bg-[var(--system-blue)] text-white rounded-lg font-medium text-sm hover:brightness-95 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
           >
             {isAddingCredits ? (
               <>
