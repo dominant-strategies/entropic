@@ -5048,7 +5048,7 @@ export function Chat({
             }}
           />
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="inline-flex items-center gap-1">
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
               {([
                 { key: "chat", label: "Chat", icon: Bot },
                 { key: "shell", label: "Shell", icon: Terminal },
@@ -5081,7 +5081,7 @@ export function Chat({
               })}
             </div>
             {activeComposerMode === "shell" ? (
-              <div className="min-w-0 text-[11px] text-[var(--text-tertiary)]">
+              <div className="min-w-0 max-w-full text-[11px] text-[var(--text-tertiary)]">
                 <div className="inline-flex min-w-0 max-w-full items-center gap-2 px-1 py-0.5">
                   <Terminal className="h-3.5 w-3.5 shrink-0" />
                   <span className="shrink-0 font-medium text-[var(--text-secondary)]">/run</span>
@@ -5094,7 +5094,7 @@ export function Chat({
                 </div>
               </div>
             ) : activeComposerMode === "image" ? (
-              <div className="min-w-0 text-[11px] text-[var(--text-tertiary)]">
+              <div className="min-w-0 max-w-full text-[11px] text-[var(--text-tertiary)]">
                 <div className="inline-flex min-w-0 max-w-full items-center gap-2 px-1 py-0.5">
                   <ImageIcon className="h-3.5 w-3.5 shrink-0" />
                   <span className="shrink-0 font-medium text-[var(--text-secondary)]">model</span>

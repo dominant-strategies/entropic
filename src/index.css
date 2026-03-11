@@ -48,7 +48,7 @@
   --glass-border-subtle: rgba(0, 0, 0, 0.05);
 
   /* Chat-specific */
-  --chat-user-bg: var(--text-primary);
+  --chat-user-bg: var(--text-accent);
   --chat-user-text: #FFFFFF;
   --chat-assistant-bg: var(--bg-card);
   --chat-assistant-text: var(--text-primary);
@@ -114,8 +114,8 @@
     --glass-border: rgba(255, 255, 255, 0.08);
     --glass-border-subtle: rgba(255, 255, 255, 0.05);
 
-    --chat-user-bg: #F0F0F0;
-    --chat-user-text: #161616;
+    --chat-user-bg: var(--purple-accent-hover);
+    --chat-user-text: #FFFFFF;
     --chat-assistant-bg: #262626;
     --chat-assistant-text: #F0F0F0;
     --chat-assistant-border: rgba(255, 255, 255, 0.08);
@@ -165,8 +165,8 @@
   --glass-border: rgba(255, 255, 255, 0.08);
   --glass-border-subtle: rgba(255, 255, 255, 0.05);
 
-  --chat-user-bg: #F0F0F0;
-  --chat-user-text: #161616;
+  --chat-user-bg: var(--purple-accent-hover);
+  --chat-user-text: #FFFFFF;
   --chat-assistant-bg: #262626;
   --chat-assistant-text: #F0F0F0;
   --chat-assistant-border: rgba(255, 255, 255, 0.08);

@@ -751,6 +751,43 @@ function AppWindow({
   );
 }
 
+function DockIconButton({
+  label,
+  active = false,
+  onClick,
+  children,
+}: {
+  label: string;
+  active?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group relative flex flex-col items-center"
+      aria-label={label}
+    >
+      <div
+        className="pointer-events-none absolute bottom-full mb-2 rounded-lg border px-2.5 py-1 text-[11px] font-medium whitespace-nowrap opacity-0 translate-y-1 transition-all duration-150 group-hover:translate-y-0 group-hover:opacity-100"
+        style={{
+          background: "rgba(17,24,39,0.88)",
+          color: "rgba(255,255,255,0.96)",
+          borderColor: "rgba(255,255,255,0.16)",
+          boxShadow: "0 10px 24px rgba(0,0,0,0.28)",
+          backdropFilter: "blur(18px)",
+          WebkitBackdropFilter: "blur(18px)",
+        }}
+      >
+        {label}
+      </div>
+      {children}
+      <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${active ? "bg-white/80" : "opacity-0"}`} />
+    </button>
+  );
+}
+
 // ═════════════════════════════════════════════════════════════════════
 export function Files({
   gatewayRunning,
@@ -4391,7 +4428,9 @@ export function Files({
             onClick={(e) => e.stopPropagation()}
           >
             {/* Finder */}
-            <button
+            <DockIconButton
+              label="Finder"
+              active={finderOpen}
               onClick={() => {
                 if (!finderOpen) {
                   setFinderOpen(true);
@@ -4399,8 +4438,6 @@ export function Files({
                 }
                 focusWindow("finder");
               }}
-              className="group flex flex-col items-center"
-              title="Finder"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -4408,17 +4445,16 @@ export function Files({
               >
                 <Folder className="w-6 h-6 text-white" />
               </div>
-              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${finderOpen ? "bg-white/80" : "opacity-0"}`} />
-            </button>
+            </DockIconButton>
 
             {/* Chat */}
-            <button
+            <DockIconButton
+              label="Chat"
+              active={chatOpen}
               onClick={() => {
                 if (!chatOpen) setChatOpen(true);
                 focusWindow("chat");
               }}
-              className="group flex flex-col items-center"
-              title="Chat"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -4426,11 +4462,12 @@ export function Files({
               >
                 <MessageSquare className="w-6 h-6 text-white" />
               </div>
-              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${chatOpen ? "bg-white/80" : "opacity-0"}`} />
-            </button>
+            </DockIconButton>
 
             {/* Browser */}
-            <button
+            <DockIconButton
+              label="Browser"
+              active={browserOpen}
               onClick={() => {
                 if (!browserOpen) {
                   openFreshBrowserWindow(DEFAULT_BROWSER_URL);
@@ -4438,8 +4475,6 @@ export function Files({
                 }
                 focusWindow("browser");
               }}
-              className="group flex flex-col items-center"
-              title="Browser"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -4447,16 +4482,15 @@ export function Files({
               >
                 <Globe className="w-6 h-6 text-white" />
               </div>
-              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${browserOpen ? "bg-white/80" : "opacity-0"}`} />
-            </button>
+            </DockIconButton>
 
             {/* Terminal */}
-            <button
+            <DockIconButton
+              label="Terminal"
+              active={terminalOpen}
               onClick={() => {
                 openTerminalWindow();
               }}
-              className="group flex flex-col items-center"
-              title="Terminal"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -4464,35 +4498,16 @@ export function Files({
               >
                 <Terminal className="w-6 h-6 text-white" />
               </div>
-              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${terminalOpen ? "bg-white/80" : "opacity-0"}`} />
-            </button>
-
-            {/* Integrations */}
-            <button
-              onClick={() => {
-                if (!pluginsOpen) setPluginsOpen(true);
-                focusWindow("plugins");
-              }}
-              className="group flex flex-col items-center"
-              title="Integrations"
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #c084fc 0%, #7c3aed 100%)", boxShadow: "0 3px 10px rgba(124,58,237,0.4)" }}
-              >
-                <Puzzle className="w-6 h-6 text-white" />
-              </div>
-              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${pluginsOpen ? "bg-white/80" : "opacity-0"}`} />
-            </button>
+            </DockIconButton>
 
             {/* Skills */}
-            <button
+            <DockIconButton
+              label="Skills"
+              active={skillsOpen}
               onClick={() => {
                 if (!skillsOpen) setSkillsOpen(true);
                 focusWindow("skills");
               }}
-              className="group flex flex-col items-center"
-              title="Skills"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -4500,17 +4515,16 @@ export function Files({
               >
                 <Sparkles className="w-6 h-6 text-white" />
               </div>
-              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${skillsOpen ? "bg-white/80" : "opacity-0"}`} />
-            </button>
+            </DockIconButton>
 
             {/* Messaging */}
-            <button
+            <DockIconButton
+              label="Messaging"
+              active={channelsOpen}
               onClick={() => {
                 if (!channelsOpen) setChannelsOpen(true);
                 focusWindow("channels");
               }}
-              className="group flex flex-col items-center"
-              title="Messaging"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -4518,17 +4532,16 @@ export function Files({
               >
                 <Radio className="w-6 h-6 text-white" />
               </div>
-              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${channelsOpen ? "bg-white/80" : "opacity-0"}`} />
-            </button>
+            </DockIconButton>
 
             {/* Tasks */}
-            <button
+            <DockIconButton
+              label="Tasks"
+              active={tasksOpen}
               onClick={() => {
                 if (!tasksOpen) setTasksOpen(true);
                 focusWindow("tasks");
               }}
-              className="group flex flex-col items-center"
-              title="Tasks"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -4536,17 +4549,16 @@ export function Files({
               >
                 <ListTodo className="w-6 h-6 text-white" />
               </div>
-              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${tasksOpen ? "bg-white/80" : "opacity-0"}`} />
-            </button>
+            </DockIconButton>
 
             {/* Jobs */}
-            <button
+            <DockIconButton
+              label="Jobs"
+              active={jobsOpen}
               onClick={() => {
                 if (!jobsOpen) setJobsOpen(true);
                 focusWindow("jobs");
               }}
-              className="group flex flex-col items-center"
-              title="Jobs"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -4554,17 +4566,16 @@ export function Files({
               >
                 <CalendarClock className="w-6 h-6 text-white" />
               </div>
-              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${jobsOpen ? "bg-white/80" : "opacity-0"}`} />
-            </button>
+            </DockIconButton>
 
             {/* Logs */}
-            <button
+            <DockIconButton
+              label="Logs"
+              active={logsOpen}
               onClick={() => {
                 if (!logsOpen) setLogsOpen(true);
                 focusWindow("logs");
               }}
-              className="group flex flex-col items-center"
-              title="Logs"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -4572,17 +4583,16 @@ export function Files({
               >
                 <ScrollText className="w-6 h-6 text-white" />
               </div>
-              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${logsOpen ? "bg-white/80" : "opacity-0"}`} />
-            </button>
+            </DockIconButton>
 
             {/* Billing */}
-            <button
+            <DockIconButton
+              label="Billing"
+              active={billingOpen}
               onClick={() => {
                 if (!billingOpen) setBillingOpen(true);
                 focusWindow("billing");
               }}
-              className="group flex flex-col items-center"
-              title="Billing"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -4590,17 +4600,16 @@ export function Files({
               >
                 <CreditCard className="w-6 h-6 text-white" />
               </div>
-              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${billingOpen ? "bg-white/80" : "opacity-0"}`} />
-            </button>
+            </DockIconButton>
 
             {/* Settings */}
-            <button
+            <DockIconButton
+              label="Settings"
+              active={settingsOpen}
               onClick={() => {
                 if (!settingsOpen) setSettingsOpen(true);
                 focusWindow("settings");
               }}
-              className="group flex flex-col items-center"
-              title="Settings"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -4608,16 +4617,14 @@ export function Files({
               >
                 <SettingsIcon className="w-6 h-6 text-[#111827]" />
               </div>
-              <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${settingsOpen ? "bg-white/80" : "opacity-0"}`} />
-            </button>
+            </DockIconButton>
 
             <div className="w-px self-stretch my-1.5 mx-0.5" style={{ background: "rgba(255,255,255,0.25)" }} />
 
             {/* Wallpaper */}
-            <button
+            <DockIconButton
+              label="Wallpaper"
               onClick={() => setShowWallpaperPicker(!showWallpaperPicker)}
-              className="group flex flex-col items-center"
-              title="Change Wallpaper"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -4625,14 +4632,12 @@ export function Files({
               >
                 <Image className="w-6 h-6 text-white" />
               </div>
-              <div className="w-1 h-1 rounded-full mt-1 opacity-0" />
-            </button>
+            </DockIconButton>
 
             {/* Add Files */}
-            <button
+            <DockIconButton
+              label="Add Files"
               onClick={() => fileInputRef.current?.click()}
-              className="group flex flex-col items-center"
-              title="Add Files"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -4640,8 +4645,7 @@ export function Files({
               >
                 <Plus className="w-6 h-6 text-white" />
               </div>
-              <div className="w-1 h-1 rounded-full mt-1 opacity-0" />
-            </button>
+            </DockIconButton>
 
             <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileInputChange} multiple />
           </div>
