@@ -62,6 +62,8 @@ const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const CLIENT_LOG_READ_MAX_BYTES: usize = 512 * 1024;
 
 static BROWSER_SERVICE_TOKEN_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static EMBEDDED_PREVIEW_STATE_CACHE: OnceLock<Mutex<Option<EmbeddedPreviewStatePayload>>> =
+    OnceLock::new();
 static DESKTOP_TERMINAL_MANAGER: OnceLock<DesktopTerminalManager> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -4588,19 +4590,32 @@ fn emit_embedded_preview_state(app: &AppHandle, url: &Url, title: Option<String>
         url: url.to_string(),
         title,
     };
+    if let Ok(mut cache) = embedded_preview_state_cache().lock() {
+        *cache = Some(payload.clone());
+    }
     let _ = app.emit_to("main", EMBEDDED_PREVIEW_STATE_EVENT, payload);
 }
 
-fn emit_embedded_preview_state_from_webview(
-    app: &AppHandle,
-    webview: &Webview,
-    title: Option<String>,
-) {
-    if let Ok(url) = webview.url() {
-        if native_preview_navigation_allowed(&url) {
-            emit_embedded_preview_state(app, &url, title);
+fn emit_cached_embedded_preview_state(app: &AppHandle, title: Option<String>) {
+    if let Ok(mut cache) = embedded_preview_state_cache().lock() {
+        if let Some(payload) = cache.as_mut() {
+            if title.is_some() {
+                payload.title = title;
+            }
+            let _ = app.emit_to("main", EMBEDDED_PREVIEW_STATE_EVENT, payload.clone());
         }
     }
+}
+
+fn embedded_preview_state_cache() -> &'static Mutex<Option<EmbeddedPreviewStatePayload>> {
+    EMBEDDED_PREVIEW_STATE_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn cached_embedded_preview_url() -> Option<String> {
+    embedded_preview_state_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.as_ref().map(|payload| payload.url.clone()))
 }
 
 fn get_embedded_preview_webview(app: &AppHandle) -> Result<Webview, String> {
@@ -12790,12 +12805,12 @@ pub async fn sync_embedded_preview_webview(
             }
             NewWindowResponse::Deny
         })
-        .on_page_load(move |webview, payload| {
+        .on_page_load(move |_webview, payload| {
             emit_embedded_preview_state(&page_load_app, payload.url(), None);
-            emit_embedded_preview_state_from_webview(&page_load_app, &webview, None);
         })
         .on_document_title_changed(move |webview, title| {
-            emit_embedded_preview_state_from_webview(&title_app, &webview, Some(title));
+            let _ = webview;
+            emit_cached_embedded_preview_state(&title_app, Some(title));
         });
 
         parent_window
@@ -12807,7 +12822,7 @@ pub async fn sync_embedded_preview_webview(
             .map_err(|e| format!("Failed to create embedded preview webview: {}", e))?
     };
 
-    let current_url = webview.url().ok().map(|value| value.to_string());
+    let current_url = cached_embedded_preview_url();
     if current_url.as_deref() != Some(resolved.as_str()) {
         webview
             .navigate(resolved.clone())
@@ -12845,7 +12860,7 @@ pub async fn embedded_preview_reload(app: AppHandle) -> Result<(), String> {
     webview
         .reload()
         .map_err(|e| format!("Failed to reload embedded preview: {}", e))?;
-    emit_embedded_preview_state_from_webview(&app, &webview, None);
+    emit_cached_embedded_preview_state(&app, None);
     Ok(())
 }
 

@@ -20,7 +20,14 @@ import {
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
-import { GatewayClient, createGatewayClient, type ChatEvent, type AgentEvent, type GatewayMessage } from "../lib/gateway";
+import {
+  GatewayClient,
+  GatewayError,
+  createGatewayClient,
+  type ChatEvent,
+  type AgentEvent,
+  type GatewayMessage,
+} from "../lib/gateway";
 import {
   getProfileInitials,
   isRenderableAvatarDataUrl,
@@ -942,6 +949,7 @@ export function Chat({
   const lastIntegrationsSyncRef = useRef<number>(0);
   const proxyAuthRecoveryInFlightRef = useRef(false);
   const lastProxyAuthRecoveryAtRef = useRef(0);
+  const gatewayAuthRateLimitedUntilRef = useRef(0);
   // Local persistence: cache messages per session key
   const sessionMessagesRef = useRef<Record<string, Message[]>>({});
   const persistTimerRef = useRef<number | null>(null);
@@ -1241,6 +1249,44 @@ export function Chat({
       text.includes("cookie auth credentials") ||
       text.includes("gateway token");
     return has401 && looksProxy;
+  }
+
+  function isGatewayAuthRateLimited(message?: string | null): boolean {
+    if (!message) return false;
+    const text = message.toLowerCase();
+    return (
+      text.includes("too many failed authentication attempts") ||
+      text.includes("auth_rate_limited") ||
+      (text.includes("rate_limited") && text.includes("unauthorized"))
+    );
+  }
+
+  function readGatewayRetryAfterMs(details: unknown): number | null {
+    if (!details || typeof details !== "object" || Array.isArray(details)) {
+      return null;
+    }
+    const retryAfterMs = (details as { retryAfterMs?: unknown }).retryAfterMs;
+    return typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) && retryAfterMs > 0
+      ? retryAfterMs
+      : null;
+  }
+
+  function applyGatewayAuthRateLimit(message?: string | null, retryAfterMs?: number | null) {
+    const cooldownMs =
+      typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) && retryAfterMs > 0
+        ? retryAfterMs
+        : 60_000;
+    gatewayAuthRateLimitedUntilRef.current = Date.now() + cooldownMs;
+    const retrySeconds = Math.max(
+      1,
+      Math.ceil((gatewayAuthRateLimitedUntilRef.current - Date.now()) / 1000),
+    );
+    setError(
+      message?.trim()
+        ? `${message.trim()} Waiting about ${retrySeconds}s before reconnecting.`
+        : `Gateway authentication was rate-limited. Waiting about ${retrySeconds}s before reconnecting.`,
+    );
+    addDiag(`gateway auth rate-limited; backing off for ${retrySeconds}s`);
   }
 
   async function getRecoveryCreditBalanceCents(): Promise<number | null> {
@@ -1877,6 +1923,13 @@ export function Chat({
 
   async function connectToGateway() {
     if (connectInFlightRef.current || showOutOfCreditsModal) return;
+    const blockedForMs = gatewayAuthRateLimitedUntilRef.current - Date.now();
+    if (blockedForMs > 0) {
+      const retrySeconds = Math.max(1, Math.ceil(blockedForMs / 1000));
+      setError(`Gateway authentication is temporarily rate-limited. Retrying in about ${retrySeconds}s.`);
+      addDiag(`connect skipped due to gateway auth rate limit (${retrySeconds}s remaining)`);
+      return;
+    }
     connectInFlightRef.current = true;
     setIsConnecting(true);
     setError(null);
@@ -1895,6 +1948,7 @@ export function Chat({
       clientRef.current = client;
       detachGatewayListeners(client);
       const onConnected = () => {
+        gatewayAuthRateLimitedUntilRef.current = 0;
         setConnected(true);
         setIsConnecting(false);
         setError(null);
@@ -1949,6 +2003,14 @@ export function Chat({
           return;
         }
 
+        if (isGatewayAuthRateLimited(normalizedError)) {
+          applyGatewayAuthRateLimit(normalizedError);
+          setIsConnecting(false);
+          setLastGatewayError(normalizedError);
+          addDiag(`gateway error (auth rate-limited): ${normalizedError}`);
+          return;
+        }
+
         // Intercept proxy auth failures at the gateway level — show modal instead of raw banner
         if (isProxyAuthFailure(normalizedError)) {
           if (!proxyAuthRecoveryInFlightRef.current) {
@@ -1983,11 +2045,20 @@ export function Chat({
       }
     } catch (e) {
       const inStartupGracePeriod = Date.now() - componentMountedAt < 15_000;
+      const errorMessage = e instanceof Error ? e.message : "Connection failed";
+      if (isGatewayAuthRateLimited(errorMessage)) {
+        applyGatewayAuthRateLimit(
+          errorMessage,
+          e instanceof GatewayError ? readGatewayRetryAfterMs(e.details) : null,
+        );
+      } else if (!gatewayStarting && !inStartupGracePeriod) {
+        setError(errorMessage);
+      }
       if (!gatewayStarting && !inStartupGracePeriod) {
-        setError(e instanceof Error ? e.message : "Connection failed");
+        setLastGatewayError(errorMessage);
       }
       setIsConnecting(false);
-      addDiag(`connect failed: ${e instanceof Error ? e.message : "unknown"}${inStartupGracePeriod ? ' (suppressed: startup grace period)' : ''}`);
+      addDiag(`connect failed: ${errorMessage}${inStartupGracePeriod ? ' (suppressed: startup grace period)' : ''}`);
     } finally {
       connectInFlightRef.current = false;
     }
