@@ -144,7 +144,7 @@ if [ "${ENTROPIC_BROWSER_HEADFUL:-1}" != "0" ]; then
       if [ -f /data/browser/xvfb.log ]; then
           tail -n 40 /data/browser/xvfb.log >&2 || true
       fi
-  else
+  elif [ "${ENTROPIC_BROWSER_REMOTE_DESKTOP_UI:-0}" = "1" ]; then
       x11vnc -display "$DISPLAY" -forever -shared -nopw -rfbport 5900 -localhost >/data/browser/x11vnc.log 2>&1 &
       x11vnc_pid="$!"
       x11vnc_ready=0
@@ -190,6 +190,8 @@ if [ "${ENTROPIC_BROWSER_HEADFUL:-1}" != "0" ]; then
               fi
           fi
       fi
+  else
+      echo "[entrypoint] Remote desktop UI disabled; skipping x11vnc/websockify startup"
   fi
 fi
 

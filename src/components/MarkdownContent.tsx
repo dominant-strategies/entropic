@@ -196,7 +196,7 @@ function renderWorkspaceChip(
   return (
     <a
       href={`${WORKSPACE_LINK_SCHEME}${workspaceAction.action}?path=${encodeURIComponent(workspaceAction.path)}&file=${workspaceAction.looksLikeFile ? "1" : "0"}${workspaceAction.url ? `&url=${encodeURIComponent(workspaceAction.url)}` : ""}`}
-      className="mx-0.5 my-0.5 inline-flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold align-middle whitespace-nowrap shadow-sm transition-transform hover:-translate-y-px hover:shadow-md"
+      className="mx-0.5 my-0.5 inline-flex max-w-full min-w-0 cursor-pointer items-center gap-2 overflow-hidden rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold align-middle shadow-sm transition-transform hover:-translate-y-px hover:shadow-md"
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -221,7 +221,7 @@ function renderWorkspaceChip(
       >
         <Icon className="h-3 w-3" />
       </span>
-      <span className="font-mono">{label}</span>
+      <span className="min-w-0 truncate font-mono">{label}</span>
     </a>
   );
 }
@@ -230,7 +230,7 @@ function buildComponents(
   onWorkspaceLinkClick?: (action: WorkspaceLinkAction) => void,
 ): Components {
   return {
-    p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+    p: ({ children }) => <p className="mb-2 break-words last:mb-0">{children}</p>,
     strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
     em: ({ children }) => <em>{children}</em>,
     h1: ({ children }) => <h1 className="text-lg font-bold mb-2 mt-3 first:mt-0">{children}</h1>,
@@ -248,7 +248,7 @@ function buildComponents(
       const isBlock = className?.includes("language-");
       if (isBlock) {
         return (
-          <code className="block bg-black/5 rounded-lg px-3 py-2 my-2 text-xs font-mono overflow-x-auto whitespace-pre">
+          <code className="block max-w-full overflow-x-auto rounded-lg bg-black/5 px-3 py-2 font-mono text-xs whitespace-pre">
             {children}
           </code>
         );
@@ -310,12 +310,14 @@ export const MarkdownContent = memo(function MarkdownContent({
   onWorkspaceLinkClick?: (action: WorkspaceLinkAction) => void;
 }) {
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkWorkspaceLinks]}
-      urlTransform={markdownUrlTransform}
-      components={buildComponents(onWorkspaceLinkClick)}
-    >
-      {content}
-    </ReactMarkdown>
+    <div className="min-w-0 max-w-full break-words">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkWorkspaceLinks]}
+        urlTransform={markdownUrlTransform}
+        components={buildComponents(onWorkspaceLinkClick)}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
   );
 });

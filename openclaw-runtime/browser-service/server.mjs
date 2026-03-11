@@ -45,6 +45,9 @@ const BROWSER_DEVICE_SCALE_FACTOR = Math.max(
 const DISPLAY_AVAILABLE = typeof process.env.DISPLAY === "string" && process.env.DISPLAY.trim() !== "";
 const USE_HEADFUL_DISPLAY = (process.env.ENTROPIC_BROWSER_HEADFUL ?? "1") !== "0" && DISPLAY_AVAILABLE;
 const EXPOSE_REMOTE_DESKTOP_UI = (process.env.ENTROPIC_BROWSER_REMOTE_DESKTOP_UI ?? "0") === "1";
+const ALLOW_UNSAFE_NO_SANDBOX = (process.env.ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX ?? "0") === "1";
+const ALLOW_INSECURE_SECURE_CONTEXTS =
+  (process.env.ENTROPIC_BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS ?? "0") === "1";
 const BROWSER_CONTROL_TOKEN_PATH =
   process.env.ENTROPIC_BROWSER_CONTROL_TOKEN_PATH || "/data/browser/control-token";
 const BROWSER_APP_URL = `data:text/html,${encodeURIComponent(
@@ -93,6 +96,9 @@ function parseUrlOrNull(value) {
 }
 
 function secureContextOverrideOrigin(targetUrl) {
+  if (!ALLOW_INSECURE_SECURE_CONTEXTS) {
+    return null;
+  }
   const parsed = parseUrlOrNull(targetUrl);
   if (!parsed || parsed.protocol !== "http:") {
     return null;
@@ -108,7 +114,10 @@ function secureContextOverrideOrigin(targetUrl) {
 }
 
 function buildLaunchArgs(secureOrigins = [], viewport = DEFAULT_VIEWPORT) {
-  const args = ["--no-sandbox", "--disable-dev-shm-usage"];
+  const args = ["--disable-dev-shm-usage"];
+  if (ALLOW_UNSAFE_NO_SANDBOX) {
+    args.push("--no-sandbox");
+  }
   if (secureOrigins.length > 0) {
     args.push(`--unsafely-treat-insecure-origin-as-secure=${secureOrigins.join(",")}`);
   }
@@ -124,6 +133,16 @@ function buildLaunchArgs(secureOrigins = [], viewport = DEFAULT_VIEWPORT) {
     );
   }
   return args;
+}
+
+function isSandboxLaunchFailure(error) {
+  const message = String(error instanceof Error ? error.message : error || "").toLowerCase();
+  return (
+    message.includes("sandbox") ||
+    message.includes("setuid") ||
+    message.includes("zygote") ||
+    message.includes("namespace")
+  );
 }
 
 function normalizeNavigationTarget(rawTargetUrl) {
@@ -1087,14 +1106,25 @@ async function navigateSession(session, targetUrl, options = {}) {
 }
 
 async function launchBrowserContext(userDataDir, secureOrigins = [], viewport = DEFAULT_VIEWPORT) {
-  return chromium.launchPersistentContext(userDataDir, {
-    headless: !USE_HEADFUL_DISPLAY,
-    args: buildLaunchArgs(secureOrigins, viewport),
-    viewport,
-    deviceScaleFactor: BROWSER_DEVICE_SCALE_FACTOR,
-    locale: "en-US",
-    timezoneId: "America/Chicago",
-  });
+  try {
+    return await chromium.launchPersistentContext(userDataDir, {
+      headless: !USE_HEADFUL_DISPLAY,
+      args: buildLaunchArgs(secureOrigins, viewport),
+      viewport,
+      deviceScaleFactor: BROWSER_DEVICE_SCALE_FACTOR,
+      locale: "en-US",
+      timezoneId: "America/Chicago",
+    });
+  } catch (error) {
+    if (!ALLOW_UNSAFE_NO_SANDBOX && isSandboxLaunchFailure(error)) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}. ` +
+          "Chromium sandbox launch failed in the runtime container. " +
+          "If you need the previous dev-only fallback, set ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX=1."
+      );
+    }
+    throw error;
+  }
 }
 
 async function stopSessionScreencast(session) {

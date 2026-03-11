@@ -2,6 +2,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useMemo,
   useRef,
   lazy,
   Suspense,
@@ -250,6 +251,7 @@ type DesktopHandoff = {
 };
 type WindowPoint = { x: number; y: number };
 type WindowSize = { w: number; h: number };
+type WindowRect = { x: number; y: number; w: number; h: number };
 type DesktopSessionState = {
   finderOpen: boolean;
   chatOpen: boolean;
@@ -590,6 +592,15 @@ function workspacePathParent(path: string): string {
   return parts.join("/");
 }
 
+function windowRectsIntersect(a: WindowRect, b: WindowRect): boolean {
+  return (
+    a.x < b.x + b.w &&
+    a.x + a.w > b.x &&
+    a.y < b.y + b.h &&
+    a.y + a.h > b.y
+  );
+}
+
 function extractChatWorkspaceReferences(content: string): ChatWorkspaceReference[] {
   const refs: ChatWorkspaceReference[] = [];
   const seen = new Set<string>();
@@ -859,6 +870,7 @@ export function Files({
   const [browserLoadError, setBrowserLoadError] = useState<string | null>(null);
   const [browserSessionId, setBrowserSessionId] = useState<string | null>(null);
   const [browserEmbeddedPreview, setBrowserEmbeddedPreview] = useState<EmbeddedPreviewState | null>(null);
+  const [browserEmbeddedPreviewCovered, setBrowserEmbeddedPreviewCovered] = useState(false);
   const [browserSnapshot, setBrowserSnapshot] = useState<BrowserSnapshot | null>(null);
   const [browserClickingId, setBrowserClickingId] = useState<string | null>(null);
   const [browserLiveState, setBrowserLiveState] = useState<BrowserLiveState | null>(null);
@@ -875,6 +887,7 @@ export function Files({
   const browserLiveLastFrameRef = useRef<string | null>(null);
   const browserLiveSizeRef = useRef<string>("");
   const browserEmbeddedPreviewSyncKeyRef = useRef<string>("");
+  const browserEmbeddedPreviewSnapshotPendingRef = useRef<string>("");
   const [terminalSessionId, setTerminalSessionId] = useState<string | null>(null);
   const [terminalOutput, setTerminalOutput] = useState("");
   const [terminalInput, setTerminalInput] = useState("");
@@ -1595,6 +1608,14 @@ export function Files({
   const browserHasRemoteDesktop = Boolean(browserRemoteDesktopUrl);
   const browserSnapshotImage =
     browserSnapshot?.screenshot_base64 ? `data:image/png;base64,${browserSnapshot.screenshot_base64}` : null;
+  const browserEmbeddedPreviewSnapshotTarget = browserEmbeddedPreview?.url
+    ? presentBrowserUrl(browserEmbeddedPreview.url)
+    : null;
+  const browserSnapshotMatchesEmbeddedPreview = Boolean(
+    browserEmbeddedPreviewSnapshotTarget &&
+    browserSnapshot?.url &&
+    presentBrowserUrl(browserSnapshot.url) === browserEmbeddedPreviewSnapshotTarget
+  );
   const browserHasRenderableImage = browserLiveHasFrame || Boolean(browserSnapshotImage);
   const browserUsingEmbeddedRemoteDesktop = browserHasRemoteDesktop && !browserHasRenderableImage;
   const browserTitle =
@@ -2211,6 +2232,64 @@ export function Files({
     );
   }
 
+  useEffect(() => {
+    if (!browserOpen || !browserUsingEmbeddedPreview || !browserEmbeddedPreviewSnapshotTarget) {
+      browserEmbeddedPreviewSnapshotPendingRef.current = "";
+      return;
+    }
+    if (browserLoading || browserSnapshotMatchesEmbeddedPreview) {
+      return;
+    }
+    if (
+      browserEmbeddedPreviewSnapshotPendingRef.current === browserEmbeddedPreviewSnapshotTarget
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    browserEmbeddedPreviewSnapshotPendingRef.current = browserEmbeddedPreviewSnapshotTarget;
+
+    void (async () => {
+      let snapshotSessionId: string | null = null;
+      try {
+        const viewport = browserRequestedViewportSize();
+        const snapshot = await invoke<BrowserSnapshot>("browser_session_create", {
+          url: browserEmbeddedPreviewSnapshotTarget,
+          viewportWidth: viewport.width,
+          viewportHeight: viewport.height,
+        });
+        snapshotSessionId = snapshot.session_id;
+        if (cancelled) return;
+        setBrowserSnapshot(snapshot);
+      } catch {
+        // Ignore local preview snapshot failures; the live native webview remains primary.
+      } finally {
+        if (snapshotSessionId) {
+          try {
+            await invoke("browser_session_close", { sessionId: snapshotSessionId });
+          } catch {
+            // Ignore best-effort cleanup failures for fallback snapshots.
+          }
+        }
+        if (browserEmbeddedPreviewSnapshotPendingRef.current === browserEmbeddedPreviewSnapshotTarget) {
+          browserEmbeddedPreviewSnapshotPendingRef.current = "";
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    browserOpen,
+    browserUsingEmbeddedPreview,
+    browserEmbeddedPreviewSnapshotTarget,
+    browserSnapshotMatchesEmbeddedPreview,
+    browserLoading,
+    browserSize.w,
+    browserSize.h,
+  ]);
+
   async function navigateBrowser(input: string) {
     const next = normalizeBrowserUrl(input);
     if (!next) return;
@@ -2782,7 +2861,6 @@ export function Files({
   const wallpaperCss = getWallpaperCss();
   const currentWp = getWallpaperById(wallpaperId);
   const isWpImage = (wallpaperId === "custom" && customWallpaper) || currentWp?.type === "photo";
-  const highestWindowZ = Math.max(...Object.values(windowZ));
   const normalizedChatQuery = chatSessionQuery.trim().toLowerCase();
   const sortedChatSessions = sortDesktopChatSessions(chatSessions);
   const activeChatSession = chatCurrentSession
@@ -2794,8 +2872,121 @@ export function Files({
     ))
     : sortedChatSessions;
   const browserWindowZ = windowZ.browser ?? DEFAULT_WINDOW_Z.browser;
-  const browserNeedsFocusOverlay = browserWindowZ < highestWindowZ;
-
+  const embeddedPreviewForegroundWindows = useMemo(() => {
+    const frames: Array<{ z: number; rect: WindowRect }> = [];
+    if (finderOpen) {
+      frames.push({ z: windowZ.finder ?? DEFAULT_WINDOW_Z.finder, rect: { x: finderPos.x, y: finderPos.y, w: finderSize.w, h: finderSize.h } });
+    }
+    if (chatOpen) {
+      frames.push({ z: windowZ.chat ?? DEFAULT_WINDOW_Z.chat, rect: { x: chatPos.x, y: chatPos.y, w: chatSize.w, h: chatSize.h } });
+    }
+    if (terminalOpen) {
+      frames.push({ z: windowZ.terminal ?? DEFAULT_WINDOW_Z.terminal, rect: { x: terminalPos.x, y: terminalPos.y, w: terminalSize.w, h: terminalSize.h } });
+    }
+    if (pluginsOpen) {
+      frames.push({ z: windowZ.plugins ?? DEFAULT_WINDOW_Z.plugins, rect: { x: pluginsPos.x, y: pluginsPos.y, w: pluginsSize.w, h: pluginsSize.h } });
+    }
+    if (skillsOpen) {
+      frames.push({ z: windowZ.skills ?? DEFAULT_WINDOW_Z.skills, rect: { x: skillsPos.x, y: skillsPos.y, w: skillsSize.w, h: skillsSize.h } });
+    }
+    if (channelsOpen) {
+      frames.push({ z: windowZ.channels ?? DEFAULT_WINDOW_Z.channels, rect: { x: channelsPos.x, y: channelsPos.y, w: channelsSize.w, h: channelsSize.h } });
+    }
+    if (tasksOpen) {
+      frames.push({ z: windowZ.tasks ?? DEFAULT_WINDOW_Z.tasks, rect: { x: tasksPos.x, y: tasksPos.y, w: tasksSize.w, h: tasksSize.h } });
+    }
+    if (jobsOpen) {
+      frames.push({ z: windowZ.jobs ?? DEFAULT_WINDOW_Z.jobs, rect: { x: jobsPos.x, y: jobsPos.y, w: jobsSize.w, h: jobsSize.h } });
+    }
+    if (logsOpen) {
+      frames.push({ z: windowZ.logs ?? DEFAULT_WINDOW_Z.logs, rect: { x: logsPos.x, y: logsPos.y, w: logsSize.w, h: logsSize.h } });
+    }
+    if (billingOpen) {
+      frames.push({ z: windowZ.billing ?? DEFAULT_WINDOW_Z.billing, rect: { x: billingPos.x, y: billingPos.y, w: billingSize.w, h: billingSize.h } });
+    }
+    if (settingsOpen) {
+      frames.push({ z: windowZ.settings ?? DEFAULT_WINDOW_Z.settings, rect: { x: settingsPos.x, y: settingsPos.y, w: settingsSize.w, h: settingsSize.h } });
+    }
+    if (preview) {
+      frames.push({
+        z: windowZ.preview ?? DEFAULT_WINDOW_Z.preview,
+        rect: { x: 0, y: 0, w: desktopBounds.width, h: desktopBounds.height },
+      });
+    }
+    return frames.filter((frame) => frame.z > browserWindowZ);
+  }, [
+    browserWindowZ,
+    finderOpen,
+    finderPos.x,
+    finderPos.y,
+    finderSize.w,
+    finderSize.h,
+    chatOpen,
+    chatPos.x,
+    chatPos.y,
+    chatSize.w,
+    chatSize.h,
+    terminalOpen,
+    terminalPos.x,
+    terminalPos.y,
+    terminalSize.w,
+    terminalSize.h,
+    pluginsOpen,
+    pluginsPos.x,
+    pluginsPos.y,
+    pluginsSize.w,
+    pluginsSize.h,
+    skillsOpen,
+    skillsPos.x,
+    skillsPos.y,
+    skillsSize.w,
+    skillsSize.h,
+    channelsOpen,
+    channelsPos.x,
+    channelsPos.y,
+    channelsSize.w,
+    channelsSize.h,
+    tasksOpen,
+    tasksPos.x,
+    tasksPos.y,
+    tasksSize.w,
+    tasksSize.h,
+    jobsOpen,
+    jobsPos.x,
+    jobsPos.y,
+    jobsSize.w,
+    jobsSize.h,
+    logsOpen,
+    logsPos.x,
+    logsPos.y,
+    logsSize.w,
+    logsSize.h,
+    billingOpen,
+    billingPos.x,
+    billingPos.y,
+    billingSize.w,
+    billingSize.h,
+    settingsOpen,
+    settingsPos.x,
+    settingsPos.y,
+    settingsSize.w,
+    settingsSize.h,
+    preview,
+    desktopBounds.width,
+    desktopBounds.height,
+    windowZ.finder,
+    windowZ.chat,
+    windowZ.terminal,
+    windowZ.plugins,
+    windowZ.skills,
+    windowZ.channels,
+    windowZ.tasks,
+    windowZ.jobs,
+    windowZ.logs,
+    windowZ.billing,
+    windowZ.settings,
+    windowZ.preview,
+  ]);
   useEffect(() => {
     return () => {
       void hideEmbeddedPreviewWebview().catch(() => {});
@@ -2809,6 +3000,7 @@ export function Files({
     const syncOrHide = async () => {
       if (!browserUsingEmbeddedPreview || !browserEmbeddedPreview?.url) {
         browserEmbeddedPreviewSyncKeyRef.current = "";
+        setBrowserEmbeddedPreviewCovered(false);
         try {
           await hideEmbeddedPreviewWebview();
         } catch {
@@ -2818,7 +3010,25 @@ export function Files({
       }
 
       const viewport = browserViewportRef.current;
-      if (!browserOpen || browserNeedsFocusOverlay || !viewport) {
+      const containerBounds = containerRef.current?.getBoundingClientRect();
+      const viewportBounds = viewport?.getBoundingClientRect();
+      const isCoveredByForegroundWindow = Boolean(
+        viewportBounds &&
+        containerBounds &&
+        embeddedPreviewForegroundWindows.some((frame) => (
+          windowRectsIntersect(
+            {
+              x: viewportBounds.left - containerBounds.left,
+              y: viewportBounds.top - containerBounds.top,
+              w: viewportBounds.width,
+              h: viewportBounds.height,
+            },
+            frame.rect,
+          )
+        ))
+      );
+      setBrowserEmbeddedPreviewCovered(isCoveredByForegroundWindow);
+      if (!browserOpen || !viewport || isCoveredByForegroundWindow) {
         const hiddenKey = `${browserEmbeddedPreview.url}|hidden`;
         if (browserEmbeddedPreviewSyncKeyRef.current === hiddenKey) {
           return;
@@ -2893,7 +3103,7 @@ export function Files({
     browserOpen,
     browserUsingEmbeddedPreview,
     browserEmbeddedPreview,
-    browserNeedsFocusOverlay,
+    embeddedPreviewForegroundWindows,
     browserPos,
     browserSize,
     desktopBounds.width,
@@ -3714,15 +3924,6 @@ export function Files({
                   </form>
                 </div>
                 <div className="relative flex-1 bg-white">
-                  {browserNeedsFocusOverlay && (
-                    <button
-                      type="button"
-                      className="absolute inset-0 z-10 flex items-center justify-center bg-white/20 text-xs font-medium text-[var(--text-primary)] backdrop-blur-[1px]"
-                      onClick={() => focusWindow("browser")}
-                    >
-                      Click to focus browser
-                    </button>
-                  )}
                   {browserLoading && !browserSnapshot && !browserLiveState && !browserUsingEmbeddedPreview ? (
                     <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
                       <div className="flex items-center gap-2">
@@ -3744,9 +3945,19 @@ export function Files({
                       >
                         {browserUsingEmbeddedPreview ? (
                           <div className="relative w-full h-full overflow-hidden bg-white">
-                            <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
-                              Local preview is loading...
-                            </div>
+                            {browserEmbeddedPreviewCovered && browserSnapshotImage ? (
+                              <img
+                                src={browserSnapshotImage}
+                                alt={browserTitle}
+                                className="block h-full w-full object-contain select-none"
+                                draggable={false}
+                                decoding="async"
+                              />
+                            ) : browserLoading ? (
+                              <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
+                                Local preview is loading...
+                              </div>
+                            ) : null}
                           </div>
                         ) : browserUsingEmbeddedRemoteDesktop && browserRemoteDesktopUrl ? (
                           <div className="relative w-full h-full overflow-hidden bg-white">

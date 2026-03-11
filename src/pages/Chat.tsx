@@ -4611,7 +4611,7 @@ export function Chat({
     if (!result) return null;
     const combined = [result.stdout.trimEnd(), result.stderr.trimEnd()].filter(Boolean).join("\n");
     return (
-      <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--bg-secondary)]/90 p-3 shadow-sm">
+      <div className="min-w-0 rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--bg-secondary)]/90 p-3 shadow-sm">
         <div className="flex items-center justify-between gap-3 text-[11px] text-[var(--text-tertiary)]">
           <div className="flex items-center gap-2">
             <Terminal className="w-3.5 h-3.5" />
@@ -4654,7 +4654,7 @@ export function Chat({
     }
     if (!payload.events.length && !payload.errors.length) {
       return (
-        <div>
+        <div className="min-w-0 max-w-full">
           <MarkdownContent
             content={payload.cleanText}
             onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
@@ -4663,7 +4663,7 @@ export function Chat({
       );
     }
     return (
-      <div className="space-y-2">
+      <div className="min-w-0 max-w-full space-y-2">
         <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)]">
           <span>{message.kind === "toolResult" ? "Tool Result" : "Assistant"}</span>
           {message.toolName ? <span className="text-[var(--text-quaternary)]">{message.toolName}</span> : null}
@@ -5151,11 +5151,11 @@ export function Chat({
       return null;
     }
     return (
-      <div key={msg.id} className={clsx("flex", msg.role === "user" ? "justify-end" : "justify-start")}>
-        <div className={clsx("max-w-[85%]")}>
+      <div key={msg.id} className={clsx("flex min-w-0", msg.role === "user" ? "justify-end" : "justify-start")}>
+        <div className={clsx("min-w-0 max-w-[85%]")}>
           <div className={clsx("px-4 py-2.5 rounded-2xl",
             msg.role === "user" ? "bg-[var(--purple-accent)] text-white" : "bg-[var(--bg-tertiary)] text-[var(--text-primary)]")}>
-            {msg.role === "assistant" ? renderAssistantContent(msg) : <p className="whitespace-pre-wrap">{bodyContent}</p>}
+            {msg.role === "assistant" ? renderAssistantContent(msg) : <p className="whitespace-pre-wrap break-words">{bodyContent}</p>}
           </div>
           {messageTime ? (
             <div
@@ -5223,7 +5223,7 @@ export function Chat({
   // Main Chat UI
   return (
     <div
-      className="h-full flex flex-col bg-transparent"
+      className="h-full min-w-0 overflow-x-hidden flex flex-col bg-transparent"
       onDragOver={(event) => {
         if (activeComposerMode === "shell") return;
         event.preventDefault();
@@ -5288,8 +5288,8 @@ export function Chat({
       )}
 
       {/* Messages or Welcome */}
-      <div className="flex-1 p-4 overflow-auto">
-        <div className="max-w-3xl mx-auto space-y-4">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4">
+        <div className="mx-auto min-w-0 max-w-3xl space-y-4">
           {messages.length === 0 && showWelcome ? (
             renderWelcome()
           ) : messages.length === 0 && !hasInlineAssistantCard ? (
@@ -5316,7 +5316,7 @@ export function Chat({
           backdropFilter: 'blur(12px)',
           WebkitBackdropFilter: 'blur(12px)'
         }}>
-        <div className="max-w-3xl mx-auto space-y-3">
+        <div className="mx-auto min-w-0 max-w-3xl space-y-3">
           {pendingAttachments.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {pendingAttachments.map((attachment) => (

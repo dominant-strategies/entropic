@@ -9,6 +9,7 @@ DATA_VOLUME="entropic-openclaw-data"
 PORT="${OPENCLAW_PORT:-18789}"
 BROWSER_HOST_PORT="${ENTROPIC_BROWSER_HOST_PORT:-19792}"
 BROWSER_DESKTOP_HOST_PORT="${ENTROPIC_BROWSER_DESKTOP_HOST_PORT:-19793}"
+REMOTE_DESKTOP_UI="${ENTROPIC_BROWSER_REMOTE_DESKTOP_UI:-0}"
 
 # Colors
 GREEN='\033[0;32m'
@@ -39,30 +40,41 @@ docker volume create "$DATA_VOLUME" >/dev/null 2>&1 || true
 echo "Starting hardened container..."
 echo ""
 
+docker_args=(
+    run -d
+    --name "$CONTAINER_NAME"
+    --user 1000:1000
+    --cap-drop=ALL
+    --security-opt no-new-privileges
+    --read-only
+    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=100m
+    --tmpfs /run:rw,noexec,nosuid,nodev,size=10m
+    -v "$DATA_VOLUME":/data
+    -e "ENTROPIC_BROWSER_HOST_PORT=${BROWSER_HOST_PORT}"
+    -e "ENTROPIC_BROWSER_HEADFUL=1"
+    -e "ENTROPIC_BROWSER_DESKTOP_PORT=19793"
+    -e "ENTROPIC_BROWSER_DESKTOP_HOST_PORT=${BROWSER_DESKTOP_HOST_PORT}"
+    -e "ENTROPIC_BROWSER_REMOTE_DESKTOP_UI=${REMOTE_DESKTOP_UI}"
+    -e "ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX=0"
+    -e "ENTROPIC_BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS=0"
+    -e "ENTROPIC_BROWSER_BIND=0.0.0.0"
+    -p "127.0.0.1:${PORT}:18789"
+    -p "127.0.0.1:${BROWSER_HOST_PORT}:19791"
+    --restart unless-stopped
+    --health-cmd="curl -sf http://localhost:18789/health || exit 1"
+    --health-interval=10s
+    --health-timeout=3s
+    --health-start-period=10s
+)
+
+if [ "$REMOTE_DESKTOP_UI" = "1" ]; then
+    docker_args+=(-p "127.0.0.1:${BROWSER_DESKTOP_HOST_PORT}:19793")
+fi
+
+docker_args+=("$IMAGE")
+
 # Run with hardened settings
-docker run -d \
-    --name "$CONTAINER_NAME" \
-    --user 1000:1000 \
-    --cap-drop=ALL \
-    --security-opt no-new-privileges \
-    --read-only \
-    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=100m \
-    --tmpfs /run:rw,noexec,nosuid,nodev,size=10m \
-    -v "$DATA_VOLUME":/data \
-    -e "ENTROPIC_BROWSER_HOST_PORT=${BROWSER_HOST_PORT}" \
-    -e "ENTROPIC_BROWSER_HEADFUL=1" \
-    -e "ENTROPIC_BROWSER_DESKTOP_PORT=19793" \
-    -e "ENTROPIC_BROWSER_DESKTOP_HOST_PORT=${BROWSER_DESKTOP_HOST_PORT}" \
-    -e "ENTROPIC_BROWSER_BIND=0.0.0.0" \
-    -p "127.0.0.1:${PORT}:18789" \
-    -p "127.0.0.1:${BROWSER_HOST_PORT}:19791" \
-    -p "127.0.0.1:${BROWSER_DESKTOP_HOST_PORT}:19793" \
-    --restart unless-stopped \
-    --health-cmd="curl -sf http://localhost:18789/health || exit 1" \
-    --health-interval=10s \
-    --health-timeout=3s \
-    --health-start-period=10s \
-    "$IMAGE"
+docker "${docker_args[@]}"
 
 echo "Container started: $CONTAINER_NAME"
 echo ""

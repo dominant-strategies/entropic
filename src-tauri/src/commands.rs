@@ -47,6 +47,9 @@ const BROWSER_SERVICE_PORT: &str = "19791";
 const BROWSER_SERVICE_HOST_PORT: &str = "19792";
 const BROWSER_DESKTOP_PORT: &str = "19793";
 const BROWSER_DESKTOP_HOST_PORT: &str = "19793";
+const BROWSER_REMOTE_DESKTOP_UI: &str = "0";
+const BROWSER_ALLOW_UNSAFE_NO_SANDBOX: &str = "0";
+const BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS: &str = "0";
 const BROWSER_SERVICE_PATH: &str = "/app/browser-service/server.mjs";
 const BROWSER_SERVICE_LOG_PATH: &str = "/data/browser/browser-service.log";
 const BROWSER_CONTROL_TOKEN_PATH: &str = "/data/browser/control-token";
@@ -8515,7 +8518,13 @@ pub async fn start_gateway(
         let current_browser_host_port = read_container_env("ENTROPIC_BROWSER_HOST_PORT");
         let current_browser_desktop_host_port =
             read_container_env("ENTROPIC_BROWSER_DESKTOP_HOST_PORT");
+        let current_browser_remote_desktop_ui =
+            read_container_env("ENTROPIC_BROWSER_REMOTE_DESKTOP_UI");
         let current_browser_headful = read_container_env("ENTROPIC_BROWSER_HEADFUL");
+        let current_browser_allow_unsafe_no_sandbox =
+            read_container_env("ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX");
+        let current_browser_allow_insecure_secure_contexts =
+            read_container_env("ENTROPIC_BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS");
         let current_container_image_id = container_image_id(OPENCLAW_CONTAINER);
         let latest_runtime_image_id = image_id("openclaw-runtime:latest");
         let current_proxy_mode = read_container_env("ENTROPIC_PROXY_MODE");
@@ -8546,7 +8555,12 @@ pub async fn start_gateway(
             && current_model.as_deref() == Some(base_model)
             && current_browser_host_port.as_deref() == Some(BROWSER_SERVICE_HOST_PORT)
             && current_browser_desktop_host_port.as_deref() == Some(BROWSER_DESKTOP_HOST_PORT)
+            && current_browser_remote_desktop_ui.as_deref() == Some(BROWSER_REMOTE_DESKTOP_UI)
             && current_browser_headful.as_deref() == Some("1")
+            && current_browser_allow_unsafe_no_sandbox.as_deref()
+                == Some(BROWSER_ALLOW_UNSAFE_NO_SANDBOX)
+            && current_browser_allow_insecure_secure_contexts.as_deref()
+                == Some(BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS)
             && image_matches_latest
         {
             apply_agent_settings(&app, &state)?;
@@ -8631,6 +8645,18 @@ pub async fn start_gateway(
         (
             "ENTROPIC_BROWSER_DESKTOP_HOST_PORT",
             BROWSER_DESKTOP_HOST_PORT,
+        ),
+        (
+            "ENTROPIC_BROWSER_REMOTE_DESKTOP_UI",
+            BROWSER_REMOTE_DESKTOP_UI,
+        ),
+        (
+            "ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX",
+            BROWSER_ALLOW_UNSAFE_NO_SANDBOX,
+        ),
+        (
+            "ENTROPIC_BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS",
+            BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS,
         ),
         ("ENTROPIC_BROWSER_BIND", "0.0.0.0"),
         ("ENTROPIC_BROWSER_PROFILE", "/data/browser/profile"),
@@ -8885,6 +8911,18 @@ pub async fn start_gateway_with_proxy(
                 "ENTROPIC_BROWSER_DESKTOP_HOST_PORT",
                 BROWSER_DESKTOP_HOST_PORT,
             ),
+            (
+                "ENTROPIC_BROWSER_REMOTE_DESKTOP_UI",
+                BROWSER_REMOTE_DESKTOP_UI,
+            ),
+            (
+                "ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX",
+                BROWSER_ALLOW_UNSAFE_NO_SANDBOX,
+            ),
+            (
+                "ENTROPIC_BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS",
+                BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS,
+            ),
             ("ENTROPIC_BROWSER_BIND", "0.0.0.0"),
             ("ENTROPIC_BROWSER_PROFILE", "/data/browser/profile"),
             ("ENTROPIC_TOOLS_PATH", "/data/tools"),
@@ -8933,13 +8971,18 @@ pub async fn start_gateway_with_proxy(
             gateway_bind.to_string(),
             "-p".to_string(),
             format!("127.0.0.1:{}:{}", BROWSER_SERVICE_HOST_PORT, BROWSER_SERVICE_PORT),
-            "-p".to_string(),
-            format!(
-                "127.0.0.1:{}:{}",
-                BROWSER_DESKTOP_HOST_PORT, BROWSER_DESKTOP_PORT
-            ),
             "openclaw-runtime:latest".to_string(),
         ]);
+        if BROWSER_REMOTE_DESKTOP_UI == "1" {
+            docker_args.insert(
+                docker_args.len() - 1,
+                format!(
+                    "127.0.0.1:{}:{}",
+                    BROWSER_DESKTOP_HOST_PORT, BROWSER_DESKTOP_PORT
+                ),
+            );
+            docker_args.insert(docker_args.len() - 1, "-p".to_string());
+        }
 
         if let Ok(source) = std::env::var("ENTROPIC_DEV_OPENCLAW_SOURCE") {
             if !source.trim().is_empty() {
@@ -8971,7 +9014,13 @@ pub async fn start_gateway_with_proxy(
         let current_browser_host_port = read_container_env("ENTROPIC_BROWSER_HOST_PORT");
         let current_browser_desktop_host_port =
             read_container_env("ENTROPIC_BROWSER_DESKTOP_HOST_PORT");
+        let current_browser_remote_desktop_ui =
+            read_container_env("ENTROPIC_BROWSER_REMOTE_DESKTOP_UI");
         let current_browser_headful = read_container_env("ENTROPIC_BROWSER_HEADFUL");
+        let current_browser_allow_unsafe_no_sandbox =
+            read_container_env("ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX");
+        let current_browser_allow_insecure_secure_contexts =
+            read_container_env("ENTROPIC_BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS");
         let current_container_image_id = container_image_id(OPENCLAW_CONTAINER);
         let latest_runtime_image_id = image_id("openclaw-runtime:latest");
         let expected_image = image_model.clone().unwrap_or_default();
@@ -9001,7 +9050,12 @@ pub async fn start_gateway_with_proxy(
             && token_matches
             && current_browser_host_port.as_deref() == Some(BROWSER_SERVICE_HOST_PORT)
             && current_browser_desktop_host_port.as_deref() == Some(BROWSER_DESKTOP_HOST_PORT)
+            && current_browser_remote_desktop_ui.as_deref() == Some(BROWSER_REMOTE_DESKTOP_UI)
             && current_browser_headful.as_deref() == Some("1")
+            && current_browser_allow_unsafe_no_sandbox.as_deref()
+                == Some(BROWSER_ALLOW_UNSAFE_NO_SANDBOX)
+            && current_browser_allow_insecure_secure_contexts.as_deref()
+                == Some(BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS)
         {
             println!("[Entropic] Proxy container already running with matching config. Reusing.");
             let reuse_prepare_started = Instant::now();
