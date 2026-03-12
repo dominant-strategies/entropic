@@ -2534,6 +2534,27 @@ export function Files({
     }
   }
 
+  async function clickBrowserSnapshotAtPoint(clientX: number, clientY: number) {
+    if (!browserSessionId || browserLiveConnected || browserLoading || browserClickingId) return;
+    const point = browserViewportPoint(clientX, clientY);
+    if (!point) return;
+    setBrowserLoadError(null);
+    setBrowserClickingId("__snapshot__");
+    try {
+      const snapshot = await invoke<BrowserSnapshot>("browser_click", {
+        sessionId: browserSessionId,
+        x: point.x,
+        y: point.y,
+      });
+      setBrowserSnapshot(snapshot);
+      setBrowserUrlInput(presentBrowserUrl(snapshot.url));
+    } catch (e) {
+      setBrowserLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBrowserClickingId(null);
+    }
+  }
+
   async function closeBrowserWindow() {
     const committedTabs = commitActiveBrowserTabState(browserTabs);
     const sessionIds = committedTabs
@@ -4026,7 +4047,7 @@ export function Files({
                               alt={browserTitle}
                               className={browserLiveConnected
                                 ? "block max-w-full max-h-full object-contain select-none"
-                                : "w-full h-auto block"}
+                                : "w-full h-auto block cursor-pointer"}
                               draggable={false}
                               decoding="async"
                               tabIndex={browserLiveConnected ? 0 : -1}
@@ -4034,12 +4055,22 @@ export function Files({
                               onMouseMove={handleBrowserViewportMouseMove}
                               onMouseDown={handleBrowserViewportMouseDown}
                               onMouseUp={handleBrowserViewportMouseUp}
+                              onClick={(event) => {
+                                if (!browserLiveConnected) {
+                                  void clickBrowserSnapshotAtPoint(event.clientX, event.clientY);
+                                }
+                              }}
                               onWheel={handleBrowserViewportWheel}
                               onKeyDown={handleBrowserViewportKeyDown}
                               onPaste={handleBrowserViewportPaste}
                               onCopy={handleBrowserViewportCopy}
                               onContextMenu={(e) => e.preventDefault()}
                             />
+                            {!browserLiveConnected && (
+                              <div className="pointer-events-none absolute bottom-3 left-3 rounded-full bg-black/70 px-3 py-1.5 text-[11px] font-medium text-white shadow-lg">
+                                Snapshot mode: click anywhere on the page if a button is not highlighted.
+                              </div>
+                            )}
                             {!browserLiveConnected && (browserSnapshot?.interactive_elements ?? []).map((element) => (
                               <button
                                 key={element.id}

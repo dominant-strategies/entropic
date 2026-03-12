@@ -50,6 +50,8 @@ type Props = {
 
 // Default models per mode
 const DEFAULT_PROXY_MODEL = "openai/gpt-5.4";
+const DEFAULT_PROXY_ANTHROPIC_MODEL = "anthropic/claude-opus-4-6";
+const DEFAULT_PROXY_GOOGLE_MODEL = "google/gemini-3.1-pro-preview";
 const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_PROXY_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
 const DEFAULT_LOCAL_OPENAI_IMAGE_GENERATION_MODEL = "openai/gpt-image-1";
@@ -125,10 +127,10 @@ function remapModelForMode(model: string, useLocalKeys: boolean): string {
     }
   }
   if (base.startsWith("anthropic/")) {
-    return "anthropic/claude-opus-4-6:thinking";
+    return DEFAULT_PROXY_ANTHROPIC_MODEL;
   }
   if (base.startsWith("google/")) {
-    return "google/gemini-3.1-pro-preview";
+    return DEFAULT_PROXY_GOOGLE_MODEL;
   }
   if (base.startsWith("openai/") || base.startsWith("openai-codex/")) {
     return "openai/gpt-5.2";
@@ -278,20 +280,28 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           : isLocal
             ? DEFAULT_LOCAL_MODEL
             : DEFAULT_PROXY_MODEL;
-        if (saved) {
-          setSelectedModel(nextSelectedModel);
-        } else {
-          setSelectedModel(nextSelectedModel);
-        }
+        setSelectedModel(nextSelectedModel);
 
         const savedCode = await store.get("codeModel") as string | null;
         if (savedCode) setCodeModel(savedCode);
         const savedImage = await store.get("imageModel") as string | null;
         if (savedImage) setImageModel(savedImage);
         const savedImageGeneration = await store.get("imageGenerationModel") as string | null;
-        setImageGenerationModel(
-          remapImageGenerationModelForMode(savedImageGeneration || "", isLocal, nextSelectedModel),
+        const nextImageGenerationModel = remapImageGenerationModelForMode(
+          savedImageGeneration || "",
+          isLocal,
+          nextSelectedModel,
         );
+        setImageGenerationModel(nextImageGenerationModel);
+
+        if (
+          saved !== nextSelectedModel ||
+          savedImageGeneration !== nextImageGenerationModel
+        ) {
+          await store.set("selectedModel", nextSelectedModel);
+          await store.set("imageGenerationModel", nextImageGenerationModel);
+          await store.save();
+        }
       } catch (error) {
         console.error("[Entropic] Failed to load model preference:", error);
       } finally {

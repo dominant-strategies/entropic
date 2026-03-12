@@ -114,6 +114,42 @@ type ClawhubSkillDetails = {
 
 type ClawhubSort = "stars" | "downloads" | "installs" | "newest";
 
+let cachedWorkspaceSkills: WorkspaceSkill[] = [];
+let cachedJustInstalledSlugs = new Set<string>();
+let cachedPendingWorkspaceSkillIds = new Set<string>();
+let cachedSkillScanResults: Record<string, PluginScanResult> = {};
+
+function sortWorkspaceSkills(skills: WorkspaceSkill[]) {
+  return [...skills].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+}
+
+function mergeWorkspaceSkillsWithPending(
+  fetched: WorkspaceSkill[],
+  previous: WorkspaceSkill[],
+  pendingSkillIds: Set<string>,
+) {
+  const merged = new Map<string, WorkspaceSkill>();
+  for (const skill of fetched) {
+    merged.set(skill.id, skill);
+  }
+  for (const skillId of pendingSkillIds) {
+    if (merged.has(skillId)) continue;
+    const existing = previous.find((skill) => skill.id === skillId);
+    if (existing) {
+      merged.set(skillId, existing);
+      continue;
+    }
+    merged.set(skillId, {
+      id: skillId,
+      name: skillId,
+      description: "Installed from ClawHub. Syncing into the workspace now.",
+      path: "",
+      source: "ClawHub",
+    });
+  }
+  return sortWorkspaceSkills(Array.from(merged.values()));
+}
+
 const formatCompactNumber = (value: number) => {
   if (value >= 1_000_000) {
     const compact = (value / 1_000_000).toFixed(1).replace(/\.0$/, "");
@@ -299,7 +335,7 @@ export function Store({
 }) {
   const { isAuthenticated, isAuthConfigured } = useAuth();
   const [plugins, setPlugins] = useState<Plugin[]>([]);
-  const [workspaceSkills, setWorkspaceSkills] = useState<WorkspaceSkill[]>([]);
+  const [workspaceSkills, setWorkspaceSkills] = useState<WorkspaceSkill[]>(cachedWorkspaceSkills);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [category, setCategory] = useState("all");
@@ -336,13 +372,13 @@ export function Store({
   const [clawhubDetailLoading, setClawhubDetailLoading] = useState<string | null>(null);
   const [clawhubDetailError, setClawhubDetailError] = useState<string | null>(null);
   const [removingSkill, setRemovingSkill] = useState<string | null>(null);
-  const [skillScanResults, setSkillScanResults] = useState<Record<string, PluginScanResult>>({});
+  const [skillScanResults, setSkillScanResults] = useState<Record<string, PluginScanResult>>(cachedSkillScanResults);
   const [gatewayRestarting, setGatewayRestarting] = useState(false);
   // How many browse-skills are currently visible (incremented on scroll)
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const syncedIntegrationsRef = useRef<Set<string>>(new Set());
-  const [justInstalledSlugs, setJustInstalledSlugs] = useState<Set<string>>(new Set());
+  const [justInstalledSlugs, setJustInstalledSlugs] = useState<Set<string>>(new Set(cachedJustInstalledSlugs));
   const clawhubRequestSeqRef = useRef(0);
 
   // Redesign state - sub-tab removed, single unified view
@@ -413,29 +449,58 @@ export function Store({
   }
 
   async function refreshSkills() {
-    setSkillsLoading(true);
+    if (cachedWorkspaceSkills.length === 0) {
+      setSkillsLoading(true);
+    }
     setSkillsError(null);
     try {
       const list = await invoke<WorkspaceSkill[]>("get_skill_store");
-      setWorkspaceSkills(list);
+      const merged = mergeWorkspaceSkillsWithPending(
+        list,
+        cachedWorkspaceSkills,
+        cachedPendingWorkspaceSkillIds,
+      );
+      cachedWorkspaceSkills = merged;
+      setWorkspaceSkills(merged);
 
       setSkillScanResults((prev) => {
         const next: Record<string, PluginScanResult> = {};
-        for (const skill of list) {
+        for (const skill of merged) {
           if (skill.scan) {
             next[skill.id] = skill.scan;
           } else if (prev[skill.id]) {
             next[skill.id] = prev[skill.id];
           }
         }
+        cachedSkillScanResults = next;
         return next;
       });
+      const nextJustInstalledSlugs = new Set(cachedJustInstalledSlugs);
+      for (const skill of list) {
+        nextJustInstalledSlugs.delete(skill.id);
+        cachedPendingWorkspaceSkillIds.delete(skill.id);
+      }
+      cachedJustInstalledSlugs = nextJustInstalledSlugs;
+      setJustInstalledSlugs(new Set(nextJustInstalledSlugs));
+      return merged;
     } catch (err) {
       const message = String(err);
       setSkillsError(message);
       console.error("Failed to load skills:", err);
+      return cachedWorkspaceSkills;
     } finally {
       setSkillsLoading(false);
+    }
+  }
+
+  async function pollForWorkspaceSkillSync(skillId: string) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      const list = await refreshSkills();
+      const skill = list.find((entry) => entry.id === skillId);
+      if (skill && skill.path) {
+        return;
+      }
     }
   }
 
@@ -822,16 +887,46 @@ export function Store({
       });
       setIsScanning(false);
       setScanResult(result.scan);
-      setSkillScanResults((prev) => ({ ...prev, [result.installed_skill_id || normalizedSlug]: result.scan }));
+      setSkillScanResults((prev) => {
+        const next = { ...prev, [result.installed_skill_id || normalizedSlug]: result.scan };
+        cachedSkillScanResults = next;
+        return next;
+      });
       if (result.blocked && !allowUnsafe) {
         setPendingUnsafeSlug(normalizedSlug);
       } else {
         setPendingUnsafeSlug(null);
       }
       if (result.installed) {
-        setJustInstalledSlugs((prev) => new Set(prev).add(normalizedSlug));
+        const installedSkillId = result.installed_skill_id || normalizedSlug;
+        cachedPendingWorkspaceSkillIds.add(installedSkillId);
+        cachedJustInstalledSlugs = new Set(cachedJustInstalledSlugs).add(normalizedSlug);
+        setJustInstalledSlugs(new Set(cachedJustInstalledSlugs));
+        setWorkspaceSkills((prev) => {
+          const existing = prev.find((skill) => skill.id === installedSkillId);
+          const next = mergeWorkspaceSkillsWithPending(
+            existing
+              ? prev
+              : [
+                  ...prev,
+                  {
+                    id: installedSkillId,
+                    name: targetName?.trim() || installedSkillId,
+                    description: "Installed from ClawHub. Syncing into the workspace now.",
+                    path: "",
+                    source: "ClawHub",
+                    scan: result.scan,
+                  },
+                ],
+            prev,
+            cachedPendingWorkspaceSkillIds,
+          );
+          cachedWorkspaceSkills = next;
+          return next;
+        });
         await refreshSkills();
         await refreshClawhubCatalog({ silent: true });
+        void pollForWorkspaceSkillSync(installedSkillId);
       } else if (result.message) {
         setClawhubError(result.message);
       }
@@ -854,14 +949,20 @@ export function Store({
     setSkillsError(null);
     try {
       await invoke("remove_workspace_skill", { id: skillId });
-      setJustInstalledSlugs((prev) => {
-        const next = new Set(prev);
-        next.delete(skillId);
-        return next;
-      });
+      const nextJustInstalledSlugs = new Set(cachedJustInstalledSlugs);
+      nextJustInstalledSlugs.delete(skillId);
+      cachedJustInstalledSlugs = nextJustInstalledSlugs;
+      setJustInstalledSlugs(new Set(nextJustInstalledSlugs));
+      cachedPendingWorkspaceSkillIds.delete(skillId);
       setSkillScanResults((prev) => {
         const next = { ...prev };
         delete next[skillId];
+        cachedSkillScanResults = next;
+        return next;
+      });
+      setWorkspaceSkills((prev) => {
+        const next = prev.filter((skill) => skill.id !== skillId);
+        cachedWorkspaceSkills = next;
         return next;
       });
       await refreshSkills();
@@ -1399,15 +1500,16 @@ export function Store({
                   <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--system-gray-6)]/40 p-4">
                     <div className="flex items-center justify-between gap-3 mb-2">
                       <p className="text-[11px] uppercase font-semibold tracking-wide text-[var(--text-tertiary)]">What&apos;s New</p>
-                      <a
-                        href={`https://clawhub.org/skills/${clawhubDetailModalSlug}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void open(`https://clawhub.org/skills/${clawhubDetailModalSlug}`);
+                        }}
                         className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--system-blue)] hover:underline"
                       >
                         Open on ClawHub
                         <ExternalLink className="w-3.5 h-3.5" />
-                      </a>
+                      </button>
                     </div>
                     <p className="text-sm leading-relaxed whitespace-pre-wrap text-[var(--text-secondary)]">
                       {activeClawhubDetails?.changelog || "No changelog provided for this version."}

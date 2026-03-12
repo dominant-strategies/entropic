@@ -115,6 +115,13 @@ type RuntimeResourceUsage = {
   data_used_bytes?: number | null;
 };
 
+type LocalKeyProvider = "anthropic" | "google" | "openai";
+
+type AuthStateSnapshot = {
+  active_provider: string | null;
+  providers: Array<{ id: string; has_key: boolean; last4?: string | null }>;
+};
+
 function SettingsGroup({ title, children }: { title?: string, children: React.ReactNode }) {
   return (
     <div className="mb-8">
@@ -222,6 +229,10 @@ export function Settings({
   const { isAuthenticated, isAuthConfigured, user, signOut } = useAuth();
   const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
   const [apiKeys, setApiKeys] = useState({ anthropic: "", openai: "", google: "" });
+  const [localKeySavingProvider, setLocalKeySavingProvider] =
+    useState<LocalKeyProvider | null>(null);
+  const [localKeyError, setLocalKeyError] = useState<string | null>(null);
+  const [localKeyNotice, setLocalKeyNotice] = useState<string | null>(null);
   const [profile, setProfile] = useState<AgentProfile>({ name: "Entropic" });
   const [saving, setSaving] = useState(false);
   const [memorySessionIndexing, setMemorySessionIndexing] = useState(false);
@@ -244,7 +255,10 @@ export function Settings({
   const [oauthStatus, setOauthStatus] = useState<Record<string, string>>({});
   const [oauthLoading, setOauthLoading] = useState<string | null>(null);
   const [oauthError, setOauthError] = useState<string | null>(null);
-  const [authState, setAuthState] = useState<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>({ providers: [] });
+  const [authState, setAuthState] = useState<AuthStateSnapshot>({
+    active_provider: null,
+    providers: [],
+  });
   const connectedProviders = authState.providers.filter(p => p.has_key).map(p => p.id);
   const localImageGenerationProviders: string[] = connectedProviders.filter(
     (provider) => provider === "google" || provider === "openai",
@@ -436,6 +450,21 @@ export function Settings({
   useEffect(() => {
     let cancelled = false;
 
+    const refreshAuthMeta = () =>
+      Promise.allSettled([
+        invoke<Record<string, string>>("get_oauth_status"),
+        invoke<AuthStateSnapshot>("get_auth_state"),
+      ]).then((results) => {
+        if (cancelled) return;
+        const [oauthResult, authResult] = results;
+        if (oauthResult.status === "fulfilled") {
+          setOauthStatus(oauthResult.value);
+        }
+        if (authResult.status === "fulfilled") {
+          setAuthState(authResult.value);
+        }
+      });
+
     const loadDeferredSettingsData = () => {
       setRuntimeVersionLoading(true);
       setAuthMetaLoading(true);
@@ -453,19 +482,7 @@ export function Settings({
           }
         });
 
-      void Promise.allSettled([
-        invoke<Record<string, string>>("get_oauth_status"),
-        invoke<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>("get_auth_state"),
-      ]).then((results) => {
-        if (cancelled) return;
-        const [oauthResult, authResult] = results;
-        if (oauthResult.status === "fulfilled") {
-          setOauthStatus(oauthResult.value);
-        }
-        if (authResult.status === "fulfilled") {
-          setAuthState(authResult.value);
-        }
-      }).finally(() => {
+      void refreshAuthMeta().finally(() => {
         if (!cancelled) {
           setAuthMetaLoading(false);
         }
@@ -479,6 +496,87 @@ export function Settings({
       cancelDeferred();
     };
   }, []);
+
+  function localKeyProviderLabel(provider: LocalKeyProvider) {
+    switch (provider) {
+      case "anthropic":
+        return "Anthropic";
+      case "google":
+        return "Google";
+      case "openai":
+        return "OpenAI";
+    }
+  }
+
+  async function refreshAuthStateSnapshot() {
+    const [status, state] = await Promise.all([
+      invoke<Record<string, string>>("get_oauth_status"),
+      invoke<AuthStateSnapshot>("get_auth_state"),
+    ]);
+    setOauthStatus(status);
+    setAuthState(state);
+    return state;
+  }
+
+  async function saveLocalApiKey(provider: LocalKeyProvider) {
+    const key = apiKeys[provider].trim();
+    if (!key) {
+      setLocalKeyError(`Paste a ${localKeyProviderLabel(provider)} API key first.`);
+      setLocalKeyNotice(null);
+      return;
+    }
+
+    setLocalKeySavingProvider(provider);
+    setLocalKeyError(null);
+    setLocalKeyNotice(null);
+
+    try {
+      await invoke("set_api_key", { provider, key });
+      await invoke("set_active_provider", { provider });
+      await refreshAuthStateSnapshot();
+      setApiKeys((prev) => ({ ...prev, [provider]: "" }));
+      setLocalKeyNotice(
+        gatewayRunning
+          ? `${localKeyProviderLabel(provider)} key saved. Restart the sandbox to apply it to the running gateway.`
+          : `${localKeyProviderLabel(provider)} key saved.`,
+      );
+    } catch (error) {
+      console.error(`[Entropic] Failed to save ${provider} API key:`, error);
+      setLocalKeyError(
+        `Could not save the ${localKeyProviderLabel(provider)} API key.`,
+      );
+    } finally {
+      setLocalKeySavingProvider(null);
+    }
+  }
+
+  async function clearLocalApiKey(provider: LocalKeyProvider) {
+    setLocalKeySavingProvider(provider);
+    setLocalKeyError(null);
+    setLocalKeyNotice(null);
+
+    try {
+      await invoke("set_api_key", { provider, key: "" });
+      const state = await refreshAuthStateSnapshot();
+      setApiKeys((prev) => ({ ...prev, [provider]: "" }));
+      const anyKeyRemaining = state.providers.some((entry) => entry.has_key);
+      if (!anyKeyRemaining && useLocalKeys) {
+        await onUseLocalKeysChange(false);
+      }
+      setLocalKeyNotice(
+        gatewayRunning
+          ? `${localKeyProviderLabel(provider)} key cleared. Restart the sandbox if it is still using that provider.`
+          : `${localKeyProviderLabel(provider)} key cleared.`,
+      );
+    } catch (error) {
+      console.error(`[Entropic] Failed to clear ${provider} API key:`, error);
+      setLocalKeyError(
+        `Could not clear the ${localKeyProviderLabel(provider)} API key.`,
+      );
+    } finally {
+      setLocalKeySavingProvider(null);
+    }
+  }
 
   useEffect(() => {
     if (!useLocalKeys || authMetaLoading || localImageGenerationProviders.length === 0) {
@@ -641,10 +739,7 @@ export function Settings({
       }
       // OpenAI: single-step localhost callback flow
       await invoke<{ access_token: string; provider: string }>("start_openai_oauth");
-      const status = await invoke<Record<string, string>>("get_oauth_status");
-      setOauthStatus(status);
-      const state = await invoke<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>("get_auth_state");
-      setAuthState(state);
+      await refreshAuthStateSnapshot();
       // OAuth sets a local API key — switch to local keys mode and restart gateway
       if (!useLocalKeys) {
         await onUseLocalKeysChange(true);
@@ -671,10 +766,7 @@ export function Settings({
       });
       setAnthropicCodePending(false);
       setAnthropicCodeInput("");
-      const status = await invoke<Record<string, string>>("get_oauth_status");
-      setOauthStatus(status);
-      const state = await invoke<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>("get_auth_state");
-      setAuthState(state);
+      await refreshAuthStateSnapshot();
       // OAuth sets a local API key — switch to local keys mode and restart gateway
       if (!useLocalKeys) {
         await onUseLocalKeysChange(true);
@@ -697,12 +789,7 @@ export function Settings({
         setAnthropicCodePending(false);
         setAnthropicCodeInput("");
       }
-      const [status, state] = await Promise.all([
-        invoke<Record<string, string>>("get_oauth_status"),
-        invoke<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>("get_auth_state"),
-      ]);
-      setOauthStatus(status);
-      setAuthState(state);
+      const state = await refreshAuthStateSnapshot();
       // If no provider keys remain, switch back to proxy (managed) mode.
       const anyKeyRemaining = state.providers.some((p) => p.has_key);
       if (!anyKeyRemaining && useLocalKeys) {
@@ -1579,8 +1666,161 @@ export function Settings({
               );
             })()}
 
+            {(() => {
+              const providerAuth = authState.providers.find((p) => p.id === "google");
+              const hasKey = providerAuth?.has_key ?? false;
+              const last4 = providerAuth?.last4;
+              const isSaving = localKeySavingProvider === "google";
+
+              return (
+                <SettingsRow
+                  label="Google / Gemini (API Key)"
+                  icon={Key}
+                  description={
+                    hasKey
+                      ? `API key set (...${last4 || "****"})`
+                      : "Paste a Google AI Studio / Gemini API key"
+                  }
+                >
+                  <div className="flex w-[360px] items-center gap-2">
+                    <input
+                      type="password"
+                      value={apiKeys.google}
+                      onChange={(event) =>
+                        setApiKeys((prev) => ({ ...prev, google: event.target.value }))
+                      }
+                      placeholder="AIza..."
+                      className="flex-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--system-blue)]"
+                    />
+                    <button
+                      onClick={() => void saveLocalApiKey("google")}
+                      disabled={isSaving || !apiKeys.google.trim()}
+                      className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--system-blue)] text-white hover:bg-[var(--system-blue)]/90 disabled:opacity-40 transition-colors"
+                    >
+                      {isSaving ? "Saving..." : hasKey ? "Replace" : "Save Key"}
+                    </button>
+                    {hasKey && (
+                      <button
+                        onClick={() => void clearLocalApiKey("google")}
+                        disabled={isSaving}
+                        className="px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 disabled:opacity-40 transition-colors"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </SettingsRow>
+              );
+            })()}
+
+            {(() => {
+              const isConnected = oauthStatus["anthropic"] === "claude_code";
+              const providerAuth = authState.providers.find((p) => p.id === "anthropic");
+              const hasKey = providerAuth?.has_key ?? false;
+              const last4 = providerAuth?.last4;
+              const isSaving = localKeySavingProvider === "anthropic";
+
+              return (
+                <SettingsRow
+                  label="Anthropic (API Key)"
+                  icon={Key}
+                  description={
+                    isConnected && last4
+                      ? `Connected via OAuth (...${last4})`
+                      : hasKey
+                        ? `API key set (...${last4 || "****"})`
+                        : "Paste an Anthropic API key, or sign in above"
+                  }
+                >
+                  <div className="flex w-[360px] items-center gap-2">
+                    <input
+                      type="password"
+                      value={apiKeys.anthropic}
+                      onChange={(event) =>
+                        setApiKeys((prev) => ({ ...prev, anthropic: event.target.value }))
+                      }
+                      placeholder="sk-ant-..."
+                      className="flex-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--system-blue)]"
+                    />
+                    <button
+                      onClick={() => void saveLocalApiKey("anthropic")}
+                      disabled={isSaving || !apiKeys.anthropic.trim()}
+                      className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--system-blue)] text-white hover:bg-[var(--system-blue)]/90 disabled:opacity-40 transition-colors"
+                    >
+                      {isSaving ? "Saving..." : hasKey ? "Replace" : "Save Key"}
+                    </button>
+                    {hasKey && (
+                      <button
+                        onClick={() => void clearLocalApiKey("anthropic")}
+                        disabled={isSaving}
+                        className="px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 disabled:opacity-40 transition-colors"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </SettingsRow>
+              );
+            })()}
+
+            {(() => {
+              const isConnected = oauthStatus["openai"] === "openai_codex";
+              const providerAuth = authState.providers.find((p) => p.id === "openai");
+              const hasKey = providerAuth?.has_key ?? false;
+              const last4 = providerAuth?.last4;
+              const isSaving = localKeySavingProvider === "openai";
+
+              return (
+                <SettingsRow
+                  label="OpenAI (API Key)"
+                  icon={Key}
+                  description={
+                    isConnected && last4
+                      ? `Connected via OAuth (...${last4})`
+                      : hasKey
+                        ? `API key set (...${last4 || "****"})`
+                        : "Paste an OpenAI API key, or sign in above"
+                  }
+                >
+                  <div className="flex w-[360px] items-center gap-2">
+                    <input
+                      type="password"
+                      value={apiKeys.openai}
+                      onChange={(event) =>
+                        setApiKeys((prev) => ({ ...prev, openai: event.target.value }))
+                      }
+                      placeholder="sk-..."
+                      className="flex-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--system-blue)]"
+                    />
+                    <button
+                      onClick={() => void saveLocalApiKey("openai")}
+                      disabled={isSaving || !apiKeys.openai.trim()}
+                      className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--system-blue)] text-white hover:bg-[var(--system-blue)]/90 disabled:opacity-40 transition-colors"
+                    >
+                      {isSaving ? "Saving..." : hasKey ? "Replace" : "Save Key"}
+                    </button>
+                    {hasKey && (
+                      <button
+                        onClick={() => void clearLocalApiKey("openai")}
+                        disabled={isSaving}
+                        className="px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 disabled:opacity-40 transition-colors"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </SettingsRow>
+              );
+            })()}
+
             {oauthError && (
               <div className="px-4 pb-3 pt-1 text-xs text-red-500">{oauthError}</div>
+            )}
+            {localKeyError && (
+              <div className="px-4 pb-3 pt-1 text-xs text-red-500">{localKeyError}</div>
+            )}
+            {localKeyNotice && (
+              <div className="px-4 pb-3 pt-1 text-xs text-green-500">{localKeyNotice}</div>
             )}
           </>
         )}

@@ -63,6 +63,13 @@ const ENTROPIC_NATIVE_API_ALLOWED_DOMAINS: &[&str] = &["entropic.qu.ai"];
 const MAX_BRIDGE_DEVICES: usize = 10;
 const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const CLIENT_LOG_READ_MAX_BYTES: usize = 512 * 1024;
+const DEFAULT_PROXY_GATEWAY_MODEL: &str = "openai/gpt-5.4";
+const DEFAULT_PROXY_ANTHROPIC_GATEWAY_MODEL: &str = "anthropic/claude-opus-4-6";
+const DEFAULT_PROXY_GOOGLE_GATEWAY_MODEL: &str = "google/gemini-3.1-pro-preview";
+const DEFAULT_PROXY_OPENROUTER_GATEWAY_MODEL: &str = "openrouter/free";
+const DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL: &str = "anthropic/claude-opus-4-6:thinking";
+const DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL: &str = "openai-codex/gpt-5.3-codex";
+const DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL: &str = "google/gemini-2.5-pro";
 
 static BROWSER_SERVICE_TOKEN_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static EMBEDDED_PREVIEW_STATE_CACHE: OnceLock<Mutex<Option<EmbeddedPreviewStatePayload>>> =
@@ -470,6 +477,148 @@ fn split_image_generation_model(model: &str) -> Result<(&str, &str), String> {
         return Err("Image generation model is not configured.".to_string());
     }
     Ok((provider, raw_model))
+}
+
+fn has_configured_provider_key(api_keys: &HashMap<String, String>, provider: &str) -> bool {
+    api_keys
+        .get(provider)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn normalize_proxy_gateway_model(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return DEFAULT_PROXY_GATEWAY_MODEL.to_string();
+    }
+
+    let base_model = trimmed.split(':').next().unwrap_or(trimmed).trim();
+    match base_model {
+        "openrouter/free"
+        | "anthropic/claude-opus-4-6"
+        | "anthropic/claude-opus-4.5"
+        | "openai/gpt-5.4"
+        | "openai/gpt-5.3-codex"
+        | "openai/gpt-5.2"
+        | "openai/gpt-5.2-codex"
+        | "google/gemini-3.1-pro-preview"
+        | "google/gemini-3.1-flash-image-preview"
+        | "google/gemini-3-pro-image-preview" => base_model.to_string(),
+        _ => {
+            if let Some(openai_model) = base_model.strip_prefix("openai-codex/") {
+                let candidate = format!("openai/{}", openai_model);
+                match candidate.as_str() {
+                    "openai/gpt-5.3-codex" | "openai/gpt-5.2" | "openai/gpt-5.2-codex" => {
+                        return candidate;
+                    }
+                    _ => {}
+                }
+            }
+
+            if base_model.starts_with("anthropic/") {
+                return DEFAULT_PROXY_ANTHROPIC_GATEWAY_MODEL.to_string();
+            }
+            if base_model.starts_with("google/") {
+                return DEFAULT_PROXY_GOOGLE_GATEWAY_MODEL.to_string();
+            }
+            if base_model.starts_with("openrouter/") {
+                return DEFAULT_PROXY_OPENROUTER_GATEWAY_MODEL.to_string();
+            }
+            if base_model.starts_with("openai/") || base_model.starts_with("openai-codex/") {
+                return DEFAULT_PROXY_GATEWAY_MODEL.to_string();
+            }
+
+            DEFAULT_PROXY_GATEWAY_MODEL.to_string()
+        }
+    }
+}
+
+fn local_gateway_model_key_provider(provider: &str) -> Option<&'static str> {
+    match provider {
+        "anthropic" => Some("anthropic"),
+        "openai" | "openai-codex" => Some("openai"),
+        "google" => Some("google"),
+        _ => None,
+    }
+}
+
+fn default_local_gateway_model_for_provider(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" => DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL,
+        "openai" | "openai-codex" => DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL,
+        "google" => DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL,
+        _ => DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL,
+    }
+}
+
+fn choose_local_gateway_provider(
+    active_provider: Option<&str>,
+    api_keys: &HashMap<String, String>,
+) -> &'static str {
+    if let Some(provider) = active_provider.and_then(local_gateway_model_key_provider) {
+        if has_configured_provider_key(api_keys, provider) {
+            return provider;
+        }
+    }
+
+    for provider in ["anthropic", "openai", "google"] {
+        if has_configured_provider_key(api_keys, provider) {
+            return provider;
+        }
+    }
+
+    "anthropic"
+}
+
+fn normalize_local_gateway_model(
+    requested_model: Option<&str>,
+    active_provider: Option<&str>,
+    api_keys: &HashMap<String, String>,
+) -> String {
+    if let Some(requested_model) = requested_model.map(str::trim).filter(|model| !model.is_empty())
+    {
+        if let Some((provider, raw_model)) = requested_model.split_once('/') {
+            let provider = provider.trim();
+            let raw_model = raw_model.trim();
+            if !provider.is_empty() && !raw_model.is_empty() {
+                match provider {
+                    "anthropic" | "google" => {
+                        if let Some(key_provider) = local_gateway_model_key_provider(provider) {
+                            if has_configured_provider_key(api_keys, key_provider) {
+                                return requested_model.to_string();
+                            }
+                        }
+                    }
+                    "openai-codex" => {
+                        if has_configured_provider_key(api_keys, "openai") {
+                            return requested_model.to_string();
+                        }
+                    }
+                    "openai" => {
+                        if has_configured_provider_key(api_keys, "openai") {
+                            let base_model =
+                                requested_model.split(':').next().unwrap_or(requested_model);
+                            let mapped = match base_model {
+                                "openai/gpt-5.3-codex" => {
+                                    "openai-codex/gpt-5.3-codex:reasoning=medium"
+                                }
+                                "openai/gpt-5.2" => "openai-codex/gpt-5.2:reasoning=medium",
+                                "openai/gpt-5.2-codex" => {
+                                    "openai-codex/gpt-5.2-codex:reasoning=medium"
+                                }
+                                _ => DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL,
+                            };
+                            return mapped.to_string();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let fallback_provider = choose_local_gateway_provider(active_provider, api_keys);
+    default_local_gateway_model_for_provider(fallback_provider).to_string()
 }
 
 fn local_image_generation_provider_name(provider: &str) -> &str {
@@ -9945,9 +10094,9 @@ pub async fn start_gateway(
 
     let gateway_token = expected_gateway_token(&app)?;
 
-    let has_any_local_api_key = api_keys.contains_key("anthropic")
-        || api_keys.contains_key("openai")
-        || api_keys.contains_key("google");
+    let has_any_local_api_key = has_configured_provider_key(&api_keys, "anthropic")
+        || has_configured_provider_key(&api_keys, "openai")
+        || has_configured_provider_key(&api_keys, "google");
     if !has_any_local_api_key {
         return Err(
             "No local API key configured. Add an Anthropic/OpenAI/Google key in Settings, or sign in and disable 'Use Local Keys'."
@@ -9957,31 +10106,19 @@ pub async fn start_gateway(
 
     // Resolve model early so we can compare against the running container.
     // Use the model passed from frontend if provided, otherwise fall back based on active provider
-    let model_full: String = if let Some(ref m) = model {
-        if !m.is_empty() {
-            m.clone()
-        } else {
-            "anthropic/claude-opus-4-6:thinking".to_string()
-        }
-    } else {
-        match active_provider.as_deref() {
-            Some("anthropic") if api_keys.contains_key("anthropic") => {
-                "anthropic/claude-opus-4-6:thinking".to_string()
-            }
-            Some("openai") if api_keys.contains_key("openai") => {
-                "openai-codex/gpt-5.3-codex".to_string()
-            }
-            Some("google") if api_keys.contains_key("google") => {
-                "google/gemini-2.5-pro".to_string()
-            }
-            _ if api_keys.contains_key("anthropic") => {
-                "anthropic/claude-opus-4-6:thinking".to_string()
-            }
-            _ if api_keys.contains_key("openai") => "openai-codex/gpt-5.3-codex".to_string(),
-            _ if api_keys.contains_key("google") => "google/gemini-2.5-pro".to_string(),
-            _ => "anthropic/claude-opus-4-6:thinking".to_string(),
-        }
-    };
+    let requested_model = model.as_deref();
+    let model_full = normalize_local_gateway_model(
+        requested_model,
+        active_provider.as_deref(),
+        &api_keys,
+    );
+    if requested_model.map(str::trim).filter(|value| !value.is_empty()) != Some(model_full.as_str()) {
+        println!(
+            "[Entropic] Local gateway model normalized from {:?} to {:?}",
+            requested_model,
+            model_full
+        );
+    }
 
     // Parse model string: "provider/model-id:param" -> base model + optional params
     // Supported suffixes: ":thinking" (Anthropic), ":reasoning=level" (OpenAI)
@@ -10331,6 +10468,13 @@ pub async fn start_gateway_with_proxy(
     let gateway_bind = "127.0.0.1:19789:18789";
     let resolved_proxy_url = resolve_container_proxy_base(&proxy_url)?;
     let docker_proxy_api_url = resolve_container_openai_base(&resolved_proxy_url);
+    let normalized_model = normalize_proxy_gateway_model(&model);
+    if normalized_model != model.trim() {
+        println!(
+            "[Entropic] Proxy gateway model normalized from {:?} to {:?}",
+            model, normalized_model
+        );
+    }
     // Ensure runtime (Colima) is running on macOS
     let runtime = get_runtime(&app);
     let mut status = runtime.check_status();
@@ -10379,7 +10523,7 @@ pub async fn start_gateway_with_proxy(
                 "ENTROPIC_GATEWAY_SCHEMA_VERSION",
                 ENTROPIC_GATEWAY_SCHEMA_VERSION,
             ),
-            ("OPENCLAW_MODEL", model.as_str()),
+            ("OPENCLAW_MODEL", normalized_model.as_str()),
             ("OPENCLAW_MEMORY_SLOT", "memory-core"),
             ("ENTROPIC_PROXY_MODE", "1"),
             ("OPENROUTER_API_KEY", gateway_token.as_str()),
@@ -10505,7 +10649,7 @@ pub async fn start_gateway_with_proxy(
         let gateway_token_matches =
             current_gateway_token.as_deref() == Some(local_gateway_token.as_str());
         let schema_matches = current_schema.as_deref() == Some(ENTROPIC_GATEWAY_SCHEMA_VERSION);
-        let model_matches = current_model.as_deref() == Some(model.as_str());
+        let model_matches = current_model.as_deref() == Some(normalized_model.as_str());
         let image_matches =
             expected_image.is_empty() || current_image.as_deref() == Some(expected_image.as_str());
         let container_image_matches_latest = match (
@@ -10595,7 +10739,10 @@ pub async fn start_gateway_with_proxy(
     let (docker_args, _proxy_env_file) = build_proxy_docker_args()?;
 
     // Create and start container
-    println!("[Entropic] Starting proxy gateway with model: {}", model);
+    println!(
+        "[Entropic] Starting proxy gateway with model: {}",
+        normalized_model
+    );
     println!("[Entropic] Proxy URL: {}", resolved_proxy_url);
     println!("[Entropic] Proxy API URL: {}", docker_proxy_api_url);
     println!(

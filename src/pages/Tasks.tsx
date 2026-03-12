@@ -2412,6 +2412,59 @@ export function Tasks({ gatewayRunning, view = "tasks" }: Props) {
               Scheduled Jobs
             </h2>
 
+            <div className="mb-6 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-5 shadow-sm">
+              <div className="mb-4 flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--system-blue)]/10 text-[var(--system-blue)]">
+                  <Info className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-[var(--text-primary)]">How Jobs Work</h3>
+                  <p className="text-sm text-[var(--text-secondary)]">
+                    Jobs are scheduled agent runs that operate on your task board inside this desktop sandbox.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--system-gray-6)]/50 p-4">
+                  <p className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-secondary)]">
+                    <Clock className="h-4 w-4" />
+                    Schedule
+                  </p>
+                  <p className="text-sm text-[var(--text-secondary)]">
+                    Choose daily, interval, one-time, or custom cron timing. The saved instructions run on every scheduled trigger.
+                  </p>
+                </div>
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--system-gray-6)]/50 p-4">
+                  <p className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-secondary)]">
+                    <Smartphone className="h-4 w-4" />
+                    Runtime
+                  </p>
+                  <p className="text-sm text-[var(--text-secondary)]">
+                    Jobs only run while this computer is awake and the secure sandbox is started.
+                  </p>
+                </div>
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--system-gray-6)]/50 p-4">
+                  <p className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-secondary)]">
+                    <Play className="h-4 w-4" />
+                    Run Now
+                  </p>
+                  <p className="text-sm text-[var(--text-secondary)]">
+                    Use Run Now to test the same job immediately without waiting for the next schedule window.
+                  </p>
+                </div>
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--system-gray-6)]/50 p-4">
+                  <p className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-secondary)]">
+                    <History className="h-4 w-4" />
+                    Results
+                  </p>
+                  <p className="text-sm text-[var(--text-secondary)]">
+                    Each job keeps run history so you can inspect what happened and adjust the instructions or cadence.
+                  </p>
+                </div>
+              </div>
+            </div>
+
             {/* Job List */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pb-20">
               {gatewayRunning && loading && jobs.length === 0 ? (
