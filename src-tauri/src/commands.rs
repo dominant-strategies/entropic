@@ -2472,6 +2472,7 @@ fn ensure_runtime_image() -> Result<(), String> {
 
     let local_runtime_tar = find_local_runtime_tar();
     let local_image_present = runtime_image_id()?.is_some();
+    let mut runtime_tar_sync_error: Option<String> = None;
     if local_runtime_tar.is_none() {
         if let Err(sync_err) =
             download_runtime_tar_to_cache(!local_image_present, RUNTIME_TAR_MAX_TIME_SECS)
@@ -2480,6 +2481,7 @@ fn ensure_runtime_image() -> Result<(), String> {
                 "[Entropic] Runtime tar cache refresh skipped/failed: {}",
                 sync_err
             );
+            runtime_tar_sync_error = Some(sync_err);
         }
     }
 
@@ -2588,11 +2590,24 @@ fn ensure_runtime_image() -> Result<(), String> {
         ));
     }
 
-    Err("OpenClaw runtime image not available.\n\
-         • No cached or bundled runtime image tar found.\n\
-         • Registry pull fallback is disabled (set OPENCLAW_RUNTIME_REGISTRY to enable).\n\
-         • To build locally: ./scripts/build-openclaw-runtime.sh"
-        .to_string())
+    let mut error = String::from(
+        "OpenClaw runtime image not available.\n\
+         • No cached or bundled runtime image tar found.\n",
+    );
+    if let Some(sync_err) = runtime_tar_sync_error {
+        error.push_str("• Runtime download from entropic-releases failed:\n");
+        for line in sync_err.lines() {
+            error.push_str("  ");
+            error.push_str(line);
+            error.push('\n');
+        }
+        error.push_str("• Check network, VPN, firewall, or GitHub release access and retry.\n");
+    }
+    error.push_str(
+        "• Registry pull fallback is disabled (set OPENCLAW_RUNTIME_REGISTRY to enable).\n\
+         • To build locally: ./scripts/build-openclaw-runtime.sh",
+    );
+    Err(error)
 }
 
 /// Ensure the scanner image is available locally.
