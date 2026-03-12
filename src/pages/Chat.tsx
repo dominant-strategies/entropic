@@ -3200,6 +3200,11 @@ export function Chat({
       mimeType: attachment.mimeType,
       content: attachment.content,
     }));
+    const imageGenerationAttachmentsPayload = pendingAttachments.map((attachment) => ({
+      file_name: attachment.fileName,
+      mime_type: attachment.mimeType,
+      content: attachment.content,
+    }));
     const hasAttachments = attachmentsPayload.length > 0;
     const attachmentLine =
       pendingAttachments.length === 1
@@ -3311,7 +3316,7 @@ export function Chat({
     }
 
     if (composerMode === "image") {
-      if (!proxyEnabled) {
+      if (!useLocalKeys && !proxyEnabled) {
         const message = "Image generation currently requires proxy mode in Settings.";
         setError(message);
         appendAssistantNotice(message, sendSession);
@@ -3361,7 +3366,7 @@ export function Chat({
         const response = await invoke<ChatImageGenerationResponse>("generate_chat_image", {
           model: imageGenerationModel,
           prompt: userMessageContent,
-          attachments: attachmentsPayload,
+          attachments: imageGenerationAttachmentsPayload,
         });
         const generatedCount = response.images.length;
         appendLocalMessage(

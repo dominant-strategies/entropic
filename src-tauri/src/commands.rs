@@ -106,7 +106,9 @@ pub struct ChatTerminalRunResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatImageGenerationAttachment {
+    #[serde(alias = "fileName")]
     pub file_name: String,
+    #[serde(alias = "mimeType")]
     pub mime_type: String,
     pub content: String,
 }
@@ -455,6 +457,441 @@ fn extract_openrouter_generated_images(message: &serde_json::Value) -> Vec<ChatG
             }
         })
         .collect()
+}
+
+fn split_image_generation_model(model: &str) -> Result<(&str, &str), String> {
+    let trimmed = model.trim();
+    let Some((provider, raw_model)) = trimmed.split_once('/') else {
+        return Err("Image generation model is not configured.".to_string());
+    };
+    let provider = provider.trim();
+    let raw_model = raw_model.trim();
+    if provider.is_empty() || raw_model.is_empty() {
+        return Err("Image generation model is not configured.".to_string());
+    }
+    Ok((provider, raw_model))
+}
+
+fn local_image_generation_provider_name(provider: &str) -> &str {
+    match provider {
+        "anthropic" => "Anthropic",
+        "google" => "Google",
+        "openai" => "OpenAI",
+        _ => provider,
+    }
+}
+
+fn read_local_image_generation_api_key(
+    state: &AppState,
+    provider: &str,
+) -> Result<String, String> {
+    let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
+    let Some(api_key) = keys.get(provider) else {
+        return Err(format!(
+            "No {} API key is configured. Add one in Settings to use local image generation.",
+            local_image_generation_provider_name(provider)
+        ));
+    };
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "No {} API key is configured. Add one in Settings to use local image generation.",
+            local_image_generation_provider_name(provider)
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn extract_json_error_message(value: &serde_json::Value) -> Option<String> {
+    if let Some(message) = value
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(|message| message.as_str())
+    {
+        let trimmed = message.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Some(message) = value.get("message").and_then(|message| message.as_str()) {
+        let trimmed = message.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Some(message) = value.get("error").and_then(|error| error.as_str()) {
+        let trimmed = message.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+fn extract_image_generation_error_detail(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|value| extract_json_error_message(&value))
+        .unwrap_or_else(|| trimmed.to_string())
+}
+
+fn format_image_generation_http_error(status: reqwest::StatusCode, body: String) -> String {
+    let detail = extract_image_generation_error_detail(&body);
+    let suffix = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", detail)
+    };
+    format!("Image generation failed ({}{})", status, suffix)
+}
+
+fn extract_openai_generated_images(payload: &serde_json::Value) -> Vec<ChatGeneratedImage> {
+    payload
+        .get("data")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let source = item
+                .get("b64_json")
+                .and_then(|value| value.as_str())
+                .and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        return None;
+                    }
+                    let mime_type = item
+                        .get("mime_type")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| "image/png".to_string());
+                    Some((format!("data:{};base64,{}", mime_type, trimmed), mime_type))
+                })
+                .or_else(|| {
+                    let url = item.get("url").and_then(|value| value.as_str())?;
+                    let trimmed = url.trim();
+                    if trimmed.is_empty() {
+                        return None;
+                    }
+                    let mime_type = item
+                        .get("mime_type")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                        .or_else(|| infer_image_mime_from_source(trimmed))
+                        .unwrap_or_else(|| "image/png".to_string());
+                    Some((trimmed.to_string(), mime_type))
+                })?;
+            let extension = infer_image_extension(&source.1);
+            Some(ChatGeneratedImage {
+                file_name: format!("generated-image-{}.{}", index + 1, extension),
+                mime_type: source.1,
+                url: source.0,
+            })
+        })
+        .collect()
+}
+
+fn extract_google_generated_inline_data(part: &serde_json::Value) -> Option<(String, String)> {
+    let inline_data = part
+        .get("inlineData")
+        .or_else(|| part.get("inline_data"))?;
+    let mime_type = inline_data
+        .get("mimeType")
+        .or_else(|| inline_data.get("mime_type"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "image/png".to_string());
+    let data = inline_data.get("data").and_then(|value| value.as_str())?;
+    let trimmed = data.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some((mime_type, trimmed.to_string()))
+}
+
+fn extract_google_generated_content(payload: &serde_json::Value) -> ChatImageGenerationResult {
+    let mut text_chunks = Vec::new();
+    let mut images = Vec::new();
+
+    if let Some(candidates) = payload.get("candidates").and_then(|value| value.as_array()) {
+        for candidate in candidates {
+            let Some(parts) = candidate
+                .get("content")
+                .and_then(|content| content.get("parts"))
+                .and_then(|parts| parts.as_array())
+            else {
+                continue;
+            };
+
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        text_chunks.push(trimmed.to_string());
+                    }
+                }
+
+                if let Some((mime_type, data)) = extract_google_generated_inline_data(part) {
+                    let extension = infer_image_extension(&mime_type);
+                    images.push(ChatGeneratedImage {
+                        file_name: format!("generated-image-{}.{}", images.len() + 1, extension),
+                        mime_type: mime_type.clone(),
+                        url: format!("data:{};base64,{}", mime_type, data),
+                    });
+                }
+            }
+        }
+    }
+
+    ChatImageGenerationResult {
+        text: text_chunks.join("\n\n").trim().to_string(),
+        images,
+    }
+}
+
+async fn generate_proxy_chat_image(
+    client: &reqwest::Client,
+    model: &str,
+    prompt: &str,
+    attachments: &[ChatImageGenerationAttachment],
+) -> Result<ChatImageGenerationResult, String> {
+    let gateway_token = read_container_env("OPENROUTER_API_KEY")
+        .ok_or_else(|| "Proxy auth is unavailable. Restart the sandbox and try again.".to_string())?;
+    let proxy_base = read_container_env("ENTROPIC_PROXY_BASE_URL")
+        .ok_or_else(|| "Proxy base URL is unavailable. Restart the sandbox and try again.".to_string())?;
+    let host_proxy_base = resolve_host_proxy_base(&proxy_base)?;
+
+    let content = if attachments.is_empty() {
+        serde_json::Value::String(prompt.to_string())
+    } else {
+        let mut parts = Vec::with_capacity(attachments.len() + 1);
+        parts.push(serde_json::json!({
+            "type": "text",
+            "text": prompt,
+        }));
+        for attachment in attachments {
+            let mime = if attachment.mime_type.trim().is_empty() {
+                "image/png"
+            } else {
+                attachment.mime_type.trim()
+            };
+            let data_url = format!("data:{};base64,{}", mime, attachment.content.trim());
+            parts.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": data_url
+                }
+            }));
+        }
+        serde_json::Value::Array(parts)
+    };
+
+    let endpoint = format!("{}/chat/completions", host_proxy_base.trim_end_matches('/'));
+    let payload = serde_json::json!({
+        "model": model,
+        "modalities": chat_image_modalities(model),
+        "messages": [
+            {
+                "role": "user",
+                "content": content
+            }
+        ],
+        "stream": false
+    });
+
+    let response = client
+        .post(&endpoint)
+        .bearer_auth(gateway_token)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Image generation request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(format_image_generation_http_error(status, body));
+    }
+
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Invalid image generation response: {}", e))?;
+    let message = payload
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let images = extract_openrouter_generated_images(&message);
+    if images.is_empty() {
+        return Err("The selected model did not return an image.".to_string());
+    }
+
+    Ok(ChatImageGenerationResult {
+        text: extract_openrouter_message_text(&message),
+        images,
+    })
+}
+
+async fn generate_openai_chat_image(
+    client: &reqwest::Client,
+    api_key: &str,
+    raw_model: &str,
+    prompt: &str,
+    attachments: &[ChatImageGenerationAttachment],
+) -> Result<ChatImageGenerationResult, String> {
+    let response = if attachments.is_empty() {
+        let payload = serde_json::json!({
+            "model": raw_model,
+            "prompt": prompt,
+        });
+        client
+            .post("https://api.openai.com/v1/images/generations")
+            .bearer_auth(api_key)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("Image generation request failed: {}", e))?
+    } else {
+        let mut form = reqwest::multipart::Form::new()
+            .text("model", raw_model.to_string())
+            .text("prompt", prompt.to_string());
+
+        for attachment in attachments {
+            let file_name = if attachment.file_name.trim().is_empty() {
+                "reference.png".to_string()
+            } else {
+                attachment.file_name.trim().to_string()
+            };
+            let mime_type = if attachment.mime_type.trim().is_empty() {
+                "image/png"
+            } else {
+                attachment.mime_type.trim()
+            };
+            let bytes = STANDARD.decode(attachment.content.trim()).map_err(|e| {
+                format!(
+                    "Invalid image attachment '{}' for OpenAI image generation: {}",
+                    file_name, e
+                )
+            })?;
+            let part = reqwest::multipart::Part::bytes(bytes)
+                .file_name(file_name)
+                .mime_str(mime_type)
+                .map_err(|e| format!("Invalid attachment MIME type '{}': {}", mime_type, e))?;
+            form = form.part("image[]", part);
+        }
+
+        client
+            .post("https://api.openai.com/v1/images/edits")
+            .bearer_auth(api_key)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("Image generation request failed: {}", e))?
+    };
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(format_image_generation_http_error(status, body));
+    }
+
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Invalid image generation response: {}", e))?;
+    let images = extract_openai_generated_images(&payload);
+    if images.is_empty() {
+        return Err("The selected model did not return an image.".to_string());
+    }
+
+    let text = payload
+        .get("data")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("revised_prompt"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+
+    Ok(ChatImageGenerationResult { text, images })
+}
+
+async fn generate_google_chat_image(
+    client: &reqwest::Client,
+    api_key: &str,
+    raw_model: &str,
+    prompt: &str,
+    attachments: &[ChatImageGenerationAttachment],
+) -> Result<ChatImageGenerationResult, String> {
+    let mut parts = Vec::with_capacity(attachments.len() + 1);
+    parts.push(serde_json::json!({
+        "text": prompt,
+    }));
+    for attachment in attachments {
+        let mime_type = if attachment.mime_type.trim().is_empty() {
+            "image/png"
+        } else {
+            attachment.mime_type.trim()
+        };
+        parts.push(serde_json::json!({
+            "inlineData": {
+                "mimeType": mime_type,
+                "data": attachment.content.trim(),
+            }
+        }));
+    }
+
+    let endpoint = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        raw_model
+    );
+    let payload = serde_json::json!({
+        "contents": [
+            {
+                "role": "user",
+                "parts": parts,
+            }
+        ],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"]
+        }
+    });
+
+    let response = client
+        .post(&endpoint)
+        .header("x-goog-api-key", api_key)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Image generation request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(format_image_generation_http_error(status, body));
+    }
+
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Invalid image generation response: {}", e))?;
+    let result = extract_google_generated_content(&payload);
+    if result.images.is_empty() {
+        return Err("The selected model did not return an image.".to_string());
+    }
+    Ok(result)
 }
 
 fn client_log_path() -> PathBuf {
@@ -13807,21 +14244,13 @@ pub async fn run_chat_terminal_command(
 
 #[tauri::command]
 pub async fn generate_chat_image(
+    state: State<'_, AppState>,
     model: String,
     prompt: String,
     attachments: Vec<ChatImageGenerationAttachment>,
 ) -> Result<ChatImageGenerationResult, String> {
     let _container = running_gateway_container_name()
         .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
-    if read_container_env("ENTROPIC_PROXY_MODE").as_deref() != Some("1") {
-        return Err("Image generation currently requires proxy mode in Settings.".to_string());
-    }
-
-    let gateway_token = read_container_env("OPENROUTER_API_KEY")
-        .ok_or_else(|| "Proxy auth is unavailable. Restart the sandbox and try again.".to_string())?;
-    let proxy_base = read_container_env("ENTROPIC_PROXY_BASE_URL")
-        .ok_or_else(|| "Proxy base URL is unavailable. Restart the sandbox and try again.".to_string())?;
-    let host_proxy_base = resolve_host_proxy_base(&proxy_base)?;
 
     let model = model.trim().to_string();
     if model.is_empty() {
@@ -13838,99 +14267,35 @@ pub async fn generate_chat_image(
         prompt.trim().to_string()
     };
 
-    let content = if attachments.is_empty() {
-        serde_json::Value::String(normalized_prompt.clone())
-    } else {
-        let mut parts = Vec::with_capacity(attachments.len() + 1);
-        parts.push(serde_json::json!({
-            "type": "text",
-            "text": normalized_prompt,
-        }));
-        for attachment in attachments {
-            let mime = attachment.mime_type.trim();
-            let data_url = format!("data:{};base64,{}", mime, attachment.content.trim());
-            parts.push(serde_json::json!({
-                "type": "image_url",
-                "image_url": {
-                    "url": data_url
-                }
-            }));
-        }
-        serde_json::Value::Array(parts)
-    };
-
-    let endpoint = format!("{}/chat/completions", host_proxy_base.trim_end_matches('/'));
-    let payload = serde_json::json!({
-        "model": model,
-        "modalities": chat_image_modalities(&model),
-        "messages": [
-            {
-                "role": "user",
-                "content": content
-            }
-        ],
-        "stream": false
-    });
-
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(180))
         .build()
         .map_err(|e| format!("Failed to create image generation client: {}", e))?;
-    let response = client
-        .post(&endpoint)
-        .bearer_auth(gateway_token)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| format!("Image generation request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| String::new());
-        let detail = serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|value| {
-                value.get("error").and_then(|error| {
-                    error
-                        .get("message")
-                        .and_then(|value| value.as_str())
-                        .map(|text| text.to_string())
-                        .or_else(|| error.as_str().map(|text| text.to_string()))
-                })
-            })
-            .unwrap_or_else(|| body.trim().to_string());
-        let suffix = if detail.is_empty() {
-            String::new()
-        } else {
-            format!(": {}", detail)
-        };
-        return Err(format!("Image generation failed ({}{})", status, suffix));
+    if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
+        return generate_proxy_chat_image(&client, &model, &normalized_prompt, &attachments).await;
     }
 
-    let payload = response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| format!("Invalid image generation response: {}", e))?;
-    let message = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    let images = extract_openrouter_generated_images(&message);
-    if images.is_empty() {
-        return Err("The selected model did not return an image.".to_string());
+    let (provider, raw_model) = split_image_generation_model(&model)?;
+    match provider {
+        "openai" => {
+            let api_key = read_local_image_generation_api_key(&state, "openai")?;
+            generate_openai_chat_image(&client, &api_key, raw_model, &normalized_prompt, &attachments)
+                .await
+        }
+        "google" => {
+            let api_key = read_local_image_generation_api_key(&state, "google")?;
+            generate_google_chat_image(&client, &api_key, raw_model, &normalized_prompt, &attachments)
+                .await
+        }
+        "anthropic" => Err(
+            "Anthropic local keys support image input, but Anthropic does not provide image generation output here."
+                .to_string(),
+        ),
+        _ => Err(format!(
+            "Local image generation is not supported for {}. Choose an OpenAI or Google image model in Settings.",
+            provider
+        )),
     }
-
-    Ok(ChatImageGenerationResult {
-        text: extract_openrouter_message_text(&message),
-        images,
-    })
 }
 
 #[tauri::command]

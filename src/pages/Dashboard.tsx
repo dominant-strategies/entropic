@@ -28,6 +28,7 @@ import {
 } from "../lib/integrations";
 import { getGatewayStatusCached } from "../lib/gateway-status";
 import {
+  LOCAL_IMAGE_GENERATION_MODEL_IDS,
   LOCAL_MODEL_IDS,
   PROXY_IMAGE_GENERATION_MODEL_IDS,
   PROXY_MODEL_IDS,
@@ -51,11 +52,24 @@ type Props = {
 const DEFAULT_PROXY_MODEL = "openai/gpt-5.4";
 const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_PROXY_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
+const DEFAULT_LOCAL_OPENAI_IMAGE_GENERATION_MODEL = "openai/gpt-image-1";
+const DEFAULT_LOCAL_GOOGLE_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
 const GATEWAY_FAILURE_THRESHOLD = 3;
 const FEEDBACK_FORM_URL = "https://entropic.qu.ai/feedback";
 
 function stripModelParams(model: string) {
   return model.split(":")[0] || model;
+}
+
+function defaultLocalImageGenerationModel(primaryModel?: string) {
+  const base = stripModelParams(primaryModel || "");
+  if (base.startsWith("openai/") || base.startsWith("openai-codex/")) {
+    return DEFAULT_LOCAL_OPENAI_IMAGE_GENERATION_MODEL;
+  }
+  if (base.startsWith("google/")) {
+    return DEFAULT_LOCAL_GOOGLE_IMAGE_GENERATION_MODEL;
+  }
+  return DEFAULT_LOCAL_GOOGLE_IMAGE_GENERATION_MODEL;
 }
 
 function remapModelForMode(model: string, useLocalKeys: boolean): string {
@@ -120,6 +134,41 @@ function remapModelForMode(model: string, useLocalKeys: boolean): string {
     return "openai/gpt-5.2";
   }
   return DEFAULT_PROXY_MODEL;
+}
+
+function remapImageGenerationModelForMode(
+  model: string,
+  useLocalKeys: boolean,
+  primaryModel?: string,
+): string {
+  if (useLocalKeys) {
+    if (LOCAL_IMAGE_GENERATION_MODEL_IDS.has(model)) {
+      return model;
+    }
+    const base = stripModelParams(model);
+    if (LOCAL_IMAGE_GENERATION_MODEL_IDS.has(base)) {
+      return base;
+    }
+    if (base.startsWith("openai/") || base.startsWith("openai-codex/")) {
+      return DEFAULT_LOCAL_OPENAI_IMAGE_GENERATION_MODEL;
+    }
+    if (base.startsWith("google/")) {
+      return DEFAULT_LOCAL_GOOGLE_IMAGE_GENERATION_MODEL;
+    }
+    return defaultLocalImageGenerationModel(primaryModel);
+  }
+
+  if (PROXY_IMAGE_GENERATION_MODEL_IDS.has(model)) {
+    return model;
+  }
+  const base = stripModelParams(model);
+  if (PROXY_IMAGE_GENERATION_MODEL_IDS.has(base)) {
+    return base;
+  }
+  if (base.startsWith("google/")) {
+    return DEFAULT_PROXY_IMAGE_GENERATION_MODEL;
+  }
+  return DEFAULT_PROXY_IMAGE_GENERATION_MODEL;
 }
 
 export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
@@ -224,10 +273,15 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         const isLocal = storedUseLocal === true;
 
         const saved = await store.get("selectedModel") as string | null;
+        const nextSelectedModel = saved
+          ? remapModelForMode(saved, isLocal)
+          : isLocal
+            ? DEFAULT_LOCAL_MODEL
+            : DEFAULT_PROXY_MODEL;
         if (saved) {
-          setSelectedModel(remapModelForMode(saved, isLocal));
+          setSelectedModel(nextSelectedModel);
         } else {
-          setSelectedModel(isLocal ? DEFAULT_LOCAL_MODEL : DEFAULT_PROXY_MODEL);
+          setSelectedModel(nextSelectedModel);
         }
 
         const savedCode = await store.get("codeModel") as string | null;
@@ -235,9 +289,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         const savedImage = await store.get("imageModel") as string | null;
         if (savedImage) setImageModel(savedImage);
         const savedImageGeneration = await store.get("imageGenerationModel") as string | null;
-        if (savedImageGeneration && PROXY_IMAGE_GENERATION_MODEL_IDS.has(savedImageGeneration)) {
-          setImageGenerationModel(savedImageGeneration);
-        }
+        setImageGenerationModel(
+          remapImageGenerationModelForMode(savedImageGeneration || "", isLocal, nextSelectedModel),
+        );
       } catch (error) {
         console.error("[Entropic] Failed to load model preference:", error);
       } finally {
@@ -1456,14 +1510,23 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
               setUseLocalKeys(value);
 
               const newModel = remapModelForMode(selectedModel, value);
+              const newImageGenerationModel = remapImageGenerationModelForMode(
+                imageGenerationModel,
+                value,
+                newModel,
+              );
               if (newModel !== selectedModel) {
                 setSelectedModel(newModel);
+              }
+              if (newImageGenerationModel !== imageGenerationModel) {
+                setImageGenerationModel(newImageGenerationModel);
               }
 
               try {
                 const store = await TauriStore.load("entropic-settings.json");
                 await store.set("useLocalKeys", value);
                 await store.set("selectedModel", newModel);
+                await store.set("imageGenerationModel", newImageGenerationModel);
                 await store.save();
               } catch (error) {
                 console.error("[Entropic] Failed to save useLocalKeys:", error);

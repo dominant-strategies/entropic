@@ -80,11 +80,41 @@ export const PROXY_IMAGE_GENERATION_MODELS: Model[] = [
   },
 ];
 
+export const LOCAL_IMAGE_GENERATION_MODELS: Model[] = [
+  {
+    id: "google/gemini-3.1-flash-image-preview",
+    name: "Gemini 3.1 Flash Image Preview",
+    provider: "Google",
+    tier: "recommended",
+  },
+  {
+    id: "google/gemini-3-pro-image-preview",
+    name: "Gemini 3 Pro Image (Nano Banana 3)",
+    provider: "Google",
+    tier: "premium",
+  },
+  {
+    id: "google/gemini-2.5-flash-image",
+    name: "Gemini 2.5 Flash Image",
+    provider: "Google",
+    tier: "fast",
+  },
+  {
+    id: "openai/gpt-image-1",
+    name: "GPT Image 1",
+    provider: "OpenAI",
+    tier: "premium",
+  },
+];
+
 // Exported ID sets for mode-mismatch detection in Dashboard
 export const PROXY_MODEL_IDS = new Set(PROXY_MODELS.map(m => m.id));
 export const LOCAL_MODEL_IDS = new Set(LOCAL_MODELS.map(m => m.id));
 export const PROXY_IMAGE_GENERATION_MODEL_IDS = new Set(
   PROXY_IMAGE_GENERATION_MODELS.map((m) => m.id),
+);
+export const LOCAL_IMAGE_GENERATION_MODEL_IDS = new Set(
+  LOCAL_IMAGE_GENERATION_MODELS.map((m) => m.id),
 );
 
 // Map provider display names to auth provider IDs
