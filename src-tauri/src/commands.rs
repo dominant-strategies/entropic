@@ -115,7 +115,7 @@ pub struct ChatImageGenerationAttachment {
 pub struct ChatGeneratedImage {
     pub file_name: String,
     pub mime_type: String,
-    pub data_url: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -329,6 +329,39 @@ fn infer_image_mime_from_data_url(data_url: &str) -> Option<String> {
     }
 }
 
+fn infer_image_mime_from_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = trimmed
+        .split('#')
+        .next()
+        .unwrap_or(trimmed)
+        .split('?')
+        .next()
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase();
+    if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        Some("image/jpeg".to_string())
+    } else if path.ends_with(".webp") {
+        Some("image/webp".to_string())
+    } else if path.ends_with(".gif") {
+        Some("image/gif".to_string())
+    } else if path.ends_with(".svg") || path.ends_with(".svgz") {
+        Some("image/svg+xml".to_string())
+    } else if path.ends_with(".png") {
+        Some("image/png".to_string())
+    } else {
+        None
+    }
+}
+
+fn infer_image_mime_from_source(image_source: &str) -> Option<String> {
+    infer_image_mime_from_data_url(image_source)
+        .or_else(|| infer_image_mime_from_url(image_source))
+}
+
 fn infer_image_extension(mime_type: &str) -> &'static str {
     match mime_type {
         "image/jpeg" => "jpg",
@@ -411,14 +444,14 @@ fn extract_openrouter_generated_images(message: &serde_json::Value) -> Vec<ChatG
 
     urls.into_iter()
         .enumerate()
-        .map(|(index, data_url)| {
+        .map(|(index, url)| {
             let mime_type =
-                infer_image_mime_from_data_url(&data_url).unwrap_or_else(|| "image/png".to_string());
+                infer_image_mime_from_source(&url).unwrap_or_else(|| "image/png".to_string());
             let extension = infer_image_extension(&mime_type);
             ChatGeneratedImage {
                 file_name: format!("generated-image-{}.{}", index + 1, extension),
                 mime_type,
-                data_url,
+                url,
             }
         })
         .collect()
@@ -1385,7 +1418,8 @@ impl RuntimeReleaseManifest {
                     if !url.trim().is_empty() && !sha.trim().is_empty() {
                         self.url = url.trim().to_string();
                         self.sha256 = sha.trim().to_string();
-                        self.url_size_bytes = self.runtime_linux_x86_64_size_bytes;
+                        self.url_size_bytes =
+                            self.runtime_linux_x86_64_size_bytes.or(self.url_size_bytes);
                     }
                 }
             }
@@ -1397,7 +1431,8 @@ impl RuntimeReleaseManifest {
                     if !url.trim().is_empty() && !sha.trim().is_empty() {
                         self.url = url.trim().to_string();
                         self.sha256 = sha.trim().to_string();
-                        self.url_size_bytes = self.runtime_linux_aarch64_size_bytes;
+                        self.url_size_bytes =
+                            self.runtime_linux_aarch64_size_bytes.or(self.url_size_bytes);
                     }
                 }
             }

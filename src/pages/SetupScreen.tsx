@@ -187,7 +187,7 @@ function detectDarkTheme(): boolean {
   if (root.classList.contains("dark")) return true;
   if (root.classList.contains("light")) return false;
 
-  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
+  return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ?? false;
 }
 
 export function SetupScreen({ onComplete, preview }: Props) {

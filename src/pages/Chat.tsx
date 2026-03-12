@@ -166,7 +166,7 @@ type ChatImageGenerationResponse = {
   images: Array<{
     file_name: string;
     mime_type: string;
-    data_url: string;
+    url: string;
   }>;
 };
 
@@ -1116,9 +1116,21 @@ export function Chat({
     );
   }
 
-  function stripDataUrlPrefix(value: string): string {
+  function extractBase64FromDataUrl(value: string): string | null {
     const match = /^data:[^;]+;base64,(.*)$/i.exec(value);
-    return match ? match[1] : value;
+    return match ? match[1] : null;
+  }
+
+  function getGeneratedImageWorkspaceSaveUnsupportedReason(
+    attachment: MessageAttachment,
+  ): string | null {
+    if (!attachment.previewUrl) {
+      return "Image preview is unavailable.";
+    }
+    if (extractBase64FromDataUrl(attachment.previewUrl)) {
+      return null;
+    }
+    return "This image was returned as a remote URL and cannot be saved to the workspace yet.";
   }
 
   function formatUnknownUiError(error: unknown, fallback: string): string {
@@ -1222,7 +1234,10 @@ export function Chat({
       }
       try {
         const dataUrl = await readFileAsDataUrl(file);
-        const base64 = stripDataUrlPrefix(dataUrl);
+        const base64 = extractBase64FromDataUrl(dataUrl);
+        if (!base64) {
+          throw new Error(`Failed to read file: ${file.name}`);
+        }
         nextAttachments.push({
           id: crypto.randomUUID(),
           fileName: file.name,
@@ -3362,7 +3377,7 @@ export function Chat({
             attachments: response.images.map((image, index) => ({
               fileName: image.file_name || `generated-${index + 1}.png`,
               mimeType: image.mime_type || "image/png",
-              previewUrl: image.data_url,
+              previewUrl: image.url,
             })),
           },
           sendSession
@@ -4312,6 +4327,14 @@ export function Chat({
     index: number,
   ) {
     if (!attachment.previewUrl) return;
+    const previewBase64 = extractBase64FromDataUrl(attachment.previewUrl);
+    if (!previewBase64) {
+      setError(
+        getGeneratedImageWorkspaceSaveUnsupportedReason(attachment) ??
+          "Failed to save image to workspace.",
+      );
+      return;
+    }
     const actionKey = imageAttachmentActionKey(message.id, index);
     const existingPath = savedWorkspaceImagePaths[actionKey];
     if (existingPath) {
@@ -4329,7 +4352,7 @@ export function Chat({
     try {
       await invoke("upload_workspace_file", {
         fileName,
-        base64: stripDataUrlPrefix(attachment.previewUrl),
+        base64: previewBase64,
         destPath: GENERATED_IMAGES_DEST_PATH,
       });
       setSavedWorkspaceImagePaths((prev) => ({ ...prev, [actionKey]: workspacePath }));
@@ -4381,47 +4404,57 @@ export function Chat({
     }
     return (
       <div className="mb-2 grid gap-2">
-        {attachments.map((attachment, index) => (
-          <div
-            key={imageAttachmentActionKey(message.id, index)}
-            className="overflow-hidden rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)]"
-          >
-            <img
-              src={attachment.previewUrl}
-              alt={attachment.fileName}
-              className="block h-auto max-h-[360px] w-full object-contain"
-            />
-            <div className="flex items-center justify-between gap-3 px-3 py-2 text-xs text-[var(--text-secondary)]">
-              <span className="min-w-0 truncate">{attachment.fileName}</span>
-              {message.role === "assistant" && attachment.mimeType.startsWith("image/") ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    void saveGeneratedImageToWorkspace(message, attachment, index);
-                  }}
-                  disabled={Boolean(savingWorkspaceImageKeys[imageAttachmentActionKey(message.id, index)])}
-                  className="inline-flex shrink-0 items-center gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-2 py-1 text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--system-gray-6)] disabled:cursor-not-allowed disabled:opacity-60"
-                  title={
-                    savedWorkspaceImagePaths[imageAttachmentActionKey(message.id, index)]
-                      ? `/data/workspace/${savedWorkspaceImagePaths[imageAttachmentActionKey(message.id, index)]}`
-                      : "Save image to /data/workspace/generated-images"
-                  }
-                >
-                  {savingWorkspaceImageKeys[imageAttachmentActionKey(message.id, index)] ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Download className="h-3.5 w-3.5" />
-                  )}
-                  <span>
-                    {savedWorkspaceImagePaths[imageAttachmentActionKey(message.id, index)]
-                      ? "Open in Workspace"
-                      : "Save to Workspace"}
-                  </span>
-                </button>
-              ) : null}
+        {attachments.map((attachment, index) => {
+          const actionKey = imageAttachmentActionKey(message.id, index);
+          const savedPath = savedWorkspaceImagePaths[actionKey];
+          const saveUnsupportedReason = getGeneratedImageWorkspaceSaveUnsupportedReason(attachment);
+          const canSaveToWorkspace = !saveUnsupportedReason;
+          return (
+            <div
+              key={actionKey}
+              className="overflow-hidden rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)]"
+            >
+              <img
+                src={attachment.previewUrl}
+                alt={attachment.fileName}
+                className="block h-auto max-h-[360px] w-full object-contain"
+              />
+              <div className="flex items-center justify-between gap-3 px-3 py-2 text-xs text-[var(--text-secondary)]">
+                <span className="min-w-0 truncate">{attachment.fileName}</span>
+                {message.role === "assistant" && attachment.mimeType.startsWith("image/") ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void saveGeneratedImageToWorkspace(message, attachment, index);
+                    }}
+                    disabled={Boolean(savingWorkspaceImageKeys[actionKey]) || !canSaveToWorkspace}
+                    className="inline-flex shrink-0 items-center gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-2 py-1 text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--system-gray-6)] disabled:cursor-not-allowed disabled:opacity-60"
+                    title={
+                      savedPath
+                        ? `/data/workspace/${savedPath}`
+                        : canSaveToWorkspace
+                          ? "Save image to /data/workspace/generated-images"
+                          : saveUnsupportedReason ?? undefined
+                    }
+                  >
+                    {savingWorkspaceImageKeys[actionKey] ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Download className="h-3.5 w-3.5" />
+                    )}
+                    <span>
+                      {savedPath
+                        ? "Open in Workspace"
+                        : canSaveToWorkspace
+                          ? "Save to Workspace"
+                          : "Save unavailable"}
+                    </span>
+                  </button>
+                ) : null}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     );
   }

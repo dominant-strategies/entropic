@@ -475,6 +475,13 @@ export function Settings({
   }, []);
 
   useEffect(() => {
+    if (!isMacOS || !gatewayRunning) {
+      setRuntimeResourceUsage(null);
+      setRuntimeResourceUsageError(null);
+      setRuntimeUsageLoading(false);
+      return;
+    }
+
     let cancelled = false;
     let intervalId: number | null = null;
 
@@ -511,7 +518,7 @@ export function Settings({
         window.clearInterval(intervalId);
       }
     };
-  }, [gatewayRunning]);
+  }, [gatewayRunning, isMacOS]);
 
   useEffect(() => {
     if (!gatewayRunning) {
@@ -1144,7 +1151,7 @@ export function Settings({
               <SettingsRow
                 label="Image Generation Model"
                 icon={Sparkles}
-                description="Used for the upcoming Image mode and generated images."
+                description="Used for Image mode in Chat and generated images."
               >
                 <div className="w-80">
                   <ModelSelector

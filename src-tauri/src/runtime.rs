@@ -3424,7 +3424,7 @@ exit 1
                 .join("Entropic")
                 .join("runtime")
                 .join(WINDOWS_BOOTSTRAP_STATE_FILE);
-            let runtime = Runtime::new(resources_root.clone());
+            let runtime = Runtime::new(resources_root.clone(), RuntimeVmConfig::default());
 
             Self {
                 root_dir,
