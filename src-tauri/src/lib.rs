@@ -227,6 +227,10 @@ pub fn run() {
             commands::read_workspace_file_base64,
             commands::delete_workspace_file,
             commands::upload_workspace_file,
+            commands::check_patchright_installed,
+            commands::install_patchright_browser,
+            commands::get_browser_install_progress,
+            commands::uninstall_patchright_browser,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|error| {

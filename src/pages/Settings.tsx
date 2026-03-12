@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { Key, Shield, Sparkles, Cpu, Image, ChevronRight, User, Palette, ChevronDown, ScrollText, LogIn, LogOut, Loader2, Trash2, AlertTriangle, Copy, Download, Sun, Moon, Monitor } from "lucide-react";
+import { Key, Shield, Sparkles, Cpu, Image, ChevronRight, User, Palette, ChevronDown, ScrollText, LogIn, LogOut, Loader2, Trash2, AlertTriangle, Copy, Download, Sun, Moon, Monitor, Globe } from "lucide-react";
 import clsx from "clsx";
 import {
   getProfileInitials,
@@ -19,6 +19,7 @@ import { getProxyUrl, signOut as authSignOut } from "../lib/auth";
 import { disconnectIntegration, resetIntegrationState } from "../lib/integrations";
 import { resetIntegrationVaultSession } from "../lib/vault";
 import { Logs } from "./Logs";
+import { BrowserInstallModal } from "../components/BrowserInstallModal";
 import {
   clearDiagnosticLogs,
   diagnosticsUpdatedEventName,
@@ -162,7 +163,13 @@ export function Settings({
   const [memorySessionIndexingError, setMemorySessionIndexingError] = useState<string | null>(null);
   const [memoryQmdError, setMemoryQmdError] = useState<string | null>(null);
   const [soul, setSoul] = useState("");
-  
+
+  // Browser install state
+  const [browserInstalled, setBrowserInstalled] = useState(false);
+  const [browserChecking, setBrowserChecking] = useState(false);
+  const [browserModalOpen, setBrowserModalOpen] = useState(false);
+  const [browserError, setBrowserError] = useState<string | null>(null);
+
   // OAuth state
   const [oauthStatus, setOauthStatus] = useState<Record<string, string>>({});
   const [oauthLoading, setOauthLoading] = useState<string | null>(null);
@@ -343,6 +350,21 @@ export function Settings({
     void refreshGatewayConfigHealth();
   }, [gatewayRunning]);
 
+  useEffect(() => {
+    if (!gatewayRunning) {
+      setBrowserInstalled(false);
+      return;
+    }
+    let cancelled = false;
+    setBrowserChecking(true);
+    invoke<boolean>("check_patchright_installed")
+      .then((installed) => { if (!cancelled) setBrowserInstalled(installed); })
+      .catch(() => { if (!cancelled) setBrowserInstalled(false); })
+      .finally(() => { if (!cancelled) setBrowserChecking(false); });
+    return () => { cancelled = true; };
+  }, [gatewayRunning]);
+
+
   async function saveWallpaper(id: string, custom?: string | null) {
     setWallpaperId(id);
     if (custom !== undefined) setCustomWallpaper(custom);
@@ -516,6 +538,22 @@ export function Settings({
       );
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleBrowserUninstall() {
+    setBrowserError(null);
+    const confirmed = await ask(
+      "Remove the stealth browser? You can reinstall it at any time.",
+      { title: "Uninstall Stealth Browser", kind: "warning", okLabel: "Uninstall", cancelLabel: "Cancel" }
+    );
+    if (!confirmed) return;
+    try {
+      await invoke("uninstall_patchright_browser");
+      setBrowserInstalled(false);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setBrowserError(`Failed to uninstall: ${detail}`);
     }
   }
 
@@ -976,6 +1014,39 @@ export function Settings({
         )}
         {gatewayConfigNotice && (
           <div className="px-4 pb-4 pt-2 text-xs text-green-500">{gatewayConfigNotice}</div>
+        )}
+
+        <SettingsRow
+          label="Stealth Browser"
+          icon={Globe}
+          description={
+            browserChecking
+              ? "Checking..."
+              : browserInstalled
+                ? "Patchright Chromium installed"
+                : "Not installed. Required for web browsing."
+          }
+        >
+          {browserInstalled ? (
+            <button
+              onClick={handleBrowserUninstall}
+              disabled={!gatewayRunning}
+              className="px-3 py-1.5 text-xs font-semibold rounded-md border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
+            >
+              Uninstall
+            </button>
+          ) : (
+            <button
+              onClick={() => setBrowserModalOpen(true)}
+              disabled={!gatewayRunning || browserChecking}
+              className="px-3 py-1.5 text-xs font-semibold rounded-md bg-[var(--system-blue)] text-white hover:bg-blue-600 disabled:opacity-50"
+            >
+              Install
+            </button>
+          )}
+        </SettingsRow>
+        {browserError && (
+          <div className="px-4 pb-4 pt-2 text-xs text-red-600">{browserError}</div>
         )}
       </SettingsGroup>
 
@@ -1635,6 +1706,12 @@ export function Settings({
           </div>
         </div>
       )}
+
+      <BrowserInstallModal
+        isOpen={browserModalOpen}
+        onClose={() => setBrowserModalOpen(false)}
+        onInstallComplete={() => setBrowserInstalled(true)}
+      />
 
     </div>
   );

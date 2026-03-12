@@ -2659,6 +2659,7 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
 
 pub struct AppState {
     pub setup_progress: Mutex<SetupProgress>,
+    pub browser_install_progress: Mutex<BrowserInstallProgress>,
     pub api_keys: Mutex<HashMap<String, String>>,
     pub active_provider: Mutex<Option<String>>,
     pub whatsapp_login: Mutex<WhatsAppLoginCache>,
@@ -2678,10 +2679,32 @@ pub struct SetupProgress {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BrowserInstallProgress {
+    pub stage: String,
+    pub message: String,
+    pub percent: u8,
+    pub complete: bool,
+    pub error: Option<String>,
+}
+
+impl Default for BrowserInstallProgress {
+    fn default() -> Self {
+        Self {
+            stage: "idle".to_string(),
+            message: String::new(),
+            percent: 0,
+            complete: false,
+            error: None,
+        }
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self {
             setup_progress: Mutex::new(SetupProgress::default()),
+            browser_install_progress: Mutex::new(BrowserInstallProgress::default()),
             api_keys: Mutex::new(HashMap::new()),
             active_provider: Mutex::new(None),
             whatsapp_login: Mutex::new(WhatsAppLoginCache::default()),
@@ -3936,6 +3959,42 @@ fn docker_exec_output(args: &[&str]) -> Result<String, String> {
         return Err(stderr.to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// If patchright was previously installed (chrome binary exists in /data/playwright)
+/// but the container-layer symlink /usr/bin/chromium is missing (container was
+/// recreated), recreate the symlink using `docker exec -u root`.
+fn ensure_patchright_symlink() {
+    let container = match running_gateway_container_name() {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Check if the browser binary exists on the persistent volume
+    let chrome_exists = docker_command()
+        .args(["exec", container, "test", "-x", "/data/playwright/chrome"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !chrome_exists {
+        return; // Browser not installed; nothing to check
+    }
+
+    // Verify the browser actually runs (system deps must be present in the
+    // committed image layer).  If it fails (e.g. image was rebuilt and deps
+    // are gone), log a warning — the user will need to reinstall from Settings.
+    let works = docker_command()
+        .args(["exec", container, "/data/playwright/chrome", "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if works {
+        println!("[Entropic] Patchright browser verified OK");
+    } else {
+        println!("[Entropic] Patchright browser binary exists but system deps missing; reinstall from Settings");
+    }
 }
 
 fn ensure_qmd_runtime_dependencies() -> Result<(), String> {
@@ -5913,6 +5972,10 @@ fn current_millis() -> u128 {
 }
 
 fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    // Restore /usr/bin/chromium symlink if browser was previously installed
+    // but the container was recreated (symlink lives in container layer, not volume).
+    ensure_patchright_symlink();
+
     let settings = load_agent_settings(app);
     let installed_skill_paths = collect_workspace_skill_paths().unwrap_or_default();
     let installed_workspace_skill_ids: Vec<String> = installed_skill_paths
@@ -8512,6 +8575,7 @@ pub fn init_state(app: &AppHandle) -> AppState {
     let stored = load_auth(app);
     AppState {
         setup_progress: Mutex::new(SetupProgress::default()),
+        browser_install_progress: Mutex::new(BrowserInstallProgress::default()),
         api_keys: Mutex::new(stored.keys.clone()),
         active_provider: Mutex::new(stored.active_provider.clone()),
         whatsapp_login: Mutex::new(WhatsAppLoginCache::default()),
@@ -12455,6 +12519,196 @@ pub async fn scan_and_install_clawhub_skill(
 pub async fn get_setup_progress(state: State<'_, AppState>) -> Result<SetupProgress, String> {
     let progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
     Ok(progress.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Patchright browser install / uninstall
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn check_patchright_installed() -> Result<bool, String> {
+    let container = match running_gateway_container_name() {
+        Some(c) => c,
+        None => return Ok(false),
+    };
+    // Verify the browser binary exists on the persistent volume AND runs
+    // (system deps must be present in the image for it to execute).
+    let installed = docker_command()
+        .args(["exec", container, "/data/playwright/chrome", "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    Ok(installed)
+}
+
+#[tauri::command]
+pub async fn get_browser_install_progress(
+    state: State<'_, AppState>,
+) -> Result<BrowserInstallProgress, String> {
+    let progress = state
+        .browser_install_progress
+        .lock()
+        .map_err(|e| e.to_string())?;
+    Ok(progress.clone())
+}
+
+#[tauri::command]
+pub async fn install_patchright_browser(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "Gateway container is not running. Start gateway first.".to_string())?;
+
+    // Helper to update progress
+    macro_rules! set_progress {
+        ($state:expr, $stage:expr, $msg:expr, $pct:expr) => {
+            if let Ok(mut p) = $state.browser_install_progress.lock() {
+                *p = BrowserInstallProgress {
+                    stage: $stage.to_string(),
+                    message: $msg.to_string(),
+                    percent: $pct,
+                    complete: false,
+                    error: None,
+                };
+            }
+        };
+    }
+    macro_rules! set_error {
+        ($state:expr, $msg:expr) => {
+            if let Ok(mut p) = $state.browser_install_progress.lock() {
+                *p = BrowserInstallProgress {
+                    stage: "error".to_string(),
+                    message: $msg.to_string(),
+                    percent: 0,
+                    complete: false,
+                    error: Some($msg.to_string()),
+                };
+            }
+        };
+    }
+
+    // Step 1: Download and install patchright's chromium
+    set_progress!(state, "downloading", "Downloading Chromium browser...", 10);
+
+    let install_script = r#"
+set -e
+export PLAYWRIGHT_BROWSERS_PATH=/data/playwright
+export HOME=/data
+export npm_config_cache=/data/.npm
+npx patchright@latest install chromium
+"#;
+
+    let output = docker_command()
+        .args(["exec", &container, "sh", "-c", install_script])
+        .output()
+        .map_err(|e| {
+            let msg = format!("Failed to run install: {}", e);
+            set_error!(state, &msg);
+            msg
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let err_msg = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else {
+            stdout.trim().to_string()
+        };
+        let msg = format!("Browser download failed: {}", err_msg);
+        set_error!(state, &msg);
+        return Err(msg);
+    }
+
+    // Step 2: Locate the installed chrome binary and create a convenience symlink
+    set_progress!(state, "configuring", "Configuring browser paths...", 75);
+
+    let link_script = r#"
+CHROME_BIN=$(find /data/playwright -name chrome -type f -path "*/chrome-linux/chrome" 2>/dev/null | head -1)
+if [ -z "$CHROME_BIN" ]; then
+    CHROME_BIN=$(find /data/playwright -name chrome -type f 2>/dev/null | head -1)
+fi
+if [ -z "$CHROME_BIN" ]; then
+    echo "ERROR: chrome binary not found after install" >&2
+    exit 1
+fi
+ln -sfn "$CHROME_BIN" /data/playwright/chrome
+echo "$CHROME_BIN"
+"#;
+
+    let link_output = docker_command()
+        .args(["exec", container, "sh", "-c", link_script])
+        .output()
+        .map_err(|e| {
+            let msg = format!("Failed to create chrome link: {}", e);
+            set_error!(state, &msg);
+            msg
+        })?;
+
+    if !link_output.status.success() {
+        let err = String::from_utf8_lossy(&link_output.stderr).trim().to_string();
+        let msg = format!("Failed to configure browser: {}", err);
+        set_error!(state, &msg);
+        return Err(msg);
+    }
+
+    // Step 3: Verify — use the data-volume chrome binary directly
+    // (no /usr/bin/chromium symlink needed; the patchright library finds
+    // the browser via PLAYWRIGHT_BROWSERS_PATH)
+    set_progress!(state, "verifying", "Verifying browser installation...", 90);
+
+    let verify = docker_command()
+        .args(["exec", container, "/data/playwright/chrome", "--version"])
+        .output()
+        .map_err(|e| {
+            let msg = format!("Failed to verify chromium: {}", e);
+            set_error!(state, &msg);
+            msg
+        })?;
+
+    if !verify.status.success() {
+        let err = String::from_utf8_lossy(&verify.stderr).trim().to_string();
+        let msg = format!("Browser verification failed: {}", err);
+        set_error!(state, &msg);
+        return Err(msg);
+    }
+
+    let version = String::from_utf8_lossy(&verify.stdout).trim().to_string();
+    println!("[Entropic] Patchright browser installed: {}", version);
+
+    // Complete
+    if let Ok(mut p) = state.browser_install_progress.lock() {
+        *p = BrowserInstallProgress {
+            stage: "complete".to_string(),
+            message: format!("Browser installed: {}", version),
+            percent: 100,
+            complete: true,
+            error: None,
+        };
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn uninstall_patchright_browser() -> Result<(), String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "Gateway container is not running.".to_string())?;
+
+    // Remove browser files from persistent volume
+    let cleanup_script = "rm -rf /data/playwright/chromium-* /data/playwright/chromium_headless_shell-* /data/playwright/ffmpeg-* /data/playwright/chrome";
+    let output = docker_command()
+        .args(["exec", container, "sh", "-c", cleanup_script])
+        .output()
+        .map_err(|e| format!("Failed to remove browser: {}", e))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!("Failed to clean browser files: {}", err));
+    }
+
+    println!("[Entropic] Patchright browser uninstalled");
+    Ok(())
 }
 
 async fn run_first_time_setup_internal(

@@ -13,41 +13,41 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     sqlite3 \
     unzip \
-    # Headless Chromium runtime dependencies (patchright)
+    # Shared libraries required by patchright's patched Chromium binary.
+    # Matches Playwright's debian12-x64 chromium dependency list from nativeDeps.ts.
+    # The binary itself is downloaded on-demand via Settings > Install.
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
+    libatspi2.0-0 \
+    libcairo2 \
     libcups2 \
     libdbus-1-3 \
     libdrm2 \
     libgbm1 \
     libglib2.0-0 \
-    libgtk-3-0 \
     libnspr4 \
     libnss3 \
     libpango-1.0-0 \
     libx11-6 \
+    libxcb1 \
     libxcomposite1 \
     libxdamage1 \
     libxext6 \
     libxfixes3 \
     libxkbcommon0 \
     libxrandr2 \
-    fonts-liberation \
-    fonts-noto-color-emoji \
-    # Additional fonts for realistic browser fingerprint
-    fonts-noto-core \
-    fonts-dejavu-core \
-    fonts-freefont-ttf \
-    fonts-roboto \
-    # Video codec libraries (h264 support for Chromium)
-    libavcodec59 \
-    libavformat59 \
-    libavutil57 \
+    # Font libraries
+    libfontconfig1 \
+    libfreetype6 \
+    # Virtual framebuffer + VNC for headed browser mode
     xvfb \
     x11vnc \
     novnc \
-    websockify && \
+    websockify \
+    # Fonts for realistic browser fingerprint
+    fonts-liberation \
+    fonts-noto-color-emoji && \
     rm -rf /var/lib/apt/lists/* && \
     # Make `python` resolve to python3 so skills can call either name
     ln -sfn /usr/bin/python3 /usr/local/bin/python && \
@@ -55,16 +55,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ln -sfn /data/qmd-models /home/node/.cache/qmd/models && \
     chown -R node:node /data /home/node/.openclaw /home/node/.bun /home/node/.cache
 
-# Install patchright's patched Chromium:
-# 1. Symlink to /usr/bin/chromium (OpenClaw's findChromeExecutableLinux() searches there)
-# 2. Copy browsers to /opt/patchright-browsers/ so entrypoint can symlink into
-#    PLAYWRIGHT_BROWSERS_PATH (/data/playwright/) for patchright's chromium.launch()
-RUN npx patchright@latest install chromium && \
-    cp -a /root/.cache/ms-playwright /opt/patchright-browsers && \
-    chmod -R a+rX /opt/patchright-browsers && \
-    CHROME_BIN=$(find /opt/patchright-browsers -name 'chrome' -type f | head -1) && \
-    if [ -n "$CHROME_BIN" ]; then ln -sfn "$CHROME_BIN" /usr/bin/chromium; fi && \
-    rm -rf /root/.cache/ms-playwright /tmp/.npm /tmp/patchright-*
+# Patchright's patched Chromium binary is downloaded on-demand to
+# /data/playwright/ (persistent volume) when the user clicks Install
+# in the app's Settings UI. The shared libs above provide the runtime
+# dependencies the patched binary needs.
 
 ENV BUN_INSTALL=/data/.bun
 # Python user installs land in /data/.local so they survive container restarts

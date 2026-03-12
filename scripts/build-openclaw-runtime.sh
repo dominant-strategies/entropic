@@ -446,3 +446,19 @@ run_docker build \
 echo ""
 echo "=== OpenClaw runtime image built: openclaw-runtime:latest ==="
 run_docker images openclaw-runtime:latest
+
+# Export the image as a bundled tar so the Tauri app uses it on next startup.
+# In dev mode this goes to target/debug/resources/; in prod to src-tauri/resources/.
+if [ "$ENTROPIC_RUNTIME_MODE" = "dev" ]; then
+    TAR_DEST="$PROJECT_ROOT/src-tauri/target/debug/resources/openclaw-runtime.tar.gz"
+else
+    TAR_DEST="$PROJECT_ROOT/src-tauri/resources/openclaw-runtime.tar.gz"
+fi
+
+if [ -d "$(dirname "$TAR_DEST")" ]; then
+    echo "Exporting runtime image to $TAR_DEST ..."
+    run_docker save openclaw-runtime:latest | gzip > "$TAR_DEST"
+    echo "Bundled tar updated ($(du -h "$TAR_DEST" | cut -f1))."
+else
+    echo "Skipping tar export ($(dirname "$TAR_DEST") does not exist yet)."
+fi
