@@ -1,6 +1,6 @@
 {
   "name": "entropic",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "OpenClaw Desktop - AI assistant with secure sandboxing",
   "type": "module",
   "scripts": {
