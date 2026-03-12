@@ -13,7 +13,11 @@ import {
   type AgentProfile,
 } from "../lib/profile";
 import { useAuth } from "../contexts/AuthContext";
-import { ModelSelector } from "../components/ModelSelector";
+import {
+  LOCAL_IMAGE_GENERATION_MODELS,
+  ModelSelector,
+  PROXY_IMAGE_GENERATION_MODELS,
+} from "../components/ModelSelector";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
 import { getProxyUrl, signOut as authSignOut } from "../lib/auth";
 import { disconnectIntegration, resetIntegrationState } from "../lib/integrations";
@@ -26,8 +30,6 @@ import {
   type DiagnosticLogEntry,
   type DiagnosticLogType,
 } from "../lib/diagnostics";
-import { PROXY_IMAGE_GENERATION_MODELS } from "../components/ModelSelector";
-
 type Props = {
   gatewayRunning: boolean;
   onGatewayToggle: () => void;
@@ -244,6 +246,10 @@ export function Settings({
   const [oauthError, setOauthError] = useState<string | null>(null);
   const [authState, setAuthState] = useState<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>({ providers: [] });
   const connectedProviders = authState.providers.filter(p => p.has_key).map(p => p.id);
+  const localImageGenerationProviders: string[] = connectedProviders.filter(
+    (provider) => provider === "google" || provider === "openai",
+  );
+  const localImageGenerationProviderKey = localImageGenerationProviders.join(",");
   // Anthropic OAuth code-paste state
   const [anthropicCodePending, setAnthropicCodePending] = useState(false);
   const [anthropicCodeInput, setAnthropicCodeInput] = useState("");
@@ -473,6 +479,33 @@ export function Settings({
       cancelDeferred();
     };
   }, []);
+
+  useEffect(() => {
+    if (!useLocalKeys || authMetaLoading || localImageGenerationProviders.length === 0) {
+      return;
+    }
+    const allowedModelIds = new Set(
+      LOCAL_IMAGE_GENERATION_MODELS
+        .filter((model) => localImageGenerationProviders.includes(model.provider.toLowerCase()))
+        .map((model) => model.id),
+    );
+    if (allowedModelIds.has(imageGenerationModel)) {
+      return;
+    }
+    const nextModel = LOCAL_IMAGE_GENERATION_MODELS.find((model) =>
+      localImageGenerationProviders.includes(model.provider.toLowerCase()),
+    )?.id;
+    if (!nextModel || nextModel === imageGenerationModel) {
+      return;
+    }
+    void Promise.resolve(onImageGenerationModelChange(nextModel));
+  }, [
+    authMetaLoading,
+    imageGenerationModel,
+    localImageGenerationProviderKey,
+    onImageGenerationModelChange,
+    useLocalKeys,
+  ]);
 
   useEffect(() => {
     if (!isMacOS || !gatewayRunning) {
@@ -1163,10 +1196,37 @@ export function Settings({
               </SettingsRow>
             </>
           )}
-          {useLocalKeys && (
+          {useLocalKeys && authMetaLoading && (
+            <div className="px-4 py-3">
+              <SettingsLoadingHint label="Loading local image-generation providers…" />
+            </div>
+          )}
+          {useLocalKeys && !authMetaLoading && localImageGenerationProviders.length > 0 && (
+            <>
+              <SettingsRow
+                label="Image Generation Model"
+                icon={Sparkles}
+                description="Used for Image mode in Chat and generated images."
+              >
+                <div className="w-80">
+                  <ModelSelector
+                    selectedModel={imageGenerationModel}
+                    onModelChange={onImageGenerationModelChange}
+                    models={LOCAL_IMAGE_GENERATION_MODELS}
+                    connectedProviders={localImageGenerationProviders}
+                  />
+                </div>
+              </SettingsRow>
+              <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
+                Local image generation supports OpenAI and Google keys. Anthropic local keys accept
+                image input, but do not generate image output.
+              </div>
+            </>
+          )}
+          {useLocalKeys && !authMetaLoading && localImageGenerationProviders.length === 0 && (
             <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
-              Image generation is proxy/OpenRouter-only right now. Local Anthropic keys will not
-              generate images, and direct OpenAI/Google image generation is not wired yet.
+              Connect an OpenAI or Google API key to use local image generation. Anthropic local
+              keys accept image input, but do not generate image output.
             </div>
           )}
         </SettingsGroup>
