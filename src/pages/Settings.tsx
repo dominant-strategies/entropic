@@ -161,6 +161,15 @@ function SettingsRow({
   );
 }
 
+function SettingsLoadingHint({ label, className = "" }: { label: string; className?: string }) {
+  return (
+    <div className={clsx("inline-flex items-center gap-2 text-xs text-[var(--text-secondary)]", className)}>
+      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      <span>{label}</span>
+    </div>
+  );
+}
+
 function formatBytes(value?: number | null) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "—";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -251,6 +260,10 @@ export function Settings({
   const [runtimeVersionLoading, setRuntimeVersionLoading] = useState(false);
   const [authMetaLoading, setAuthMetaLoading] = useState(false);
   const [runtimeFetchLoading, setRuntimeFetchLoading] = useState(false);
+  const [profileInfoLoading, setProfileInfoLoading] = useState(true);
+  const [agentProfileLoading, setAgentProfileLoading] = useState(true);
+  const [wallpaperStateLoading, setWallpaperStateLoading] = useState(true);
+  const [runtimeUsageLoading, setRuntimeUsageLoading] = useState(false);
   const appliedRuntimeDigest =
     runtimeVersionInfo?.applied_runtime_image_id
       ?.replace(/^sha256:/, "")
@@ -262,6 +275,7 @@ export function Settings({
   const profileAvatarDataUrl = isRenderableAvatarDataUrl(profile.avatarDataUrl)
     ? profile.avatarDataUrl.trim()
     : undefined;
+  const profileStateLoading = profileInfoLoading || agentProfileLoading;
   const isMacOS =
     typeof document !== "undefined" &&
     document.documentElement.classList.contains("platform-macos");
@@ -325,13 +339,22 @@ export function Settings({
   useEffect(() => {
     let cancelled = false;
     const cancelDeferred = scheduleDeferredSettingsWork(() => {
+      setProfileInfoLoading(true);
+      setAgentProfileLoading(true);
+      setWallpaperStateLoading(true);
+
       void loadProfile()
         .then((value) => {
           if (!cancelled) {
             setProfile(value);
           }
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) {
+            setProfileInfoLoading(false);
+          }
+        });
 
       void invoke<AgentProfileState>("get_agent_profile_state")
         .then((state) => {
@@ -375,7 +398,12 @@ export function Settings({
             });
           }
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) {
+            setAgentProfileLoading(false);
+          }
+        });
 
       void Store.load("entropic-settings.json")
         .then(async (store) => {
@@ -385,7 +413,12 @@ export function Settings({
           if (wp) setWallpaperId(wp);
           if (cwp) setCustomWallpaper(cwp);
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) {
+            setWallpaperStateLoading(false);
+          }
+        });
     });
 
     return () => {
@@ -446,6 +479,7 @@ export function Settings({
     let intervalId: number | null = null;
 
     const refreshRuntimeUsage = () => {
+      setRuntimeUsageLoading(true);
       void invoke<RuntimeResourceUsage>("get_runtime_resource_usage")
         .then((usage) => {
           if (cancelled) return;
@@ -456,6 +490,11 @@ export function Settings({
           if (cancelled) return;
           console.error("[Entropic] Failed to load runtime resource usage:", error);
           setRuntimeResourceUsageError("Unable to read live sandbox usage right now.");
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setRuntimeUsageLoading(false);
+          }
         });
     };
 
@@ -842,12 +881,9 @@ export function Settings({
     <div className="max-w-3xl mx-auto py-8 px-4">
       <div className="mb-8 px-1">
         <h1 className="text-2xl font-bold">Settings</h1>
-        {runtimeVersionLoading || authMetaLoading ? (
-          <div className="mt-2 inline-flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            Loading runtime and account details…
-          </div>
-        ) : null}
+        <div className="mt-2 text-xs text-[var(--text-secondary)]">
+          Settings opens immediately now. Slower runtime and account checks load in place below.
+        </div>
       </div>
 
       {gatewayConfigInvalid && (
@@ -889,6 +925,11 @@ export function Settings({
       )}
 
       <SettingsGroup title="Profile">
+        {profileStateLoading && (
+          <div className="px-4 pt-4">
+            <SettingsLoadingHint label="Loading profile and sandbox identity…" />
+          </div>
+        )}
         <div className="p-4 flex items-start gap-6">
           <div className="relative group cursor-pointer flex-shrink-0">
             <div className="w-20 h-20 rounded-full bg-[var(--system-gray-5)] overflow-hidden shadow-sm">
@@ -1022,6 +1063,11 @@ export function Settings({
       </SettingsGroup>
 
       <SettingsGroup title="Appearance">
+        {wallpaperStateLoading && (
+          <div className="px-4 pt-4">
+            <SettingsLoadingHint label="Loading wallpaper settings…" />
+          </div>
+        )}
         <SettingsRow
           label="Theme"
           icon={themeMode === "dark" ? Moon : themeMode === "light" ? Sun : Monitor}
@@ -1120,6 +1166,16 @@ export function Settings({
       </div>
 
       <SettingsGroup title="System">
+        {(runtimeUsageLoading || gatewayConfigLoading) && (
+          <div className="px-4 pt-4 flex flex-wrap gap-4">
+            {runtimeUsageLoading && (
+              <SettingsLoadingHint label="Loading live sandbox resource usage…" />
+            )}
+            {gatewayConfigLoading && (
+              <SettingsLoadingHint label="Checking gateway config health…" />
+            )}
+          </div>
+        )}
         <SettingsRow label="Gateway Status" icon={Shield} description={gatewayRunning ? "Running on localhost:19789" : "Secure sandbox stopped"}>
           <button 
             onClick={onGatewayToggle} 
@@ -1180,12 +1236,16 @@ export function Settings({
             </div>
             <div className="px-4 pb-4">
               <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-2">
-                <div className="grid grid-cols-4 gap-3 text-[12px] text-[var(--text-secondary)]">
-                  <div className="flex items-center font-medium">{runtimeResourceUsage?.running ? "Current Usage" : "Usage"}</div>
-                  <div><div className="text-[var(--text-tertiary)]">CPU</div><div className="font-medium text-[var(--text-primary)]">{liveCpuText}</div></div>
-                  <div><div className="text-[var(--text-tertiary)]">RAM</div><div className="font-medium text-[var(--text-primary)]">{liveMemoryText}</div></div>
-                  <div><div className="text-[var(--text-tertiary)]">Disk</div><div className="font-medium text-[var(--text-primary)]">{liveDiskText}</div></div>
-                </div>
+                {runtimeUsageLoading && !runtimeResourceUsage ? (
+                  <SettingsLoadingHint label="Loading live sandbox usage…" />
+                ) : (
+                  <div className="grid grid-cols-4 gap-3 text-[12px] text-[var(--text-secondary)]">
+                    <div className="flex items-center font-medium">{runtimeResourceUsage?.running ? "Current Usage" : "Usage"}</div>
+                    <div><div className="text-[var(--text-tertiary)]">CPU</div><div className="font-medium text-[var(--text-primary)]">{liveCpuText}</div></div>
+                    <div><div className="text-[var(--text-tertiary)]">RAM</div><div className="font-medium text-[var(--text-primary)]">{liveMemoryText}</div></div>
+                    <div><div className="text-[var(--text-tertiary)]">Disk</div><div className="font-medium text-[var(--text-primary)]">{liveDiskText}</div></div>
+                  </div>
+                )}
               </div>
             </div>
             {runtimeResourceError && (
@@ -1265,7 +1325,11 @@ export function Settings({
         <SettingsRow
           label="Gateway Config Health"
           icon={AlertTriangle}
-          description={gatewayConfigHealth?.summary || "Check gateway config validity"}
+          description={
+            gatewayConfigLoading
+              ? "Checking gateway config validity…"
+              : gatewayConfigHealth?.summary || "Check gateway config validity"
+          }
         >
           <div className="flex items-center gap-2">
             <button
@@ -1295,6 +1359,11 @@ export function Settings({
       </SettingsGroup>
 
       <SettingsGroup title="Keys">
+        {authMetaLoading && (
+          <div className="px-4 pt-4">
+            <SettingsLoadingHint label="Loading auth and provider status…" />
+          </div>
+        )}
         <SettingsRow
           label="Use Local Keys"
           icon={Key}
@@ -1594,6 +1663,9 @@ export function Settings({
               <div className="text-[12px] text-[var(--text-secondary)] mb-3">
                 Refresh the runtime manifest and cache the newest OpenClaw runtime tar for faster startup and updates.
               </div>
+              {runtimeVersionLoading && (
+                <SettingsLoadingHint label="Loading runtime asset metadata…" className="mb-3" />
+              )}
               {(runtimeVersionInfo?.runtime_download_asset_name || runtimeVersionInfo?.runtime_download_size_bytes != null) && (
                 <div className="text-[11px] text-[var(--text-tertiary)] mb-3">
                   Selected asset: {runtimeVersionInfo?.runtime_download_asset_name ?? "unknown"}
