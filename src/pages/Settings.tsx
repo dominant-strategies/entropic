@@ -174,6 +174,24 @@ function formatBytes(value?: number | null) {
   return `${next.toFixed(digits)} ${units[unitIndex]}`;
 }
 
+function scheduleDeferredSettingsWork(work: () => void, delayMs = 0) {
+  let rafId: number | null = null;
+  let timeoutId: number | null = null;
+
+  rafId = window.requestAnimationFrame(() => {
+    timeoutId = window.setTimeout(work, delayMs);
+  });
+
+  return () => {
+    if (rafId !== null) {
+      window.cancelAnimationFrame(rafId);
+    }
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+  };
+}
+
 export function Settings({
   gatewayRunning,
   onGatewayToggle,
@@ -190,7 +208,6 @@ export function Settings({
   onImageGenerationModelChange,
   onImageModelChange,
 }: Props) {
-  console.log("[Settings] Component rendering");
   const { isAuthenticated, isAuthConfigured, user, signOut } = useAuth();
   const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
   const [apiKeys, setApiKeys] = useState({ anthropic: "", openai: "", google: "" });
@@ -306,59 +323,79 @@ export function Settings({
 
   // Load initial state
   useEffect(() => {
-    loadProfile().then(setProfile).catch(() => {});
-    invoke<AgentProfileState>("get_agent_profile_state").then((state) => {
-      setSoul(state.soul || "");
-      setMemorySessionIndexing(Boolean(state.memory_sessions_enabled));
-      setMemoryEnabled(state.memory_enabled ?? true);
-      setMemoryQmdEnabled(Boolean(state.memory_qmd_enabled));
-      const nextRuntimeCpu = Math.min(16, Math.max(1, state.runtime_cpu ?? 2));
-      const nextRuntimeMemoryGb = Math.min(64, Math.max(2, state.runtime_memory_gb ?? 4));
-      const nextRuntimeDiskGb = Math.min(500, Math.max(20, state.runtime_disk_gb ?? 20));
-      setRuntimeCpu(nextRuntimeCpu);
-      setRuntimeMemoryGb(nextRuntimeMemoryGb);
-      setRuntimeDiskGb(nextRuntimeDiskGb);
-      setRuntimeResourceBaseline({
-        cpu: nextRuntimeCpu,
-        memoryGb: nextRuntimeMemoryGb,
-        diskGb: nextRuntimeDiskGb,
-      });
-      const hasIdentityName = Object.prototype.hasOwnProperty.call(state, "identity_name");
-      const hasIdentityAvatar = Object.prototype.hasOwnProperty.call(state, "identity_avatar");
-      if (hasIdentityName || hasIdentityAvatar) {
-        setProfile((prev) => {
-          const next: AgentProfile = {
-            name:
-              hasIdentityName && typeof state.identity_name === "string" && state.identity_name.trim()
-                ? sanitizeProfileName(state.identity_name)
-                : prev.name,
-            avatarDataUrl: hasIdentityAvatar
-              ? isRenderableAvatarDataUrl(state.identity_avatar)
-                ? state.identity_avatar.trim()
-                : undefined
-              : prev.avatarDataUrl,
-          };
-          if (next.name !== prev.name || next.avatarDataUrl !== prev.avatarDataUrl) {
-            saveProfile(next)
-              .then(() => window.dispatchEvent(new Event("entropic-profile-updated")))
-              .catch(() => {});
+    let cancelled = false;
+    const cancelDeferred = scheduleDeferredSettingsWork(() => {
+      void loadProfile()
+        .then((value) => {
+          if (!cancelled) {
+            setProfile(value);
           }
-          return next;
-        });
-      }
-    }).catch(() => {});
-    Store.load("entropic-settings.json").then(async (store) => {
-      const wp = (await store.get("desktopWallpaper")) as string | null;
-      if (wp) setWallpaperId(wp);
-      const cwp = (await store.get("desktopCustomWallpaper")) as string | null;
-      if (cwp) setCustomWallpaper(cwp);
-    }).catch(() => {});
+        })
+        .catch(() => {});
+
+      void invoke<AgentProfileState>("get_agent_profile_state")
+        .then((state) => {
+          if (cancelled) return;
+          setSoul(state.soul || "");
+          setMemorySessionIndexing(Boolean(state.memory_sessions_enabled));
+          setMemoryEnabled(state.memory_enabled ?? true);
+          setMemoryQmdEnabled(Boolean(state.memory_qmd_enabled));
+          const nextRuntimeCpu = Math.min(16, Math.max(1, state.runtime_cpu ?? 2));
+          const nextRuntimeMemoryGb = Math.min(64, Math.max(2, state.runtime_memory_gb ?? 4));
+          const nextRuntimeDiskGb = Math.min(500, Math.max(20, state.runtime_disk_gb ?? 20));
+          setRuntimeCpu(nextRuntimeCpu);
+          setRuntimeMemoryGb(nextRuntimeMemoryGb);
+          setRuntimeDiskGb(nextRuntimeDiskGb);
+          setRuntimeResourceBaseline({
+            cpu: nextRuntimeCpu,
+            memoryGb: nextRuntimeMemoryGb,
+            diskGb: nextRuntimeDiskGb,
+          });
+          const hasIdentityName = Object.prototype.hasOwnProperty.call(state, "identity_name");
+          const hasIdentityAvatar = Object.prototype.hasOwnProperty.call(state, "identity_avatar");
+          if (hasIdentityName || hasIdentityAvatar) {
+            setProfile((prev) => {
+              const next: AgentProfile = {
+                name:
+                  hasIdentityName && typeof state.identity_name === "string" && state.identity_name.trim()
+                    ? sanitizeProfileName(state.identity_name)
+                    : prev.name,
+                avatarDataUrl: hasIdentityAvatar
+                  ? isRenderableAvatarDataUrl(state.identity_avatar)
+                    ? state.identity_avatar.trim()
+                    : undefined
+                  : prev.avatarDataUrl,
+              };
+              if (next.name !== prev.name || next.avatarDataUrl !== prev.avatarDataUrl) {
+                saveProfile(next)
+                  .then(() => window.dispatchEvent(new Event("entropic-profile-updated")))
+                  .catch(() => {});
+              }
+              return next;
+            });
+          }
+        })
+        .catch(() => {});
+
+      void Store.load("entropic-settings.json")
+        .then(async (store) => {
+          const wp = (await store.get("desktopWallpaper")) as string | null;
+          const cwp = (await store.get("desktopCustomWallpaper")) as string | null;
+          if (cancelled) return;
+          if (wp) setWallpaperId(wp);
+          if (cwp) setCustomWallpaper(cwp);
+        })
+        .catch(() => {});
+    });
+
+    return () => {
+      cancelled = true;
+      cancelDeferred();
+    };
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-    let rafId: number | null = null;
-    let timeoutId: number | null = null;
 
     const loadDeferredSettingsData = () => {
       setRuntimeVersionLoading(true);
@@ -396,18 +433,11 @@ export function Settings({
       });
     };
 
-    rafId = window.requestAnimationFrame(() => {
-      timeoutId = window.setTimeout(loadDeferredSettingsData, 0);
-    });
+    const cancelDeferred = scheduleDeferredSettingsWork(loadDeferredSettingsData);
 
     return () => {
       cancelled = true;
-      if (rafId !== null) {
-        window.cancelAnimationFrame(rafId);
-      }
-      if (timeoutId !== null) {
-        window.clearTimeout(timeoutId);
-      }
+      cancelDeferred();
     };
   }, []);
 
@@ -429,11 +459,15 @@ export function Settings({
         });
     };
 
-    refreshRuntimeUsage();
-    intervalId = window.setInterval(refreshRuntimeUsage, 5000);
+    const cancelDeferred = scheduleDeferredSettingsWork(() => {
+      if (cancelled) return;
+      refreshRuntimeUsage();
+      intervalId = window.setInterval(refreshRuntimeUsage, 5000);
+    }, 180);
 
     return () => {
       cancelled = true;
+      cancelDeferred();
       if (intervalId !== null) {
         window.clearInterval(intervalId);
       }
@@ -447,7 +481,15 @@ export function Settings({
       setGatewayConfigNotice(null);
       return;
     }
-    void refreshGatewayConfigHealth();
+    let cancelled = false;
+    const cancelDeferred = scheduleDeferredSettingsWork(() => {
+      if (cancelled) return;
+      void refreshGatewayConfigHealth();
+    }, 300);
+    return () => {
+      cancelled = true;
+      cancelDeferred();
+    };
   }, [gatewayRunning]);
 
   async function saveWallpaper(id: string, custom?: string | null) {
