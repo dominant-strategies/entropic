@@ -616,8 +616,9 @@ export function Settings({
     let cancelled = false;
     let intervalId: number | null = null;
 
+    let isFirstLoad = true;
     const refreshRuntimeUsage = () => {
-      setRuntimeUsageLoading(true);
+      if (isFirstLoad) setRuntimeUsageLoading(true);
       void invoke<RuntimeResourceUsage>("get_runtime_resource_usage")
         .then((usage) => {
           if (cancelled) return;
@@ -631,6 +632,7 @@ export function Settings({
         })
         .finally(() => {
           if (!cancelled) {
+            isFirstLoad = false;
             setRuntimeUsageLoading(false);
           }
         });
@@ -1052,11 +1054,6 @@ export function Settings({
       )}
 
       <SettingsGroup title="Profile">
-        {profileStateLoading && (
-          <div className="px-4 pt-4">
-            <SettingsLoadingHint label="Loading profile and sandbox identity…" />
-          </div>
-        )}
         <div className="p-4 flex items-start gap-6">
           <div className="relative group cursor-pointer flex-shrink-0">
             <div className="w-20 h-20 rounded-full bg-[var(--system-gray-5)] overflow-hidden shadow-sm">
@@ -1190,11 +1187,6 @@ export function Settings({
       </SettingsGroup>
 
       <SettingsGroup title="Appearance">
-        {wallpaperStateLoading && (
-          <div className="px-4 pt-4">
-            <SettingsLoadingHint label="Loading wallpaper settings…" />
-          </div>
-        )}
         <SettingsRow
           label="Theme"
           icon={themeMode === "dark" ? Moon : themeMode === "light" ? Sun : Monitor}
@@ -1283,11 +1275,6 @@ export function Settings({
               </SettingsRow>
             </>
           )}
-          {useLocalKeys && authMetaLoading && (
-            <div className="px-4 py-3">
-              <SettingsLoadingHint label="Loading local image-generation providers…" />
-            </div>
-          )}
           {useLocalKeys && !authMetaLoading && localImageGenerationProviders.length > 0 && (
             <>
               <SettingsRow
@@ -1320,16 +1307,6 @@ export function Settings({
       </div>
 
       <SettingsGroup title="System">
-        {(runtimeUsageLoading || gatewayConfigLoading) && (
-          <div className="px-4 pt-4 flex flex-wrap gap-4">
-            {runtimeUsageLoading && (
-              <SettingsLoadingHint label="Loading live sandbox resource usage…" />
-            )}
-            {gatewayConfigLoading && (
-              <SettingsLoadingHint label="Checking gateway config health…" />
-            )}
-          </div>
-        )}
         <SettingsRow label="Gateway Status" icon={Shield} description={gatewayRunning ? "Running on localhost:19789" : "Secure sandbox stopped"}>
           <button 
             onClick={onGatewayToggle} 
@@ -1390,16 +1367,15 @@ export function Settings({
             </div>
             <div className="px-4 pb-4">
               <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-2">
-                {runtimeUsageLoading && !runtimeResourceUsage ? (
-                  <SettingsLoadingHint label="Loading live sandbox usage…" />
-                ) : (
-                  <div className="grid grid-cols-4 gap-3 text-[12px] text-[var(--text-secondary)]">
-                    <div className="flex items-center font-medium">{runtimeResourceUsage?.running ? "Current Usage" : "Usage"}</div>
-                    <div><div className="text-[var(--text-tertiary)]">CPU</div><div className="font-medium text-[var(--text-primary)]">{liveCpuText}</div></div>
-                    <div><div className="text-[var(--text-tertiary)]">RAM</div><div className="font-medium text-[var(--text-primary)]">{liveMemoryText}</div></div>
-                    <div><div className="text-[var(--text-tertiary)]">Disk</div><div className="font-medium text-[var(--text-primary)]">{liveDiskText}</div></div>
+                <div className="grid grid-cols-4 gap-3 text-[12px] text-[var(--text-secondary)]">
+                  <div className="flex items-center gap-1.5 font-medium">
+                    {runtimeResourceUsage?.running ? "Current Usage" : "Usage"}
+                    {runtimeUsageLoading && <Loader2 className="w-3 h-3 animate-spin text-[var(--text-tertiary)]" />}
                   </div>
-                )}
+                  <div><div className="text-[var(--text-tertiary)]">CPU</div><div className="font-medium text-[var(--text-primary)]">{liveCpuText}</div></div>
+                  <div><div className="text-[var(--text-tertiary)]">RAM</div><div className="font-medium text-[var(--text-primary)]">{liveMemoryText}</div></div>
+                  <div><div className="text-[var(--text-tertiary)]">Disk</div><div className="font-medium text-[var(--text-primary)]">{liveDiskText}</div></div>
+                </div>
               </div>
             </div>
             {runtimeResourceError && (
@@ -1513,11 +1489,6 @@ export function Settings({
       </SettingsGroup>
 
       <SettingsGroup title="Keys">
-        {authMetaLoading && (
-          <div className="px-4 pt-4">
-            <SettingsLoadingHint label="Loading auth and provider status…" />
-          </div>
-        )}
         <SettingsRow
           label="Use Local Keys"
           icon={Key}
@@ -1549,7 +1520,10 @@ export function Settings({
 
         {useLocalKeys && (
           <>
-            {/* Anthropic (Claude) OAuth */}
+            {/* ── Anthropic ── */}
+            <div className="px-4 pt-3 pb-1">
+              <span className="text-[11px] font-medium uppercase tracking-wider text-[var(--text-tertiary)]">Anthropic</span>
+            </div>
             {(() => {
               const isConnected = oauthStatus["anthropic"] === "claude_code";
               const providerAuth = authState.providers.find(p => p.id === "anthropic");
@@ -1560,7 +1534,7 @@ export function Settings({
               return (
                 <>
                   <SettingsRow
-                    label="Claude (OAuth)"
+                    label="OAuth"
                     icon={LogIn}
                     description={
                       isConnected && last4
@@ -1585,7 +1559,7 @@ export function Settings({
                     ) : anthropicCodePending ? (
                       <button
                         onClick={() => { setAnthropicCodePending(false); setAnthropicCodeInput(""); }}
-                        className="text-xs text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors"
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-[var(--text-tertiary)] hover:bg-[var(--system-gray-5)] transition-colors"
                       >
                         Cancel
                       </button>
@@ -1623,7 +1597,60 @@ export function Settings({
               );
             })()}
 
-            {/* OpenAI OAuth */}
+            {(() => {
+              const isConnected = oauthStatus["anthropic"] === "claude_code";
+              const providerAuth = authState.providers.find((p) => p.id === "anthropic");
+              const hasKey = providerAuth?.has_key ?? false;
+              const last4 = providerAuth?.last4;
+              const isSaving = localKeySavingProvider === "anthropic";
+
+              return (
+                <SettingsRow
+                  label="API Key"
+                  icon={Key}
+                  description={
+                    isConnected && last4
+                      ? `Connected via OAuth (...${last4})`
+                      : hasKey
+                        ? `Key set (...${last4 || "****"})`
+                        : "Paste an Anthropic API key, or sign in above"
+                  }
+                >
+                  <div className="flex w-full max-w-[360px] items-center gap-2">
+                    <input
+                      type="password"
+                      value={apiKeys.anthropic}
+                      onChange={(event) =>
+                        setApiKeys((prev) => ({ ...prev, anthropic: event.target.value }))
+                      }
+                      placeholder="sk-ant-..."
+                      className="flex-1 min-w-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--system-blue)]"
+                    />
+                    <button
+                      onClick={() => void saveLocalApiKey("anthropic")}
+                      disabled={isSaving || !apiKeys.anthropic.trim()}
+                      className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--system-blue)] text-white hover:bg-[var(--system-blue)]/90 disabled:opacity-40 transition-colors"
+                    >
+                      {isSaving ? "Saving..." : hasKey ? "Replace" : "Save Key"}
+                    </button>
+                    {hasKey && (
+                      <button
+                        onClick={() => void clearLocalApiKey("anthropic")}
+                        disabled={isSaving}
+                        className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 disabled:opacity-40 transition-colors"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </SettingsRow>
+              );
+            })()}
+
+            {/* ── OpenAI ── */}
+            <div className="px-4 pt-3 pb-1">
+              <span className="text-[11px] font-medium uppercase tracking-wider text-[var(--text-tertiary)]">OpenAI</span>
+            </div>
             {(() => {
               const isConnected = oauthStatus["openai"] === "openai_codex";
               const providerAuth = authState.providers.find(p => p.id === "openai");
@@ -1633,7 +1660,7 @@ export function Settings({
 
               return (
                 <SettingsRow
-                  label="OpenAI (OAuth)"
+                  label="OAuth"
                   icon={LogIn}
                   description={
                     isConnected && last4
@@ -1667,103 +1694,6 @@ export function Settings({
             })()}
 
             {(() => {
-              const providerAuth = authState.providers.find((p) => p.id === "google");
-              const hasKey = providerAuth?.has_key ?? false;
-              const last4 = providerAuth?.last4;
-              const isSaving = localKeySavingProvider === "google";
-
-              return (
-                <SettingsRow
-                  label="Google / Gemini (API Key)"
-                  icon={Key}
-                  description={
-                    hasKey
-                      ? `API key set (...${last4 || "****"})`
-                      : "Paste a Google AI Studio / Gemini API key"
-                  }
-                >
-                  <div className="flex w-[360px] items-center gap-2">
-                    <input
-                      type="password"
-                      value={apiKeys.google}
-                      onChange={(event) =>
-                        setApiKeys((prev) => ({ ...prev, google: event.target.value }))
-                      }
-                      placeholder="AIza..."
-                      className="flex-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--system-blue)]"
-                    />
-                    <button
-                      onClick={() => void saveLocalApiKey("google")}
-                      disabled={isSaving || !apiKeys.google.trim()}
-                      className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--system-blue)] text-white hover:bg-[var(--system-blue)]/90 disabled:opacity-40 transition-colors"
-                    >
-                      {isSaving ? "Saving..." : hasKey ? "Replace" : "Save Key"}
-                    </button>
-                    {hasKey && (
-                      <button
-                        onClick={() => void clearLocalApiKey("google")}
-                        disabled={isSaving}
-                        className="px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 disabled:opacity-40 transition-colors"
-                      >
-                        Clear
-                      </button>
-                    )}
-                  </div>
-                </SettingsRow>
-              );
-            })()}
-
-            {(() => {
-              const isConnected = oauthStatus["anthropic"] === "claude_code";
-              const providerAuth = authState.providers.find((p) => p.id === "anthropic");
-              const hasKey = providerAuth?.has_key ?? false;
-              const last4 = providerAuth?.last4;
-              const isSaving = localKeySavingProvider === "anthropic";
-
-              return (
-                <SettingsRow
-                  label="Anthropic (API Key)"
-                  icon={Key}
-                  description={
-                    isConnected && last4
-                      ? `Connected via OAuth (...${last4})`
-                      : hasKey
-                        ? `API key set (...${last4 || "****"})`
-                        : "Paste an Anthropic API key, or sign in above"
-                  }
-                >
-                  <div className="flex w-[360px] items-center gap-2">
-                    <input
-                      type="password"
-                      value={apiKeys.anthropic}
-                      onChange={(event) =>
-                        setApiKeys((prev) => ({ ...prev, anthropic: event.target.value }))
-                      }
-                      placeholder="sk-ant-..."
-                      className="flex-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--system-blue)]"
-                    />
-                    <button
-                      onClick={() => void saveLocalApiKey("anthropic")}
-                      disabled={isSaving || !apiKeys.anthropic.trim()}
-                      className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--system-blue)] text-white hover:bg-[var(--system-blue)]/90 disabled:opacity-40 transition-colors"
-                    >
-                      {isSaving ? "Saving..." : hasKey ? "Replace" : "Save Key"}
-                    </button>
-                    {hasKey && (
-                      <button
-                        onClick={() => void clearLocalApiKey("anthropic")}
-                        disabled={isSaving}
-                        className="px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 disabled:opacity-40 transition-colors"
-                      >
-                        Clear
-                      </button>
-                    )}
-                  </div>
-                </SettingsRow>
-              );
-            })()}
-
-            {(() => {
               const isConnected = oauthStatus["openai"] === "openai_codex";
               const providerAuth = authState.providers.find((p) => p.id === "openai");
               const hasKey = providerAuth?.has_key ?? false;
@@ -1772,17 +1702,17 @@ export function Settings({
 
               return (
                 <SettingsRow
-                  label="OpenAI (API Key)"
+                  label="API Key"
                   icon={Key}
                   description={
                     isConnected && last4
                       ? `Connected via OAuth (...${last4})`
                       : hasKey
-                        ? `API key set (...${last4 || "****"})`
+                        ? `Key set (...${last4 || "****"})`
                         : "Paste an OpenAI API key, or sign in above"
                   }
                 >
-                  <div className="flex w-[360px] items-center gap-2">
+                  <div className="flex w-full max-w-[360px] items-center gap-2">
                     <input
                       type="password"
                       value={apiKeys.openai}
@@ -1790,12 +1720,12 @@ export function Settings({
                         setApiKeys((prev) => ({ ...prev, openai: event.target.value }))
                       }
                       placeholder="sk-..."
-                      className="flex-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--system-blue)]"
+                      className="flex-1 min-w-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--system-blue)]"
                     />
                     <button
                       onClick={() => void saveLocalApiKey("openai")}
                       disabled={isSaving || !apiKeys.openai.trim()}
-                      className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--system-blue)] text-white hover:bg-[var(--system-blue)]/90 disabled:opacity-40 transition-colors"
+                      className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--system-blue)] text-white hover:bg-[var(--system-blue)]/90 disabled:opacity-40 transition-colors"
                     >
                       {isSaving ? "Saving..." : hasKey ? "Replace" : "Save Key"}
                     </button>
@@ -1803,7 +1733,7 @@ export function Settings({
                       <button
                         onClick={() => void clearLocalApiKey("openai")}
                         disabled={isSaving}
-                        className="px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 disabled:opacity-40 transition-colors"
+                        className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 disabled:opacity-40 transition-colors"
                       >
                         Clear
                       </button>
@@ -1813,14 +1743,63 @@ export function Settings({
               );
             })()}
 
-            {oauthError && (
-              <div className="px-4 pb-3 pt-1 text-xs text-red-500">{oauthError}</div>
-            )}
-            {localKeyError && (
-              <div className="px-4 pb-3 pt-1 text-xs text-red-500">{localKeyError}</div>
-            )}
-            {localKeyNotice && (
-              <div className="px-4 pb-3 pt-1 text-xs text-green-500">{localKeyNotice}</div>
+            {/* ── Google ── */}
+            <div className="px-4 pt-3 pb-1">
+              <span className="text-[11px] font-medium uppercase tracking-wider text-[var(--text-tertiary)]">Google</span>
+            </div>
+            {(() => {
+              const providerAuth = authState.providers.find((p) => p.id === "google");
+              const hasKey = providerAuth?.has_key ?? false;
+              const last4 = providerAuth?.last4;
+              const isSaving = localKeySavingProvider === "google";
+
+              return (
+                <SettingsRow
+                  label="API Key"
+                  icon={Key}
+                  description={
+                    hasKey
+                      ? `Key set (...${last4 || "****"})`
+                      : "Paste a Google AI Studio / Gemini API key"
+                  }
+                >
+                  <div className="flex w-full max-w-[360px] items-center gap-2">
+                    <input
+                      type="password"
+                      value={apiKeys.google}
+                      onChange={(event) =>
+                        setApiKeys((prev) => ({ ...prev, google: event.target.value }))
+                      }
+                      placeholder="AIza..."
+                      className="flex-1 min-w-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--system-blue)]"
+                    />
+                    <button
+                      onClick={() => void saveLocalApiKey("google")}
+                      disabled={isSaving || !apiKeys.google.trim()}
+                      className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--system-blue)] text-white hover:bg-[var(--system-blue)]/90 disabled:opacity-40 transition-colors"
+                    >
+                      {isSaving ? "Saving..." : hasKey ? "Replace" : "Save Key"}
+                    </button>
+                    {hasKey && (
+                      <button
+                        onClick={() => void clearLocalApiKey("google")}
+                        disabled={isSaving}
+                        className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 disabled:opacity-40 transition-colors"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </SettingsRow>
+              );
+            })()}
+
+            {(oauthError || localKeyError || localKeyNotice) && (
+              <div className="px-4 pb-3 pt-2 flex flex-col gap-1">
+                {oauthError && <div className="text-xs text-red-500">{oauthError}</div>}
+                {localKeyError && <div className="text-xs text-red-500">{localKeyError}</div>}
+                {localKeyNotice && <div className="text-xs text-green-500">{localKeyNotice}</div>}
+              </div>
             )}
           </>
         )}
