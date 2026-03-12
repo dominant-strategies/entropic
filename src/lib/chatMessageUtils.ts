@@ -242,6 +242,10 @@ export function sanitizeGatewayErrorMessage(raw?: string | null): string {
   const message = (raw || "").trim();
   if (!message) return "Chat error";
 
+  if (/session file path must be within sessions directory/i.test(message)) {
+    return "The conversation history path was invalid. Restart the sandbox and retry.";
+  }
+
   const providerMatches = [...message.matchAll(/No API key found for provider "([^"]+)"/g)];
   const providers = [...new Set(providerMatches.map((m) => m[1]).filter(Boolean))];
   if (providers.length > 0) {

@@ -7786,6 +7786,14 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         &["gateway", "controlUi", "dangerouslyDisableDeviceAuth"],
         serde_json::json!(true),
     );
+    remove_openclaw_config_value(
+        cfg,
+        &[
+            "gateway",
+            "controlUi",
+            "dangerouslyAllowHostHeaderOriginFallback",
+        ],
+    );
     // OpenClaw channel/plugin activation can require a restart rather than a
     // pure hot reload. Keep the safer upstream behavior explicit so Telegram
     // and similar channel changes are applied instead of being ignored.

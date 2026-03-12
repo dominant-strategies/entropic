@@ -179,6 +179,8 @@ const CHAT_WORKSPACE_PREFIXES = [
   "/home/node/.openclaw/workspace",
 ];
 const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/node\/\.openclaw\/workspace)(?:\/[^\s`"'<>]+)?)/g;
+const FINAL_RESPONSE_RECOVERY_RETRY_MS = 1200;
+const FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS = 2;
 
 function trimChatWorkspaceToken(raw: string): string {
   return raw
@@ -202,6 +204,38 @@ function normalizeChatWorkspacePath(raw: string): string | null {
 function workspacePathName(path: string): string {
   const parts = path.split("/").filter(Boolean);
   return parts[parts.length - 1] || "Workspace";
+}
+
+function isTransientGatewayConnectCloseMessage(raw?: string | null): boolean {
+  const message = (raw || "").trim();
+  if (!message) return false;
+  return /gateway socket closed during connect/i.test(message);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function buildNoVisibleResponseMessage(params: {
+  lastGatewayError?: string | null;
+  connected: boolean;
+}): string {
+  const lastGatewayError = params.lastGatewayError || "";
+  const normalized = sanitizeGatewayErrorMessage(lastGatewayError);
+  if (
+    /conversation history path was invalid/i.test(normalized) ||
+    /session file path must be within sessions directory/i.test(lastGatewayError)
+  ) {
+    return "The conversation history path was invalid. Restart the sandbox and retry.";
+  }
+  if (
+    !params.connected ||
+    isTransientGatewayConnectCloseMessage(lastGatewayError) ||
+    /connection lost while waiting for response/i.test(normalized)
+  ) {
+    return "The response was interrupted while the sandbox was reconnecting. Please retry.";
+  }
+  return "The assistant finished without a visible reply. Retry once; if it keeps happening, check Billing, auth, and network.";
 }
 
 function extractWorkspaceChatReferences(content: string): WorkspaceChatReference[] {
@@ -2124,9 +2158,11 @@ export function Chat({
       const onAgent = (event: AgentEvent) => handleAgentEvent(event);
       const onError = (err: string) => {
         const normalizedError = sanitizeGatewayErrorMessage(err);
+        const transientConnectClose = isTransientGatewayConnectCloseMessage(normalizedError);
         // Suppress errors during startup grace period (first 15 seconds after component mount)
         const inStartupGracePeriod = Date.now() - componentMountedAt < 15_000;
-        const suppressError = gatewayStarting || isConnecting || !gatewayRunning || inStartupGracePeriod;
+        const suppressError =
+          transientConnectClose || gatewayStarting || isConnecting || !gatewayRunning || inStartupGracePeriod;
         if (!client.isConnected()) {
           setConnected(false);
         }
@@ -2142,6 +2178,13 @@ export function Chat({
           setIsConnecting(false);
           setLastGatewayError(normalizedError);
           addDiag(`gateway error (auth rate-limited): ${normalizedError}`);
+          return;
+        }
+
+        if (transientConnectClose) {
+          setIsConnecting(false);
+          setLastGatewayError(null);
+          addDiag("gateway connect retry pending");
           return;
         }
 
@@ -2180,6 +2223,7 @@ export function Chat({
       } catch (e) {
         const inStartupGracePeriod = Date.now() - componentMountedAt < 15_000;
         const errorMessage = e instanceof Error ? e.message : "Connection failed";
+        const transientConnectClose = isTransientGatewayConnectCloseMessage(errorMessage);
         const suppressConnectDiag =
           gatewayStarting || !gatewayRunning || inStartupGracePeriod;
         if (isGatewayAuthRateLimited(errorMessage)) {
@@ -2187,16 +2231,18 @@ export function Chat({
             errorMessage,
             e instanceof GatewayError ? readGatewayRetryAfterMs(e.details) : null,
           );
-      } else if (!gatewayStarting && !inStartupGracePeriod) {
+      } else if (!gatewayStarting && !inStartupGracePeriod && !transientConnectClose) {
         setError(errorMessage);
       }
-      if (!gatewayStarting && !inStartupGracePeriod) {
+      if (!gatewayStarting && !inStartupGracePeriod && !transientConnectClose) {
         setLastGatewayError(errorMessage);
+      } else if (transientConnectClose) {
+        setLastGatewayError(null);
       }
       setIsConnecting(false);
       if (
-        suppressConnectDiag &&
-        errorMessage.includes("Gateway socket closed during connect")
+        transientConnectClose ||
+        (suppressConnectDiag && errorMessage.includes("Gateway socket closed during connect"))
       ) {
         addDiag("gateway connect retry pending");
       } else {
@@ -2267,86 +2313,152 @@ export function Chat({
   async function recoverFinalRunFromHistory(runId: string, sessionKey: string) {
     if (!runId || !sessionKey) return;
     if (runHistoryRecoveryRef.current[runId]) return;
-    const client = clientRef.current;
-    if (!client || !client.isConnected()) return;
 
     runHistoryRecoveryRef.current[runId] = true;
     try {
-      const history = await client.getChatHistory(sessionKey, 40);
-      const fallback = [...history].reverse().find((item) => {
-        const role = typeof item?.role === "string" ? item.role.toLowerCase() : "";
-        if (role !== "assistant" && role !== "toolresult" && role !== "tool_result" && role !== "tool") {
-          return false;
+      for (let attempt = 0; attempt < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS; attempt += 1) {
+        const client = clientRef.current;
+        if (!client || !client.isConnected()) {
+          if (attempt + 1 < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS) {
+            setThinkingStatus("Finalizing response");
+            addDiag(`final recovery waiting for reconnect runId=${runId} attempt=${attempt + 1}`);
+            await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
+            continue;
+          }
+          setError(
+            buildNoVisibleResponseMessage({
+              lastGatewayError,
+              connected,
+            }),
+          );
+          addDiag(`final recovery missed runId=${runId} (client disconnected)`);
+          return;
         }
-        const normalized = normalizeGatewayMessage(item as GatewayMessage, runId);
-        const text = normalized?.content ?? "";
-        const hasPayload = Boolean(
-          normalized?.assistantPayload &&
-          (normalized.assistantPayload.events.length > 0 || normalized.assistantPayload.errors.length > 0)
-        );
-        return Boolean(text || hasPayload);
-      });
 
-      if (!fallback) {
-        setError("Assistant returned no visible response. Check Billing/auth/network and retry.");
-        addDiag(`final recovery missed runId=${runId} (no assistant payload in history)`);
-        return;
-      }
+        try {
+          const history = await client.getChatHistory(sessionKey, 40);
+          const fallback = [...history].reverse().find((item) => {
+            const role = typeof item?.role === "string" ? item.role.toLowerCase() : "";
+            if (role !== "assistant" && role !== "toolresult" && role !== "tool_result" && role !== "tool") {
+              return false;
+            }
+            const normalized = normalizeGatewayMessage(item as GatewayMessage, runId);
+            const text = normalized?.content ?? "";
+            const hasPayload = Boolean(
+              normalized?.assistantPayload &&
+              (normalized.assistantPayload.events.length > 0 || normalized.assistantPayload.errors.length > 0)
+            );
+            return Boolean(text || hasPayload);
+          });
 
-      const normalized = normalizeGatewayMessage(fallback as GatewayMessage, runId);
-      if (!normalized) {
-        setError("Assistant returned no visible response. Check Billing/auth/network and retry.");
-        addDiag(`final recovery missed runId=${runId} (normalize failed)`);
-        return;
-      }
+          if (!fallback) {
+            if (attempt + 1 < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS) {
+              setThinkingStatus("Finalizing response");
+              addDiag(`final recovery retry runId=${runId} (no assistant payload in history)`);
+              await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
+              continue;
+            }
+            setError(
+              buildNoVisibleResponseMessage({
+                lastGatewayError,
+                connected,
+              }),
+            );
+            addDiag(`final recovery missed runId=${runId} (no assistant payload in history)`);
+            return;
+          }
 
-      const text = normalized.content ?? "";
-      const hasRenderableAssistantPayload = Boolean(
-        normalized.assistantPayload &&
-        (normalized.assistantPayload.events.length > 0 || normalized.assistantPayload.errors.length > 0)
-      );
-      if (!text && !hasRenderableAssistantPayload) {
-        setError("Assistant returned no visible response. Check Billing/auth/network and retry.");
-        addDiag(`final recovery missed runId=${runId} (empty normalized payload)`);
-        return;
-      }
+          const normalized = normalizeGatewayMessage(fallback as GatewayMessage, runId);
+          if (!normalized) {
+            if (attempt + 1 < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS) {
+              setThinkingStatus("Finalizing response");
+              addDiag(`final recovery retry runId=${runId} (normalize failed)`);
+              await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
+              continue;
+            }
+            setError(
+              buildNoVisibleResponseMessage({
+                lastGatewayError,
+                connected,
+              }),
+            );
+            addDiag(`final recovery missed runId=${runId} (normalize failed)`);
+            return;
+          }
 
-      setMessages((prev) => {
-        const existingIdx = prev.findIndex((m) => m.id === runId && m.role === "assistant");
-        if (existingIdx >= 0) {
-          const updated = [...prev];
-          updated[existingIdx] = {
-            ...updated[existingIdx],
-            content: text,
-            kind: normalized.kind ?? updated[existingIdx].kind,
-            toolName: normalized.toolName ?? updated[existingIdx].toolName,
-            assistantPayload: normalized.assistantPayload ?? updated[existingIdx].assistantPayload,
-            sentAt: updated[existingIdx].sentAt ?? normalized.sentAt ?? Date.now(),
-          };
-          return updated;
+          const text = normalized.content ?? "";
+          const hasRenderableAssistantPayload = Boolean(
+            normalized.assistantPayload &&
+            (normalized.assistantPayload.events.length > 0 || normalized.assistantPayload.errors.length > 0)
+          );
+          if (!text && !hasRenderableAssistantPayload) {
+            if (attempt + 1 < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS) {
+              setThinkingStatus("Finalizing response");
+              addDiag(`final recovery retry runId=${runId} (empty normalized payload)`);
+              await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
+              continue;
+            }
+            setError(
+              buildNoVisibleResponseMessage({
+                lastGatewayError,
+                connected,
+              }),
+            );
+            addDiag(`final recovery missed runId=${runId} (empty normalized payload)`);
+            return;
+          }
+
+          setMessages((prev) => {
+            const existingIdx = prev.findIndex((m) => m.id === runId && m.role === "assistant");
+            if (existingIdx >= 0) {
+              const updated = [...prev];
+              updated[existingIdx] = {
+                ...updated[existingIdx],
+                content: text,
+                kind: normalized.kind ?? updated[existingIdx].kind,
+                toolName: normalized.toolName ?? updated[existingIdx].toolName,
+                assistantPayload: normalized.assistantPayload ?? updated[existingIdx].assistantPayload,
+                sentAt: updated[existingIdx].sentAt ?? normalized.sentAt ?? Date.now(),
+              };
+              return updated;
+            }
+            return [
+              ...prev,
+              {
+                id: runId,
+                role: "assistant",
+                content: text,
+                kind: normalized.kind,
+                toolName: normalized.toolName,
+                assistantPayload: normalized.assistantPayload,
+                sentAt: normalized.sentAt ?? Date.now(),
+              },
+            ];
+          });
+          setThinkingStatus(null);
+          if (isBillingIssueMessage(text)) {
+            setError(BILLING_RECOVERY_MESSAGE);
+            setShowOutOfCreditsModal(true);
+          }
+          addDiag(`recovered final response from history runId=${runId} attempt=${attempt + 1}`);
+          return;
+        } catch (err) {
+          if (attempt + 1 < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS) {
+            setThinkingStatus("Finalizing response");
+            addDiag(`final recovery retry runId=${runId}: ${String(err)}`);
+            await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
+            continue;
+          }
+          setError(
+            buildNoVisibleResponseMessage({
+              lastGatewayError: err instanceof Error ? err.message : lastGatewayError,
+              connected,
+            }),
+          );
+          addDiag(`final recovery failed runId=${runId}: ${String(err)}`);
+          return;
         }
-        return [
-          ...prev,
-          {
-            id: runId,
-            role: "assistant",
-            content: text,
-            kind: normalized.kind,
-            toolName: normalized.toolName,
-            assistantPayload: normalized.assistantPayload,
-            sentAt: normalized.sentAt ?? Date.now(),
-          },
-        ];
-      });
-      setThinkingStatus(null);
-      if (isBillingIssueMessage(text)) {
-        setError(BILLING_RECOVERY_MESSAGE);
-        setShowOutOfCreditsModal(true);
       }
-      addDiag(`recovered final response from history runId=${runId}`);
-    } catch (err) {
-      setError("Assistant returned no visible response. Check Billing/auth/network and retry.");
-      addDiag(`final recovery failed runId=${runId}: ${String(err)}`);
     } finally {
       delete runHistoryRecoveryRef.current[runId];
     }

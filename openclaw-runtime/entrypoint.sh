@@ -383,12 +383,11 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
         "tauri://localhost",
         "http://tauri.localhost",
         "https://tauri.localhost",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174"
+      "http://localhost:5174",
+      "http://127.0.0.1:5174"
       ],
       "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": true,
-      "dangerouslyAllowHostHeaderOriginFallback": true
+      "dangerouslyDisableDeviceAuth": true
     }${GATEWAY_AUTH_BLOCK}
   },
   "plugins": {
@@ -413,6 +412,14 @@ const fs = require('fs');
 
 const currentPath = '/home/node/.openclaw/openclaw.json';
 const persistedPath = '/data/openclaw.persisted.json';
+const pruneLegacyControlUiFallback = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const gateway = value.gateway;
+  if (!gateway || typeof gateway !== 'object' || Array.isArray(gateway)) return;
+  const controlUi = gateway.controlUi;
+  if (!controlUi || typeof controlUi !== 'object' || Array.isArray(controlUi)) return;
+  delete controlUi.dangerouslyAllowHostHeaderOriginFallback;
+};
 
 const isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const mergePreferCurrent = (base, current) => {
@@ -430,7 +437,10 @@ const mergePreferCurrent = (base, current) => {
 try {
   const current = JSON.parse(fs.readFileSync(currentPath, 'utf8'));
   const persisted = JSON.parse(fs.readFileSync(persistedPath, 'utf8'));
+  pruneLegacyControlUiFallback(current);
+  pruneLegacyControlUiFallback(persisted);
   const merged = mergePreferCurrent(persisted, current);
+  pruneLegacyControlUiFallback(merged);
   fs.writeFileSync(currentPath, JSON.stringify(merged, null, 2));
 } catch (error) {
   console.error('[entrypoint] Failed to merge persisted openclaw config:', error?.message || error);
