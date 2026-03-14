@@ -35,6 +35,11 @@ import {
 } from "../components/ModelSelector";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { hideEmbeddedPreviewWebview } from "../lib/nativePreview";
+import {
+  defaultUseLocalKeys,
+  entropicSitePath,
+  hostedFeaturesEnabled,
+} from "../lib/buildProfile";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -57,7 +62,7 @@ const DEFAULT_PROXY_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-prev
 const DEFAULT_LOCAL_OPENAI_IMAGE_GENERATION_MODEL = "openai/gpt-image-1";
 const DEFAULT_LOCAL_GOOGLE_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
 const GATEWAY_FAILURE_THRESHOLD = 3;
-const FEEDBACK_FORM_URL = "https://entropic.qu.ai/feedback";
+const FEEDBACK_FORM_URL = entropicSitePath("/feedback");
 
 function stripModelParams(model: string) {
   return model.split(":")[0] || model;
@@ -175,7 +180,7 @@ function remapImageGenerationModelForMode(
 
 export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const { isAuthenticated, isAuthConfigured, refreshBalance } = useAuth();
-  const [useLocalKeys, setUseLocalKeys] = useState(false);
+  const [useLocalKeys, setUseLocalKeys] = useState(defaultUseLocalKeys);
   const [currentPage, setCurrentPage] = useState<Page>("chat");
   const [gatewayRunning, setGatewayRunning] = useState(false);
   const [isTogglingGateway, setIsTogglingGateway] = useState(false);
@@ -190,11 +195,15 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [integrationsSyncing, setIntegrationsSyncing] = useState(false);
   const [integrationsMissing, setIntegrationsMissing] = useState(false);
   const [prefsLoaded, setPrefsLoaded] = useState(false);
-  const [selectedModel, setSelectedModel] = useState(DEFAULT_PROXY_MODEL);
+  const [selectedModel, setSelectedModel] = useState(
+    defaultUseLocalKeys ? DEFAULT_LOCAL_MODEL : DEFAULT_PROXY_MODEL,
+  );
   const [codeModel, setCodeModel] = useState("openai/gpt-5.3-codex");
   const [imageModel, setImageModel] = useState("google/gemini-3.1-flash-image-preview");
   const [imageGenerationModel, setImageGenerationModel] = useState(
-    DEFAULT_PROXY_IMAGE_GENERATION_MODEL,
+    defaultUseLocalKeys
+      ? defaultLocalImageGenerationModel(DEFAULT_LOCAL_MODEL)
+      : DEFAULT_PROXY_IMAGE_GENERATION_MODEL,
   );
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [currentChatSession, setCurrentChatSession] = useState<string | null>(null);
@@ -220,6 +229,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const gatewayHealthFailureStreakRef = useRef(0);
 
   async function openFeedbackPage() {
+    if (!FEEDBACK_FORM_URL) {
+      return;
+    }
     const url = new URL(FEEDBACK_FORM_URL);
     if (!url.searchParams.get("source")) {
       url.searchParams.set("source", "desktop_sidebar");
@@ -271,8 +283,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       try {
         const store = await TauriStore.load("entropic-settings.json");
         const storedUseLocal = await store.get("useLocalKeys") as boolean | null;
-        if (typeof storedUseLocal === "boolean") setUseLocalKeys(storedUseLocal);
-        const isLocal = storedUseLocal === true;
+        const isLocal = typeof storedUseLocal === "boolean"
+          ? storedUseLocal
+          : defaultUseLocalKeys;
+        setUseLocalKeys(isLocal);
 
         const saved = await store.get("selectedModel") as string | null;
         const nextSelectedModel = saved
@@ -368,7 +382,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   useEffect(() => {
     const handleOpenPage = (event: Event) => {
       const detail = (event as CustomEvent<{ page?: string }>).detail;
-      if (detail?.page === "billing") {
+      if (detail?.page === "billing" && hostedFeaturesEnabled) {
         setCurrentPage("billing");
       }
     };
@@ -1620,9 +1634,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     <Layout
       currentPage={currentPage}
       onNavigate={setCurrentPage}
-      onOpenFeedback={() => {
-        void openFeedbackPage();
-      }}
+      onOpenFeedback={FEEDBACK_FORM_URL
+        ? () => {
+            void openFeedbackPage();
+          }
+        : undefined}
       gatewayRunning={gatewayRunning}
       integrationsSyncing={integrationsSyncing}
       chatSessions={chatSessions}

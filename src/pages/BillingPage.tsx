@@ -14,6 +14,7 @@ import {
   LocalUsageResponse,
 } from "../lib/localCredits";
 import { OAuthButtons } from "../components/OAuthButtons";
+import { hostedFeaturesEnabled } from "../lib/buildProfile";
 
 export function BillingPage() {
   const { isAuthenticated, isAuthConfigured } = useAuth();
@@ -56,6 +57,31 @@ export function BillingPage() {
       window.removeEventListener("entropic-local-credits-changed", onLocalCreditsChanged);
     };
   }, [isAuthenticated, isAuthConfigured]);
+
+  if (!hostedFeaturesEnabled) {
+    return (
+      <div className="p-6 h-full flex flex-col">
+        <div className="mb-4">
+          <h1 className="text-xl font-semibold text-[var(--text-primary)]">
+            Billing
+          </h1>
+          <p className="text-sm text-[var(--text-tertiary)]">
+            Managed billing is disabled in local builds
+          </p>
+        </div>
+        <div className="flex-1 overflow-auto">
+          <div className="max-w-3xl mx-auto py-8 px-4">
+            <div className="bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl shadow-sm p-6">
+              <p className="text-sm text-[var(--text-secondary)]">
+                This build runs locally by default and does not enable Entropic-managed auth,
+                billing, or hosted credits. Use local provider auth or API keys from Settings.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!isAuthenticated) {
     const localBalanceCents = localBalance?.balance_cents ?? 0;

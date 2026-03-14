@@ -19,6 +19,7 @@ import {
 import { clientLog } from "./lib/clientLog";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { getLocalCreditBalance } from "./lib/localCredits";
+import { updaterEnabled } from "./lib/buildProfile";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -44,7 +45,7 @@ function AppContent() {
   const appStateBeforeSignInRef = useRef<AppState>("ready");
 
   useEffect(() => {
-    if (import.meta.env.DEV) {
+    if (!updaterEnabled) {
       return;
     }
     let cancelled = false;

@@ -75,6 +75,7 @@ import {
   reloadEmbeddedPreview,
   syncEmbeddedPreviewWebview,
 } from "../lib/nativePreview";
+import { hostedFeaturesEnabled } from "../lib/buildProfile";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -809,6 +810,7 @@ export function Files({
   onImageModelChange,
 }: Props) {
   const { balance, isAuthenticated, isAuthConfigured } = useAuth();
+  const billingEnabled = hostedFeaturesEnabled;
   const [agentName, setAgentName] = useState("Joulie");
 
   // Wallpaper
@@ -982,7 +984,9 @@ export function Files({
       if (typeof saved.tasksOpen === "boolean") setTasksOpen(saved.tasksOpen);
       if (typeof saved.jobsOpen === "boolean") setJobsOpen(saved.jobsOpen);
       if (typeof saved.logsOpen === "boolean") setLogsOpen(saved.logsOpen);
-      if (typeof saved.billingOpen === "boolean") setBillingOpen(saved.billingOpen);
+      if (billingEnabled && typeof saved.billingOpen === "boolean") {
+        setBillingOpen(saved.billingOpen);
+      }
       if (typeof saved.settingsOpen === "boolean") setSettingsOpen(saved.settingsOpen);
 
       const nextFinderPos = asWindowPoint(saved.finderPos);
@@ -2979,6 +2983,9 @@ export function Files({
         focusWindow("settings");
         return;
       case "billing":
+        if (!billingEnabled) {
+          return;
+        }
         setBillingOpen(true);
         focusWindow("billing");
         return;
@@ -3034,7 +3041,7 @@ export function Files({
     if (logsOpen) {
       frames.push({ z: windowZ.logs ?? DEFAULT_WINDOW_Z.logs, rect: { x: logsPos.x, y: logsPos.y, w: logsSize.w, h: logsSize.h } });
     }
-    if (billingOpen) {
+    if (billingEnabled && billingOpen) {
       frames.push({ z: windowZ.billing ?? DEFAULT_WINDOW_Z.billing, rect: { x: billingPos.x, y: billingPos.y, w: billingSize.w, h: billingSize.h } });
     }
     if (settingsOpen) {
@@ -3094,6 +3101,7 @@ export function Files({
     logsPos.y,
     logsSize.w,
     logsSize.h,
+    billingEnabled,
     billingOpen,
     billingPos.x,
     billingPos.y,
@@ -4357,7 +4365,7 @@ export function Files({
           )}
 
           {/* ── BILLING WINDOW ─────────────────────────────────────── */}
-          {billingOpen && (
+          {billingEnabled && billingOpen && (
             <AppWindow
               title="Billing"
               icon={CreditCard}
@@ -4582,21 +4590,23 @@ export function Files({
             </DockIconButton>
 
             {/* Billing */}
-            <DockIconButton
-              label="Billing"
-              active={billingOpen}
-              onClick={() => {
-                if (!billingOpen) setBillingOpen(true);
-                focusWindow("billing");
-              }}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #22c55e 0%, #16a34a 100%)", boxShadow: "0 3px 10px rgba(34,197,94,0.35)" }}
+            {billingEnabled && (
+              <DockIconButton
+                label="Billing"
+                active={billingOpen}
+                onClick={() => {
+                  if (!billingOpen) setBillingOpen(true);
+                  focusWindow("billing");
+                }}
               >
-                <CreditCard className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
+                <div
+                  className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                  style={{ background: "linear-gradient(180deg, #22c55e 0%, #16a34a 100%)", boxShadow: "0 3px 10px rgba(34,197,94,0.35)" }}
+                >
+                  <CreditCard className="w-6 h-6 text-white" />
+                </div>
+              </DockIconButton>
+            )}
 
             {/* Settings */}
             <DockIconButton

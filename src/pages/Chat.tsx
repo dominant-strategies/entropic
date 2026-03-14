@@ -69,6 +69,7 @@ import {
 } from "../lib/taskBoard";
 import { resolveGatewayAuth } from "../lib/gateway-auth";
 import { appendDiagnosticLog } from "../lib/diagnostics";
+import { entropicSitePath } from "../lib/buildProfile";
 import {
   workspaceBrowserUrl,
 } from "../lib/nativePreview";
@@ -533,6 +534,8 @@ const PROVIDERS: Provider[] = [
 ];
 
 const DEFAULT_GATEWAY_URL = "ws://localhost:19789";
+const TERMS_URL = entropicSitePath("/terms");
+const PRIVACY_URL = entropicSitePath("/privacy");
 const HISTORY_LIMIT = 500;
 const ACTIVE_RUN_IDLE_TIMEOUT_MS = 120_000;
 const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 4;
@@ -4801,12 +4804,14 @@ export function Chat({
               </>
             ) : null}
 
-            <p className="text-xs text-center text-[var(--text-tertiary)] mt-6 pt-4 border-t border-[var(--border-subtle)] leading-relaxed">
-              By continuing, you agree to the{" "}
-              <button type="button" onClick={() => open("https://entropic.qu.ai/terms")} className="underline text-[var(--text-secondary)] hover:text-[var(--text-secondary)]">Terms of Service</button>
-              {" "}and{" "}
-              <button type="button" onClick={() => open("https://entropic.qu.ai/privacy")} className="underline text-[var(--text-secondary)] hover:text-[var(--text-secondary)]">Privacy Policy</button>.
-            </p>
+            {TERMS_URL && PRIVACY_URL ? (
+              <p className="text-xs text-center text-[var(--text-tertiary)] mt-6 pt-4 border-t border-[var(--border-subtle)] leading-relaxed">
+                By continuing, you agree to the{" "}
+                <button type="button" onClick={() => open(TERMS_URL)} className="underline text-[var(--text-secondary)] hover:text-[var(--text-secondary)]">Terms of Service</button>
+                {" "}and{" "}
+                <button type="button" onClick={() => open(PRIVACY_URL)} className="underline text-[var(--text-secondary)] hover:text-[var(--text-secondary)]">Privacy Policy</button>.
+              </p>
+            ) : null}
           </div>
         </div>
         {showKeyModal && selectedProvider && <ApiKeyModal />}

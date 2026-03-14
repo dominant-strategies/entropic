@@ -8,6 +8,7 @@ import {
   signInWithEmail,
   signUpWithEmail,
 } from "../lib/auth";
+import { entropicSitePath, hostedFeaturesEnabled } from "../lib/buildProfile";
 import { GoogleIcon, DiscordIcon } from "../components/OAuthIcons";
 
 type AuthMode = "options" | "email-signin" | "email-signup" | "own-keys";
@@ -16,6 +17,9 @@ type Props = {
   onSignInStarted?: () => void;
   onSkipAuth?: () => void;
 };
+
+const TERMS_URL = entropicSitePath("/terms");
+const PRIVACY_URL = entropicSitePath("/privacy");
 
 export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
   const [mode, setMode] = useState<AuthMode>("options");
@@ -88,6 +92,33 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
   // Shared container styles
   const containerClasses = "h-screen w-screen flex items-center justify-center bg-[var(--bg-primary)] p-4";
   const cardClasses = "w-full max-w-[400px] bg-[var(--bg-card)] rounded-2xl shadow-xl p-10 animate-scale-in border border-[var(--border-subtle)]";
+
+  if (!hostedFeaturesEnabled) {
+    return (
+      <div className={containerClasses}>
+        <main className={cardClasses}>
+          <div className="text-center mb-8">
+            <div className="w-16 h-16 rounded-2xl bg-transparent mx-auto flex items-center justify-center mb-6">
+              <img src={entropicLogo} alt="Entropic" width={64} height={64} className="w-16 h-16 rounded-2xl shadow-lg" />
+            </div>
+            <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-2">
+              Local Build
+            </h1>
+            <p className="text-[var(--text-secondary)]">
+              Account sign-in is disabled in local builds. Configure provider access in Settings instead.
+            </p>
+          </div>
+
+          <button
+            onClick={() => onSkipAuth?.()}
+            className="w-full py-4 px-4 rounded-xl bg-[#1A1A2E] hover:opacity-90 text-white font-medium shadow-lg hover:shadow-xl active:scale-95 duration-200"
+          >
+            Continue Locally
+          </button>
+        </main>
+      </div>
+    );
+  }
 
   // Own keys mode
   if (mode === "own-keys") {
@@ -310,12 +341,14 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
           </button>
         </div>
 
-        <p className="text-xs text-center text-[var(--text-secondary)] mt-8 max-w-xs mx-auto leading-relaxed">
-          By continuing, you agree to our{" "}
-          <button type="button" onClick={() => open("https://entropic.qu.ai/terms")} className="underline text-[var(--text-primary)] hover:opacity-80">Terms of Service</button>
-          {" "}and{" "}
-          <button type="button" onClick={() => open("https://entropic.qu.ai/privacy")} className="underline text-[var(--text-primary)] hover:opacity-80">Privacy Policy</button>.
-        </p>
+        {TERMS_URL && PRIVACY_URL ? (
+          <p className="text-xs text-center text-[var(--text-secondary)] mt-8 max-w-xs mx-auto leading-relaxed">
+            By continuing, you agree to our{" "}
+            <button type="button" onClick={() => open(TERMS_URL)} className="underline text-[var(--text-primary)] hover:opacity-80">Terms of Service</button>
+            {" "}and{" "}
+            <button type="button" onClick={() => open(PRIVACY_URL)} className="underline text-[var(--text-primary)] hover:opacity-80">Privacy Policy</button>.
+          </p>
+        ) : null}
       </main>
     </div>
   );
