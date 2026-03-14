@@ -22,6 +22,7 @@ import type { ChatSession } from "../pages/Chat";
 import clsx from "clsx";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { platform } from "@tauri-apps/plugin-os";
+import { hostedFeaturesEnabled } from "../lib/buildProfile";
 import {
   getProfileInitials,
   isRenderableAvatarDataUrl,
@@ -190,7 +191,9 @@ export function Layout({
   const profileAvatarUrl = isRenderableAvatarDataUrl(profile.avatarDataUrl)
     ? profile.avatarDataUrl.trim()
     : undefined;
-  const navItems = baseNavItems;
+  const navItems = hostedFeaturesEnabled
+    ? baseNavItems
+    : baseNavItems.filter((item) => item.id !== "billing");
 
   return (
     <div className="h-screen w-screen flex bg-[var(--bg-app)] text-[var(--text-primary)] font-sans overflow-hidden">

@@ -66,6 +66,19 @@ fn install_startup_panic_logger() {
     }));
 }
 
+fn managed_build_profile_enabled() -> bool {
+    fn is_managed(raw: &str) -> bool {
+        raw.trim().eq_ignore_ascii_case("managed")
+    }
+
+    option_env!("ENTROPIC_BUILD_PROFILE")
+        .map(is_managed)
+        .unwrap_or(false)
+        || std::env::var("ENTROPIC_BUILD_PROFILE")
+            .map(|value| is_managed(&value))
+            .unwrap_or(false)
+}
+
 pub fn maybe_handle_cli_mode() -> Option<i32> {
     windows_runtime_manager::maybe_handle_runtime_manager_cli()
 }
@@ -73,15 +86,20 @@ pub fn maybe_handle_cli_mode() -> Option<i32> {
 pub fn run() {
     install_startup_panic_logger();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init());
+
+    if managed_build_profile_enabled() {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    builder
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             let urls: Vec<String> = args
                 .into_iter()
@@ -125,6 +143,11 @@ pub fn run() {
             }
 
             let state = commands::init_state(&app.handle());
+            commands::ensure_bridge_server_running(
+                &app.handle(),
+                &state,
+                commands::HOST_AUTOMATION_SERVER_PORT,
+            )?;
             app.manage(state);
             Ok(())
         })
@@ -160,6 +183,7 @@ pub fn run() {
             commands::get_auth_state,
             commands::get_agent_profile_state,
             commands::get_runtime_resource_usage,
+            commands::get_apple_automation_status,
             commands::set_personality,
             commands::set_runtime_resources,
             commands::sync_onboarding_to_settings,

@@ -5,12 +5,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { platform } from "@tauri-apps/plugin-os";
 import { getDeviceFingerprintHash } from "./localCredits";
 import { nativeApiRequest, shouldUseNativeApiTransport } from "./nativeApi";
+import {
+  ENTROPIC_BUILD_PROFILE,
+  hostedFeaturesEnabled,
+  managedApiUrl,
+} from "./buildProfile";
 
 // These should be set via environment variables
 const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL || "";
 const SUPABASE_ANON_KEY = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || "";
-const RAW_API_URL = (import.meta as any).env?.VITE_API_URL || "";
-const API_URL = RAW_API_URL || ((import.meta as any).env?.DEV ? "/api" : "");
+const API_URL = managedApiUrl;
 const APP_SCHEME = (import.meta as any).env?.DEV ? "entropic-dev" : "entropic";
 const AUTH_REDIRECT_URL =
   (import.meta as any).env?.VITE_AUTH_REDIRECT_URL || `${APP_SCHEME}://auth/callback`;
@@ -29,7 +33,8 @@ const AUTH_FORCE_DEEPLINK =
 const AUTH_DEBUG =
   (import.meta as any).env?.VITE_AUTH_DEBUG === "1" ||
   (import.meta as any).env?.DEV;
-const USE_NATIVE_API_TRANSPORT = shouldUseNativeApiTransport(API_URL);
+const USE_NATIVE_API_TRANSPORT =
+  hostedFeaturesEnabled && shouldUseNativeApiTransport(API_URL);
 
 function authDebug(message: string, data?: Record<string, unknown>) {
   if (!AUTH_DEBUG) return;
@@ -38,6 +43,8 @@ function authDebug(message: string, data?: Record<string, unknown>) {
 }
 
 authDebug("config", {
+  buildProfile: ENTROPIC_BUILD_PROFILE,
+  hostedFeaturesEnabled,
   apiUrl: API_URL || "(empty)",
   supabaseConfigured: Boolean(SUPABASE_URL && SUPABASE_ANON_KEY),
   authStore: AUTH_STORE_NAME,
@@ -50,7 +57,8 @@ function redactToken(token?: string | null) {
 }
 
 // Check if auth is configured
-export const isAuthConfigured = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+export const isAuthConfigured =
+  hostedFeaturesEnabled && Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 
 // Create Supabase client (or null if not configured)
 export const supabase: SupabaseClient | null = isAuthConfigured

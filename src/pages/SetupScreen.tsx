@@ -6,6 +6,7 @@ import { Loader2, CheckCircle2, XCircle, AlertTriangle, Copy } from "lucide-reac
 import entropicLogo from "../assets/entropic-logo.png";
 import quaiHeaderWhite from "../assets/quai-header-white.png";
 import quaiLogo from "../assets/quai-logo.svg";
+import { entropicSitePath, hostedFeaturesEnabled } from "../lib/buildProfile";
 
 export type SetupProgress = {
   stage: string;
@@ -43,9 +44,14 @@ const EDUCATIONAL_FACTS = [
   "Colima is a lightweight local VM runtime that Entropic uses on macOS for secure container execution.",
   "Use Integrations to connect tools like Calendar or Gmail after setup completes.",
   "Local Keys mode lets you use your own provider keys directly from Settings.",
-  "Proxy mode uses Entropic credits and keeps model routing and billing centralized.",
+  ...(hostedFeaturesEnabled
+    ? ["Proxy mode uses Entropic credits and keeps model routing and billing centralized."]
+    : []),
   "Jobs and Files are designed for longer-running automation, while Chat is best for quick iterations.",
 ];
+
+const TERMS_URL = entropicSitePath("/terms");
+const PRIVACY_URL = entropicSitePath("/privacy");
 
 function sanitizeSetupError(rawError: string): string {
   return rawError
@@ -396,28 +402,34 @@ export function SetupScreen({ onComplete, preview }: Props) {
                 className="mt-0.5 w-4 h-4 rounded border-[var(--border-primary)] text-violet-600 focus:ring-violet-500 cursor-pointer"
               />
               <span className="text-sm text-[var(--text-secondary)] leading-relaxed">
-                I have read and agree to the{" "}
-                <button
-                  type="button"
-                  className="text-violet-600 hover:text-violet-800 underline font-medium"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void openExternalLink("https://entropic.qu.ai/terms");
-                  }}
-                >
-                  Terms of Service
-                </button>
-                {" "}and{" "}
-                <button
-                  type="button"
-                  className="text-violet-600 hover:text-violet-800 underline font-medium"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void openExternalLink("https://entropic.qu.ai/privacy");
-                  }}
-                >
-                  Privacy Policy
-                </button>.
+                {TERMS_URL && PRIVACY_URL ? (
+                  <>
+                    I have read and agree to the{" "}
+                    <button
+                      type="button"
+                      className="text-violet-600 hover:text-violet-800 underline font-medium"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void openExternalLink(TERMS_URL);
+                      }}
+                    >
+                      Terms of Service
+                    </button>
+                    {" "}and{" "}
+                    <button
+                      type="button"
+                      className="text-violet-600 hover:text-violet-800 underline font-medium"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void openExternalLink(PRIVACY_URL);
+                      }}
+                    >
+                      Privacy Policy
+                    </button>.
+                  </>
+                ) : (
+                  "I understand that Entropic will configure a local sandbox runtime on this device."
+                )}
               </span>
             </label>
             <button
