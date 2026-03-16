@@ -14696,14 +14696,7 @@ fn localhost_auth_state() -> &'static Mutex<Option<PendingLocalhostAuth>> {
 }
 
 fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    env_var_truthy(name)
 }
 
 fn executable_prefers_localhost_oauth_path(path: &Path) -> bool {
