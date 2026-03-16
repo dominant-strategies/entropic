@@ -158,6 +158,28 @@ function Ensure-DevRuntimeTar {
     }
 }
 
+function Assert-FreshSandboxArtifactsForReleaseRun {
+    if (Test-DevRuntimeTarFresh) {
+        return
+    }
+
+    if ($env:ENTROPIC_ALLOW_STALE_RUNTIME_TAR -eq "1") {
+        Write-Warning "Release user-test run is using a stale openclaw-runtime.tar.gz because ENTROPIC_ALLOW_STALE_RUNTIME_TAR=1 was set."
+        return
+    }
+
+    throw @"
+Release user-test run is blocked because src-tauri\resources\openclaw-runtime.tar.gz is stale relative to openclaw-runtime sources.
+
+This can produce misleading sandbox startup failures or hangs during 'Provisioning isolated container' / 'Verifying sandbox health'.
+
+Rebuild the Windows user-test binary without -SkipRuntimeTarBuild:
+  pnpm.cmd user-test:build:win:bin
+
+If you intentionally want to run with a stale sandbox image, set ENTROPIC_ALLOW_STALE_RUNTIME_TAR=1 and retry.
+"@
+}
+
 function Stop-StaleDebugEntropicProcess {
     Stop-StaleEntropicProcessByPath -BinaryPath $DebugBinaryPath
 
@@ -183,21 +205,24 @@ function Stop-StaleEntropicProcessByPath([string]$BinaryPath) {
 
 Set-Location $ProjectRoot
 
-$RuntimeHelper = Join-Path $ScriptDir "dev-wsl-runtime.ps1"
-& powershell -ExecutionPolicy Bypass -File $RuntimeHelper start $Mode
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to start WSL runtime for mode '$Mode'."
-}
-
 $env:ENTROPIC_WINDOWS_MANAGED_WSL = "1"
 $env:ENTROPIC_RUNTIME_ALLOW_SHARED_DOCKER = "0"
 $env:ENTROPIC_RUNTIME_MODE = $Mode
+$scriptExitCode = 0
 
 if ($ReleaseBinary) {
+    Assert-FreshSandboxArtifactsForReleaseRun
+    $env:ENTROPIC_AUTH_USE_LOCALHOST = "1"
     $binaryPath = Resolve-ReleaseBinaryPath
     Stop-StaleReleaseEntropicProcess
     & $binaryPath
 } else {
+    $RuntimeHelper = Join-Path $ScriptDir "dev-wsl-runtime.ps1"
+    & powershell -ExecutionPolicy Bypass -File $RuntimeHelper start $Mode
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to start WSL runtime for mode '$Mode'."
+    }
+
     if ($Mode -eq "dev") {
         Ensure-DevRuntimeTar
         Ensure-WslRuntimeArtifacts
@@ -206,4 +231,8 @@ if ($ReleaseBinary) {
     & pnpm.cmd tauri:dev
 }
 
-exit $LASTEXITCODE
+if (Get-Variable -Name LASTEXITCODE -ErrorAction SilentlyContinue) {
+    $scriptExitCode = [int]$LASTEXITCODE
+}
+
+exit $scriptExitCode

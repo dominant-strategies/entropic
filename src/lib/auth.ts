@@ -110,16 +110,22 @@ type LocalhostAuthStart = { redirect_url: string };
 async function shouldUseLocalhostOAuth(): Promise<boolean> {
   if (AUTH_FORCE_DEEPLINK) return false;
   if (AUTH_USE_LOCALHOST) return true;
-  // Standard tauri dev builds set DEV=true. If someone runs a non-standard
-  // desktop dev environment without that flag, they can still opt in with
-  // VITE_AUTH_USE_LOCALHOST=1 instead of relying on deep-link callbacks.
-  if (!(import.meta as any).env?.DEV) return false;
   try {
     const os = await platform();
+    if (os !== "macos" && os !== "windows") {
+      return false;
+    }
+
     // In tauri dev on desktop, prefer localhost OAuth. The debug app is not a
     // normal installed bundle, so deep-link callbacks are less reliable than in
     // packaged builds.
-    return os === "macos" || os === "windows";
+    if ((import.meta as any).env?.DEV) {
+      return true;
+    }
+
+    const preferLocalhost = await invoke<boolean>("should_use_localhost_oauth");
+    authDebug("desktop OAuth transport decision", { os, preferLocalhost });
+    return preferLocalhost;
   } catch {
     return false;
   }

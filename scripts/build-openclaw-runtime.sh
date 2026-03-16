@@ -289,6 +289,21 @@ copy_source_node_modules() {
     copy_filtered_node_modules "$OPENCLAW_SOURCE/node_modules" "$STAGING_DIR/node_modules"
 }
 
+prune_filtered_copy_tree() {
+    local root="$1"
+    [ -d "$root" ] || return 0
+
+    while IFS= read -r -d '' path; do
+        rm -rf "$path"
+    done < <(
+        find "$root" -depth -type d \
+            \( -name '.cache' -o -name '.git' -o -name 'test' -o -name 'tests' \) \
+            -print0 2>/dev/null
+    )
+
+    find "$root" -type f -name '*.map' -delete 2>/dev/null || true
+}
+
 copy_filtered_node_modules() {
     local source_dir="$1"
     local dest_dir="$2"
@@ -311,13 +326,21 @@ copy_filtered_node_modules() {
         rm -rf "$staging_dir"
         mkdir -p "$staging_dir"
 
-        tar -C "$source_dir" \
+        if tar -C "$source_dir" \
             --exclude='.cache' \
             --exclude='*.map' \
             --exclude='test' \
             --exclude='tests' \
             --exclude='.git' \
-            -cf - . | tar -C "$staging_dir" -xf -
+            -cf - . | tar -C "$staging_dir" -xf -; then
+            :
+        else
+            echo "WARNING: tar stream copy failed for $source_dir. Retrying with cp -a..."
+            rm -rf "$staging_dir"
+            mkdir -p "$staging_dir"
+            cp -a "$source_dir/." "$staging_dir/"
+            prune_filtered_copy_tree "$staging_dir"
+        fi
     fi
 
     if [ -e "$dest_dir" ]; then

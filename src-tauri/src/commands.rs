@@ -5807,10 +5807,19 @@ fn run_container_write_script(script: &str, target: &str) -> Result<(), String> 
         .map_err(|e| format!("Failed to finalize {} write: {}", target, e))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let trimmed = stderr.trim();
+        if trimmed.contains("is restarting") || container_is_restarting() {
+            let health = container_health_status().unwrap_or_else(|| "unknown".to_string());
+            return Err(format!(
+                "Failed to write {} in container: gateway container is restarting/unhealthy (health={}). \
+The sandbox runtime did not start cleanly, so file writes cannot proceed yet. Original Docker error: {}",
+                target, health, trimmed
+            ));
+        }
         return Err(format!(
             "Failed to write {} in container: {}",
             target,
-            stderr.trim()
+            trimmed
         ));
     }
     Ok(())
@@ -6101,6 +6110,31 @@ mod container_file_write_tests {
         let script = build_container_file_write_script(&files);
 
         assert!(script.contains("if [ ! -s \"$path\" ]; then"));
+    }
+}
+
+#[cfg(test)]
+mod gateway_health_tolerance_tests {
+    use super::{gateway_health_error_is_startup_transient, should_tolerate_gateway_startup_error};
+
+    #[test]
+    fn startup_transient_detection_matches_ws_probe_failures() {
+        assert!(gateway_health_error_is_startup_transient(
+            "WebSocket connect failed"
+        ));
+        assert!(gateway_health_error_is_startup_transient(
+            "gateway health timeout"
+        ));
+        assert!(!gateway_health_error_is_startup_transient(
+            "missing scope: operator.read"
+        ));
+    }
+
+    #[test]
+    fn tolerance_requires_live_container_state() {
+        assert!(!should_tolerate_gateway_startup_error(
+            "WebSocket connect failed"
+        ));
     }
 }
 
@@ -9300,16 +9334,44 @@ fn append_colima_runtime_hint(message: String) -> String {
     }
 }
 
-fn finish_health_wait_or_tolerate_starting(err: String, context: &str) -> Result<(), String> {
-    // Tolerate normal startup transients: container still warming up, or WS not ready yet
-    if err.contains("container health=starting")
+fn gateway_health_error_is_startup_transient(err: &str) -> bool {
+    err.contains("container health=starting")
         || err.contains("Handshake not finished")
         || err.contains("gateway closed before response")
         || err.contains("gateway health timeout")
         || err.contains("WebSocket connect timeout")
         || err.contains("WebSocket connect failed")
         || err.contains("WebSocket protocol error")
+}
+
+fn container_is_restarting() -> bool {
+    let output = match docker_command()
+        .args([
+            "inspect",
+            "--format",
+            "{{.State.Restarting}}",
+            OPENCLAW_CONTAINER,
+        ])
+        .output()
     {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .eq_ignore_ascii_case("true")
+}
+
+fn should_tolerate_gateway_startup_error(err: &str) -> bool {
+    gateway_health_error_is_startup_transient(err)
+        && container_running()
+        && !container_is_restarting()
+        && matches!(container_health_status().as_deref(), Some("starting"))
+}
+
+fn finish_health_wait_or_tolerate_starting(err: String, context: &str) -> Result<(), String> {
+    if should_tolerate_gateway_startup_error(&err) {
         println!(
             "[Entropic] {}: {} (continuing; container still warming up)",
             context, err
@@ -14618,6 +14680,8 @@ pub async fn approve_gateway_device_pairing(request_id: String) -> Result<(), St
 
 const AUTH_LOCALHOST_PORT_ENV: &str = "ENTROPIC_AUTH_LOCALHOST_PORT";
 const AUTH_LOCALHOST_DEFAULT_PORT: u16 = 27100;
+const AUTH_USE_LOCALHOST_ENV: &str = "ENTROPIC_AUTH_USE_LOCALHOST";
+const AUTH_FORCE_DEEPLINK_ENV: &str = "ENTROPIC_AUTH_FORCE_DEEPLINK";
 
 #[derive(Debug, Clone)]
 struct PendingLocalhostAuth {
@@ -14629,6 +14693,43 @@ struct PendingLocalhostAuth {
 fn localhost_auth_state() -> &'static Mutex<Option<PendingLocalhostAuth>> {
     static STATE: OnceLock<Mutex<Option<PendingLocalhostAuth>>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn executable_prefers_localhost_oauth_path(path: &Path) -> bool {
+    let segments: Vec<String> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect();
+
+    segments
+        .windows(2)
+        .any(|window| window[0] == "target" && matches!(window[1].as_str(), "debug" | "release"))
+}
+
+fn should_use_localhost_oauth_runtime() -> bool {
+    if env_flag_enabled(AUTH_FORCE_DEEPLINK_ENV) {
+        return false;
+    }
+    if env_flag_enabled(AUTH_USE_LOCALHOST_ENV) {
+        return true;
+    }
+    std::env::current_exe()
+        .map(|path| executable_prefers_localhost_oauth_path(&path))
+        .unwrap_or(false)
 }
 
 fn unix_timestamp_secs() -> u64 {
@@ -15097,6 +15198,11 @@ async fn wait_for_localhost_auth_callback(
 }
 
 #[tauri::command]
+pub fn should_use_localhost_oauth() -> bool {
+    should_use_localhost_oauth_runtime()
+}
+
+#[tauri::command]
 pub async fn start_auth_localhost(app: AppHandle) -> Result<LocalhostAuthStart, String> {
     let port = std::env::var(AUTH_LOCALHOST_PORT_ENV)
         .ok()
@@ -15173,6 +15279,32 @@ pub async fn start_auth_localhost(app: AppHandle) -> Result<LocalhostAuthStart, 
     });
 
     Ok(LocalhostAuthStart { redirect_url })
+}
+
+#[cfg(test)]
+mod localhost_oauth_mode_tests {
+    use super::executable_prefers_localhost_oauth_path;
+    use std::path::Path;
+
+    #[test]
+    fn target_release_binary_prefers_localhost_oauth() {
+        assert!(executable_prefers_localhost_oauth_path(Path::new(
+            r"C:\Users\alan\agent\entropic\src-tauri\target\release\entropic.exe",
+        )));
+        assert!(executable_prefers_localhost_oauth_path(Path::new(
+            "/Users/alan/agent/entropic/src-tauri/target/debug/entropic",
+        )));
+    }
+
+    #[test]
+    fn installed_bundle_path_does_not_prefer_localhost_oauth() {
+        assert!(!executable_prefers_localhost_oauth_path(Path::new(
+            r"C:\Users\alan\AppData\Local\Programs\Entropic\entropic.exe",
+        )));
+        assert!(!executable_prefers_localhost_oauth_path(Path::new(
+            "/Applications/Entropic.app/Contents/MacOS/entropic",
+        )));
+    }
 }
 
 async fn exchange_code_for_tokens(

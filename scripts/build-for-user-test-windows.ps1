@@ -218,24 +218,24 @@ Ensure-WslRuntimeArtifacts
 
 if (-not (Test-RuntimeTarFresh $RuntimeTar)) {
     if ($SkipRuntimeTarBuild -and (Test-FileNonEmpty $RuntimeTar)) {
-        Write-Host "Runtime tar is stale; rebuilding because runtime source files changed."
+        Write-Host "Runtime tar is stale, but -SkipRuntimeTarBuild was requested. Reusing existing runtime artifacts."
     } elseif ($SkipRuntimeTarBuild) {
         throw "Missing or empty runtime tar: $RuntimeTar. Re-run without -SkipRuntimeTarBuild to generate a valid runtime image tar."
-    }
+    } else {
+        Write-Step "Building runtime image tar via WSL (this can take a while)"
 
-    Write-Step "Building runtime image tar via WSL (this can take a while)"
+        $OpenClawDist = Join-Path $ProjectRoot "..\openclaw\dist"
+        if (-not (Test-Path $OpenClawDist)) {
+            throw "OpenClaw dist missing at $OpenClawDist. Build openclaw first."
+        }
 
-    $OpenClawDist = Join-Path $ProjectRoot "..\openclaw\dist"
-    if (-not (Test-Path $OpenClawDist)) {
-        throw "OpenClaw dist missing at $OpenClawDist. Build openclaw first."
-    }
+        Invoke-DevWslHelper -Command "start" -Mode "dev"
+        $BashCommand = "set -euo pipefail; ./scripts/build-openclaw-runtime.sh; ./scripts/bundle-runtime-image.sh"
 
-    Invoke-DevWslHelper -Command "start" -Mode "dev"
-    $BashCommand = "set -euo pipefail; ./scripts/build-openclaw-runtime.sh; ./scripts/bundle-runtime-image.sh"
-
-    Invoke-WslProjectBash -Command $BashCommand
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed generating runtime tar in WSL (entropic-dev)."
+        Invoke-WslProjectBash -Command $BashCommand
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed generating runtime tar in WSL (entropic-dev)."
+        }
     }
 }
 

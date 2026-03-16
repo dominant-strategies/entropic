@@ -33,6 +33,83 @@ fn apply_windows_no_window(cmd: &mut Command) {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetACP() -> u32;
+    fn GetOEMCP() -> u32;
+    fn MultiByteToWideChar(
+        code_page: u32,
+        flags: u32,
+        multi_byte_str: *const u8,
+        multi_byte_len: i32,
+        wide_char_str: *mut u16,
+        wide_char_len: i32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+fn decode_multibyte_with_code_page(bytes: &[u8], code_page: u32) -> Option<String> {
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+
+    let input_len = i32::try_from(bytes.len()).ok()?;
+    let wide_len = unsafe {
+        MultiByteToWideChar(
+            code_page,
+            0,
+            bytes.as_ptr(),
+            input_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if wide_len <= 0 {
+        return None;
+    }
+
+    let mut wide = vec![0u16; wide_len as usize];
+    let written = unsafe {
+        MultiByteToWideChar(
+            code_page,
+            0,
+            bytes.as_ptr(),
+            input_len,
+            wide.as_mut_ptr(),
+            wide_len,
+        )
+    };
+    if written <= 0 {
+        return None;
+    }
+
+    Some(String::from_utf16_lossy(&wide[..written as usize]))
+}
+
+fn decode_command_output(bytes: &[u8]) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return text.to_string();
+        }
+
+        let oem = unsafe { GetOEMCP() };
+        if let Some(text) = decode_multibyte_with_code_page(bytes, oem) {
+            return text;
+        }
+
+        let acp = unsafe { GetACP() };
+        if acp != oem {
+            if let Some(text) = decode_multibyte_with_code_page(bytes, acp) {
+                return text;
+            }
+        }
+    }
+
+    String::from_utf8_lossy(bytes).to_string()
+}
+
 #[derive(Error, Debug)]
 pub enum RuntimeError {
     #[error("Colima not found in resources")]
@@ -123,6 +200,8 @@ const WINDOWS_BOOTSTRAP_STAGE_DOCKER_PROD: &str = "docker-prod";
 const WINDOWS_BOOTSTRAP_STAGE_READY: &str = "ready";
 const WINDOWS_WSL_AVAILABILITY_POLL_ATTEMPTS: usize = 20;
 const WINDOWS_WSL_AVAILABILITY_POLL_MILLIS: u64 = 500;
+const WINDOWS_WSL_FEATURE_NAME: &str = "Microsoft-Windows-Subsystem-Linux";
+const WINDOWS_VM_PLATFORM_FEATURE_NAME: &str = "VirtualMachinePlatform";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct WindowsBootstrapState {
@@ -131,6 +210,89 @@ struct WindowsBootstrapState {
     #[serde(default)]
     error: Option<String>,
     updated_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WindowsOptionalFeatureState {
+    Enabled,
+    Disabled,
+    EnablePending,
+    DisablePending,
+    DisabledWithPayloadRemoved,
+    Unknown(String),
+}
+
+impl WindowsOptionalFeatureState {
+    fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "enabled" => Self::Enabled,
+            "disabled" => Self::Disabled,
+            "enablepending" => Self::EnablePending,
+            "disablepending" => Self::DisablePending,
+            "disabledwithpayloadremoved" => Self::DisabledWithPayloadRemoved,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+
+    fn is_disabled(&self) -> bool {
+        matches!(self, Self::Disabled | Self::DisabledWithPayloadRemoved)
+    }
+
+    fn pending_reboot(&self) -> bool {
+        matches!(self, Self::EnablePending | Self::DisablePending)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct WindowsWslFeatureStates {
+    wsl: Option<WindowsOptionalFeatureState>,
+    virtual_machine_platform: Option<WindowsOptionalFeatureState>,
+}
+
+impl WindowsWslFeatureStates {
+    fn set(&mut self, feature_name: &str, state: WindowsOptionalFeatureState) {
+        match feature_name {
+            WINDOWS_WSL_FEATURE_NAME => self.wsl = Some(state),
+            WINDOWS_VM_PLATFORM_FEATURE_NAME => self.virtual_machine_platform = Some(state),
+            _ => {}
+        }
+    }
+
+    fn any_known(&self) -> bool {
+        self.wsl.is_some() || self.virtual_machine_platform.is_some()
+    }
+
+    fn any_required_disabled(&self) -> bool {
+        self.wsl
+            .as_ref()
+            .map(WindowsOptionalFeatureState::is_disabled)
+            .unwrap_or(false)
+            || self
+                .virtual_machine_platform
+                .as_ref()
+                .map(WindowsOptionalFeatureState::is_disabled)
+                .unwrap_or(false)
+    }
+
+    fn pending_reboot(&self) -> bool {
+        self.wsl
+            .as_ref()
+            .map(WindowsOptionalFeatureState::pending_reboot)
+            .unwrap_or(false)
+            || self
+                .virtual_machine_platform
+                .as_ref()
+                .map(WindowsOptionalFeatureState::pending_reboot)
+                .unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct WindowsOptionalFeatureRecord {
+    #[serde(rename = "FeatureName")]
+    feature_name: String,
+    #[serde(rename = "State")]
+    state: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -994,7 +1156,10 @@ impl Runtime {
     }
 
     fn sanitize_command_output(bytes: &[u8]) -> String {
-        String::from_utf8_lossy(bytes).replace('\0', "").trim().to_string()
+        decode_command_output(bytes)
+            .replace('\0', "")
+            .trim()
+            .to_string()
     }
 
     fn wsl_command(&self) -> Command {
@@ -1031,6 +1196,26 @@ impl Runtime {
         debug_log(&format!(
             "wsl.exe {} => code {:?} ({})",
             args.join(" "),
+            output.status.code(),
+            Self::command_output_summary(&output)
+        ));
+        Ok(output)
+    }
+
+    fn run_windows_powershell(&self, script: &str) -> Result<std::process::Output, std::io::Error> {
+        let mut cmd = Command::new("powershell");
+        apply_windows_no_window(&mut cmd);
+        cmd.args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ]);
+        let output = cmd.output()?;
+        debug_log(&format!(
+            "powershell {} => code {:?} ({})",
+            script,
             output.status.code(),
             Self::command_output_summary(&output)
         ));
@@ -1445,6 +1630,159 @@ impl Runtime {
         Ok(())
     }
 
+    fn windows_wsl_feature_states_from_test_file() -> Option<WindowsWslFeatureStates> {
+        let state_file = std::env::var("ENTROPIC_TEST_WSL_STATE_FILE").ok()?;
+        let raw = std::fs::read_to_string(state_file).ok()?;
+        let mut states = WindowsWslFeatureStates::default();
+
+        for line in raw.lines() {
+            if let Some(value) = line.strip_prefix("feature_wsl=") {
+                states.set(
+                    WINDOWS_WSL_FEATURE_NAME,
+                    WindowsOptionalFeatureState::parse(value),
+                );
+            } else if let Some(value) = line.strip_prefix("feature_vmp=") {
+                states.set(
+                    WINDOWS_VM_PLATFORM_FEATURE_NAME,
+                    WindowsOptionalFeatureState::parse(value),
+                );
+            }
+        }
+
+        states.any_known().then_some(states)
+    }
+
+    fn windows_wsl_feature_states_from_system(&self) -> Option<WindowsWslFeatureStates> {
+        let script = format!(
+            "$ErrorActionPreference = 'Stop'; Get-WindowsOptionalFeature -Online -FeatureName '{wsl}','{vmp}' | Select-Object FeatureName,@{{Name='State';Expression={{ $_.State.ToString() }}}} | ConvertTo-Json -Compress",
+            wsl = WINDOWS_WSL_FEATURE_NAME,
+            vmp = WINDOWS_VM_PLATFORM_FEATURE_NAME,
+        );
+        let output = match self.run_windows_powershell(&script) {
+            Ok(out) => out,
+            Err(err) => {
+                debug_log(&format!(
+                    "Failed to query Windows optional feature state for WSL bootstrap: {}",
+                    err
+                ));
+                return None;
+            }
+        };
+        if !output.status.success() {
+            debug_log(&format!(
+                "Windows optional feature query failed: {}",
+                Self::command_output_summary(&output)
+            ));
+            return None;
+        }
+
+        let raw = Self::sanitize_command_output(&output.stdout);
+        if raw.is_empty() {
+            debug_log("Windows optional feature query returned empty stdout");
+            return None;
+        }
+
+        let parsed = match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(value) => value,
+            Err(err) => {
+                debug_log(&format!(
+                    "Failed to parse Windows optional feature JSON '{}': {}",
+                    raw, err
+                ));
+                return None;
+            }
+        };
+
+        let mut states = WindowsWslFeatureStates::default();
+        match parsed {
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    match serde_json::from_value::<WindowsOptionalFeatureRecord>(item) {
+                        Ok(record) => states.set(
+                            &record.feature_name,
+                            WindowsOptionalFeatureState::parse(&record.state),
+                        ),
+                        Err(err) => debug_log(&format!(
+                            "Failed to parse Windows optional feature record: {}",
+                            err
+                        )),
+                    }
+                }
+            }
+            serde_json::Value::Object(object) => {
+                match serde_json::from_value::<WindowsOptionalFeatureRecord>(
+                    serde_json::Value::Object(object),
+                ) {
+                    Ok(record) => states.set(
+                        &record.feature_name,
+                        WindowsOptionalFeatureState::parse(&record.state),
+                    ),
+                    Err(err) => {
+                        debug_log(&format!(
+                            "Failed to parse Windows optional feature object: {}",
+                            err
+                        ));
+                        return None;
+                    }
+                }
+            }
+            other => {
+                debug_log(&format!(
+                    "Unexpected Windows optional feature JSON payload: {}",
+                    other
+                ));
+                return None;
+            }
+        }
+
+        states.any_known().then_some(states)
+    }
+
+    fn windows_wsl_feature_states(&self) -> Option<WindowsWslFeatureStates> {
+        if let Some(states) = Self::windows_wsl_feature_states_from_test_file() {
+            return Some(states);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            return self.windows_wsl_feature_states_from_system();
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            None
+        }
+    }
+
+    fn windows_wsl_features_pending_reboot(&self) -> bool {
+        self.windows_wsl_feature_states()
+            .map(|states| states.pending_reboot())
+            .unwrap_or(false)
+    }
+
+    fn windows_wsl_features_need_enable(&self) -> bool {
+        self.windows_wsl_feature_states()
+            .map(|states| states.any_required_disabled())
+            .unwrap_or(false)
+    }
+
+    fn windows_wsl_install_requires_reboot(&self, output: &std::process::Output) -> bool {
+        self.windows_wsl_features_pending_reboot() || Self::output_mentions_reboot(output)
+    }
+
+    fn windows_wsl_reboot_message() -> String {
+        "WSL platform installed. Restart Windows to finish setup, then reopen Entropic."
+            .to_string()
+    }
+
+    fn legacy_windows_wsl_cli_message() -> String {
+        "The installed WSL command is too old for Entropic's automatic setup. Update WSL or enable Windows Subsystem for Linux and Virtual Machine Platform, restart Windows, then reopen Entropic.".to_string()
+    }
+
+    fn manual_windows_wsl_feature_enable_message() -> String {
+        "Entropic could not enable the required Windows features automatically. Enable Windows Subsystem for Linux and Virtual Machine Platform, restart Windows if prompted, then reopen Entropic.".to_string()
+    }
+
     fn windows_wsl_available(&self) -> bool {
         for args in [
             &["--version"][..],
@@ -1527,6 +1865,42 @@ impl Runtime {
             && combined.contains("--install")
     }
 
+    fn output_contains_manual_wsl_install_guidance(text: &str) -> bool {
+        let lower = text.to_ascii_lowercase();
+        lower.contains("wsl.exe --install") || lower.contains("aka.ms/wslinstall")
+    }
+
+    fn output_mentions_manual_wsl_install_guidance(output: &std::process::Output) -> bool {
+        let combined = format!(
+            "{}\n{}",
+            Self::sanitize_command_output(&output.stdout),
+            Self::sanitize_command_output(&output.stderr)
+        );
+        Self::output_contains_manual_wsl_install_guidance(&combined)
+    }
+
+    fn manual_windows_wsl_install_message() -> String {
+        "WSL is not installed on this Windows machine yet, and Entropic could not enable it automatically. Run \"wsl.exe --install\" from an elevated PowerShell or Command Prompt, restart Windows if prompted, then reopen Entropic.".to_string()
+    }
+
+    fn run_elevated_windows_wsl_install(&self) -> Result<std::process::Output, RuntimeError> {
+        if std::env::var("ENTROPIC_TEST_WSL_STATE_FILE").is_ok() {
+            return self
+                .run_wsl(&["--install", "--no-distribution"])
+                .map_err(|e| {
+                    RuntimeError::CommandFailed(format!(
+                        "Failed to invoke test WSL install shim: {}",
+                        e
+                    ))
+                });
+        }
+
+        self.run_windows_powershell(
+            "$p = Start-Process -FilePath wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+        )
+        .map_err(|e| RuntimeError::CommandFailed(format!("Failed to request elevated WSL install: {}", e)))
+    }
+
     fn ensure_windows_wsl_platform(&self) -> Result<(), RuntimeError> {
         if self.windows_wsl_available() {
             return Ok(());
@@ -1539,77 +1913,21 @@ impl Runtime {
             .map_err(|e| {
                 RuntimeError::CommandFailed(format!("Failed to invoke wsl --install: {}", e))
             })?;
+        let direct_summary = Self::command_output_summary(&direct);
+        let direct_lower = direct_summary.to_ascii_lowercase();
+        let direct_install_guidance = Self::output_mentions_manual_wsl_install_guidance(&direct);
+        let direct_unsupported = Self::output_mentions_unsupported_wsl_install(&direct);
+        let direct_needs_elevation = direct_lower.contains("elevation")
+            || direct_lower.contains("administrator")
+            || direct_lower.contains("access is denied")
+            || direct_lower.contains("requested operation requires elevation");
 
-        if !direct.status.success() {
-            let combined = Self::command_output_summary(&direct);
-            let lower = combined.to_ascii_lowercase();
-
-            if Self::output_mentions_unsupported_wsl_install(&direct) {
-                if self.windows_wsl_available() {
-                    return Ok(());
-                }
-                let err = RuntimeError::CommandFailed(
-                    "The installed WSL command is too old for Entropic's automatic setup. Update WSL or enable Windows Subsystem for Linux and Virtual Machine Platform, restart Windows, then reopen Entropic.".to_string(),
-                );
-                self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
-                return Err(err);
-            }
-
-            let needs_elevation = lower.contains("elevation")
-                || lower.contains("administrator")
-                || lower.contains("access is denied")
-                || lower.contains("requested operation requires elevation");
-
-            if needs_elevation {
-                let elevated = Command::new("powershell")
-                    .args([
-                        "-NoProfile",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-Command",
-                        "Start-Process -FilePath wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
-                    ])
-                    .output()
-                    .map_err(|e| {
-                        RuntimeError::CommandFailed(format!(
-                            "Failed to request elevated WSL install: {}",
-                            e
-                        ))
-                    })?;
-
-                debug_log(&format!(
-                    "elevated WSL install => code {:?} ({})",
-                    elevated.status.code(),
-                    Self::command_output_summary(&elevated)
-                ));
-
-                if !elevated.status.success() {
-                    let err = RuntimeError::CommandFailed(format!(
-                        "WSL install failed after elevation attempt: {}",
-                        Self::command_output_summary(&elevated)
-                    ));
-                    self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
-                    return Err(err);
-                }
-
-                if Self::output_mentions_reboot(&elevated) || !self.windows_wait_for_wsl_available()
-                {
-                    let message = "WSL platform installed. Restart Windows to finish setup, then reopen Entropic."
-                        .to_string();
-                    self.save_windows_bootstrap_state(
-                        WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL,
-                        true,
-                        Some(message.clone()),
-                    );
-                    return Err(RuntimeError::CommandFailed(message));
-                }
+        if direct.status.success() || self.windows_wsl_available() {
+            if self.windows_wait_for_wsl_available() {
                 return Ok(());
             }
-
-            if Self::output_mentions_reboot(&direct) {
-                let message =
-                    "WSL platform installed. Restart Windows to finish setup, then reopen Entropic."
-                        .to_string();
+            if self.windows_wsl_install_requires_reboot(&direct) {
+                let message = Self::windows_wsl_reboot_message();
                 self.save_windows_bootstrap_state(
                     WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL,
                     true,
@@ -1618,15 +1936,16 @@ impl Runtime {
                 return Err(RuntimeError::CommandFailed(message));
             }
 
-            let err = RuntimeError::CommandFailed(format!("WSL install failed: {}", combined));
+            let err = RuntimeError::CommandFailed(format!(
+                "WSL install completed but WSL is still unavailable: {}",
+                direct_summary
+            ));
             self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
             return Err(err);
         }
 
-        if Self::output_mentions_reboot(&direct) || !self.windows_wait_for_wsl_available() {
-            let message =
-                "WSL platform installed. Restart Windows to finish setup, then reopen Entropic."
-                    .to_string();
+        if self.windows_wsl_install_requires_reboot(&direct) {
+            let message = Self::windows_wsl_reboot_message();
             self.save_windows_bootstrap_state(
                 WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL,
                 true,
@@ -1635,7 +1954,99 @@ impl Runtime {
             return Err(RuntimeError::CommandFailed(message));
         }
 
-        Ok(())
+        let should_try_elevated =
+            self.windows_wsl_features_need_enable() || direct_install_guidance || direct_needs_elevation;
+
+        if should_try_elevated {
+            let elevated = self.run_elevated_windows_wsl_install()?;
+            let elevated_summary = Self::command_output_summary(&elevated);
+            let elevated_install_guidance =
+                Self::output_mentions_manual_wsl_install_guidance(&elevated);
+            let elevated_unsupported = Self::output_mentions_unsupported_wsl_install(&elevated);
+
+            if elevated.status.success() || self.windows_wsl_available() {
+                if self.windows_wait_for_wsl_available() {
+                    return Ok(());
+                }
+                if self.windows_wsl_install_requires_reboot(&elevated) {
+                    let message = Self::windows_wsl_reboot_message();
+                    self.save_windows_bootstrap_state(
+                        WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL,
+                        true,
+                        Some(message.clone()),
+                    );
+                    return Err(RuntimeError::CommandFailed(message));
+                }
+
+                let err = RuntimeError::CommandFailed(format!(
+                    "Elevated WSL install completed but WSL is still unavailable: {}",
+                    elevated_summary
+                ));
+                self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
+                return Err(err);
+            }
+
+            if self.windows_wsl_install_requires_reboot(&elevated) {
+                let message = Self::windows_wsl_reboot_message();
+                self.save_windows_bootstrap_state(
+                    WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL,
+                    true,
+                    Some(message.clone()),
+                );
+                return Err(RuntimeError::CommandFailed(message));
+            }
+
+            if direct_unsupported || elevated_unsupported {
+                let err = RuntimeError::CommandFailed(Self::legacy_windows_wsl_cli_message());
+                self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
+                return Err(err);
+            }
+
+            if self.windows_wsl_features_need_enable() {
+                let err = RuntimeError::CommandFailed(
+                    Self::manual_windows_wsl_feature_enable_message(),
+                );
+                self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
+                return Err(err);
+            }
+
+            if direct_install_guidance || elevated_install_guidance {
+                let err =
+                    RuntimeError::CommandFailed(Self::manual_windows_wsl_install_message());
+                self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
+                return Err(err);
+            }
+
+            let err = RuntimeError::CommandFailed(format!(
+                "WSL install failed after elevation attempt: {}",
+                elevated_summary
+            ));
+            self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
+            return Err(err);
+        }
+
+        if direct_unsupported {
+            let err = RuntimeError::CommandFailed(Self::legacy_windows_wsl_cli_message());
+            self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
+            return Err(err);
+        }
+
+        if self.windows_wsl_features_need_enable() {
+            let err =
+                RuntimeError::CommandFailed(Self::manual_windows_wsl_feature_enable_message());
+            self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
+            return Err(err);
+        }
+
+        if direct_install_guidance {
+            let err = RuntimeError::CommandFailed(Self::manual_windows_wsl_install_message());
+            self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
+            return Err(err);
+        }
+
+        let err = RuntimeError::CommandFailed(format!("WSL install failed: {}", direct_summary));
+        self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
+        Err(err)
     }
 
     fn ensure_windows_wsl_default_version(&self) -> Result<(), RuntimeError> {
@@ -1991,6 +2402,9 @@ fi
         match self.run_wsl(&["--unregister", distro]) {
             Ok(out) if out.status.success() => Ok(()),
             Ok(out) => {
+                if !self.windows_distro_registered(distro) {
+                    return Ok(());
+                }
                 let summary = Self::command_output_summary(&out);
                 let lower = summary.to_ascii_lowercase();
                 if lower.contains("there is no distribution with the supplied name")
@@ -2863,6 +3277,8 @@ fi
 installed=0
 reboot_pending=0
 distros=""
+feature_wsl=Disabled
+feature_vmp=Disabled
 if [ -f "$STATE_FILE" ]; then
   # shellcheck disable=SC1090
   . "$STATE_FILE"
@@ -2874,6 +3290,8 @@ save_state() {
     echo "installed=$installed"
     echo "reboot_pending=$reboot_pending"
     echo "distros=\"$distros\""
+    echo "feature_wsl=$feature_wsl"
+    echo "feature_vmp=$feature_vmp"
   } > "$STATE_FILE"
 }
 
@@ -2916,11 +3334,19 @@ if [ "$#" -ge 2 ] && [ "$1" = "--install" ] && [ "$2" = "--no-distribution" ]; t
   installed=1
   if [ "${ENTROPIC_TEST_WSL_INSTALL_REBOOT:-0}" = "1" ]; then
     reboot_pending=1
+    feature_wsl=EnablePending
+    feature_vmp=EnablePending
     save_state
-    echo "Restart required to complete installation"
+    if [ -n "${ENTROPIC_TEST_WSL_INSTALL_REBOOT_MESSAGE:-}" ]; then
+      echo "$ENTROPIC_TEST_WSL_INSTALL_REBOOT_MESSAGE"
+    else
+      echo "Restart required to complete installation"
+    fi
     exit 0
   fi
   reboot_pending=0
+  feature_wsl=Enabled
+  feature_vmp=Enabled
   save_state
   echo "Installed WSL"
   exit 0
@@ -3082,6 +3508,8 @@ if ([string]::IsNullOrWhiteSpace($stateFile)) {
 $installed = 0
 $reboot_pending = 0
 $distros = @()
+$feature_wsl = "Disabled"
+$feature_vmp = "Disabled"
 
 if (Test-Path $stateFile) {
   foreach ($line in Get-Content $stateFile) {
@@ -3094,6 +3522,10 @@ if (Test-Path $stateFile) {
       if (-not [string]::IsNullOrWhiteSpace($value)) {
         $distros = @($value.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries))
       }
+    } elseif ($line -match '^feature_wsl=(.+)$') {
+      $feature_wsl = $Matches[1]
+    } elseif ($line -match '^feature_vmp=(.+)$') {
+      $feature_vmp = $Matches[1]
     }
   }
 }
@@ -3107,6 +3539,8 @@ function Save-State {
     "installed=$installed"
     "reboot_pending=$reboot_pending"
     ('distros="' + ($distros -join ',') + '"')
+    "feature_wsl=$feature_wsl"
+    "feature_vmp=$feature_vmp"
   ) | Set-Content -Path $stateFile -Encoding ascii
 }
 
@@ -3141,11 +3575,19 @@ if ($args.Count -ge 2 -and $args[0] -eq "--install" -and $args[1] -eq "--no-dist
   $installed = 1
   if ($env:ENTROPIC_TEST_WSL_INSTALL_REBOOT -eq "1") {
     $reboot_pending = 1
+    $feature_wsl = "EnablePending"
+    $feature_vmp = "EnablePending"
     Save-State
-    Write-Output "Restart required to complete installation"
+    if (-not [string]::IsNullOrWhiteSpace($env:ENTROPIC_TEST_WSL_INSTALL_REBOOT_MESSAGE)) {
+      Write-Output $env:ENTROPIC_TEST_WSL_INSTALL_REBOOT_MESSAGE
+    } else {
+      Write-Output "Restart required to complete installation"
+    }
     exit 0
   }
   $reboot_pending = 0
+  $feature_wsl = "Enabled"
+  $feature_vmp = "Enabled"
   Save-State
   Write-Output "Installed WSL"
   exit 0
@@ -3363,6 +3805,11 @@ exit 1
                 fake_binary
             };
             let wsl_state_file = root_dir.join("fake-wsl-state.env");
+            fs::write(
+                &wsl_state_file,
+                "installed=0\nreboot_pending=0\ndistros=\"\"\nfeature_wsl=Disabled\nfeature_vmp=Disabled\n",
+            )
+            .expect("failed to seed fake wsl state");
 
             let env_guard = EnvGuard::new(&[
                 "PATH",
@@ -3380,6 +3827,7 @@ exit 1
                 "ENTROPIC_WSL_POWERSHELL_SCRIPT",
                 "ENTROPIC_TEST_WSL_STATE_FILE",
                 "ENTROPIC_TEST_WSL_INSTALL_REBOOT",
+                "ENTROPIC_TEST_WSL_INSTALL_REBOOT_MESSAGE",
                 "ENTROPIC_TEST_WSL_DOCKER_FAIL",
                 "ENTROPIC_TEST_WSL_LEGACY_CLI",
             ]);
@@ -3414,6 +3862,7 @@ exit 1
                 "ENTROPIC_TEST_WSL_INSTALL_REBOOT",
                 if install_requires_reboot { "1" } else { "0" },
             );
+            env_guard.remove("ENTROPIC_TEST_WSL_INSTALL_REBOOT_MESSAGE");
             env_guard.remove("ENTROPIC_TEST_WSL_DOCKER_FAIL");
             env_guard.remove("ENTROPIC_TEST_WSL_LEGACY_CLI");
             env_guard.set("ENTROPIC_WSL_DEV_DISTRO_SHA256", sha256_hex(dev_contents));
@@ -3449,7 +3898,10 @@ exit 1
 
         fn mark_reboot_complete(&self) {
             let raw = self.read_wsl_state();
-            let updated = raw.replace("reboot_pending=1", "reboot_pending=0");
+            let updated = raw
+                .replace("reboot_pending=1", "reboot_pending=0")
+                .replace("feature_wsl=EnablePending", "feature_wsl=Enabled")
+                .replace("feature_vmp=EnablePending", "feature_vmp=Enabled");
             fs::write(&self.wsl_state_file, updated).expect("failed to update fake wsl state");
         }
 
@@ -3505,6 +3957,10 @@ exit 1
     fn windows_bootstrap_reboot_resume_flow_persists_and_recovers() {
         let _guard = env_lock().lock().expect("env lock poisoned");
         let fixture = WindowsBootstrapFixture::new("reboot-resume", true);
+        std::env::set_var(
+            "ENTROPIC_TEST_WSL_INSTALL_REBOOT_MESSAGE",
+            "Redemarrage requis pour terminer l installation",
+        );
 
         let first_err = fixture
             .runtime
@@ -3529,6 +3985,7 @@ exit 1
 
         fixture.mark_reboot_complete();
         std::env::set_var("ENTROPIC_TEST_WSL_INSTALL_REBOOT", "0");
+        std::env::remove_var("ENTROPIC_TEST_WSL_INSTALL_REBOOT_MESSAGE");
 
         fixture
             .runtime
@@ -3556,7 +4013,7 @@ exit 1
         std::env::set_var("ENTROPIC_TEST_WSL_LEGACY_CLI", "1");
         fs::write(
             &fixture.wsl_state_file,
-            "installed=1\nreboot_pending=0\ndistros=\"\"\n",
+            "installed=1\nreboot_pending=0\ndistros=\"\"\nfeature_wsl=Enabled\nfeature_vmp=Enabled\n",
         )
         .expect("failed to seed fake wsl state");
 
@@ -3577,6 +4034,15 @@ exit 1
         assert!(
             wsl_state.contains("entropic-prod"),
             "prod distro should be imported"
+        );
+    }
+
+    #[test]
+    fn windows_manual_install_guidance_detection_handles_localized_output() {
+        let sample = "Le Sous-syst�me Windows pour Linux n est pas install�. Vous pouvez effectuer l installation en ex�cutant \"wsl.exe --install\".\nPour plus d informations, visitez https://aka.ms/wslinstall";
+        assert!(
+            Runtime::output_contains_manual_wsl_install_guidance(sample),
+            "expected localized install guidance to be detected"
         );
     }
 

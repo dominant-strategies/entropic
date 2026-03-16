@@ -192,6 +192,7 @@ pub fn run() {
             commands::scan_plugin,
             commands::scan_workspace_skill,
             commands::scan_and_install_clawhub_skill,
+            commands::should_use_localhost_oauth,
             commands::start_auth_localhost,
             commands::start_google_oauth,
             commands::refresh_google_token,

@@ -253,21 +253,17 @@ function Test-DockerResponsive([string]$Name) {
     return $LASTEXITCODE
 }
 
-function Bootstrap-DevDocker([string]$Name) {
-    Write-Host "[wsl] Bootstrapping Docker inside $Name..."
-    $bootstrapCommand = @(
+function Start-DevDockerDaemon([string]$Name) {
+    $startCommand = @(
         'set -euo pipefail'
-        'export DEBIAN_FRONTEND=noninteractive'
-        'if ! command -v apt-get >/dev/null 2>&1; then'
-        '  echo "apt-get is required to install Docker in this distro." >&2'
-        '  exit 1'
+        'if ! command -v docker >/dev/null 2>&1; then'
+        '  exit 42'
         'fi'
-        'apt-get update'
-        'apt-get install -y docker.io'
         'if command -v systemctl >/dev/null 2>&1; then'
         '  systemctl enable docker >/dev/null 2>&1 || true'
         '  systemctl start docker >/dev/null 2>&1 || true'
-        'elif command -v service >/dev/null 2>&1; then'
+        'fi'
+        'if command -v service >/dev/null 2>&1; then'
         '  service docker start >/dev/null 2>&1 || true'
         'fi'
         'if [ ! -S /var/run/docker.sock ]; then'
@@ -286,7 +282,29 @@ function Bootstrap-DevDocker([string]$Name) {
         'exit 1'
     ) -join "`n"
 
+    Invoke-DistroRootBash $Name $startCommand
+    return $LASTEXITCODE
+}
+
+function Bootstrap-DevDocker([string]$Name) {
+    Write-Host "[wsl] Bootstrapping Docker inside $Name..."
+    $bootstrapCommand = @(
+        'set -euo pipefail'
+        'export DEBIAN_FRONTEND=noninteractive'
+        'if ! command -v apt-get >/dev/null 2>&1; then'
+        '  echo "apt-get is required to install Docker in this distro." >&2'
+        '  exit 1'
+        'fi'
+        'apt-get update'
+        'apt-get install -y docker.io'
+    ) -join "`n"
+
     Invoke-DistroRootBash $Name $bootstrapCommand
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to bootstrap Docker in '$Name'. Verify network access in the distro and inspect /var/log/dockerd.log."
+    }
+
+    Start-DevDockerDaemon $Name *> $null
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to bootstrap Docker in '$Name'. Verify network access in the distro and inspect /var/log/dockerd.log."
     }
@@ -311,14 +329,7 @@ function Ensure-DevDockerReady([string]$Name) {
     Stop-Distro $Name
     Start-Distro $Name
 
-    $repairCommand = @(
-        "if command -v systemctl >/dev/null 2>&1; then"
-        "  systemctl is-active docker >/dev/null 2>&1 || systemctl start docker >/dev/null 2>&1 || true"
-        "fi"
-    ) -join "`n"
-    & wsl -d $Name --user root --exec bash -lc $repairCommand *> $null
-
-    $retryExit = Test-DockerResponsive $Name
+    $retryExit = Start-DevDockerDaemon $Name
     if ($retryExit -eq 0) {
         Write-Host "[wsl] Docker in $Name recovered after distro restart."
         return
