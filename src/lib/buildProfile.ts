@@ -15,7 +15,7 @@ function trimUrl(rawValue: unknown): string {
 }
 
 export const ENTROPIC_BUILD_PROFILE = normalizeBuildProfile(
-  (import.meta as ImportMeta & { env?: Record<string, unknown> }).env?.ENTROPIC_BUILD_PROFILE,
+  import.meta.env.VITE_ENTROPIC_BUILD_PROFILE,
 );
 
 export const managedBuild = ENTROPIC_BUILD_PROFILE === "managed";

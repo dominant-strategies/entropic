@@ -5,7 +5,7 @@
 Entropic supports host-native development for macOS and Linux, and a WSL-based
 workflow for Windows.
 
-The removed `dev.sh` container workflow is no longer supported.
+The legacy `dev.sh` container-based workflow has been removed and is no longer supported.
 
 ## Requirements
 
@@ -13,7 +13,7 @@ The removed `dev.sh` container workflow is no longer supported.
 
 - Node.js 20+ with `pnpm`
 - Rust via `rustup`
-- `openclaw` built in a sibling directory or provided via `OPENCLAW_SOURCE`
+- [`openclaw`](https://github.com/dominant-strategies/openclaw) cloned and built in an adjacent directory (or pointed to via `OPENCLAW_SOURCE`)
 
 ### macOS
 
@@ -44,12 +44,11 @@ Use this for normal source development:
 ENTROPIC_BUILD_PROFILE=local pnpm tauri:dev
 ```
 
-Behavior:
+What this means:
 
-- hosted auth disabled
-- hosted billing disabled
-- updater disabled
-- local/provider-key flow expected
+- Hosted auth and billing are disabled
+- Auto-updater is disabled
+- You bring your own API keys for each AI provider
 
 ### Managed
 
@@ -59,11 +58,11 @@ Use this only when intentionally validating Entropic-managed flows:
 ENTROPIC_BUILD_PROFILE=managed pnpm tauri:dev
 ```
 
-Managed mode expects hosted env vars to be configured.
+Managed mode requires hosted env vars (`VITE_API_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`).
 
 ## OpenClaw Runtime
 
-Build the sibling `openclaw` repo first:
+Clone and build OpenClaw first (in an adjacent directory):
 
 ```bash
 cd /path/to/workspace/openclaw
@@ -78,7 +77,7 @@ cd /path/to/workspace/entropic
 ./scripts/build-openclaw-runtime.sh
 ```
 
-Optional external skills:
+To include an external skills bundle (optional):
 
 ```bash
 ENTROPIC_SKILLS_SOURCE=../entropic-skills ./scripts/build-openclaw-runtime.sh
@@ -135,12 +134,12 @@ pnpm dev:wsl:shell:dev
 pnpm dev:wsl:shell:prod
 ```
 
-## OAuth and Auth Expectations
+## Auth Expectations
 
-- Local builds should be treated as local-only.
-- Managed builds are the only builds that should expose hosted Entropic account
-  flows.
-- Provider OAuth and local API-key flows still belong in local builds.
+- **Local builds:** No hosted Entropic account flows. Users authenticate
+  directly with AI providers using their own API keys or OAuth.
+- **Managed builds:** The only builds that expose hosted Entropic account
+  creation, login, and billing.
 
 ## Validation Commands
 
@@ -151,5 +150,5 @@ pnpm build
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-If you touch Windows bootstrap/runtime code, also run the relevant Windows
-workflow or tests where possible.
+If your change affects Windows bootstrap or runtime code, also validate with the
+Windows WSL workflow (`pnpm dev:wsl:status`, `pnpm dev:wsl:up`).

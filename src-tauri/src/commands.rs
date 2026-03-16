@@ -20,6 +20,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
+#[cfg(target_os = "macos")]
+use std::os::raw::c_uchar;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -38,6 +40,12 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXIsProcessTrusted() -> c_uchar;
+}
 
 const ENTROPIC_PROXY_DEV_ORIGIN: &str = "http://host.docker.internal:5174";
 const ENTROPIC_PROXY_HOST_DEV_ORIGIN: &str = "http://127.0.0.1:5174";
@@ -3617,6 +3625,14 @@ pub struct CapabilityState {
     pub id: String,
     pub label: String,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AppleAutomationStatus {
+    pub supported: bool,
+    pub osascript_available: bool,
+    pub shortcuts_available: bool,
+    pub accessibility_trusted: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -8299,6 +8315,20 @@ fn bridge_status_from_settings(settings: &StoredAgentSettings) -> BridgeState {
     }
 }
 
+fn normalize_bridge_settings(settings: &mut StoredAgentSettings) -> bool {
+    let mut changed = migrate_bridge_devices(settings);
+    if settings.bridge_port == 0 {
+        settings.bridge_port = 19789;
+        changed = true;
+    }
+    let previous_tailnet_ip = settings.bridge_tailnet_ip.clone();
+    refresh_bridge_tailnet_ip(settings);
+    if settings.bridge_tailnet_ip != previous_tailnet_ip {
+        changed = true;
+    }
+    changed
+}
+
 fn refresh_bridge_tailnet_ip(settings: &mut StoredAgentSettings) {
     if settings.bridge_tailnet_ip.trim().is_empty() {
         if let Some(ip) = resolve_tailscale_ipv4() {
@@ -8829,9 +8859,9 @@ async fn run_bridge_server(app: AppHandle, port: u16) -> Result<(), String> {
     }
 }
 
-fn ensure_bridge_server_running(
+pub(crate) fn ensure_bridge_server_running(
     app: &AppHandle,
-    state: &State<'_, AppState>,
+    state: &AppState,
     port: u16,
 ) -> Result<(), String> {
     let mut started = state
@@ -8848,6 +8878,21 @@ fn ensure_bridge_server_running(
             eprintln!("[Entropic] Bridge server stopped: {}", err);
         }
     });
+    Ok(())
+}
+
+pub(crate) fn start_mobile_bridge_server_if_enabled(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    let mut settings = load_agent_settings(app);
+    let changed = normalize_bridge_settings(&mut settings);
+    if settings.bridge_enabled {
+        ensure_bridge_server_running(app, state, settings.bridge_port)?;
+    }
+    if changed {
+        save_agent_settings(app, settings)?;
+    }
     Ok(())
 }
 fn redact_env_value(env: &str) -> String {
@@ -11437,6 +11482,26 @@ pub async fn sync_onboarding_to_settings(
     settings.identity_name = agent_name;
     save_agent_settings(&app, settings)?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apple_accessibility_trusted() -> bool {
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apple_accessibility_trusted() -> bool {
+    false
+}
+
+#[tauri::command]
+pub async fn get_apple_automation_status() -> Result<AppleAutomationStatus, String> {
+    Ok(AppleAutomationStatus {
+        supported: cfg!(target_os = "macos"),
+        osascript_available: which::which("osascript").is_ok(),
+        shortcuts_available: which::which("shortcuts").is_ok(),
+        accessibility_trusted: apple_accessibility_trusted(),
+    })
 }
 
 #[tauri::command]

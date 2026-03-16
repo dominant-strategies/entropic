@@ -1,22 +1,23 @@
 ## Summary
 
-- what changed
-- why it changed
+<!-- Describe what changed and why. -->
 
 ## Validation
 
-- [ ] `pnpm build`
-- [ ] `cargo check --manifest-path src-tauri/Cargo.toml`
-- [ ] docs updated if setup or contributor workflow changed
+- [ ] `pnpm build` passes
+- [ ] `cargo check --manifest-path src-tauri/Cargo.toml` passes
+- [ ] Docs updated (if setup or contributor workflow changed)
 
-## Impact
+## Affected platforms and profiles
+
+Check all that apply:
 
 - [ ] macOS
 - [ ] Linux
 - [ ] Windows / WSL
-- [ ] local build profile
-- [ ] managed build profile
+- [ ] `local` build profile
+- [ ] `managed` build profile
 
 ## Notes
 
-Call out any auth, billing, updater, runtime, or Windows bootstrap changes.
+<!-- If this change touches auth, billing, updater, runtime, or Windows bootstrap behavior, describe the impact here. Otherwise delete this section. -->

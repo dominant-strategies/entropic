@@ -14,46 +14,44 @@ build, and run the app without any Entropic cloud account or private secrets.
 
 `ENTROPIC_BUILD_PROFILE=local`
 
-Defaults:
+This is the default for contributors and forks. It:
 
-- hosted auth hidden
-- hosted billing hidden
-- updater disabled
-- managed API proxy disabled
-- local provider auth and API-key flows remain available
-
-This is the correct default for contributors and forks.
+- Hides hosted auth and billing UI
+- Disables the auto-updater
+- Disables the managed API proxy
+- Keeps provider-direct auth and API-key flows available (you bring your own keys)
 
 ## Managed Profile
 
 `ENTROPIC_BUILD_PROFILE=managed`
 
-Defaults:
+Used for official releases. It enables:
 
-- hosted auth available when Supabase env vars exist
-- hosted billing available
-- updater enabled
-- managed API proxy allowed
+- Hosted auth (requires Supabase env vars)
+- Hosted billing
+- Auto-updater
+- Managed API proxy
 
-Managed builds still require the relevant env vars at build/runtime.
+These features activate only when the corresponding env vars are set at build or
+runtime.
 
 ## Runtime Model
 
-Entropic runs OpenClaw in a local runtime:
+Entropic runs OpenClaw inside an isolated local runtime rather than directly on
+your machine:
 
-- macOS: isolated Colima-based runtime
-- Linux: Docker Engine
-- Windows: managed WSL runtime path
+- **macOS:** Colima VM running Docker (lightweight Linux VM via Virtualization.framework)
+- **Linux:** Docker Engine directly
+- **Windows:** Docker inside a managed WSL instance
 
-The runtime image is built from the sibling `openclaw` repository with
-`./scripts/build-openclaw-runtime.sh`.
+The runtime container image is built from the adjacent `openclaw` repository
+using `./scripts/build-openclaw-runtime.sh`.
 
 ## Windows Runtime Notes
 
-Windows support is implemented around the managed WSL workflow and release/user
-test scripts. Preview builds may be unsigned. The current remaining quality work
-is around test confidence and runtime-manager integration, not the existence of
-the platform path itself.
+Windows support uses a managed WSL workflow. The platform path works end-to-end,
+but preview builds may be unsigned and test coverage is still being expanded
+(particularly around runtime-manager integration).
 
 ## Managed Infrastructure
 
@@ -63,10 +61,10 @@ Managed builds may use:
 - managed Entropic API endpoints
 - updater metadata and release endpoints
 
-Those integrations should be configured explicitly, never assumed for source
+These are configured explicitly via env vars and are never assumed in source
 builds.
 
 ## Contributor Principle
 
-If a change makes the app unusable without private hosted services in the
-default source workflow, that is a regression.
+If a change makes the app unusable without private hosted services when using
+the default `local` build profile, that is a regression.

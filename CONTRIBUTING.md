@@ -54,12 +54,12 @@ carry it.
 
 ## Review Bar
 
-Changes should be safe for external contributors to reproduce locally. That
-means:
+Every change must be reproducible by external contributors without private
+access. That means:
 
-- no reliance on private secrets for normal validation
-- no new hardcoded private infrastructure defaults
-- no breaking the host-native macOS/Linux or WSL Windows workflows
+- No reliance on private secrets to build or validate
+- No hardcoded private infrastructure URLs or defaults
+- No breaking the macOS/Linux native or Windows WSL workflows
 
 ## Security
 

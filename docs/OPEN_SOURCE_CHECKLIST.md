@@ -1,6 +1,6 @@
 # Open Source Checklist
 
-Use this before calling the repository publicly open-source ready.
+Complete these items before declaring the repository publicly open-source ready.
 
 ## Required
 
@@ -14,11 +14,11 @@ Use this before calling the repository publicly open-source ready.
 
 ## Before Public Launch
 
-- current Rust warning set is burned down
-- CI policy for warnings-as-errors is enabled
-- Windows bootstrap tests are reliable
-- release automation and managed build envs are documented
-- review ownership and automation are configured
+- all existing Rust compiler warnings are resolved
+- CI treats warnings as errors (`-D warnings`)
+- Windows bootstrap tests pass reliably
+- release automation and managed-build env vars are documented
+- GitHub review ownership (CODEOWNERS) and CI automation are configured
 
 ## Optional but Recommended
 

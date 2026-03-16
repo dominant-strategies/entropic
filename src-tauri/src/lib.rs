@@ -67,16 +67,9 @@ fn install_startup_panic_logger() {
 }
 
 fn managed_build_profile_enabled() -> bool {
-    fn is_managed(raw: &str) -> bool {
-        raw.trim().eq_ignore_ascii_case("managed")
-    }
-
     option_env!("ENTROPIC_BUILD_PROFILE")
-        .map(is_managed)
+        .map(|raw| raw.trim().eq_ignore_ascii_case("managed"))
         .unwrap_or(false)
-        || std::env::var("ENTROPIC_BUILD_PROFILE")
-            .map(|value| is_managed(&value))
-            .unwrap_or(false)
 }
 
 pub fn maybe_handle_cli_mode() -> Option<i32> {
@@ -143,11 +136,12 @@ pub fn run() {
             }
 
             let state = commands::init_state(&app.handle());
-            commands::ensure_bridge_server_running(
-                &app.handle(),
-                &state,
-                commands::HOST_AUTOMATION_SERVER_PORT,
-            )?;
+            if let Err(err) = commands::start_mobile_bridge_server_if_enabled(&app.handle(), &state)
+            {
+                let msg = format!("mobile bridge startup skipped: {}", err);
+                append_startup_log(&msg);
+                eprintln!("[Entropic] {}", msg);
+            }
             app.manage(state);
             Ok(())
         })

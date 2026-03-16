@@ -21,9 +21,10 @@
   <a href="./docs/OPEN_SOURCE_CHECKLIST.md"><img alt="Launch Checklist" src="https://img.shields.io/badge/launch-checklist-111827"></a>
 </p>
 
-Entropic runs OpenClaw in a hardened local runtime. Source builds default to a
-local-only profile: no Entropic-hosted auth, billing, updater, or managed API
-access is enabled unless you explicitly opt into a managed build.
+Entropic runs [OpenClaw](https://github.com/dominant-strategies/openclaw) in a
+hardened local runtime. Source builds default to a local-only profile -- hosted
+auth, billing, auto-updates, and managed API access are all disabled unless you
+explicitly opt into a managed build.
 
 ## Highlights
 
@@ -40,9 +41,9 @@ access is enabled unless you explicitly opt into a managed build.
 
 ## Releases
 
-- Preview release artifacts currently live in `dominant-strategies/entropic-releases`.
-- Source builds default to `ENTROPIC_BUILD_PROFILE=local`.
-- Official managed releases should use `ENTROPIC_BUILD_PROFILE=managed`.
+- Preview builds are published to [`dominant-strategies/entropic-releases`](https://github.com/dominant-strategies/entropic-releases/releases).
+- Building from source defaults to `ENTROPIC_BUILD_PROFILE=local` (no hosted services).
+- Official releases use `ENTROPIC_BUILD_PROFILE=managed` to enable hosted features.
 
 Preview releases:
 
@@ -50,17 +51,16 @@ Preview releases:
 
 ## Build Profiles
 
-### `ENTROPIC_BUILD_PROFILE=local`
+### `ENTROPIC_BUILD_PROFILE=local` (default)
 
-- default for source builds
-- hides hosted auth and billing UI
-- disables updater and managed API proxy defaults
-- intended for local provider auth and API key usage
+- Hides hosted auth and billing UI
+- Disables auto-updater and managed API proxy
+- You bring your own API keys for each AI provider
 
 ### `ENTROPIC_BUILD_PROFILE=managed`
 
-- enables hosted Entropic features when the required env vars are present
-- intended for official managed builds and release automation
+- Enables hosted Entropic features (auth, billing, updater, API proxy) when the required env vars are set
+- Used for official releases and release automation
 
 ## Quick Start
 
@@ -70,7 +70,7 @@ Preview releases:
 - Rust via `rustup`
 - Docker Engine running locally
 - Tauri system dependencies for your platform
-- a sibling `openclaw` checkout
+- a cloned copy of [`openclaw`](https://github.com/dominant-strategies/openclaw) next to the `entropic` directory
 
 ### 2. Build OpenClaw
 
@@ -89,7 +89,7 @@ cd /path/to/workspace/entropic
 ./scripts/build-openclaw-runtime.sh
 ```
 
-Optional skill bundle source:
+To include an external skills bundle (optional):
 
 ```bash
 ENTROPIC_SKILLS_SOURCE=../entropic-skills ./scripts/build-openclaw-runtime.sh
@@ -144,21 +144,21 @@ Unsigned preview builds are currently acceptable for local and user-test use.
 macOS and Linux:
 
 ```bash
-pnpm dev:runtime:status
-pnpm dev:runtime:start
-pnpm dev:runtime:up
-pnpm dev:runtime:stop
-pnpm dev:runtime:prune
-pnpm dev:runtime:logs
+pnpm dev:runtime:status   # Check if the runtime VM and Docker are ready
+pnpm dev:runtime:start    # Start the runtime (Colima VM + Docker)
+pnpm dev:runtime:up       # Start runtime and launch the OpenClaw container
+pnpm dev:runtime:stop     # Stop the runtime
+pnpm dev:runtime:prune    # Remove the runtime VM and reclaim disk space
+pnpm dev:runtime:logs     # Tail the OpenClaw container logs
 ```
 
 Windows:
 
 ```powershell
-pnpm dev:wsl:status
-pnpm dev:wsl:start
-pnpm dev:wsl:stop
-pnpm dev:wsl:prune
+pnpm dev:wsl:status       # Check WSL runtime state
+pnpm dev:wsl:start        # Start the WSL runtime
+pnpm dev:wsl:stop         # Stop the WSL runtime
+pnpm dev:wsl:prune        # Remove the WSL runtime and reclaim disk space
 ```
 
 ## Validation
@@ -170,9 +170,9 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 ## Project Docs
 
-- [DEVELOPMENT.md](./DEVELOPMENT.md): supported contributor workflows
-- [SETUP.md](./SETUP.md): runtime and profile architecture
-- [DISTRIBUTE.md](./DISTRIBUTE.md): release-signing and distribution notes
-- [CONTRIBUTING.md](./CONTRIBUTING.md): contribution expectations
-- [TRADEMARKS.md](./TRADEMARKS.md): Entropic name and branding policy
-- [docs/OPEN_SOURCE_CHECKLIST.md](./docs/OPEN_SOURCE_CHECKLIST.md): launch-readiness checklist
+- [DEVELOPMENT.md](./DEVELOPMENT.md) -- platform-specific setup and day-to-day development workflows
+- [SETUP.md](./SETUP.md) -- how build profiles, runtime isolation, and auth are architected
+- [DISTRIBUTE.md](./DISTRIBUTE.md) -- signing, notarizing, and publishing macOS releases
+- [CONTRIBUTING.md](./CONTRIBUTING.md) -- how to contribute (scope, PR expectations, review bar)
+- [TRADEMARKS.md](./TRADEMARKS.md) -- rules for using the Entropic name and branding
+- [docs/OPEN_SOURCE_CHECKLIST.md](./docs/OPEN_SOURCE_CHECKLIST.md) -- pre-launch readiness checklist

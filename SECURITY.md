@@ -4,14 +4,15 @@
 
 Do not open a public issue for security-sensitive reports.
 
-Send a private report to the maintainers with:
+Instead, use [GitHub's private vulnerability reporting](https://github.com/dominant-strategies/entropic/security/advisories/new)
+to send a report to the maintainers. Include:
 
-- affected area
-- impact
-- reproduction details
-- any suggested remediation
+- affected area (e.g., runtime sandbox, auth flow, build pipeline)
+- impact (what an attacker could do)
+- steps to reproduce
+- any suggested fix
 
-If you are unsure whether something is security-sensitive, treat it as private
+If you are unsure whether something is security-sensitive, report it privately
 first.
 
 ## Handling Expectations
