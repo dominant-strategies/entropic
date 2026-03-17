@@ -1,7 +1,8 @@
 # Trademarks
 
-The source code in this repository is licensed under Apache-2.0. That license
-does not grant trademark rights.
+The source code in this repository is licensed under MIT. That copyright
+license does not grant trademark rights or permission to present a modified
+build as an official Entropic release.
 
 ## Reserved Marks
 
@@ -20,13 +21,13 @@ You may use nominative references such as:
 - "forked from Entropic"
 - "compatible with Entropic"
 
-You may not present a modified build, fork, or redistribution as the official
-Entropic project unless you have explicit permission.
+You may not present a modified build, fork, redistribution, or hosted service
+as the official Entropic project unless you have explicit permission.
 
 ## Forks and Redistributed Builds
 
-If you ship modified builds to others, you should rename them and remove or
-replace official project branding unless you have written permission to keep it.
+If you ship modified builds to others, rename them and remove or replace
+official project branding unless you have written permission to keep it.
 
 ## Questions
 

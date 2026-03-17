@@ -5,20 +5,20 @@
 </p>
 
 <p align="center">
-  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue.svg"></a>
+  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/static/v1?label=License&message=MIT&color=2563eb"></a>
   <a href="https://github.com/dominant-strategies/entropic/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/dominant-strategies/entropic/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/dominant-strategies/entropic/actions/workflows/actionlint.yml"><img alt="Actionlint" src="https://github.com/dominant-strategies/entropic/actions/workflows/actionlint.yml/badge.svg"></a>
-  <a href="./CONTRIBUTING.md"><img alt="Contributing" src="https://img.shields.io/badge/contributions-welcome-1f6feb"></a>
-  <a href="./TRADEMARKS.md"><img alt="Trademark Policy" src="https://img.shields.io/badge/branding-protected-555"></a>
-  <a href="./docs/OPEN_SOURCE_CHECKLIST.md"><img alt="OSS Checklist" src="https://img.shields.io/badge/oss-checklist-in%20progress-f59e0b"></a>
+  <a href="./CONTRIBUTING.md"><img alt="Contributing" src="https://img.shields.io/static/v1?label=Contributing&message=Welcome&color=1f6feb"></a>
+  <a href="./TRADEMARKS.md"><img alt="Trademark Policy" src="https://img.shields.io/static/v1?label=Trademark&message=Protected&color=555555"></a>
+  <a href="./docs/OPEN_SOURCE_CHECKLIST.md"><img alt="OSS Checklist" src="https://img.shields.io/static/v1?label=OSS%20Checklist&message=In%20Progress&color=f59e0b"></a>
 </p>
 
 <p align="center">
-  <a href="#quick-start"><img alt="Get Started" src="https://img.shields.io/badge/get%20started-quick%20start-111827"></a>
-  <a href="https://github.com/dominant-strategies/entropic"><img alt="Repository" src="https://img.shields.io/badge/repository-github-111827"></a>
-  <a href="./CONTRIBUTING.md"><img alt="Contribute" src="https://img.shields.io/badge/contribute-guidelines-111827"></a>
-  <a href="https://github.com/dominant-strategies/entropic-releases/releases"><img alt="Preview Releases" src="https://img.shields.io/badge/releases-preview%20builds-111827"></a>
-  <a href="./docs/OPEN_SOURCE_CHECKLIST.md"><img alt="Launch Checklist" src="https://img.shields.io/badge/launch-checklist-111827"></a>
+  <a href="#quick-start"><img alt="Get Started" src="https://img.shields.io/static/v1?label=Get%20Started&message=Quick%20Start&color=111827"></a>
+  <a href="https://github.com/dominant-strategies/entropic"><img alt="Repository" src="https://img.shields.io/static/v1?label=Repository&message=GitHub&color=111827"></a>
+  <a href="./CONTRIBUTING.md"><img alt="Contribute" src="https://img.shields.io/static/v1?label=Contribute&message=Guidelines&color=111827"></a>
+  <a href="https://github.com/dominant-strategies/entropic-releases/releases"><img alt="Preview Releases" src="https://img.shields.io/static/v1?label=Preview&message=Releases&color=111827"></a>
+  <a href="./docs/OPEN_SOURCE_CHECKLIST.md"><img alt="Launch Checklist" src="https://img.shields.io/static/v1?label=Launch&message=Checklist&color=111827"></a>
 </p>
 
 Entropic runs [OpenClaw](https://github.com/dominant-strategies/openclaw) in a
@@ -176,3 +176,9 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - [CONTRIBUTING.md](./CONTRIBUTING.md) -- how to contribute (scope, PR expectations, review bar)
 - [TRADEMARKS.md](./TRADEMARKS.md) -- rules for using the Entropic name and branding
 - [docs/OPEN_SOURCE_CHECKLIST.md](./docs/OPEN_SOURCE_CHECKLIST.md) -- pre-launch readiness checklist
+
+## License
+
+Entropic source code is licensed under [MIT](./LICENSE). The copyright license
+does not grant rights to the Entropic name, logos, or other branding; see
+[TRADEMARKS.md](./TRADEMARKS.md).

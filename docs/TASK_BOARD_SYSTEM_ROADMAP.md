@@ -1,11 +1,11 @@
-# Task Board System Roadmap (Nova-first, Minimal OpenClaw)
+# Task Board System Roadmap (Entropic-first, Minimal OpenClaw)
 
 ## Outcome
 Deliver a shared task board for Entropic where natural chat can manage tasks, jobs run on cron, and heartbeat always reviews active work, without adding invasive OpenClaw task RPC/tool surface.
 
 ## Direction (Chosen)
 - Keep OpenClaw unchanged for task-board RPC/tooling.
-- Use Nova as the task-board orchestration layer.
+- Use Entropic as the task-board orchestration layer.
 - Reuse existing OpenClaw primitives only:
   - `cron.list/add/update/remove/run/runs` for Jobs.
   - `agent` (with `extraSystemPrompt`) for heartbeat task context.
@@ -13,26 +13,26 @@ Deliver a shared task board for Entropic where natural chat can manage tasks, jo
 ## Design Principles
 - No slash-command dependency: natural chat intent should be enough.
 - Minimal OpenClaw footprint: only existing stable APIs.
-- Explicit ownership: Tasks are Nova-owned, Jobs are OpenClaw cron-owned.
-- Clear join model: `taskId <-> cronJobId` link managed by Nova.
+- Explicit ownership: Tasks are Entropic-owned, Jobs are OpenClaw cron-owned.
+- Clear join model: `taskId <-> cronJobId` link managed by Entropic.
 - No hidden writes: every mutation gets user-visible confirmation.
 
 ## Shared Contract
 - Board statuses: `backlog | todo | in_progress | blocked | done`
 - Priorities: `low | medium | high | critical`
 - Jobs source: OpenClaw cron APIs
-- Task source: Nova task board store/capability layer
+- Task source: Entropic task board store/capability layer
 
-## Current Baseline (Nova)
+## Current Baseline (Entropic)
 - Tasks board + Jobs tabs are unified in Tasks screen.
 - Chat can create task cards from high-confidence natural language patterns.
 - Board refresh events sync Chat and Tasks UI (`entropic-task-board-updated`).
-- Heartbeat checks can be driven from Nova context injection.
+- Heartbeat checks can be driven from Entropic context injection.
 
 ---
 
-## Phase 1: Stabilize Nova-owned Board
-### Nova files
+## Phase 1: Stabilize Entropic-owned Board
+### Entropic files
 - `src/lib/taskBoard.ts`
   - Canonical task schema, parsing, and persistence helpers.
   - Intent parsing for natural chat create-task flows.
@@ -53,7 +53,7 @@ Deliver a shared task board for Entropic where natural chat can manage tasks, jo
 ---
 
 ## Phase 2: Chat + Jobs Linkage
-### Nova files
+### Entropic files
 - `src/pages/Chat.tsx`
   - Expand intents for move/update/done/block/link job.
   - Add confirmations for destructive operations.
@@ -74,7 +74,7 @@ Deliver a shared task board for Entropic where natural chat can manage tasks, jo
 ---
 
 ## Phase 3: Heartbeat Intelligence (without new task RPC)
-### Nova files
+### Entropic files
 - Build compact task digest from board state:
   - blocked tasks,
   - overdue tasks,
@@ -97,6 +97,6 @@ Deliver a shared task board for Entropic where natural chat can manage tasks, jo
 - Telemetry on mutation success/failure and job-link reliability.
 
 ## Suggested Rollout
-1. Finalize Phase 1 Nova task-board capability.
+1. Finalize Phase 1 Entropic task-board capability.
 2. Ship Phase 2 task-job linking UX.
 3. Add Phase 3 heartbeat digest injection.

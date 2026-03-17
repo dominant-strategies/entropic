@@ -5,10 +5,10 @@ Date: 2026-02-09
 ## Summary
 Entropic X integration is wired end-to-end for OAuth connect + API proxy, with billing in entropic-web and tools exposed via `entropic-x` OpenClaw plugin. Tokens are stored in Supabase `user_integrations` with PKCE state stored in `oauth_states` (code verifier).
 
-## Repos & Commits
-- `entropic-web`: `bc27a12` — Add X OAuth endpoints and PKCE state.
-- `Entropic`: `557ec73` — Add X integration connect flow (Store UI + auth/deeplink refresh).
-- `entropic-skills`: `23d05cd` — Add `entropic-x` plugin (tools + README + diagram).
+## Components
+- `entropic-web` hosts the X OAuth endpoints and PKCE state handling.
+- `entropic` provides the desktop connect/disconnect flow and deep-link refresh.
+- `entropic-skills` provides the `entropic-x` plugin and tool definitions.
 
 ## Entropic (Desktop)
 - Store UI shows X integration card under **Social**.
@@ -44,7 +44,7 @@ Entropic X integration is wired end-to-end for OAuth connect + API proxy, with b
 - `entropic-web/supabase/migrations/20260209000000_add_oauth_state_verifier.sql` adds `code_verifier` and updates `create_oauth_state` + `validate_oauth_state`.
 
 ## entropic-skills / OpenClaw plugin
-- Plugin: `entropic-x` (in `/home/alan/agent/entropic-skills/entropic-x`).
+- Plugin: `entropic-x` (in `entropic-skills/entropic-x`).
 - Tools: `x_search`, `x_profile`, `x_thread`, `x_user_tweets`.
 - Tools call entropic-web endpoints with `Authorization: Bearer <gateway_token>`.
 - Requires `ENTROPIC_WEB_BASE_URL` in container (set by Entropic).

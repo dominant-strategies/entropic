@@ -120,7 +120,9 @@ Entropic uses the Tauri updater to deliver silent updates for DMG installs. The 
 
 ### 1. Create a Public Releases Repo
 
-Keep the code repo private and publish only release artifacts in a public repo (example: `entropic-releases`).
+Use a separate public releases repo for signed updater assets and installer
+artifacts (example: `entropic-releases`). This works whether the source repo is
+public or private.
 
 ### 2. Generate Updater Signing Keys
 

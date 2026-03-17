@@ -2,7 +2,7 @@
   "name": "entropic",
   "version": "0.1.9",
   "description": "OpenClaw Desktop - AI assistant with secure sandboxing",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

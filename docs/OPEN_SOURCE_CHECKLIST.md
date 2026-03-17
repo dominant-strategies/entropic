@@ -23,5 +23,5 @@ Complete these items before declaring the repository publicly open-source ready.
 ## Optional but Recommended
 
 - add `CODEOWNERS`
-- add actionlint workflow validation
+- keep actionlint workflow validation aligned with any custom runner labels
 - add a dedicated launch/readiness issue or milestone
