@@ -4,13 +4,15 @@
 
 ## Validation
 
+- [ ] `pnpm install --frozen-lockfile` passes
 - [ ] `pnpm build` passes
 - [ ] `cargo check --manifest-path src-tauri/Cargo.toml` passes
+- [ ] GitHub checks are green (`CI`, `Actionlint`)
 - [ ] Docs updated (if setup or contributor workflow changed)
 
 ## Affected platforms and profiles
 
-Check all that apply:
+These boxes describe scope, not test coverage. Check all that apply:
 
 - [ ] macOS
 - [ ] Linux

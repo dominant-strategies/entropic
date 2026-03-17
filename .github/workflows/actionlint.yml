@@ -16,4 +16,4 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - uses: rhysd/actionlint@v1
+      - uses: devops-actions/actionlint@e7ee33fbf5aa8c9f9ee1145137f3e52e25d6a35b # v0.1.3
