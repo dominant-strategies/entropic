@@ -34,6 +34,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Typecheck
+        run: pnpm typecheck
+
       - name: Build frontend
         run: pnpm build
 
@@ -51,6 +54,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-latest'
@@ -63,5 +68,88 @@ jobs:
             librsvg2-dev \
             libssl-dev
 
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+
       - name: Cargo check
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+  rust-fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Rustfmt
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+  security-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect suspicious unicode
+        run: |
+          # Detect Unicode bidirectional control characters and other dangerous
+          # codepoints that can be used to disguise malicious code (trojan-source
+          # style attacks, homoglyph substitution, invisible characters).
+          #
+          # Covers: BiDi overrides/embeddings/isolates (U+202A-202E, U+2066-2069),
+          # zero-width characters (U+200B-200F, U+FEFF), confusable homoglyphs in
+          # common attack patterns, and other encoding tricks.
+
+          HEX_PATTERNS=(
+            # BiDi override / embedding / isolate characters (trojan-source)
+            '\xe2\x80\xaa'   # U+202A LEFT-TO-RIGHT EMBEDDING
+            '\xe2\x80\xab'   # U+202B RIGHT-TO-LEFT EMBEDDING
+            '\xe2\x80\xac'   # U+202C POP DIRECTIONAL FORMATTING
+            '\xe2\x80\xad'   # U+202D LEFT-TO-RIGHT OVERRIDE
+            '\xe2\x80\xae'   # U+202E RIGHT-TO-LEFT OVERRIDE
+            '\xe2\x81\xa6'   # U+2066 LEFT-TO-RIGHT ISOLATE
+            '\xe2\x81\xa7'   # U+2067 RIGHT-TO-LEFT ISOLATE
+            '\xe2\x81\xa8'   # U+2068 FIRST STRONG ISOLATE
+            '\xe2\x81\xa9'   # U+2069 POP DIRECTIONAL ISOLATE
+            # Zero-width and invisible characters
+            '\xe2\x80\x8b'   # U+200B ZERO WIDTH SPACE
+            '\xe2\x80\x8c'   # U+200C ZERO WIDTH NON-JOINER
+            '\xe2\x80\x8d'   # U+200D ZERO WIDTH JOINER
+            '\xe2\x80\x8e'   # U+200E LEFT-TO-RIGHT MARK
+            '\xe2\x80\x8f'   # U+200F RIGHT-TO-LEFT MARK
+            '\xef\xbb\xbf'   # U+FEFF BYTE ORDER MARK (when not at file start)
+            '\xe2\x81\xa0'   # U+2060 WORD JOINER
+            '\xc2\xad'       # U+00AD SOFT HYPHEN
+          )
+
+          found=0
+          for pattern in "${HEX_PATTERNS[@]}"; do
+            # Search source files, skip binaries/images/lockfiles/vendored
+            if grep -rlP "$pattern" \
+                --include='*.rs' --include='*.ts' --include='*.tsx' \
+                --include='*.js' --include='*.jsx' --include='*.json' \
+                --include='*.toml' --include='*.yaml' --include='*.yml' \
+                --include='*.md' --include='*.html' --include='*.css' \
+                --include='*.sh' --include='*.ps1' \
+                . 2>/dev/null; then
+              echo "::error::Suspicious unicode detected (pattern: $pattern)"
+              found=1
+            fi
+          done
+
+          if [ "$found" -eq 1 ]; then
+            echo ""
+            echo "================================================================"
+            echo "BLOCKED: Source files contain suspicious Unicode characters."
+            echo "These can be used for trojan-source attacks or to hide malicious"
+            echo "code. Please review and remove them before merging."
+            echo "================================================================"
+            exit 1
+          fi
+
+          echo "No suspicious unicode characters found."

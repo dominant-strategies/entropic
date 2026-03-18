@@ -5,9 +5,11 @@
 ## Validation
 
 - [ ] `pnpm install --frozen-lockfile` passes
+- [ ] `pnpm typecheck` passes
 - [ ] `pnpm build` passes
-- [ ] `cargo check --manifest-path src-tauri/Cargo.toml` passes
-- [ ] GitHub checks are green (`CI`, `Actionlint`)
+- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes
+- [ ] `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` passes
+- [ ] GitHub checks are green (`CI`, `Actionlint`, `security-lint`)
 - [ ] Docs updated (if setup or contributor workflow changed)
 
 ## Affected platforms and profiles

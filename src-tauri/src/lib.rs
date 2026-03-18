@@ -121,7 +121,7 @@ pub fn run() {
             if !salt_path.exists() {
                 let mut salt = [0u8; 32];
                 rand::thread_rng().fill_bytes(&mut salt);
-                fs::write(&salt_path, &salt)
+                fs::write(&salt_path, salt)
                     .map_err(|e| format!("Failed to write stronghold salt: {}", e))?;
             }
 
@@ -129,14 +129,14 @@ pub fn run() {
                 .plugin(tauri_plugin_stronghold::Builder::with_argon2(&salt_path).build())
                 .map_err(|e| format!("Failed to init stronghold: {}", e))?;
 
-            if let Err(err) = commands::migrate_legacy_nova_data_on_startup(&app.handle()) {
+            if let Err(err) = commands::migrate_legacy_nova_data_on_startup(app.handle()) {
                 let msg = format!("legacy migration failed: {}", err);
                 append_startup_log(&msg);
                 eprintln!("[Entropic] {}", msg);
             }
 
-            let state = commands::init_state(&app.handle());
-            if let Err(err) = commands::start_mobile_bridge_server_if_enabled(&app.handle(), &state)
+            let state = commands::init_state(app.handle());
+            if let Err(err) = commands::start_mobile_bridge_server_if_enabled(app.handle(), &state)
             {
                 let msg = format!("mobile bridge startup skipped: {}", err);
                 append_startup_log(&msg);

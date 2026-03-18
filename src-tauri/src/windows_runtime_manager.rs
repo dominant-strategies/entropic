@@ -1,30 +1,7 @@
-use std::process::Command;
-
+#[cfg(target_os = "windows")]
 pub(crate) const RUNTIME_MANAGER_DISPATCH_FLAG: &str = "--entropic-runtime-manager-dispatch";
+#[cfg(target_os = "windows")]
 pub(crate) const RUNTIME_MANAGER_SERVER_FLAG: &str = "--entropic-runtime-manager-server";
-
-pub fn docker_dispatch_command(mode: &str) -> Option<Command> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let normalized = normalize_mode(mode);
-        let exe = std::env::current_exe().ok()?;
-        let mut cmd = Command::new(exe);
-        cmd.arg(RUNTIME_MANAGER_DISPATCH_FLAG);
-        cmd.arg("--mode");
-        cmd.arg(normalized);
-        cmd.arg("--");
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        return Some(cmd);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = mode;
-        None
-    }
-}
 
 pub fn maybe_handle_runtime_manager_cli() -> Option<i32> {
     #[cfg(target_os = "windows")]
@@ -37,6 +14,7 @@ pub fn maybe_handle_runtime_manager_cli() -> Option<i32> {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn normalize_mode(mode: &str) -> &'static str {
     if mode.eq_ignore_ascii_case("dev") {
         "dev"

@@ -24,12 +24,12 @@ fn debug_log(msg: &str) {
     }
 }
 
-fn apply_windows_no_window(cmd: &mut Command) {
+fn apply_windows_no_window(_cmd: &mut Command) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        _cmd.creation_flags(CREATE_NO_WINDOW);
     }
 }
 
@@ -114,18 +114,10 @@ fn decode_command_output(bytes: &[u8]) -> String {
 pub enum RuntimeError {
     #[error("Colima not found in resources")]
     ColimaNotFound,
-    #[error("Docker CLI not found")]
-    DockerNotFound,
     #[error("Failed to start Colima: {0}")]
     ColimaStartFailed(String),
     #[error("Failed to stop Colima: {0}")]
     ColimaStopFailed(String),
-    #[error("VM not running")]
-    VmNotRunning,
-    #[error("Docker not installed on system")]
-    DockerNotInstalled,
-    #[error("Docker daemon not running")]
-    DockerNotRunning,
     #[error("Command failed: {0}")]
     CommandFailed(String),
 }
@@ -161,8 +153,6 @@ impl Default for RuntimeVmConfig {
 
 pub struct Runtime {
     resources_dir: PathBuf,
-    #[allow(dead_code)]
-    platform: Platform,
     vm_config: RuntimeVmConfig,
 }
 
@@ -287,6 +277,7 @@ impl WindowsWslFeatureStates {
     }
 }
 
+#[cfg(target_os = "windows")]
 #[derive(Debug, Clone, serde::Deserialize)]
 struct WindowsOptionalFeatureRecord {
     #[serde(rename = "FeatureName")]
@@ -297,8 +288,6 @@ struct WindowsOptionalFeatureRecord {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct WindowsRuntimeReleaseManifest {
-    #[allow(dead_code)]
-    version: String,
     #[serde(default)]
     windows_wsl_rootfs_url: Option<String>,
     #[serde(default)]
@@ -328,7 +317,7 @@ fn fallback_colima_home_path() -> PathBuf {
     {
         // SAFETY: geteuid has no preconditions and does not dereference pointers.
         let uid = unsafe { libc::geteuid() };
-        return base.join(format!("entropic-colima-{}", uid));
+        base.join(format!("entropic-colima-{}", uid))
     }
 
     #[cfg(not(unix))]
@@ -359,7 +348,7 @@ fn fallback_runtime_home_path() -> PathBuf {
     {
         // SAFETY: geteuid has no preconditions and does not dereference pointers.
         let uid = unsafe { libc::geteuid() };
-        return base.join(format!("entropic-home-{}", uid));
+        base.join(format!("entropic-home-{}", uid))
     }
 
     #[cfg(not(unix))]
@@ -479,13 +468,13 @@ fn env_var_truthy(name: &str) -> bool {
 }
 
 fn env_var_bool(name: &str) -> Option<bool> {
-    std::env::var(name).ok().and_then(|value| {
-        match value.trim().to_ascii_lowercase().as_str() {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => Some(true),
             "0" | "false" | "no" | "off" => Some(false),
             _ => None,
-        }
-    })
+        })
 }
 
 fn windows_managed_wsl_runtime_enabled() -> bool {
@@ -577,7 +566,10 @@ pub enum Platform {
 }
 
 impl Platform {
+    const SUPPORTED: [Self; 3] = [Self::MacOS, Self::Linux, Self::Windows];
+
     pub fn detect() -> Self {
+        let _ = Self::SUPPORTED;
         #[cfg(target_os = "macos")]
         return Platform::MacOS;
         #[cfg(target_os = "linux")]
@@ -594,15 +586,13 @@ impl Runtime {
         debug_log("=== Runtime::new() called ===");
         debug_log(&format!("resources_dir: {:?}", resources_dir));
         debug_log(&format!("resources_dir exists: {}", resources_dir.exists()));
-        let platform = Platform::detect();
-        debug_log(&format!("Platform detected: {:?}", platform));
+        debug_log(&format!("Platform detected: {:?}", Platform::detect()));
         debug_log(&format!(
             "Colima config cpu={} memory_gb={} disk_gb={}",
             vm_config.cpu, vm_config.memory_gb, vm_config.disk_gb
         ));
         Self {
             resources_dir,
-            platform,
             vm_config,
         }
     }
@@ -1167,13 +1157,7 @@ impl Runtime {
             let trimmed = script.trim();
             if !trimmed.is_empty() {
                 let mut cmd = Command::new("powershell");
-                cmd.args([
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    trimmed,
-                ]);
+                cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", trimmed]);
                 apply_windows_no_window(&mut cmd);
                 return cmd;
             }
@@ -1406,11 +1390,12 @@ impl Runtime {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(600))
             .build()
-            .map_err(|e| RuntimeError::CommandFailed(format!("Failed to build HTTP client: {}", e)))?;
-        let mut response = client
-            .get(url)
-            .send()
-            .map_err(|e| RuntimeError::CommandFailed(format!("Failed downloading {}: {}", url, e)))?;
+            .map_err(|e| {
+                RuntimeError::CommandFailed(format!("Failed to build HTTP client: {}", e))
+            })?;
+        let mut response = client.get(url).send().map_err(|e| {
+            RuntimeError::CommandFailed(format!("Failed downloading {}: {}", url, e))
+        })?;
 
         if !response.status().is_success() {
             return Err(RuntimeError::CommandFailed(format!(
@@ -1428,11 +1413,7 @@ impl Runtime {
             ))
         })?;
         std::io::copy(&mut response, &mut file).map_err(|e| {
-            RuntimeError::CommandFailed(format!(
-                "Failed writing {}: {}",
-                partial_path.display(),
-                e
-            ))
+            RuntimeError::CommandFailed(format!("Failed writing {}: {}", partial_path.display(), e))
         })?;
         std::fs::rename(&partial_path, output_path).map_err(|e| {
             RuntimeError::CommandFailed(format!(
@@ -1445,7 +1426,9 @@ impl Runtime {
         Ok(())
     }
 
-    fn windows_fetch_runtime_manifest(&self) -> Result<WindowsRuntimeReleaseManifest, RuntimeError> {
+    fn windows_fetch_runtime_manifest(
+        &self,
+    ) -> Result<WindowsRuntimeReleaseManifest, RuntimeError> {
         let manifest_url = self.windows_runtime_manifest_url();
         let manifest_path = self.windows_cached_runtime_manifest_path();
         self.windows_download_url_to_path(&manifest_url, &manifest_path)?;
@@ -1652,6 +1635,7 @@ impl Runtime {
         states.any_known().then_some(states)
     }
 
+    #[cfg(target_os = "windows")]
     fn windows_wsl_feature_states_from_system(&self) -> Option<WindowsWslFeatureStates> {
         let script = format!(
             "$ErrorActionPreference = 'Stop'; Get-WindowsOptionalFeature -Online -FeatureName '{wsl}','{vmp}' | Select-Object FeatureName,@{{Name='State';Expression={{ $_.State.ToString() }}}} | ConvertTo-Json -Compress",
@@ -1771,8 +1755,7 @@ impl Runtime {
     }
 
     fn windows_wsl_reboot_message() -> String {
-        "WSL platform installed. Restart Windows to finish setup, then reopen Entropic."
-            .to_string()
+        "WSL platform installed. Restart Windows to finish setup, then reopen Entropic.".to_string()
     }
 
     fn legacy_windows_wsl_cli_message() -> String {
@@ -1954,8 +1937,9 @@ impl Runtime {
             return Err(RuntimeError::CommandFailed(message));
         }
 
-        let should_try_elevated =
-            self.windows_wsl_features_need_enable() || direct_install_guidance || direct_needs_elevation;
+        let should_try_elevated = self.windows_wsl_features_need_enable()
+            || direct_install_guidance
+            || direct_needs_elevation;
 
         if should_try_elevated {
             let elevated = self.run_elevated_windows_wsl_install()?;
@@ -2003,16 +1987,14 @@ impl Runtime {
             }
 
             if self.windows_wsl_features_need_enable() {
-                let err = RuntimeError::CommandFailed(
-                    Self::manual_windows_wsl_feature_enable_message(),
-                );
+                let err =
+                    RuntimeError::CommandFailed(Self::manual_windows_wsl_feature_enable_message());
                 self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
                 return Err(err);
             }
 
             if direct_install_guidance || elevated_install_guidance {
-                let err =
-                    RuntimeError::CommandFailed(Self::manual_windows_wsl_install_message());
+                let err = RuntimeError::CommandFailed(Self::manual_windows_wsl_install_message());
                 self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
                 return Err(err);
             }
@@ -2354,7 +2336,9 @@ fi
 
     fn windows_start_distro(&self, distro: &str) -> Result<(), RuntimeError> {
         let output = self
-            .run_wsl(&["-d", distro, "--user", "root", "--exec", "sh", "-lc", "true"])
+            .run_wsl(&[
+                "-d", distro, "--user", "root", "--exec", "sh", "-lc", "true",
+            ])
             .map_err(|e| {
                 RuntimeError::CommandFailed(format!("Failed to start {}: {}", distro, e))
             })?;
@@ -2500,23 +2484,22 @@ fi
 
         self.save_windows_bootstrap_state(WINDOWS_BOOTSTRAP_STAGE_PREFLIGHT, false, None);
 
-        self.ensure_windows_wsl_platform().map_err(|err| {
+        self.ensure_windows_wsl_platform().inspect_err(|err| {
             if self
                 .load_windows_bootstrap_state()
                 .map(|state| state.pending_reboot)
                 .unwrap_or(false)
             {
-                return err;
+                return;
             }
-            self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, &err);
-            err
+            self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL, err);
         })?;
 
         self.save_windows_bootstrap_state(WINDOWS_BOOTSTRAP_STAGE_WSL_DEFAULT_VERSION, false, None);
-        self.ensure_windows_wsl_default_version().map_err(|err| {
-            self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_DEFAULT_VERSION, &err);
-            err
-        })?;
+        self.ensure_windows_wsl_default_version()
+            .inspect_err(|err| {
+                self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_WSL_DEFAULT_VERSION, err);
+            })?;
 
         let runtime_root = self.windows_runtime_root();
         std::fs::create_dir_all(runtime_root.join("dev")).map_err(|e| {
@@ -2528,15 +2511,13 @@ fi
 
         self.save_windows_bootstrap_state(WINDOWS_BOOTSTRAP_STAGE_IMPORT_DEV, false, None);
         self.ensure_windows_distro_imported(ENTROPIC_WSL_DEV_DISTRO)
-            .map_err(|err| {
-                self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_IMPORT_DEV, &err);
-                err
+            .inspect_err(|err| {
+                self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_IMPORT_DEV, err);
             })?;
         self.save_windows_bootstrap_state(WINDOWS_BOOTSTRAP_STAGE_IMPORT_PROD, false, None);
         self.ensure_windows_distro_imported(ENTROPIC_WSL_PROD_DISTRO)
-            .map_err(|err| {
-                self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_IMPORT_PROD, &err);
-                err
+            .inspect_err(|err| {
+                self.save_windows_bootstrap_error(WINDOWS_BOOTSTRAP_STAGE_IMPORT_PROD, err);
             })?;
 
         let active = windows_active_distro_name();
@@ -2547,9 +2528,8 @@ fi
         };
         self.save_windows_bootstrap_state(docker_stage, false, None);
         self.ensure_windows_distro_docker_ready(active)
-            .map_err(|err| {
-                self.save_windows_bootstrap_error(docker_stage, &err);
-                err
+            .inspect_err(|err| {
+                self.save_windows_bootstrap_error(docker_stage, err);
             })?;
 
         if !self.windows_docker_ready_for_distro(active) {
@@ -2862,18 +2842,6 @@ fi
         }
 
         false
-    }
-
-    fn docker_socket_colima(&self) -> String {
-        if let Some(socket) = self.preferred_colima_socket() {
-            return format!("unix://{}", socket.display());
-        }
-
-        format!(
-            "unix://{}",
-            self.colima_socket_for_profile(ENTROPIC_VZ_PROFILE)
-                .display()
-        )
     }
 
     /// Get the bin directory containing our bundled binaries
@@ -3190,32 +3158,6 @@ fi
         }
 
         Ok(())
-    }
-
-    pub fn docker_socket_path(&self) -> String {
-        match Platform::detect() {
-            Platform::MacOS => self.docker_socket_colima(),
-            Platform::Linux => {
-                if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-                    let socket = PathBuf::from(runtime_dir).join("docker.sock");
-                    if socket.exists() {
-                        return format!("unix://{}", socket.display());
-                    }
-                }
-                if let Some(home) = dirs::home_dir() {
-                    let desktop = home.join(".docker/desktop/docker.sock");
-                    if desktop.exists() {
-                        return format!("unix://{}", desktop.display());
-                    }
-                    let run_socket = home.join(".docker/run/docker.sock");
-                    if run_socket.exists() {
-                        return format!("unix://{}", run_socket.display());
-                    }
-                }
-                "unix:///var/run/docker.sock".to_string()
-            }
-            Platform::Windows => "npipe:////./pipe/docker_engine".to_string(),
-        }
     }
 }
 
@@ -3844,7 +3786,10 @@ exit 1
             env_guard.set("HOME", home_dir.display().to_string());
             env_guard.set("USERPROFILE", home_dir.display().to_string());
             if cfg!(windows) {
-                env_guard.set("ENTROPIC_WSL_POWERSHELL_SCRIPT", fake_wsl.display().to_string());
+                env_guard.set(
+                    "ENTROPIC_WSL_POWERSHELL_SCRIPT",
+                    fake_wsl.display().to_string(),
+                );
                 env_guard.remove("ENTROPIC_WSL_EXE");
             } else {
                 env_guard.set("ENTROPIC_WSL_EXE", fake_wsl.display().to_string());
@@ -4066,7 +4011,8 @@ exit 1
         let state = fixture.read_bootstrap_state();
         assert_eq!(state.stage, WINDOWS_BOOTSTRAP_STAGE_WSL_INSTALL);
         assert!(
-            state.error
+            state
+                .error
                 .unwrap_or_default()
                 .contains("installed WSL command is too old"),
             "bootstrap state should persist the legacy-WSL guidance"
@@ -4160,7 +4106,11 @@ exit 1
             "prod distro should be removed by reset"
         );
         assert!(
-            !fixture.local_app_data.join("Entropic").join("runtime").exists(),
+            !fixture
+                .local_app_data
+                .join("Entropic")
+                .join("runtime")
+                .exists(),
             "managed runtime root should be removed by reset"
         );
         assert!(

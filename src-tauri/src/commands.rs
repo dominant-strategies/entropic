@@ -1,6 +1,6 @@
 use crate::runtime::{
-    entropic_colima_home_path, macos_docker_socket_candidates, Platform, Runtime,
-    RuntimeStatus, RuntimeVmConfig, DEFAULT_RUNTIME_VM_CPU, DEFAULT_RUNTIME_VM_DISK_GB,
+    entropic_colima_home_path, macos_docker_socket_candidates, Platform, Runtime, RuntimeStatus,
+    RuntimeVmConfig, DEFAULT_RUNTIME_VM_CPU, DEFAULT_RUNTIME_VM_DISK_GB,
     DEFAULT_RUNTIME_VM_MEMORY_GB, ENTROPIC_QEMU_PROFILE, ENTROPIC_VZ_PROFILE,
     ENTROPIC_WSL_DEV_DISTRO, ENTROPIC_WSL_PROD_DISTRO, LEGACY_NOVA_QEMU_PROFILE,
     LEGACY_NOVA_VZ_PROFILE,
@@ -11,7 +11,6 @@ use base64::{
 };
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
-use http;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::de::DeserializeOwned;
@@ -375,8 +374,7 @@ fn infer_image_mime_from_url(url: &str) -> Option<String> {
 }
 
 fn infer_image_mime_from_source(image_source: &str) -> Option<String> {
-    infer_image_mime_from_data_url(image_source)
-        .or_else(|| infer_image_mime_from_url(image_source))
+    infer_image_mime_from_data_url(image_source).or_else(|| infer_image_mime_from_url(image_source))
 }
 
 fn infer_image_extension(mime_type: &str) -> &'static str {
@@ -401,10 +399,8 @@ fn extract_openrouter_generated_image_url(value: &serde_json::Value) -> Option<S
         obj.get("url"),
         obj.get("data_url"),
         obj.get("dataUrl"),
-        obj.get("image_url")
-            .and_then(|nested| nested.get("url")),
-        obj.get("imageUrl")
-            .and_then(|nested| nested.get("url")),
+        obj.get("image_url").and_then(|nested| nested.get("url")),
+        obj.get("imageUrl").and_then(|nested| nested.get("url")),
     ] {
         if let Some(text) = candidate.and_then(|candidate| candidate.as_str()) {
             let trimmed = text.trim();
@@ -420,7 +416,10 @@ fn extract_openrouter_message_text(message: &serde_json::Value) -> String {
     if let Some(text) = message.get("content").and_then(|content| content.as_str()) {
         return text.trim().to_string();
     }
-    if let Some(parts) = message.get("content").and_then(|content| content.as_array()) {
+    if let Some(parts) = message
+        .get("content")
+        .and_then(|content| content.as_array())
+    {
         let mut chunks = Vec::new();
         for part in parts {
             if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
@@ -583,7 +582,9 @@ fn normalize_local_gateway_model(
     active_provider: Option<&str>,
     api_keys: &HashMap<String, String>,
 ) -> String {
-    if let Some(requested_model) = requested_model.map(str::trim).filter(|model| !model.is_empty())
+    if let Some(requested_model) = requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
     {
         if let Some((provider, raw_model)) = requested_model.split_once('/') {
             let provider = provider.trim();
@@ -638,10 +639,7 @@ fn local_image_generation_provider_name(provider: &str) -> &str {
     }
 }
 
-fn read_local_image_generation_api_key(
-    state: &AppState,
-    provider: &str,
-) -> Result<String, String> {
+fn read_local_image_generation_api_key(state: &AppState, provider: &str) -> Result<String, String> {
     let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
     let Some(api_key) = keys.get(provider) else {
         return Err(format!(
@@ -756,9 +754,7 @@ fn extract_openai_generated_images(payload: &serde_json::Value) -> Vec<ChatGener
 }
 
 fn extract_google_generated_inline_data(part: &serde_json::Value) -> Option<(String, String)> {
-    let inline_data = part
-        .get("inlineData")
-        .or_else(|| part.get("inline_data"))?;
+    let inline_data = part.get("inlineData").or_else(|| part.get("inline_data"))?;
     let mime_type = inline_data
         .get("mimeType")
         .or_else(|| inline_data.get("mime_type"))
@@ -820,10 +816,12 @@ async fn generate_proxy_chat_image(
     prompt: &str,
     attachments: &[ChatImageGenerationAttachment],
 ) -> Result<ChatImageGenerationResult, String> {
-    let gateway_token = read_container_env("OPENROUTER_API_KEY")
-        .ok_or_else(|| "Proxy auth is unavailable. Restart the sandbox and try again.".to_string())?;
-    let proxy_base = read_container_env("ENTROPIC_PROXY_BASE_URL")
-        .ok_or_else(|| "Proxy base URL is unavailable. Restart the sandbox and try again.".to_string())?;
+    let gateway_token = read_container_env("OPENROUTER_API_KEY").ok_or_else(|| {
+        "Proxy auth is unavailable. Restart the sandbox and try again.".to_string()
+    })?;
+    let proxy_base = read_container_env("ENTROPIC_PROXY_BASE_URL").ok_or_else(|| {
+        "Proxy base URL is unavailable. Restart the sandbox and try again.".to_string()
+    })?;
     let host_proxy_base = resolve_host_proxy_base(&proxy_base)?;
 
     let content = if attachments.is_empty() {
@@ -1262,13 +1260,13 @@ fn env_var_truthy(name: &str) -> bool {
 }
 
 fn env_var_bool(name: &str) -> Option<bool> {
-    std::env::var(name).ok().and_then(|value| {
-        match value.trim().to_ascii_lowercase().as_str() {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => Some(true),
             "0" | "false" | "no" | "off" => Some(false),
             _ => None,
-        }
-    })
+        })
 }
 
 fn windows_managed_wsl_runtime_enabled() -> bool {
@@ -1552,12 +1550,12 @@ fn find_docker_binary() -> String {
 }
 
 /// Create a Docker command with the correct DOCKER_HOST set
-fn apply_windows_no_window(cmd: &mut Command) {
+fn apply_windows_no_window(_cmd: &mut Command) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        _cmd.creation_flags(CREATE_NO_WINDOW);
     }
 }
 
@@ -2025,8 +2023,9 @@ impl RuntimeReleaseManifest {
                     if !url.trim().is_empty() && !sha.trim().is_empty() {
                         self.url = url.trim().to_string();
                         self.sha256 = sha.trim().to_string();
-                        self.url_size_bytes =
-                            self.runtime_linux_aarch64_size_bytes.or(self.url_size_bytes);
+                        self.url_size_bytes = self
+                            .runtime_linux_aarch64_size_bytes
+                            .or(self.url_size_bytes);
                     }
                 }
             }
@@ -2057,18 +2056,6 @@ impl RuntimeReleaseManifest {
 
     fn selected_runtime_size_bytes(&self) -> Option<u64> {
         self.url_size_bytes
-    }
-
-    fn selected_scanner_size_bytes(&self) -> Option<u64> {
-        match runtime_asset_arch() {
-            Some("x86_64") => self
-                .scanner_linux_x86_64_size_bytes
-                .or(self.scanner_size_bytes),
-            Some("aarch64") => self
-                .scanner_linux_aarch64_size_bytes
-                .or(self.scanner_size_bytes),
-            _ => self.scanner_size_bytes,
-        }
     }
 }
 
@@ -2728,7 +2715,10 @@ fn bundled_runtime_signature_from_manifest(tar_path: &Path) -> Result<String, St
     let metadata = std::fs::metadata(tar_path)
         .map_err(|e| format!("failed to stat {}: {}", tar_path.display(), e))?;
     if metadata.len() == 0 {
-        return Err(format!("bundled runtime tar {} is empty", tar_path.display()));
+        return Err(format!(
+            "bundled runtime tar {} is empty",
+            tar_path.display()
+        ));
     }
 
     let tar_path = tar_path.to_string_lossy();
@@ -3090,13 +3080,11 @@ fn download_scanner_tar_from_release(scanner_image: &str) -> Result<(), String> 
 }
 
 fn ensure_runtime_image() -> Result<(), String> {
-    if cfg!(debug_assertions) {
-        if runtime_image_id()?.is_some() {
-            println!(
+    if cfg!(debug_assertions) && runtime_image_id()?.is_some() {
+        println!(
                 "[Entropic] Debug build detected; using local runtime image and skipping bundled runtime tar reload."
             );
-            return Ok(());
-        }
+        return Ok(());
     }
 
     let local_runtime_tar = find_local_runtime_tar();
@@ -3136,7 +3124,7 @@ fn ensure_runtime_image() -> Result<(), String> {
     let mut require_local_reload = false;
 
     if let Some(tar_path) = runtime_tar_path.as_ref() {
-        let tar_signature = bundled_runtime_signature_from_manifest(&tar_path).map_err(|e| {
+        let tar_signature = bundled_runtime_signature_from_manifest(tar_path).map_err(|e| {
             println!("[Entropic] Failed to read bundled runtime signature: {}", e);
             e
         });
@@ -3158,7 +3146,7 @@ fn ensure_runtime_image() -> Result<(), String> {
                 );
             }
 
-            if load_runtime_from_tar(&tar_path)? {
+            if load_runtime_from_tar(tar_path)? {
                 return Ok(());
             }
         }
@@ -3178,7 +3166,7 @@ fn ensure_runtime_image() -> Result<(), String> {
     println!("[Entropic] Runtime image not found locally, attempting to load...");
 
     if let Some(tar_path) = runtime_tar_path.as_ref() {
-        match load_runtime_from_tar(&tar_path) {
+        match load_runtime_from_tar(tar_path) {
             Ok(true) => return Ok(()),
             Ok(false) => {} // no tar found or load failed, continue
             Err(e) => println!("[Entropic] Bundled tar check failed: {}", e),
@@ -3446,7 +3434,10 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
                             .map(|scopes| scopes.iter().filter_map(|v| v.as_str()).collect())
                             .unwrap_or_default();
                         let can_call_health = granted_scopes.iter().any(|scope| {
-                            matches!(*scope, "operator.read" | "operator.write" | "operator.admin")
+                            matches!(
+                                *scope,
+                                "operator.read" | "operator.write" | "operator.admin"
+                            )
                         });
 
                         if !can_call_health {
@@ -3661,15 +3652,6 @@ pub struct BridgeDeviceSummary {
     pub is_online: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BridgePairingPayload {
-    pub status: BridgeState,
-    pub token: String,
-    pub pair_uri: String,
-    pub qr_data_url: String,
-    pub expires_at_ms: u64,
-}
-
 #[derive(Debug, Clone, serde::Deserialize)]
 struct BridgePairRequest {
     token: String,
@@ -3739,7 +3721,7 @@ pub struct WhatsAppLoginState {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-struct WhatsAppLoginCache {
+pub(crate) struct WhatsAppLoginCache {
     status: String,
     message: String,
     qr_data_url: Option<String>,
@@ -3851,6 +3833,7 @@ const FEATURED_CLAWHUB_SKILLS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+#[allow(clippy::type_complexity)]
 static CLAWHUB_CATALOG_CACHE: OnceLock<Mutex<Option<(Vec<ClawhubCatalogSkill>, Instant)>>> =
     OnceLock::new();
 
@@ -4841,7 +4824,9 @@ fn read_runtime_resource_usage(container: &str) -> Result<RuntimeResourceUsage, 
         .output()
         .map_err(|e| format!("Failed to read docker stats: {}", e))?;
     if !stats_output.status.success() {
-        let stderr = String::from_utf8_lossy(&stats_output.stderr).trim().to_string();
+        let stderr = String::from_utf8_lossy(&stats_output.stderr)
+            .trim()
+            .to_string();
         return Err(if stderr.is_empty() {
             "Failed to read docker stats".to_string()
         } else {
@@ -5476,7 +5461,7 @@ async fn scan_directory_with_scanner(scanner_dir: &str) -> Result<PluginScanResu
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string())
             })
-            .unwrap_or_else(|| text);
+            .unwrap_or(text);
         return Err(format!(
             "Scanner returned {} for {}: {}",
             status, scanner_dir, detail
@@ -5518,10 +5503,7 @@ fn decode_base64_payload(payload: &str) -> Result<Vec<u8>, String> {
 
 fn read_container_file(path: &str) -> Option<String> {
     let args = ["exec", OPENCLAW_CONTAINER, "cat", "--", path];
-    match docker_exec_output(&args) {
-        Ok(s) => Some(s),
-        Err(_) => None,
-    }
+    docker_exec_output(&args).ok()
 }
 
 fn container_file_exists(container: &str, path: &str) -> bool {
@@ -5534,10 +5516,7 @@ fn container_file_exists(container: &str, path: &str) -> bool {
 
 fn read_container_file_from(container: &str, path: &str) -> Option<String> {
     let args = ["exec", container, "cat", "--", path];
-    match docker_exec_output(&args) {
-        Ok(s) => Some(s),
-        Err(_) => None,
-    }
+    docker_exec_output(&args).ok()
 }
 
 fn clipped_tail(text: &str, max_chars: usize) -> String {
@@ -5834,8 +5813,7 @@ The sandbox runtime did not start cleanly, so file writes cannot proceed yet. Or
         }
         return Err(format!(
             "Failed to write {} in container: {}",
-            target,
-            trimmed
+            target, trimmed
         ));
     }
     Ok(())
@@ -6062,15 +6040,6 @@ fn cached_embedded_preview_url() -> Option<String> {
 fn get_embedded_preview_webview(app: &AppHandle) -> Result<Webview, String> {
     app.get_webview(EMBEDDED_PREVIEW_WEBVIEW_LABEL)
         .ok_or_else(|| "Embedded preview is not active.".to_string())
-}
-
-fn write_container_file_if_missing(path: &str, content: &str) -> Result<(), String> {
-    if let Some(existing) = read_container_file(path) {
-        if !existing.trim().is_empty() {
-            return Ok(());
-        }
-    }
-    write_container_file(path, content)
 }
 
 struct ContainerFileWrite<'a> {
@@ -7730,8 +7699,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
         let openrouter_key = read_container_env("OPENROUTER_API_KEY");
         let proxy_mode = read_container_env("ENTROPIC_PROXY_MODE");
 
-        if proxy_mode.as_deref() == Some("1") && openrouter_key.is_some() {
-            let key = openrouter_key.unwrap();
+        if let (Some("1"), Some(key)) = (proxy_mode.as_deref(), openrouter_key) {
             println!(
                 "[Entropic] Writing OpenRouter proxy credentials to auth-profiles.json (key len={})",
                 key.len()
@@ -8337,37 +8305,6 @@ fn refresh_bridge_tailnet_ip(settings: &mut StoredAgentSettings) {
     }
 }
 
-fn build_bridge_pair_uri(settings: &StoredAgentSettings, token: &str) -> String {
-    let host = if settings.bridge_tailnet_ip.trim().is_empty() {
-        "127.0.0.1".to_string()
-    } else {
-        settings.bridge_tailnet_ip.trim().to_string()
-    };
-    let mut url = match Url::parse("entropic-bridge://pair") {
-        Ok(url) => url,
-        Err(_) => return String::new(),
-    };
-    url.query_pairs_mut()
-        .append_pair("host", &host)
-        .append_pair("port", &settings.bridge_port.to_string())
-        .append_pair("token", token)
-        .append_pair("v", "1");
-    url.to_string()
-}
-
-fn build_bridge_qr_data_url(pair_uri: &str) -> Result<String, String> {
-    let qr = qrcode::QrCode::new(pair_uri.as_bytes())
-        .map_err(|e: qrcode::types::QrError| e.to_string())?;
-    let svg = qr
-        .render::<qrcode::render::svg::Color>()
-        .min_dimensions(512, 512)
-        .build();
-    Ok(format!(
-        "data:image/svg+xml;base64,{}",
-        STANDARD.encode(svg.as_bytes())
-    ))
-}
-
 fn ensure_object_entry<'a>(
     parent: &'a mut serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -8632,7 +8569,7 @@ fn http_json_response(status: u16, status_text: &str, payload: serde_json::Value
         "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         status,
         status_text,
-        body.as_bytes().len(),
+        body.len(),
         body
     )
 }
@@ -9748,11 +9685,7 @@ pub async fn check_runtime_status(app: AppHandle) -> Result<RuntimeStatus, Strin
 
 #[tauri::command]
 pub async fn append_client_log(message: String) -> Result<(), String> {
-    let compact = message
-        .replace('\n', " ")
-        .replace('\r', " ")
-        .trim()
-        .to_string();
+    let compact = message.replace(['\n', '\r'], " ").trim().to_string();
     if compact.is_empty() {
         return Ok(());
     }
@@ -9809,7 +9742,9 @@ pub async fn stop_runtime(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn reset_isolated_runtime(app: AppHandle) -> Result<(), String> {
     let runtime = get_runtime(&app);
-    runtime.reset_isolated_runtime_state().map_err(|e| e.to_string())
+    runtime
+        .reset_isolated_runtime_state()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -9868,24 +9803,23 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
                         let host = format!("unix://{}", socket.display());
 
                         let _ = std::process::Command::new(&docker_bin)
-                            .args(&["ps", "-aq"])
+                            .args(["ps", "-aq"])
                             .env("DOCKER_HOST", &host)
                             .output()
-                            .and_then(|out| {
+                            .map(|out| {
                                 let containers = String::from_utf8_lossy(&out.stdout);
                                 for container_id in
                                     containers.lines().filter(|l| !l.trim().is_empty())
                                 {
                                     let _ = std::process::Command::new(&docker_bin)
-                                        .args(&["rm", "-f", container_id])
+                                        .args(["rm", "-f", container_id])
                                         .env("DOCKER_HOST", &host)
                                         .output();
                                 }
-                                Ok(())
                             });
 
                         let _ = std::process::Command::new(&docker_bin)
-                            .args(&["system", "prune", "-af", "--volumes"])
+                            .args(["system", "prune", "-af", "--volumes"])
                             .env("DOCKER_HOST", &host)
                             .output();
                     }
@@ -9907,7 +9841,7 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
                 cleanup_log.push(format!("{} {}...", prefix, colima_home.display()));
                 for profile in &profiles {
                     let _ = std::process::Command::new(&colima_bin)
-                        .args(&["delete", "-f", "-p", profile])
+                        .args(["delete", "-f", "-p", profile])
                         .env("COLIMA_HOME", colima_home)
                         .env("LIMA_HOME", colima_home.join("_lima"))
                         .output();
@@ -9923,7 +9857,7 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
                 "colima-entropic-qemu",
             ] {
                 let _ = std::process::Command::new(&docker_bin)
-                    .args(&["context", "rm", "-f", context])
+                    .args(["context", "rm", "-f", context])
                     .output();
             }
             cleanup_log.push("Docker contexts cleaned".to_string());
@@ -9949,7 +9883,7 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
     cleanup_log.push("Cleaning up all app data and caches...".to_string());
     if matches!(platform, Platform::MacOS) {
         let _ = std::process::Command::new("pkill")
-            .args(&["-9", "-f", "Nova.app"])
+            .args(["-9", "-f", "Nova.app"])
             .output();
     }
 
@@ -9966,7 +9900,7 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
             // Fix permissions before removal — older installs may have locked files
             if matches!(platform, Platform::MacOS | Platform::Linux) {
                 let _ = std::process::Command::new("chmod")
-                    .args(&["-R", "u+w", &dir.to_string_lossy().to_string()])
+                    .args(["-R", "u+w", dir.to_string_lossy().as_ref()])
                     .output();
             }
             if let Err(e) = fs::remove_dir_all(dir) {
@@ -9995,18 +9929,20 @@ pub async fn ensure_runtime(app: AppHandle) -> Result<RuntimeStatus, String> {
     let mut status = runtime.check_status();
 
     // On macOS, auto-start Colima if it's installed but not running (skip if Docker Desktop is ready)
-    if matches!(Platform::detect(), Platform::MacOS) {
-        if status.colima_installed && !status.vm_running && !status.docker_ready {
-            // Try to start Colima
-            if let Err(e) = runtime.start_colima() {
-                return Err(append_colima_runtime_hint(format!(
-                    "Failed to start Colima: {}",
-                    e
-                )));
-            }
-            // Re-check status after starting
-            status = runtime.check_status();
+    if matches!(Platform::detect(), Platform::MacOS)
+        && status.colima_installed
+        && !status.vm_running
+        && !status.docker_ready
+    {
+        // Try to start Colima
+        if let Err(e) = runtime.start_colima() {
+            return Err(append_colima_runtime_hint(format!(
+                "Failed to start Colima: {}",
+                e
+            )));
         }
+        // Re-check status after starting
+        status = runtime.check_status();
     }
 
     if matches!(Platform::detect(), Platform::Windows)
@@ -10214,16 +10150,16 @@ pub async fn start_gateway(
     // Resolve model early so we can compare against the running container.
     // Use the model passed from frontend if provided, otherwise fall back based on active provider
     let requested_model = model.as_deref();
-    let model_full = normalize_local_gateway_model(
-        requested_model,
-        active_provider.as_deref(),
-        &api_keys,
-    );
-    if requested_model.map(str::trim).filter(|value| !value.is_empty()) != Some(model_full.as_str()) {
+    let model_full =
+        normalize_local_gateway_model(requested_model, active_provider.as_deref(), &api_keys);
+    if requested_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        != Some(model_full.as_str())
+    {
         println!(
             "[Entropic] Local gateway model normalized from {:?} to {:?}",
-            requested_model,
-            model_full
+            requested_model, model_full
         );
     }
 
@@ -10263,7 +10199,7 @@ pub async fn start_gateway(
         let has_oauth_token = read_container_env("ANTHROPIC_OAUTH_TOKEN").is_some();
         let wants_oauth_token = api_keys
             .get("anthropic")
-            .map_or(false, |k| k.starts_with("sk-ant-oat01-"));
+            .is_some_and(|k| k.starts_with("sk-ant-oat01-"));
         let auth_type_matches = has_oauth_token == wants_oauth_token;
         // Only reuse the running container if token, schema, model, and auth type all match
         // AND the container isn't a stale proxy-mode instance (start_gateway = local keys).
@@ -11717,6 +11653,7 @@ pub async fn set_identity(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn set_channels_config(
     app: AppHandle,
@@ -12095,7 +12032,7 @@ console.log(JSON.stringify({token,chatIds}));"#;
     let output = docker_exec_output(&args)
         .map_err(|e| format!("Failed to read Telegram config from gateway: {}", e))?;
 
-    let data: serde_json::Value = serde_json::from_str(&output.trim())
+    let data: serde_json::Value = serde_json::from_str(output.trim())
         .map_err(|e| format!("Failed to parse gateway Telegram config: {}", e))?;
 
     let token = data
@@ -13257,7 +13194,7 @@ pub async fn scan_workspace_skill(id: String) -> Result<PluginScanResult, String
 fn resolve_downloaded_skill_path(temp_root: &str, slug: &str) -> Result<(String, String), String> {
     let slug_tail = slug
         .split('/')
-        .last()
+        .next_back()
         .map(|v| v.trim())
         .filter(|v| !v.is_empty())
         .ok_or_else(|| "Invalid skill slug".to_string())?;
@@ -13710,9 +13647,7 @@ async fn run_first_time_setup_internal(
                         entries
                             .filter_map(|e| e.ok())
                             .filter(|e| {
-                                e.path()
-                                    .extension()
-                                    .map_or(false, |ext| ext == "downloading")
+                                e.path().extension().is_some_and(|ext| ext == "downloading")
                             })
                             .filter_map(|e| e.metadata().ok().map(|m| m.len()))
                             .max()
@@ -15104,7 +15039,7 @@ fn oauth_callback_html(page_title: &str, title: &str, message: &str, success: bo
 fn oauth_html_response(html: String) -> String {
     format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        html.as_bytes().len(),
+        html.len(),
         html
     )
 }
@@ -15286,11 +15221,9 @@ pub async fn start_auth_localhost(app: AppHandle) -> Result<LocalhostAuthStart, 
     let listener = match TcpListener::bind(&addr).await {
         Ok(listener) => listener,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            let state = localhost_auth_state()
-                .lock()
-                .map_err(|lock_err| {
-                    format!("Failed to access localhost OAuth state: {}", lock_err)
-                })?;
+            let state = localhost_auth_state().lock().map_err(|lock_err| {
+                format!("Failed to access localhost OAuth state: {}", lock_err)
+            })?;
             if let Some(existing) = state.as_ref() {
                 let age_secs = unix_timestamp_secs().saturating_sub(existing.started_at_secs);
                 if existing.port == port && age_secs < 300 {
