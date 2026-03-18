@@ -3,6 +3,14 @@ name: Publish OpenClaw Runtime
 on:
   workflow_dispatch:
     inputs:
+      runner_label:
+        description: 'Runner label for this job'
+        required: true
+        default: 'ubuntu-latest'
+        type: choice
+        options:
+          - ubuntu-latest
+          - ubuntu-latest-m
       release_tag:
         description: 'Runtime release tag in dominant-strategies/entropic-releases'
         required: true
@@ -24,7 +32,7 @@ env:
 
 jobs:
   publish-runtime:
-    runs-on: ubuntu-latest-m
+    runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 60
     permissions:
       contents: read
