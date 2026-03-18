@@ -16,7 +16,6 @@
 <p align="center">
   <a href="#quick-start"><img alt="Get Started" src="https://img.shields.io/static/v1?label=Get%20Started&message=Quick%20Start&color=111827"></a>
   <a href="https://github.com/dominant-strategies/entropic"><img alt="Repository" src="https://img.shields.io/static/v1?label=Repository&message=GitHub&color=111827"></a>
-  <a href="https://star-history.com/#dominant-strategies/entropic&Date"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/dominant-strategies/entropic?style=flat&label=GitHub%20Stars&color=111827"></a>
   <a href="./CONTRIBUTING.md"><img alt="Contribute" src="https://img.shields.io/static/v1?label=Contribute&message=Guidelines&color=111827"></a>
   <a href="https://github.com/dominant-strategies/entropic-releases/releases"><img alt="Preview Releases" src="https://img.shields.io/static/v1?label=Preview&message=Releases&color=111827"></a>
   <a href="./docs/OPEN_SOURCE_CHECKLIST.md"><img alt="Launch Checklist" src="https://img.shields.io/static/v1?label=Launch&message=Checklist&color=111827"></a>

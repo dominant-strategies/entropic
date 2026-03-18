@@ -1729,7 +1729,7 @@ impl Runtime {
 
         #[cfg(target_os = "windows")]
         {
-            return self.windows_wsl_feature_states_from_system();
+            self.windows_wsl_feature_states_from_system()
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -2913,32 +2913,31 @@ fi
                 path.display(),
                 e
             ));
-            return;
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            match std::fs::metadata(path) {
-                Ok(metadata) => {
-                    let mut perms = metadata.permissions();
-                    perms.set_mode(0o700);
-                    if let Err(e) = std::fs::set_permissions(path, perms) {
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                match std::fs::metadata(path) {
+                    Ok(metadata) => {
+                        let mut perms = metadata.permissions();
+                        perms.set_mode(0o700);
+                        if let Err(e) = std::fs::set_permissions(path, perms) {
+                            debug_log(&format!(
+                                "Failed to set permissions for runtime {} at {}: {}",
+                                label,
+                                path.display(),
+                                e
+                            ));
+                        }
+                    }
+                    Err(e) => {
                         debug_log(&format!(
-                            "Failed to set permissions for runtime {} at {}: {}",
+                            "Failed to read metadata for runtime {} at {}: {}",
                             label,
                             path.display(),
                             e
                         ));
                     }
-                }
-                Err(e) => {
-                    debug_log(&format!(
-                        "Failed to read metadata for runtime {} at {}: {}",
-                        label,
-                        path.display(),
-                        e
-                    ));
                 }
             }
         }
