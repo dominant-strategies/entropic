@@ -67,7 +67,6 @@ const DESKTOP_TERMINAL_EVENT: &str = "desktop-terminal-output";
 const DESKTOP_TERMINAL_BUFFER_MAX_BYTES: usize = 200_000;
 const ENTROPIC_NATIVE_API_ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1"];
 const ENTROPIC_NATIVE_API_ALLOWED_DOMAINS: &[&str] = &["entropic.qu.ai"];
-const MAX_BRIDGE_DEVICES: usize = 10;
 const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const CLIENT_LOG_READ_MAX_BYTES: usize = 512 * 1024;
 const DEFAULT_PROXY_GATEWAY_MODEL: &str = "openai/gpt-5.4";
@@ -3479,7 +3478,6 @@ pub struct AppState {
     pub api_keys: Mutex<HashMap<String, String>>,
     pub active_provider: Mutex<Option<String>>,
     pub whatsapp_login: Mutex<WhatsAppLoginCache>,
-    pub bridge_server_started: Mutex<bool>,
     /// Stores the PKCE verifier for the in-flight Anthropic OAuth flow
     pub anthropic_oauth_verifier: Mutex<Option<String>>,
     /// Opaque attachment IDs mapped to container temp upload paths.
@@ -3502,7 +3500,6 @@ impl Default for AppState {
             api_keys: Mutex::new(HashMap::new()),
             active_provider: Mutex::new(None),
             whatsapp_login: Mutex::new(WhatsAppLoginCache::default()),
-            bridge_server_started: Mutex::new(false),
             anthropic_oauth_verifier: Mutex::new(None),
             pending_attachments: Mutex::new(HashMap::new()),
         }
@@ -3585,16 +3582,6 @@ pub struct AgentProfileState {
     pub googlechat_audience: String,
     pub whatsapp_enabled: bool,
     pub whatsapp_allow_from: String,
-    pub bridge_enabled: bool,
-    pub bridge_tailnet_ip: String,
-    pub bridge_port: u16,
-    pub bridge_pairing_expires_at_ms: u64,
-    pub bridge_device_id: String,
-    pub bridge_device_name: String,
-    pub bridge_devices: Vec<BridgeDeviceSummary>,
-    pub bridge_device_count: usize,
-    pub bridge_online_count: usize,
-    pub bridge_paired: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -3624,72 +3611,6 @@ pub struct AppleAutomationStatus {
     pub osascript_available: bool,
     pub shortcuts_available: bool,
     pub accessibility_trusted: bool,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BridgeState {
-    pub enabled: bool,
-    pub tailnet_ip: String,
-    pub port: u16,
-    pub pairing_expires_at_ms: u64,
-    pub device_id: String,
-    pub device_name: String,
-    pub last_seen_at_ms: u64,
-    pub paired: bool,
-    pub devices: Vec<BridgeDeviceSummary>,
-    pub device_count: usize,
-    pub online_count: usize,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BridgeDeviceSummary {
-    pub id: String,
-    pub name: String,
-    pub owner_name: String,
-    pub created_at_ms: u64,
-    pub last_seen_at_ms: u64,
-    pub scopes: Vec<String>,
-    pub is_online: bool,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct BridgePairRequest {
-    token: String,
-    device_id: String,
-    device_name: Option<String>,
-    owner_name: Option<String>,
-    device_public_key: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct BridgeHeartbeatRequest {
-    device_id: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-struct BridgeDeviceRecord {
-    id: String,
-    name: String,
-    owner_name: String,
-    public_key: String,
-    created_at_ms: u64,
-    last_seen_at_ms: u64,
-    scopes: Vec<String>,
-}
-
-impl Default for BridgeDeviceRecord {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            owner_name: String::new(),
-            public_key: String::new(),
-            created_at_ms: 0,
-            last_seen_at_ms: 0,
-            scopes: vec!["chat".to_string()],
-        }
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -3922,16 +3843,6 @@ struct StoredAgentSettings {
     googlechat_audience: String,
     whatsapp_enabled: bool,
     whatsapp_allow_from: String,
-    bridge_enabled: bool,
-    bridge_tailnet_ip: String,
-    bridge_port: u16,
-    bridge_pairing_token: String,
-    bridge_pairing_expires_at_ms: u64,
-    bridge_device_id: String,
-    bridge_device_name: String,
-    bridge_device_public_key: String,
-    bridge_last_seen_at_ms: u64,
-    bridge_devices: Vec<BridgeDeviceRecord>,
 }
 
 impl Default for StoredAgentSettings {
@@ -3985,16 +3896,6 @@ impl Default for StoredAgentSettings {
             googlechat_audience: String::new(),
             whatsapp_enabled: false,
             whatsapp_allow_from: String::new(),
-            bridge_enabled: false,
-            bridge_tailnet_ip: String::new(),
-            bridge_port: 19789,
-            bridge_pairing_token: String::new(),
-            bridge_pairing_expires_at_ms: 0,
-            bridge_device_id: String::new(),
-            bridge_device_name: String::new(),
-            bridge_device_public_key: String::new(),
-            bridge_last_seen_at_ms: 0,
-            bridge_devices: Vec::new(),
         }
     }
 }
@@ -7488,12 +7389,6 @@ Use it for durable decisions, preferences, and facts that should persist across 
         }
     }
 
-    // Only suppress Telegram once bridge has at least one paired device.
-    // A stale bridge_enabled flag alone should not disable Telegram on gateway restarts.
-    if settings.bridge_enabled && has_paired_bridge_devices(&settings) {
-        disable_legacy_messaging_config(&mut cfg);
-    }
-
     // Set thinking level from ENTROPIC_THINKING_LEVEL env var (set by start_gateway from model suffix)
     // Use the value already read for the fingerprint to avoid a second docker exec
     if let Some(ref thinking_level) = thinking_level_env {
@@ -8097,214 +7992,6 @@ fn now_ms_u64() -> u64 {
         .unwrap_or(0)
 }
 
-fn resolve_tailscale_ipv4() -> Option<String> {
-    let output = Command::new("tailscale").args(["ip", "-4"]).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn bridge_device_summaries(settings: &StoredAgentSettings) -> Vec<BridgeDeviceSummary> {
-    let now = now_ms_u64();
-    let mut devices = settings
-        .bridge_devices
-        .iter()
-        .filter(|device| !device.id.trim().is_empty())
-        .map(|device| BridgeDeviceSummary {
-            id: device.id.clone(),
-            name: if device.name.trim().is_empty() {
-                "Entropic Mobile".to_string()
-            } else {
-                device.name.clone()
-            },
-            owner_name: if device.owner_name.trim().is_empty() {
-                "Unassigned".to_string()
-            } else {
-                device.owner_name.clone()
-            },
-            created_at_ms: device.created_at_ms,
-            last_seen_at_ms: device.last_seen_at_ms,
-            scopes: if device.scopes.is_empty() {
-                vec!["chat".to_string()]
-            } else {
-                device.scopes.clone()
-            },
-            is_online: device.last_seen_at_ms > 0
-                && now.saturating_sub(device.last_seen_at_ms) <= 120_000,
-        })
-        .collect::<Vec<_>>();
-    devices.sort_by(|a, b| {
-        b.last_seen_at_ms
-            .cmp(&a.last_seen_at_ms)
-            .then_with(|| b.created_at_ms.cmp(&a.created_at_ms))
-    });
-    devices
-}
-
-fn has_paired_bridge_devices(settings: &StoredAgentSettings) -> bool {
-    settings
-        .bridge_devices
-        .iter()
-        .any(|device| !device.id.trim().is_empty())
-        || !settings.bridge_device_id.trim().is_empty()
-}
-
-fn sync_legacy_bridge_fields_from_devices(settings: &mut StoredAgentSettings) {
-    let primary = settings
-        .bridge_devices
-        .iter()
-        .filter(|device| !device.id.trim().is_empty())
-        .max_by(|a, b| {
-            a.last_seen_at_ms
-                .cmp(&b.last_seen_at_ms)
-                .then_with(|| a.created_at_ms.cmp(&b.created_at_ms))
-        });
-
-    if let Some(primary_device) = primary {
-        settings.bridge_device_id = primary_device.id.clone();
-        settings.bridge_device_name = primary_device.name.clone();
-        settings.bridge_device_public_key = primary_device.public_key.clone();
-        settings.bridge_last_seen_at_ms = primary_device.last_seen_at_ms;
-    } else {
-        settings.bridge_device_id.clear();
-        settings.bridge_device_name.clear();
-        settings.bridge_device_public_key.clear();
-        settings.bridge_last_seen_at_ms = 0;
-    }
-}
-
-fn migrate_bridge_devices(settings: &mut StoredAgentSettings) -> bool {
-    let mut changed = false;
-
-    let mut normalized: Vec<BridgeDeviceRecord> = Vec::new();
-    for mut device in settings.bridge_devices.drain(..) {
-        let id = device.id.trim().to_string();
-        if id.is_empty() {
-            changed = true;
-            continue;
-        }
-        device.id = id;
-        if device.name.trim().is_empty() {
-            device.name = "Entropic Mobile".to_string();
-            changed = true;
-        }
-        if device.owner_name.trim().is_empty() {
-            device.owner_name = "Unassigned".to_string();
-            changed = true;
-        }
-        if device.scopes.is_empty() {
-            device.scopes = vec!["chat".to_string()];
-            changed = true;
-        }
-        if device.created_at_ms == 0 {
-            device.created_at_ms = if device.last_seen_at_ms > 0 {
-                device.last_seen_at_ms
-            } else {
-                now_ms_u64()
-            };
-            changed = true;
-        }
-        if let Some(existing) = normalized.iter_mut().find(|entry| entry.id == device.id) {
-            if device.last_seen_at_ms >= existing.last_seen_at_ms {
-                *existing = device;
-            }
-            changed = true;
-        } else {
-            normalized.push(device);
-        }
-    }
-
-    if normalized.is_empty() && !settings.bridge_device_id.trim().is_empty() {
-        normalized.push(BridgeDeviceRecord {
-            id: settings.bridge_device_id.trim().to_string(),
-            name: if settings.bridge_device_name.trim().is_empty() {
-                "Entropic Mobile".to_string()
-            } else {
-                settings.bridge_device_name.trim().to_string()
-            },
-            owner_name: "Legacy Pairing".to_string(),
-            public_key: settings.bridge_device_public_key.clone(),
-            created_at_ms: if settings.bridge_last_seen_at_ms > 0 {
-                settings.bridge_last_seen_at_ms
-            } else {
-                now_ms_u64()
-            },
-            last_seen_at_ms: settings.bridge_last_seen_at_ms,
-            scopes: vec!["chat".to_string()],
-        });
-        changed = true;
-    }
-
-    if settings.bridge_devices.len() != normalized.len() {
-        changed = true;
-    }
-    settings.bridge_devices = normalized;
-
-    let before = (
-        settings.bridge_device_id.clone(),
-        settings.bridge_device_name.clone(),
-        settings.bridge_device_public_key.clone(),
-        settings.bridge_last_seen_at_ms,
-    );
-    sync_legacy_bridge_fields_from_devices(settings);
-    let after = (
-        settings.bridge_device_id.clone(),
-        settings.bridge_device_name.clone(),
-        settings.bridge_device_public_key.clone(),
-        settings.bridge_last_seen_at_ms,
-    );
-    if before != after {
-        changed = true;
-    }
-
-    changed
-}
-
-fn bridge_status_from_settings(settings: &StoredAgentSettings) -> BridgeState {
-    let devices = bridge_device_summaries(settings);
-    let online_count = devices.iter().filter(|device| device.is_online).count();
-    BridgeState {
-        enabled: settings.bridge_enabled,
-        tailnet_ip: settings.bridge_tailnet_ip.clone(),
-        port: settings.bridge_port,
-        pairing_expires_at_ms: settings.bridge_pairing_expires_at_ms,
-        device_id: settings.bridge_device_id.clone(),
-        device_name: settings.bridge_device_name.clone(),
-        last_seen_at_ms: settings.bridge_last_seen_at_ms,
-        paired: settings.bridge_enabled && has_paired_bridge_devices(settings),
-        device_count: devices.len(),
-        online_count,
-        devices,
-    }
-}
-
-fn normalize_bridge_settings(settings: &mut StoredAgentSettings) -> bool {
-    let mut changed = migrate_bridge_devices(settings);
-    if settings.bridge_port == 0 {
-        settings.bridge_port = 19789;
-        changed = true;
-    }
-    let previous_tailnet_ip = settings.bridge_tailnet_ip.clone();
-    refresh_bridge_tailnet_ip(settings);
-    if settings.bridge_tailnet_ip != previous_tailnet_ip {
-        changed = true;
-    }
-    changed
-}
-
-fn refresh_bridge_tailnet_ip(settings: &mut StoredAgentSettings) {
-    if settings.bridge_tailnet_ip.trim().is_empty() {
-        if let Some(ip) = resolve_tailscale_ipv4() {
-            settings.bridge_tailnet_ip = ip;
-        }
-    }
-}
-
 fn ensure_object_entry<'a>(
     parent: &'a mut serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -8448,389 +8135,6 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         .unwrap_or("pairing")
         .to_string();
     normalize_telegram_allow_from_for_dm_policy(cfg, &telegram_dm_policy);
-}
-
-fn disable_legacy_messaging_config(cfg: &mut serde_json::Value) {
-    normalize_openclaw_config(cfg);
-
-    set_openclaw_config_value(
-        cfg,
-        &["channels", "telegram", "enabled"],
-        serde_json::json!(false),
-    );
-    set_openclaw_config_value(
-        cfg,
-        &["channels", "telegram", "botToken"],
-        serde_json::json!(""),
-    );
-    set_openclaw_config_value(
-        cfg,
-        &["plugins", "entries", "telegram", "enabled"],
-        serde_json::json!(false),
-    );
-}
-
-fn clear_legacy_messaging_settings(settings: &mut StoredAgentSettings) {
-    settings.discord_enabled = false;
-    settings.discord_token.clear();
-    settings.telegram_enabled = false;
-    settings.telegram_token.clear();
-    settings.telegram_dm_policy = "pairing".to_string();
-    settings.telegram_group_policy = "allowlist".to_string();
-    settings.telegram_config_writes = false;
-    settings.telegram_require_mention = true;
-    settings.telegram_reply_to_mode = "off".to_string();
-    settings.telegram_link_preview = true;
-    settings.slack_enabled = false;
-    settings.slack_bot_token.clear();
-    settings.slack_app_token.clear();
-    settings.googlechat_enabled = false;
-    settings.googlechat_service_account.clear();
-    settings.googlechat_audience.clear();
-    settings.whatsapp_enabled = false;
-    settings.whatsapp_allow_from.clear();
-}
-
-async fn read_http_request(
-    socket: &mut tokio::net::TcpStream,
-) -> Result<(String, String, Vec<u8>), String> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0u8; 2048];
-
-    loop {
-        let read = timeout(Duration::from_secs(10), socket.read(&mut chunk))
-            .await
-            .map_err(|_| "Request timeout".to_string())?
-            .map_err(|e| format!("Failed to read request: {}", e))?;
-        if read == 0 {
-            break;
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-        if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
-        if buffer.len() > 64 * 1024 {
-            return Err("Request headers too large".to_string());
-        }
-    }
-
-    let header_end = buffer
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| "Malformed HTTP request".to_string())?;
-    let headers_raw = String::from_utf8_lossy(&buffer[..header_end]);
-    let mut lines = headers_raw.lines();
-    let request_line = lines
-        .next()
-        .ok_or_else(|| "Missing HTTP request line".to_string())?;
-    let mut parts = request_line.split_whitespace();
-    let method = parts
-        .next()
-        .ok_or_else(|| "Missing HTTP method".to_string())?
-        .to_string();
-    let path = parts
-        .next()
-        .ok_or_else(|| "Missing HTTP path".to_string())?
-        .to_string();
-
-    let content_length = headers_raw
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                value.trim().parse::<usize>().ok()
-            } else {
-                None
-            }
-        })
-        .unwrap_or(0);
-
-    let mut body = buffer[(header_end + 4)..].to_vec();
-    while body.len() < content_length {
-        let read = timeout(Duration::from_secs(10), socket.read(&mut chunk))
-            .await
-            .map_err(|_| "Request body timeout".to_string())?
-            .map_err(|e| format!("Failed to read request body: {}", e))?;
-        if read == 0 {
-            break;
-        }
-        body.extend_from_slice(&chunk[..read]);
-    }
-    if body.len() > content_length {
-        body.truncate(content_length);
-    }
-
-    Ok((method, path, body))
-}
-
-fn http_json_response(status: u16, status_text: &str, payload: serde_json::Value) -> String {
-    let body = payload.to_string();
-    format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        status,
-        status_text,
-        body.len(),
-        body
-    )
-}
-
-async fn handle_bridge_http_connection(mut socket: tokio::net::TcpStream, app: AppHandle) {
-    let request = read_http_request(&mut socket).await;
-    let response = match request {
-        Ok((method, path, body)) => {
-            if method == "GET" && path == "/bridge/health" {
-                let mut settings = load_agent_settings(&app);
-                refresh_bridge_tailnet_ip(&mut settings);
-                let _ = save_agent_settings(&app, settings.clone());
-                http_json_response(
-                    200,
-                    "OK",
-                    serde_json::json!({ "ok": true, "status": bridge_status_from_settings(&settings) }),
-                )
-            } else if method == "POST" && path == "/bridge/pair" {
-                let parsed = serde_json::from_slice::<BridgePairRequest>(&body);
-                match parsed {
-                    Ok(req) => {
-                        let mut settings = load_agent_settings(&app);
-                        let now = now_ms_u64();
-                        let token_matches =
-                            settings.bridge_pairing_token.trim() == req.token.trim();
-                        let token_fresh = settings.bridge_pairing_expires_at_ms > now;
-                        let device_id = req.device_id.trim().to_string();
-                        if !settings.bridge_enabled {
-                            http_json_response(
-                                400,
-                                "Bad Request",
-                                serde_json::json!({ "ok": false, "error": "Bridge is disabled in Entropic desktop." }),
-                            )
-                        } else if device_id.is_empty() {
-                            http_json_response(
-                                400,
-                                "Bad Request",
-                                serde_json::json!({ "ok": false, "error": "Device id is required." }),
-                            )
-                        } else if !token_matches || !token_fresh {
-                            http_json_response(
-                                401,
-                                "Unauthorized",
-                                serde_json::json!({ "ok": false, "error": "Pairing token is invalid or expired." }),
-                            )
-                        } else {
-                            let device_name = req
-                                .device_name
-                                .as_deref()
-                                .unwrap_or("Entropic Mobile")
-                                .trim()
-                                .to_string();
-                            let owner_name = req
-                                .owner_name
-                                .as_deref()
-                                .unwrap_or("Unassigned")
-                                .trim()
-                                .to_string();
-                            let device_public_key =
-                                req.device_public_key.as_deref().unwrap_or("").to_string();
-                            let existing_index = settings
-                                .bridge_devices
-                                .iter()
-                                .position(|device| device.id == device_id);
-
-                            if existing_index.is_none()
-                                && settings.bridge_devices.len() >= MAX_BRIDGE_DEVICES
-                            {
-                                http_json_response(
-                                    429,
-                                    "Too Many Requests",
-                                    serde_json::json!({
-                                        "ok": false,
-                                        "error": format!("Maximum paired device limit reached ({}). Remove a device in Entropic Desktop and retry pairing.", MAX_BRIDGE_DEVICES)
-                                    }),
-                                )
-                            } else {
-                                if let Some(index) = existing_index {
-                                    let existing = &mut settings.bridge_devices[index];
-                                    existing.name = if device_name.is_empty() {
-                                        existing.name.clone()
-                                    } else {
-                                        device_name.clone()
-                                    };
-                                    existing.owner_name = if owner_name.is_empty() {
-                                        existing.owner_name.clone()
-                                    } else {
-                                        owner_name.clone()
-                                    };
-                                    if !device_public_key.trim().is_empty() {
-                                        existing.public_key = device_public_key.clone();
-                                    }
-                                    existing.last_seen_at_ms = now;
-                                    if existing.created_at_ms == 0 {
-                                        existing.created_at_ms = now;
-                                    }
-                                    if existing.scopes.is_empty() {
-                                        existing.scopes = vec!["chat".to_string()];
-                                    }
-                                } else {
-                                    settings.bridge_devices.push(BridgeDeviceRecord {
-                                        id: device_id.clone(),
-                                        name: if device_name.is_empty() {
-                                            "Entropic Mobile".to_string()
-                                        } else {
-                                            device_name
-                                        },
-                                        owner_name,
-                                        public_key: device_public_key,
-                                        created_at_ms: now,
-                                        last_seen_at_ms: now,
-                                        scopes: vec!["chat".to_string()],
-                                    });
-                                }
-
-                                sync_legacy_bridge_fields_from_devices(&mut settings);
-                                settings.bridge_pairing_token.clear();
-                                settings.bridge_pairing_expires_at_ms = 0;
-                                clear_legacy_messaging_settings(&mut settings);
-                                let _ = save_agent_settings(&app, settings.clone());
-                                let mut cfg = read_openclaw_config();
-                                normalize_openclaw_config(&mut cfg);
-                                disable_legacy_messaging_config(&mut cfg);
-                                let _ = write_openclaw_config(&cfg);
-                                let ws_host = if settings.bridge_tailnet_ip.trim().is_empty() {
-                                    "127.0.0.1".to_string()
-                                } else {
-                                    settings.bridge_tailnet_ip.trim().to_string()
-                                };
-                                http_json_response(
-                                    200,
-                                    "OK",
-                                    serde_json::json!({
-                                        "ok": true,
-                                        "status": bridge_status_from_settings(&settings),
-                                        "gateway": {
-                                            "wsUrl": format!("ws://{}:19789", ws_host),
-                                            "token": effective_gateway_token(&app).unwrap_or_default()
-                                        }
-                                    }),
-                                )
-                            }
-                        }
-                    }
-                    Err(_) => http_json_response(
-                        400,
-                        "Bad Request",
-                        serde_json::json!({ "ok": false, "error": "Invalid JSON body." }),
-                    ),
-                }
-            } else if method == "POST" && path == "/bridge/heartbeat" {
-                let parsed = serde_json::from_slice::<BridgeHeartbeatRequest>(&body);
-                match parsed {
-                    Ok(req) => {
-                        let mut settings = load_agent_settings(&app);
-                        let device_id = req.device_id.trim();
-                        if device_id.is_empty() {
-                            http_json_response(
-                                401,
-                                "Unauthorized",
-                                serde_json::json!({ "ok": false, "error": "Unknown device id." }),
-                            )
-                        } else if let Some(device) = settings
-                            .bridge_devices
-                            .iter_mut()
-                            .find(|entry| entry.id == device_id)
-                        {
-                            device.last_seen_at_ms = now_ms_u64();
-                            if device.scopes.is_empty() {
-                                device.scopes = vec!["chat".to_string()];
-                            }
-                            sync_legacy_bridge_fields_from_devices(&mut settings);
-                            let _ = save_agent_settings(&app, settings.clone());
-                            http_json_response(
-                                200,
-                                "OK",
-                                serde_json::json!({ "ok": true, "status": bridge_status_from_settings(&settings) }),
-                            )
-                        } else {
-                            http_json_response(
-                                401,
-                                "Unauthorized",
-                                serde_json::json!({ "ok": false, "error": "Unknown device id." }),
-                            )
-                        }
-                    }
-                    Err(_) => http_json_response(
-                        400,
-                        "Bad Request",
-                        serde_json::json!({ "ok": false, "error": "Invalid JSON body." }),
-                    ),
-                }
-            } else {
-                http_json_response(
-                    404,
-                    "Not Found",
-                    serde_json::json!({ "ok": false, "error": "Unknown endpoint." }),
-                )
-            }
-        }
-        Err(err) => http_json_response(
-            400,
-            "Bad Request",
-            serde_json::json!({ "ok": false, "error": err }),
-        ),
-    };
-    let _ = socket.write_all(response.as_bytes()).await;
-}
-
-async fn run_bridge_server(app: AppHandle, port: u16) -> Result<(), String> {
-    let listener = TcpListener::bind(("0.0.0.0", port))
-        .await
-        .map_err(|e| format!("Failed to bind bridge server on {}: {}", port, e))?;
-    println!("[Entropic] Bridge server listening on 0.0.0.0:{}", port);
-    loop {
-        let (socket, _) = listener
-            .accept()
-            .await
-            .map_err(|e| format!("Bridge server accept failed: {}", e))?;
-        let app_handle = app.clone();
-        tauri::async_runtime::spawn(async move {
-            handle_bridge_http_connection(socket, app_handle).await;
-        });
-    }
-}
-
-pub(crate) fn ensure_bridge_server_running(
-    app: &AppHandle,
-    state: &AppState,
-    port: u16,
-) -> Result<(), String> {
-    let mut started = state
-        .bridge_server_started
-        .lock()
-        .map_err(|e| format!("Bridge server lock failed: {}", e))?;
-    if *started {
-        return Ok(());
-    }
-    *started = true;
-    let app_handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Err(err) = run_bridge_server(app_handle, port).await {
-            eprintln!("[Entropic] Bridge server stopped: {}", err);
-        }
-    });
-    Ok(())
-}
-
-pub(crate) fn start_mobile_bridge_server_if_enabled(
-    app: &AppHandle,
-    state: &AppState,
-) -> Result<(), String> {
-    let mut settings = load_agent_settings(app);
-    let changed = normalize_bridge_settings(&mut settings);
-    if settings.bridge_enabled {
-        ensure_bridge_server_running(app, state, settings.bridge_port)?;
-    }
-    if changed {
-        save_agent_settings(app, settings)?;
-    }
-    Ok(())
 }
 fn redact_env_value(env: &str) -> String {
     const SECRET_ENV_PREFIXES: &[&str] = &[
@@ -9536,7 +8840,6 @@ pub fn init_state(app: &AppHandle) -> AppState {
         api_keys: Mutex::new(stored.keys.clone()),
         active_provider: Mutex::new(stored.active_provider.clone()),
         whatsapp_login: Mutex::new(WhatsAppLoginCache::default()),
-        bridge_server_started: Mutex::new(false),
         anthropic_oauth_verifier: Mutex::new(None),
         pending_attachments: Mutex::new(HashMap::new()),
     }
@@ -10071,11 +9374,6 @@ pub async fn start_gateway(
         .map_err(|e| e.to_string())?
         .clone();
     let settings = load_agent_settings(&app);
-    if settings.bridge_enabled && has_paired_bridge_devices(&settings) {
-        println!(
-            "[Entropic] Bridge mode requested in settings but disabled for security; binding gateway to localhost only.",
-        );
-    }
     let gateway_bind = "127.0.0.1:19789:18789";
     let mut memory_slot = if !settings.memory_enabled {
         "none"
@@ -10502,12 +9800,6 @@ pub async fn start_gateway_with_proxy(
     let startup_started = Instant::now();
     let _start_guard = gateway_start_lock().lock().await;
     cleanup_legacy_gateway_artifacts();
-    let settings = load_agent_settings(&app);
-    if settings.bridge_enabled && has_paired_bridge_devices(&settings) {
-        println!(
-            "[Entropic] Bridge mode requested in settings but disabled for security; binding proxy gateway to localhost only.",
-        );
-    }
     let gateway_bind = "127.0.0.1:19789:18789";
     let resolved_proxy_url = resolve_container_proxy_base(&proxy_url)?;
     let docker_proxy_api_url = resolve_container_openai_base(&resolved_proxy_url);
@@ -11256,16 +10548,6 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         .and_then(|v| v.as_str())
         .unwrap_or(&stored.whatsapp_allow_from)
         .to_string();
-    let bridge_enabled = false;
-    let bridge_tailnet_ip = String::new();
-    let bridge_port = 0;
-    let bridge_pairing_expires_at_ms = 0;
-    let bridge_device_id = String::new();
-    let bridge_device_name = String::new();
-    let bridge_devices: Vec<BridgeDeviceSummary> = Vec::new();
-    let bridge_device_count = 0;
-    let bridge_online_count = 0;
-    let bridge_paired = false;
     let tools = if gateway_running {
         read_container_file(&workspace_file("TOOLS.md")).unwrap_or_default()
     } else {
@@ -11340,16 +10622,6 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         googlechat_audience,
         whatsapp_enabled,
         whatsapp_allow_from,
-        bridge_enabled,
-        bridge_tailnet_ip,
-        bridge_port,
-        bridge_pairing_expires_at_ms,
-        bridge_device_id,
-        bridge_device_name,
-        bridge_devices: bridge_devices.clone(),
-        bridge_device_count,
-        bridge_online_count,
-        bridge_paired,
     })
 }
 

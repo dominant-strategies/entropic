@@ -136,12 +136,6 @@ pub fn run() {
             }
 
             let state = commands::init_state(app.handle());
-            if let Err(err) = commands::start_mobile_bridge_server_if_enabled(app.handle(), &state)
-            {
-                let msg = format!("mobile bridge startup skipped: {}", err);
-                append_startup_log(&msg);
-                eprintln!("[Entropic] {}", msg);
-            }
             app.manage(state);
             Ok(())
         })
