@@ -6171,6 +6171,27 @@ fn signal_gateway_config_reload() {
         .output();
 }
 
+async fn wait_for_gateway_after_config_reload(
+    app: &AppHandle,
+    context: &str,
+    attempts: usize,
+) {
+    if let Ok(token) = effective_gateway_token(app) {
+        eprintln!(
+            "[Entropic] {}: waiting for gateway health after config reload...",
+            context
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+        match wait_for_gateway_health_strict(&token, attempts).await {
+            Ok(()) => eprintln!("[Entropic] {}: gateway healthy", context),
+            Err(e) => eprintln!(
+                "[Entropic] {}: health wait timed out (non-fatal): {}",
+                context, e
+            ),
+        }
+    }
+}
+
 fn set_openclaw_config_value(cfg: &mut serde_json::Value, path: &[&str], value: serde_json::Value) {
     if path.is_empty() {
         return;
@@ -9755,6 +9776,7 @@ pub async fn start_gateway(
     // (same content).  Send SIGUSR1 to guarantee the gateway re-reads the
     // on-disk config so plugins like Telegram initialise correctly.
     signal_gateway_config_reload();
+    wait_for_gateway_after_config_reload(&app, "start_gateway", 20).await;
     println!("[Entropic] Startup timing: post_health_config applied");
     println!(
         "[Entropic] Startup timing: health={}ms total={}ms",
@@ -10162,6 +10184,7 @@ pub async fn start_gateway_with_proxy(
     clear_applied_agent_settings_fingerprint()?;
     apply_agent_settings(&app, &state)?;
     signal_gateway_config_reload();
+    wait_for_gateway_after_config_reload(&app, "start_gateway_with_proxy", 20).await;
     println!("[Entropic] Startup timing (proxy): post_health_config applied");
     println!(
         "[Entropic] Startup timing (proxy): health={}ms total={}ms",
@@ -10295,6 +10318,19 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
 #[tauri::command]
 pub async fn get_gateway_ws_url() -> Result<String, String> {
     Ok(gateway_ws_url())
+}
+
+#[tauri::command]
+pub async fn get_gateway_launch_mode() -> Result<String, String> {
+    if !gateway_container_exists(true) {
+        return Ok("stopped".to_string());
+    }
+
+    if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
+        return Ok("proxy".to_string());
+    }
+
+    Ok("local".to_string())
 }
 
 #[tauri::command]
@@ -10895,8 +10931,13 @@ pub async fn set_identity(
     name: String,
     avatar_data_url: Option<String>,
 ) -> Result<(), String> {
-    let existing = read_container_file(&workspace_file("IDENTITY.md")).unwrap_or_default();
     let stored = load_agent_settings(&app);
+    let gateway_running = gateway_container_exists(true);
+    let existing = if gateway_running {
+        read_container_file(&workspace_file("IDENTITY.md")).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let next_name = sanitize_identity_name(&name)
         .or_else(|| {
             parse_markdown_bold_field(&existing, "Name")
@@ -10904,24 +10945,39 @@ pub async fn set_identity(
         })
         .or_else(|| sanitize_identity_name(&stored.identity_name))
         .unwrap_or_else(|| "Entropic".to_string());
+    let next_avatar = avatar_data_url
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
     let creature = parse_markdown_bold_field(&existing, "Creature").unwrap_or_default();
     let vibe = parse_markdown_bold_field(&existing, "Vibe").unwrap_or_default();
     let emoji = parse_markdown_bold_field(&existing, "Emoji").unwrap_or_default();
-    let mut body = String::from("# IDENTITY.md - Who Am I?\n\n");
-    body.push_str(&format!("- **Name:** {}\n", next_name));
-    body.push_str(&format!("- **Creature:** {}\n", creature));
-    body.push_str(&format!("- **Vibe:** {}\n", vibe));
-    body.push_str(&format!("- **Emoji:** {}\n", emoji));
-    if let Some(ref url) = avatar_data_url {
-        body.push_str(&format!("- **Avatar:** {}\n", url));
-    } else {
-        body.push_str("- **Avatar:**\n");
-    }
-    write_container_file(&workspace_file("IDENTITY.md"), &body)?;
     let mut settings = stored;
-    settings.identity_name = next_name;
-    settings.identity_avatar = avatar_data_url;
+    settings.identity_name = next_name.clone();
+    settings.identity_avatar = next_avatar.clone();
     save_agent_settings(&app, settings)?;
+
+    if gateway_running {
+        let mut body = String::from("# IDENTITY.md - Who Am I?\n\n");
+        body.push_str(&format!("- **Name:** {}\n", next_name));
+        body.push_str(&format!("- **Creature:** {}\n", creature));
+        body.push_str(&format!("- **Vibe:** {}\n", vibe));
+        body.push_str(&format!("- **Emoji:** {}\n", emoji));
+        if let Some(ref url) = next_avatar {
+            body.push_str(&format!("- **Avatar:** {}\n", url));
+        } else {
+            body.push_str("- **Avatar:**\n");
+        }
+
+        if let Err(error) = write_container_file(&workspace_file("IDENTITY.md"), &body) {
+            println!(
+                "[Entropic] set_identity: saved desktop settings but failed to update live IDENTITY.md: {}",
+                error
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -11401,19 +11457,7 @@ pub async fn restart_gateway_in_place(
     // triggers the gateway's file watcher → SIGUSR1 → brief internal restart.
     // Wait for the gateway to come back healthy so callers (and the frontend)
     // don't see a jarring disconnect/error when navigating back to chat.
-    if let Ok(token) = effective_gateway_token(&app) {
-        eprintln!(
-            "[Entropic] restart_gateway_in_place: waiting for gateway health after config apply..."
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
-        match wait_for_gateway_health_strict(&token, 20).await {
-            Ok(()) => eprintln!("[Entropic] restart_gateway_in_place: gateway healthy"),
-            Err(e) => eprintln!(
-                "[Entropic] restart_gateway_in_place: health wait timed out (non-fatal): {}",
-                e
-            ),
-        }
-    }
+    wait_for_gateway_after_config_reload(&app, "restart_gateway_in_place", 20).await;
 
     Ok(())
 }

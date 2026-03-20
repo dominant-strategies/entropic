@@ -48,6 +48,8 @@ type RuntimeStatus = {
   docker_ready: boolean;
 };
 
+type GatewayLaunchMode = "stopped" | "local" | "proxy";
+
 type Props = {
   status: RuntimeStatus | null;
   onRefresh: () => void;
@@ -178,6 +180,14 @@ function remapImageGenerationModelForMode(
   return DEFAULT_PROXY_IMAGE_GENERATION_MODEL;
 }
 
+function buildProxyUnavailableStartupError() {
+  return {
+    message: hostedFeaturesEnabled
+      ? "Proxy mode is unavailable because hosted auth is not configured for this build. Enable Use Local Keys or provide the hosted auth env vars."
+      : "This dev session is a local build, so Entropic proxy mode is unavailable. Restart with `ENTROPIC_BUILD_PROFILE=managed pnpm dev:runtime:up` or enable Use Local Keys.",
+  };
+}
+
 export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const { isAuthenticated, isAuthConfigured, refreshBalance } = useAuth();
   const [useLocalKeys, setUseLocalKeys] = useState(defaultUseLocalKeys);
@@ -283,9 +293,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       try {
         const store = await TauriStore.load("entropic-settings.json");
         const storedUseLocal = await store.get("useLocalKeys") as boolean | null;
-        const isLocal = typeof storedUseLocal === "boolean"
-          ? storedUseLocal
-          : defaultUseLocalKeys;
+        const authRequiresLocalKeys = !isAuthConfigured;
+        const isLocal = authRequiresLocalKeys
+          ? true
+          : typeof storedUseLocal === "boolean"
+            ? storedUseLocal
+            : defaultUseLocalKeys;
         setUseLocalKeys(isLocal);
 
         const saved = await store.get("selectedModel") as string | null;
@@ -309,9 +322,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         setImageGenerationModel(nextImageGenerationModel);
 
         if (
+          storedUseLocal !== isLocal ||
           saved !== nextSelectedModel ||
           savedImageGeneration !== nextImageGenerationModel
         ) {
+          await store.set("useLocalKeys", isLocal);
           await store.set("selectedModel", nextSelectedModel);
           await store.set("imageGenerationModel", nextImageGenerationModel);
           await store.save();
@@ -525,7 +540,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }
 
   function normalizeProxyModel(model: string) {
-    return model.startsWith("openrouter/") ? model : `openrouter/${model}`;
+    return model.trim();
   }
 
   function extractGatewayStartError(error: unknown): string {
@@ -574,6 +589,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }
 
   async function retryGatewayStartup() {
+    if (!useLocalKeys && !isAuthConfigured) {
+      setStartupError(buildProxyUnavailableStartupError());
+      setGatewayStartupStage("idle");
+      setShowGatewayStartup(false);
+      return;
+    }
+
     const proxyEnabled =
       isAuthConfigured &&
       !useLocalKeys &&
@@ -958,7 +980,19 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
       // Check if gateway is already running
       const alreadyRunning = await getGatewayStatusCached({ force: true });
-      console.log("[Entropic] Auto-start: alreadyRunning =", alreadyRunning, "proxyEnabled =", proxyEnabled, "useLocalKeys =", useLocalKeys);
+      const currentGatewayMode = alreadyRunning
+        ? await invoke<GatewayLaunchMode>("get_gateway_launch_mode").catch(() => "local" as GatewayLaunchMode)
+        : "stopped";
+      console.log(
+        "[Entropic] Auto-start: alreadyRunning =",
+        alreadyRunning,
+        "proxyEnabled =",
+        proxyEnabled,
+        "useLocalKeys =",
+        useLocalKeys,
+        "gatewayMode =",
+        currentGatewayMode,
+      );
 
       if (alreadyRunning) {
         autoStartAttemptedRef.current = true;
@@ -1015,6 +1049,20 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           setIsTogglingGateway(false);
           setShowGatewayStartup(false);
           }
+        } else if (currentGatewayMode === "local") {
+          // Proxy mode is selected in Settings, but a stale local-keys gateway is
+          // still running. Stop it so chat doesn't silently talk to direct provider
+          // auth while the UI says proxy mode.
+          console.log("[Entropic] Auto-start: stopping stale local gateway while proxy mode is selected...");
+          setIsTogglingGateway(true);
+          try {
+            await invoke("stop_gateway");
+          } catch (error) {
+            console.error("[Entropic] Failed to stop stale local gateway:", error);
+          } finally {
+            setIsTogglingGateway(false);
+          }
+          setGatewayRunning(false);
         } else {
           setGatewayRunning(true);
         }
@@ -1180,6 +1228,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         console.log("[Entropic] Starting gateway...");
         gatewayHealthFailureStreakRef.current = 0;
         setGatewayRunning(false);
+        if (!useLocalKeys && !isAuthConfigured) {
+          setStartupError(buildProxyUnavailableStartupError());
+          return;
+        }
         const proxyEnabled =
           isAuthConfigured &&
           !useLocalKeys &&
@@ -1247,6 +1299,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       gatewayHealthFailureStreakRef.current = 0;
       autoStartAttemptedRef.current = false;
       setGatewayRunning(false);
+
+      if (!useLocalKeys && !isAuthConfigured) {
+        setStartupError(buildProxyUnavailableStartupError());
+        setShowGatewayStartup(false);
+        throw new Error("Sandbox restart requires a managed build with hosted auth, or local keys.");
+      }
 
       const proxyEnabled =
         isAuthConfigured &&
@@ -1429,8 +1487,14 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }, [currentPage]);
 
   function renderChatPage() {
+    const gatewayBootstrapPending =
+      !prefsLoaded ||
+      (!isAuthenticated && isAuthConfigured && !useLocalKeys && localCreditBalanceCents === null);
     const gatewayStarting =
-      showGatewayStartup || (isTogglingGateway && !gatewayRunning) || gatewayRetryIn !== null;
+      gatewayBootstrapPending ||
+      showGatewayStartup ||
+      (isTogglingGateway && !gatewayRunning) ||
+      gatewayRetryIn !== null;
     return (
       <Chat
         isVisible={currentPage === "chat"}
@@ -1526,6 +1590,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             onModelChange={handleModelChange}
             useLocalKeys={useLocalKeys}
             onUseLocalKeysChange={async (value) => {
+              if (!value && !isAuthConfigured) {
+                setStartupError(buildProxyUnavailableStartupError());
+                return;
+              }
+
               // Reset the auto-start guard and block the effect from running
               // until we're fully done stopping/saving. This must happen before
               // any awaits so the effect can't race ahead and see a stale guard.

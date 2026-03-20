@@ -252,6 +252,7 @@ up_stack() {
   start_stack
   ensure_runtime_images
   ensure_runtime_tars
+  local build_profile="${ENTROPIC_BUILD_PROFILE:-local}"
 
   for container in entropic-openclaw nova-openclaw; do
     local stopped_ids
@@ -261,8 +262,9 @@ up_stack() {
     fi
   done
 
-  echo "[dev] Launching pnpm tauri:dev"
+  echo "[dev] Launching pnpm tauri:dev (ENTROPIC_BUILD_PROFILE=$build_profile)"
   ENTROPIC_RUNTIME_MODE=dev \
+  ENTROPIC_BUILD_PROFILE="$build_profile" \
   ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
   DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
     pnpm tauri:dev

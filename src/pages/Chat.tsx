@@ -1024,6 +1024,8 @@ export function Chat({
   const lastIntegrationsSyncRef = useRef<number>(0);
   const proxyAuthRecoveryInFlightRef = useRef(false);
   const lastProxyAuthRecoveryAtRef = useRef(0);
+  const providerOAuthRecoveryInFlightRef = useRef(false);
+  const lastProviderOAuthRecoveryAtRef = useRef(0);
   const gatewayAuthRateLimitedUntilRef = useRef(0);
   // Local persistence: cache messages per session key
   const sessionMessagesRef = useRef<Record<string, Message[]>>({});
@@ -1383,10 +1385,13 @@ export function Chat({
     if (text.includes("gateway token mismatch")) return true;
     if (text.includes("ai provider error: 401")) return true;
     if (text.includes("no cookie auth credentials found")) return true;
+    if (text.includes("oauth token has expired")) return true;
+    if (text.includes("authentication_error") && text.includes("refresh your existing token")) return true;
     const has401 = text.includes("401") || text.includes("unauthorized");
     const looksProxy =
       text.includes("chat/completions") ||
       text.includes("ai provider") ||
+      text.includes("authentication_error") ||
       text.includes("cookie auth credentials") ||
       text.includes("gateway token");
     return has401 && looksProxy;
@@ -1400,6 +1405,28 @@ export function Chat({
       text.includes("auth_rate_limited") ||
       (text.includes("rate_limited") && text.includes("unauthorized"))
     );
+  }
+
+  function isProviderOAuthExpiryFailure(message?: string | null): boolean {
+    if (!message) return false;
+    const text = message.toLowerCase();
+    return (
+      text.includes("oauth token has expired") ||
+      (text.includes("authentication_error") && text.includes("refresh your existing token")) ||
+      (text.includes("authentication_error") && text.includes("obtain a new token"))
+    );
+  }
+
+  function currentRecoverableOAuthProvider(): "anthropic" | "openai" | null {
+    if (!useLocalKeys) return null;
+    if (connectedProvider === "anthropic" || connectedProvider === "openai") {
+      return connectedProvider;
+    }
+    return null;
+  }
+
+  function providerDisplayName(provider: "anthropic" | "openai"): string {
+    return provider === "anthropic" ? "Anthropic" : "OpenAI";
   }
 
   function readGatewayRetryAfterMs(details: unknown): number | null {
@@ -1493,6 +1520,74 @@ export function Chat({
       .finally(() => {
         proxyAuthRecoveryInFlightRef.current = false;
       });
+  }
+
+  async function recoverExpiredProviderOAuth(
+    source: string,
+    rawMessage?: string | null,
+  ): Promise<boolean> {
+    if (!isProviderOAuthExpiryFailure(rawMessage)) return false;
+    const provider = currentRecoverableOAuthProvider();
+    if (!provider) return false;
+
+    const now = Date.now();
+    const recoveryCooldownMs = 30_000;
+    const inCooldown = now - lastProviderOAuthRecoveryAtRef.current < recoveryCooldownMs;
+    if (providerOAuthRecoveryInFlightRef.current || inCooldown) {
+      addDiag(`provider oauth recovery skipped (${source}; already in progress or cooldown)`);
+      return true;
+    }
+
+    providerOAuthRecoveryInFlightRef.current = true;
+    lastProviderOAuthRecoveryAtRef.current = now;
+    const label = providerDisplayName(provider);
+    setError(`${label} OAuth token expired. Refreshing...`);
+    addDiag(`provider oauth failure detected from ${source}; refreshing ${provider}`);
+
+    try {
+      await invoke("refresh_provider_token", { provider });
+      window.dispatchEvent(new Event("entropic-auth-changed"));
+
+      if (gatewayRunning) {
+        addDiag(`provider oauth refresh succeeded; restarting gateway for ${provider}`);
+        await invoke("restart_gateway", { model: selectedModel });
+      } else {
+        addDiag(`provider oauth refresh succeeded; starting gateway for ${provider}`);
+        await invoke("start_gateway", { model: selectedModel });
+      }
+
+      setError(`${label} OAuth token refreshed. Please resend your last message.`);
+      return true;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      addDiag(`provider oauth recovery failed for ${provider}: ${detail}`);
+      setError(`${label} OAuth token expired. Refresh failed. Sign in again in Settings.`);
+      return false;
+    } finally {
+      providerOAuthRecoveryInFlightRef.current = false;
+    }
+  }
+
+  async function refreshGatewayAfterProviderAuthChange(): Promise<void> {
+    window.dispatchEvent(new Event("entropic-auth-changed"));
+
+    if (!useLocalKeys) {
+      const refreshed = onRecoverProxyAuth
+        ? await Promise.resolve(onRecoverProxyAuth())
+        : false;
+      if (!refreshed) {
+        throw new Error(
+          "Proxy mode is selected, but the proxy session could not be refreshed. Sign in to Entropic or enable local keys to use direct provider auth.",
+        );
+      }
+      return;
+    }
+
+    if (gatewayRunning) {
+      await invoke("restart_gateway", { model: selectedModel });
+    } else {
+      await invoke("start_gateway", { model: selectedModel });
+    }
   }
 
   useEffect(() => {
@@ -2206,8 +2301,19 @@ export function Chat({
           return;
         }
 
-        // Intercept proxy auth failures at the gateway level — show modal instead of raw banner
-        if (isProxyAuthFailure(normalizedError)) {
+        // Route OAuth expiry by mode: proxy mode refreshes the proxy session,
+        // local-keys mode refreshes the provider token directly.
+        if (isProviderOAuthExpiryFailure(normalizedError)) {
+          if (proxyEnabled) {
+            if (!proxyAuthRecoveryInFlightRef.current) {
+              triggerProxyAuthRecovery("gateway error");
+            }
+            addDiag(`gateway error (proxy oauth intercepted): ${normalizedError}`);
+          } else {
+            void recoverExpiredProviderOAuth("gateway error", normalizedError);
+            addDiag(`gateway error (provider oauth intercepted): ${normalizedError}`);
+          }
+        } else if (isProxyAuthFailure(normalizedError)) {
           if (!proxyAuthRecoveryInFlightRef.current) {
             triggerProxyAuthRecovery("gateway error");
           }
@@ -2675,6 +2781,14 @@ export function Chat({
       const rawErrorMessage = event.errorMessage || "Chat error";
       const errorMessage = formatAssistantErrorTextForUi(rawErrorMessage);
       setError(errorMessage);
+      const handledOAuthExpiryInProxyMode = proxyEnabled && isProviderOAuthExpiryFailure(rawErrorMessage);
+      if (isProviderOAuthExpiryFailure(rawErrorMessage)) {
+        if (handledOAuthExpiryInProxyMode) {
+          triggerProxyAuthRecovery("chat error event");
+        } else {
+          void recoverExpiredProviderOAuth("chat error event", rawErrorMessage);
+        }
+      }
       if (isBillingIssueMessage(errorMessage)) {
         setShowOutOfCreditsModal(true);
       }
@@ -2705,7 +2819,7 @@ export function Chat({
           });
         }
       }
-      if (isProxyAuthFailure(errorMessage)) {
+      if (!handledOAuthExpiryInProxyMode && isProxyAuthFailure(errorMessage)) {
         triggerProxyAuthRecovery("chat error event");
       }
     } else if (event.state === "aborted") {
@@ -3614,7 +3728,17 @@ export function Chat({
       }
       setPendingAttachments([]);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Send failed");
+      const errorMessage = e instanceof Error ? e.message : "Send failed";
+      let handledProviderOAuth = false;
+      if (proxyEnabled && isProviderOAuthExpiryFailure(errorMessage)) {
+        triggerProxyAuthRecovery("send failed");
+        handledProviderOAuth = true;
+      } else {
+        handledProviderOAuth = await recoverExpiredProviderOAuth("send failed", errorMessage);
+      }
+      if (!handledProviderOAuth) {
+        setError(errorMessage);
+      }
       setIsLoading(false);
       clearActiveRunTracking();
       await refreshTrialCredits();
@@ -4915,14 +5039,10 @@ export function Chat({
       setConnectedProvider(provider);
       setKeyInput("");
       setShowKeyModal(false);
-      if (gatewayRunning) {
-        await invoke("restart_gateway", { model: selectedModel });
-      } else {
-        await invoke("start_gateway", { model: selectedModel });
-      }
+      await refreshGatewayAfterProviderAuthChange();
     } catch (e) {
       console.error("Failed to set API key:", e);
-      setError("Failed to save API key");
+      setError(e instanceof Error ? e.message : typeof e === "string" ? e : "Failed to save API key");
     }
   }
 
@@ -4941,14 +5061,10 @@ export function Chat({
       // OpenAI: single-step localhost callback
       await invoke<{ access_token: string; provider: string }>("start_openai_oauth");
       setConnectedProvider(provider);
-      if (gatewayRunning) {
-        await invoke("restart_gateway", { model: selectedModel });
-      } else {
-        await invoke("start_gateway", { model: selectedModel });
-      }
+      await refreshGatewayAfterProviderAuthChange();
     } catch (e) {
       console.error(`OAuth login failed for ${provider}:`, e);
-      setError(typeof e === "string" ? e : `OAuth login failed`);
+      setError(e instanceof Error ? e.message : typeof e === "string" ? e : "OAuth login failed");
     } finally {
       setOauthLoading(null);
     }
@@ -4965,14 +5081,12 @@ export function Chat({
       setAnthropicCodePending(false);
       setAnthropicCodeInput("");
       setConnectedProvider("anthropic");
-      if (gatewayRunning) {
-        await invoke("restart_gateway", { model: selectedModel });
-      } else {
-        await invoke("start_gateway", { model: selectedModel });
-      }
+      await refreshGatewayAfterProviderAuthChange();
     } catch (e) {
       console.error("Anthropic OAuth code exchange failed:", e);
-      setError(typeof e === "string" ? e : "Failed to exchange authorization code");
+      setError(
+        e instanceof Error ? e.message : typeof e === "string" ? e : "Failed to exchange authorization code",
+      );
     } finally {
       setOauthLoading(null);
     }

@@ -345,6 +345,39 @@ export function Settings({
   const [customWallpaper, setCustomWallpaper] = useState<string | null>(null);
   const [wallpaperPickerOpen, setWallpaperPickerOpen] = useState(false);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
+  const identityPersistTimeoutRef = useRef<number | null>(null);
+
+  function persistProfileCache(next: AgentProfile) {
+    saveProfile(next)
+      .then(() => window.dispatchEvent(new Event("entropic-profile-updated")))
+      .catch(() => {});
+  }
+
+  function clearPendingIdentityPersist() {
+    if (identityPersistTimeoutRef.current !== null) {
+      window.clearTimeout(identityPersistTimeoutRef.current);
+      identityPersistTimeoutRef.current = null;
+    }
+  }
+
+  function persistIdentity(next: AgentProfile, immediate = false) {
+    const commit = () => {
+      identityPersistTimeoutRef.current = null;
+      invoke("set_identity", {
+        name: next.name,
+        avatarDataUrl: next.avatarDataUrl ?? null,
+      }).catch(() => {});
+    };
+
+    if (immediate) {
+      clearPendingIdentityPersist();
+      commit();
+      return;
+    }
+
+    clearPendingIdentityPersist();
+    identityPersistTimeoutRef.current = window.setTimeout(commit, 400);
+  }
 
   // Keep profile name in sync when Chat (or any other page) updates it
   useEffect(() => {
@@ -354,6 +387,8 @@ export function Settings({
     window.addEventListener("entropic-profile-updated", onProfileUpdated);
     return () => window.removeEventListener("entropic-profile-updated", onProfileUpdated);
   }, []);
+
+  useEffect(() => () => clearPendingIdentityPersist(), []);
 
   // Load initial state
   useEffect(() => {
@@ -1082,13 +1117,8 @@ export function Settings({
                   const avatarDataUrl = reader.result as string;
                   setProfile((p) => {
                     const next = { ...p, avatarDataUrl };
-                    saveProfile(next)
-                      .then(() => window.dispatchEvent(new Event("entropic-profile-updated")))
-                      .catch(() => {});
-                    invoke("set_identity", {
-                      name: next.name,
-                      avatarDataUrl: next.avatarDataUrl ?? null,
-                    }).catch(() => {});
+                    persistProfileCache(next);
+                    persistIdentity(next, true);
                     return next;
                   });
                 };
@@ -1105,15 +1135,20 @@ export function Settings({
                 value={profile.name}
                 onChange={(e) => {
                   const newName = e.target.value;
-                  setProfile(p => ({ ...p, name: newName }));
-                  saveProfile({ ...profile, name: newName }).catch(() => {});
-                  window.dispatchEvent(new Event("entropic-profile-updated"));
+                  setProfile((p) => {
+                    const next = { ...p, name: newName };
+                    persistProfileCache(next);
+                    persistIdentity(next);
+                    return next;
+                  });
                 }}
                 onBlur={(e) => {
-                  invoke("set_identity", {
+                  const next = {
+                    ...profile,
                     name: e.target.value,
-                    avatarDataUrl: profileAvatarDataUrl ?? null,
-                  }).catch(() => {});
+                    avatarDataUrl: profileAvatarDataUrl ?? undefined,
+                  };
+                  persistIdentity(next, true);
                 }}
                 maxLength={64}
                 className="w-full bg-transparent text-xl font-bold text-[var(--text-primary)] focus:outline-none border-b border-transparent focus:border-[var(--system-blue)] transition-colors placeholder:text-[var(--text-tertiary)]"
@@ -1503,9 +1538,15 @@ export function Settings({
           }
         >
           <button
-            onClick={() => onUseLocalKeysChange(!useLocalKeys)}
+            onClick={() => {
+              if (!isAuthConfigured) {
+                return;
+              }
+              void onUseLocalKeysChange(!useLocalKeys);
+            }}
+            disabled={!isAuthConfigured}
             className={clsx(
-              "relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+              "relative inline-flex h-6 w-11 flex-shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none disabled:cursor-not-allowed disabled:opacity-60",
               useLocalKeys ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-4)]"
             )}
           >
