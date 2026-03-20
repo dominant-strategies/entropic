@@ -647,13 +647,14 @@ export class GatewayClient {
       fileName?: string;
       mimeType?: string;
       content?: string;
-    }>
+    }>,
+    idempotencyKey?: string,
   ): Promise<string> {
     const result = await this.rpc<{ runId: string }>("chat.send", {
       sessionKey,
       message,
       attachments,
-      idempotencyKey: crypto.randomUUID(),
+      idempotencyKey: idempotencyKey || crypto.randomUUID(),
     });
     return result.runId;
   }

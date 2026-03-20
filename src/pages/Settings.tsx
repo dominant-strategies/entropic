@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { Key, Shield, Sparkles, Cpu, Image, ChevronRight, User, Palette, ChevronDown, ScrollText, LogIn, LogOut, Loader2, Trash2, AlertTriangle, Copy, Download, Sun, Moon, Monitor } from "lucide-react";
+import { Key, Shield, Sparkles, Cpu, Image, ChevronRight, User, Palette, ChevronDown, ScrollText, LogIn, LogOut, Loader2, Trash2, AlertTriangle, Copy, Download, Sun, Moon, Monitor, RotateCcw } from "lucide-react";
 import clsx from "clsx";
 import {
   getProfileInitials,
@@ -30,6 +30,14 @@ import {
   type DiagnosticLogEntry,
   type DiagnosticLogType,
 } from "../lib/diagnostics";
+import { loadDesktopSettings, updateDesktopSettings } from "../lib/settingsStore";
+import {
+  getCachedSettingsWarmState,
+  loadSettingsWarmState,
+  type AgentProfileState,
+  type AuthStateSnapshot,
+  type RuntimeVersionInfo,
+} from "../lib/settingsWarmState";
 type Props = {
   gatewayRunning: boolean;
   onGatewayToggle: () => void;
@@ -47,18 +55,6 @@ type Props = {
   onImageModelChange: (model: string) => void;
 };
 
-type AgentProfileState = {
-  memory_sessions_enabled?: boolean;
-  memory_enabled?: boolean;
-  memory_qmd_enabled?: boolean;
-  runtime_cpu?: number;
-  runtime_memory_gb?: number;
-  runtime_disk_gb?: number;
-  soul?: string;
-  identity_name?: string;
-  identity_avatar?: string | null;
-};
-
 type GatewayConfigHealth = {
   status: string;
   summary: string;
@@ -69,19 +65,6 @@ type GatewayHealResult = {
   container: string;
   restarted: boolean;
   message: string;
-};
-
-type RuntimeVersionInfo = {
-  entropic_version: string;
-  runtime_version: string;
-  runtime_openclaw_commit?: string | null;
-  runtime_download_asset_name?: string | null;
-  runtime_download_size_bytes?: number | null;
-  applied_runtime_version?: string | null;
-  applied_runtime_openclaw_commit?: string | null;
-  applied_runtime_image_id?: string | null;
-  app_manifest_version?: string | null;
-  app_manifest_pub_date?: string | null;
 };
 
 type RuntimeFetchResult = {
@@ -117,10 +100,17 @@ type RuntimeResourceUsage = {
 
 type LocalKeyProvider = "anthropic" | "google" | "openai";
 
-type AuthStateSnapshot = {
-  active_provider: string | null;
-  providers: Array<{ id: string; has_key: boolean; last4?: string | null }>;
-};
+function clampRuntimeCpu(value?: number | null) {
+  return Math.min(16, Math.max(1, value ?? 2));
+}
+
+function clampRuntimeMemoryGb(value?: number | null) {
+  return Math.min(64, Math.max(2, value ?? 4));
+}
+
+function clampRuntimeDiskGb(value?: number | null) {
+  return Math.min(500, Math.max(20, value ?? 20));
+}
 
 function SettingsGroup({ title, children }: { title?: string, children: React.ReactNode }) {
   return (
@@ -166,15 +156,6 @@ function SettingsRow({
       <div className="flex-shrink-0 flex items-center gap-2">
         {children}
       </div>
-    </div>
-  );
-}
-
-function SettingsLoadingHint({ label, className = "" }: { label: string; className?: string }) {
-  return (
-    <div className={clsx("inline-flex items-center gap-2 text-xs text-[var(--text-secondary)]", className)}>
-      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-      <span>{label}</span>
     </div>
   );
 }
@@ -226,6 +207,11 @@ export function Settings({
   onImageGenerationModelChange,
   onImageModelChange,
 }: Props) {
+  const cachedWarmState = getCachedSettingsWarmState();
+  const cachedAgentProfileState = cachedWarmState?.agentProfileState;
+  const initialRuntimeCpu = clampRuntimeCpu(cachedAgentProfileState?.runtime_cpu);
+  const initialRuntimeMemoryGb = clampRuntimeMemoryGb(cachedAgentProfileState?.runtime_memory_gb);
+  const initialRuntimeDiskGb = clampRuntimeDiskGb(cachedAgentProfileState?.runtime_disk_gb);
   const { isAuthenticated, isAuthConfigured, user, signOut } = useAuth();
   const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
   const [apiKeys, setApiKeys] = useState({ anthropic: "", openai: "", google: "" });
@@ -233,32 +219,32 @@ export function Settings({
     useState<LocalKeyProvider | null>(null);
   const [localKeyError, setLocalKeyError] = useState<string | null>(null);
   const [localKeyNotice, setLocalKeyNotice] = useState<string | null>(null);
-  const [profile, setProfile] = useState<AgentProfile>({ name: "Entropic" });
-  const [saving, setSaving] = useState(false);
-  const [memorySessionIndexing, setMemorySessionIndexing] = useState(false);
-  const [memoryEnabled, setMemoryEnabled] = useState(true);
-  const [memoryQmdEnabled, setMemoryQmdEnabled] = useState(false);
-  const [runtimeCpu, setRuntimeCpu] = useState(2);
-  const [runtimeMemoryGb, setRuntimeMemoryGb] = useState(4);
-  const [runtimeDiskGb, setRuntimeDiskGb] = useState(20);
-  const [runtimeResourceBaseline, setRuntimeResourceBaseline] = useState({ cpu: 2, memoryGb: 4, diskGb: 20 });
+  const [profile, setProfile] = useState<AgentProfile>(cachedWarmState?.profile ?? { name: "Entropic" });
+  const [runtimeCpu, setRuntimeCpu] = useState(initialRuntimeCpu);
+  const [runtimeMemoryGb, setRuntimeMemoryGb] = useState(initialRuntimeMemoryGb);
+  const [runtimeDiskGb, setRuntimeDiskGb] = useState(initialRuntimeDiskGb);
+  const [runtimeResourceBaseline, setRuntimeResourceBaseline] = useState({
+    cpu: initialRuntimeCpu,
+    memoryGb: initialRuntimeMemoryGb,
+    diskGb: initialRuntimeDiskGb,
+  });
   const [runtimeResourceError, setRuntimeResourceError] = useState<string | null>(null);
   const [runtimeResourceNotice, setRuntimeResourceNotice] = useState<string | null>(null);
   const [runtimeResourceSaving, setRuntimeResourceSaving] = useState(false);
   const [runtimeResourceUsage, setRuntimeResourceUsage] = useState<RuntimeResourceUsage | null>(null);
   const [runtimeResourceUsageError, setRuntimeResourceUsageError] = useState<string | null>(null);
-  const [memorySessionIndexingError, setMemorySessionIndexingError] = useState<string | null>(null);
-  const [memoryQmdError, setMemoryQmdError] = useState<string | null>(null);
-  const [soul, setSoul] = useState("");
+  const [soul, setSoul] = useState(cachedAgentProfileState?.soul || "");
   
   // OAuth state
   const [oauthStatus, setOauthStatus] = useState<Record<string, string>>({});
   const [oauthLoading, setOauthLoading] = useState<string | null>(null);
   const [oauthError, setOauthError] = useState<string | null>(null);
-  const [authState, setAuthState] = useState<AuthStateSnapshot>({
-    active_provider: null,
-    providers: [],
-  });
+  const [authState, setAuthState] = useState<AuthStateSnapshot>(
+    cachedWarmState?.authState ?? {
+      active_provider: null,
+      providers: [],
+    },
+  );
   const connectedProviders = authState.providers.filter(p => p.has_key).map(p => p.id);
   const localImageGenerationProviders: string[] = connectedProviders.filter(
     (provider) => provider === "google" || provider === "openai",
@@ -276,12 +262,14 @@ export function Settings({
   const [gatewayConfigActionLoading, setGatewayConfigActionLoading] = useState(false);
   const [gatewayConfigError, setGatewayConfigError] = useState<string | null>(null);
   const [gatewayConfigNotice, setGatewayConfigNotice] = useState<string | null>(null);
-  const [runtimeVersionInfo, setRuntimeVersionInfo] = useState<RuntimeVersionInfo | null>(null);
+  const [runtimeVersionInfo, setRuntimeVersionInfo] = useState<RuntimeVersionInfo | null>(
+    cachedWarmState?.runtimeVersionInfo ?? null,
+  );
   const [runtimeVersionLoading, setRuntimeVersionLoading] = useState(false);
   const [authMetaLoading, setAuthMetaLoading] = useState(false);
   const [runtimeFetchLoading, setRuntimeFetchLoading] = useState(false);
-  const [profileInfoLoading, setProfileInfoLoading] = useState(true);
-  const [agentProfileLoading, setAgentProfileLoading] = useState(true);
+  const [profileInfoLoading, setProfileInfoLoading] = useState(!cachedWarmState?.profile);
+  const [agentProfileLoading, setAgentProfileLoading] = useState(!cachedAgentProfileState);
   const [wallpaperStateLoading, setWallpaperStateLoading] = useState(true);
   const [runtimeUsageLoading, setRuntimeUsageLoading] = useState(false);
   const appliedRuntimeDigest =
@@ -347,6 +335,44 @@ export function Settings({
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const identityPersistTimeoutRef = useRef<number | null>(null);
 
+  function applyWarmAgentProfileState(state: AgentProfileState) {
+    setSoul(state.soul || "");
+    const nextRuntimeCpu = clampRuntimeCpu(state.runtime_cpu);
+    const nextRuntimeMemoryGb = clampRuntimeMemoryGb(state.runtime_memory_gb);
+    const nextRuntimeDiskGb = clampRuntimeDiskGb(state.runtime_disk_gb);
+    setRuntimeCpu(nextRuntimeCpu);
+    setRuntimeMemoryGb(nextRuntimeMemoryGb);
+    setRuntimeDiskGb(nextRuntimeDiskGb);
+    setRuntimeResourceBaseline({
+      cpu: nextRuntimeCpu,
+      memoryGb: nextRuntimeMemoryGb,
+      diskGb: nextRuntimeDiskGb,
+    });
+    const hasIdentityName = Object.prototype.hasOwnProperty.call(state, "identity_name");
+    const hasIdentityAvatar = Object.prototype.hasOwnProperty.call(state, "identity_avatar");
+    if (hasIdentityName || hasIdentityAvatar) {
+      setProfile((prev) => {
+        const next: AgentProfile = {
+          name:
+            hasIdentityName && typeof state.identity_name === "string" && state.identity_name.trim()
+              ? sanitizeProfileName(state.identity_name)
+              : prev.name,
+          avatarDataUrl: hasIdentityAvatar
+            ? isRenderableAvatarDataUrl(state.identity_avatar)
+              ? state.identity_avatar.trim()
+              : undefined
+            : prev.avatarDataUrl,
+        };
+        if (next.name !== prev.name || next.avatarDataUrl !== prev.avatarDataUrl) {
+          saveProfile(next)
+            .then(() => window.dispatchEvent(new Event("entropic-profile-updated")))
+            .catch(() => {});
+        }
+        return next;
+      });
+    }
+  }
+
   function persistProfileCache(next: AgentProfile) {
     saveProfile(next)
       .then(() => window.dispatchEvent(new Event("entropic-profile-updated")))
@@ -394,76 +420,36 @@ export function Settings({
   useEffect(() => {
     let cancelled = false;
     const cancelDeferred = scheduleDeferredSettingsWork(() => {
-      setProfileInfoLoading(true);
-      setAgentProfileLoading(true);
+      if (!cachedWarmState?.profile) {
+        setProfileInfoLoading(true);
+      }
+      if (!cachedAgentProfileState) {
+        setAgentProfileLoading(true);
+      }
       setWallpaperStateLoading(true);
 
-      void loadProfile()
-        .then((value) => {
-          if (!cancelled) {
-            setProfile(value);
+      void loadSettingsWarmState()
+        .then((state) => {
+          if (cancelled) return;
+          if (state.profile) {
+            setProfile(state.profile);
+          }
+          if (state.agentProfileState) {
+            applyWarmAgentProfileState(state.agentProfileState);
           }
         })
         .catch(() => {})
         .finally(() => {
           if (!cancelled) {
             setProfileInfoLoading(false);
-          }
-        });
-
-      void invoke<AgentProfileState>("get_agent_profile_state")
-        .then((state) => {
-          if (cancelled) return;
-          setSoul(state.soul || "");
-          setMemorySessionIndexing(Boolean(state.memory_sessions_enabled));
-          setMemoryEnabled(state.memory_enabled ?? true);
-          setMemoryQmdEnabled(Boolean(state.memory_qmd_enabled));
-          const nextRuntimeCpu = Math.min(16, Math.max(1, state.runtime_cpu ?? 2));
-          const nextRuntimeMemoryGb = Math.min(64, Math.max(2, state.runtime_memory_gb ?? 4));
-          const nextRuntimeDiskGb = Math.min(500, Math.max(20, state.runtime_disk_gb ?? 20));
-          setRuntimeCpu(nextRuntimeCpu);
-          setRuntimeMemoryGb(nextRuntimeMemoryGb);
-          setRuntimeDiskGb(nextRuntimeDiskGb);
-          setRuntimeResourceBaseline({
-            cpu: nextRuntimeCpu,
-            memoryGb: nextRuntimeMemoryGb,
-            diskGb: nextRuntimeDiskGb,
-          });
-          const hasIdentityName = Object.prototype.hasOwnProperty.call(state, "identity_name");
-          const hasIdentityAvatar = Object.prototype.hasOwnProperty.call(state, "identity_avatar");
-          if (hasIdentityName || hasIdentityAvatar) {
-            setProfile((prev) => {
-              const next: AgentProfile = {
-                name:
-                  hasIdentityName && typeof state.identity_name === "string" && state.identity_name.trim()
-                    ? sanitizeProfileName(state.identity_name)
-                    : prev.name,
-                avatarDataUrl: hasIdentityAvatar
-                  ? isRenderableAvatarDataUrl(state.identity_avatar)
-                    ? state.identity_avatar.trim()
-                    : undefined
-                  : prev.avatarDataUrl,
-              };
-              if (next.name !== prev.name || next.avatarDataUrl !== prev.avatarDataUrl) {
-                saveProfile(next)
-                  .then(() => window.dispatchEvent(new Event("entropic-profile-updated")))
-                  .catch(() => {});
-              }
-              return next;
-            });
-          }
-        })
-        .catch(() => {})
-        .finally(() => {
-          if (!cancelled) {
             setAgentProfileLoading(false);
           }
         });
 
-      void Store.load("entropic-settings.json")
-        .then(async (store) => {
-          const wp = (await store.get("desktopWallpaper")) as string | null;
-          const cwp = (await store.get("desktopCustomWallpaper")) as string | null;
+      void loadDesktopSettings()
+        .then((settings) => {
+          const wp = settings.desktopWallpaper;
+          const cwp = settings.desktopCustomWallpaper;
           if (cancelled) return;
           if (wp) setWallpaperId(wp);
           if (cwp) setCustomWallpaper(cwp);
@@ -485,43 +471,34 @@ export function Settings({
   useEffect(() => {
     let cancelled = false;
 
-    const refreshAuthMeta = () =>
-      Promise.allSettled([
-        invoke<Record<string, string>>("get_oauth_status"),
-        invoke<AuthStateSnapshot>("get_auth_state"),
-      ]).then((results) => {
-        if (cancelled) return;
-        const [oauthResult, authResult] = results;
-        if (oauthResult.status === "fulfilled") {
-          setOauthStatus(oauthResult.value);
-        }
-        if (authResult.status === "fulfilled") {
-          setAuthState(authResult.value);
-        }
-      });
-
     const loadDeferredSettingsData = () => {
-      setRuntimeVersionLoading(true);
-      setAuthMetaLoading(true);
+      if (!cachedWarmState?.runtimeVersionInfo) {
+        setRuntimeVersionLoading(true);
+      }
+      if (!cachedWarmState?.oauthStatus || !cachedWarmState?.authState) {
+        setAuthMetaLoading(true);
+      }
 
-      void invoke<RuntimeVersionInfo>("get_runtime_version_info")
-        .then((value) => {
-          if (!cancelled) {
-            setRuntimeVersionInfo(value);
+      void loadSettingsWarmState()
+        .then((state) => {
+          if (cancelled) return;
+          if (state.runtimeVersionInfo) {
+            setRuntimeVersionInfo(state.runtimeVersionInfo);
+          }
+          if (state.oauthStatus) {
+            setOauthStatus(state.oauthStatus);
+          }
+          if (state.authState) {
+            setAuthState(state.authState);
           }
         })
         .catch(() => {})
         .finally(() => {
           if (!cancelled) {
             setRuntimeVersionLoading(false);
+            setAuthMetaLoading(false);
           }
         });
-
-      void refreshAuthMeta().finally(() => {
-        if (!cancelled) {
-          setAuthMetaLoading(false);
-        }
-      });
     };
 
     const cancelDeferred = scheduleDeferredSettingsWork(loadDeferredSettingsData);
@@ -710,13 +687,10 @@ export function Settings({
     setWallpaperId(id);
     if (custom !== undefined) setCustomWallpaper(custom);
     try {
-      const store = await Store.load("entropic-settings.json");
-      await store.set("desktopWallpaper", id);
-      if (custom !== undefined) {
-        if (custom) await store.set("desktopCustomWallpaper", custom);
-        else await store.delete("desktopCustomWallpaper");
-      }
-      await store.save();
+      await updateDesktopSettings({
+        desktopWallpaper: id,
+        desktopCustomWallpaper: custom !== undefined ? custom ?? undefined : customWallpaper ?? undefined,
+      });
     } catch {}
   }
 
@@ -834,40 +808,6 @@ export function Settings({
       }
     } catch (e) {
       console.error(`[Entropic] OAuth disconnect failed for ${provider}:`, e);
-    }
-  }
-
-  async function handleMemorySessionIndexingChange(nextEnabled: boolean) {
-    setSaving(true);
-    setMemorySessionIndexingError(null);
-    const previous = memorySessionIndexing;
-    setMemorySessionIndexing(nextEnabled);
-    try {
-      await invoke("set_memory_session_indexing", { enabled: nextEnabled });
-    } catch (error) {
-      setMemorySessionIndexing(previous);
-      console.error("[Entropic] Failed to update memory session indexing:", error);
-      setMemorySessionIndexingError("Could not update conversation memory indexing. Please try again.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleMemoryQmdToggle(nextEnabled: boolean) {
-    setSaving(true);
-    setMemoryQmdError(null);
-    const previous = memoryQmdEnabled;
-    setMemoryQmdEnabled(nextEnabled);
-    try {
-      await invoke("set_memory_qmd_enabled", { enabled: nextEnabled });
-    } catch (error) {
-      setMemoryQmdEnabled(previous);
-      console.error("[Entropic] Failed to update QMD memory backend:", error);
-      setMemoryQmdError(
-        "Could not update QMD memory backend. Ensure gateway is running and network access is available for first-time QMD install."
-      );
-    } finally {
-      setSaving(false);
     }
   }
 
@@ -1045,9 +985,6 @@ export function Settings({
     <div className="max-w-3xl mx-auto py-8 px-4">
       <div className="mb-8 px-1">
         <h1 className="text-2xl font-bold">Settings</h1>
-        <div className="mt-2 text-xs text-[var(--text-secondary)]">
-          Settings opens immediately now. Slower runtime and account checks load in place below.
-        </div>
       </div>
 
       {gatewayConfigInvalid && (
@@ -1343,20 +1280,18 @@ export function Settings({
 
       <SettingsGroup title="System">
         <SettingsRow label="Gateway Status" icon={Shield} description={gatewayRunning ? "Running on localhost:19789" : "Secure sandbox stopped"}>
-          <button 
-            onClick={onGatewayToggle} 
+          <button
+            type="button"
+            onClick={onGatewayToggle}
             disabled={isTogglingGateway}
-            className={clsx(
-              "relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
-              (gatewayRunning || isTogglingGateway) ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-4)]"
-            )}
+            className="inline-flex items-center gap-1.5 rounded-md bg-[#1A1A2E] px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <span
-              className={clsx(
-                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-[var(--bg-card)] shadow ring-0 transition duration-200 ease-in-out",
-                (gatewayRunning || isTogglingGateway) ? "translate-x-5" : "translate-x-0"
-              )}
-            />
+            {isTogglingGateway ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RotateCcw className="h-3.5 w-3.5" />
+            )}
+            <span>{gatewayRunning ? "Restart" : "Start"}</span>
           </button>
         </SettingsRow>
 
@@ -1423,68 +1358,6 @@ export function Settings({
               <div className="px-4 pb-3 text-xs text-green-500">{runtimeResourceNotice}</div>
             )}
           </>
-        )}
-
-        <SettingsRow
-          label="Use QMD Memory Backend"
-          icon={Sparkles}
-          description={
-            memoryQmdEnabled
-              ? "QMD backend enabled for memory search"
-              : "Disabled (using builtin memory backend)"
-          }
-        >
-          <button
-            onClick={() => handleMemoryQmdToggle(!memoryQmdEnabled)}
-            disabled={saving || !memoryEnabled}
-            className={clsx(
-              "relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
-              memoryQmdEnabled && !saving ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-4)]",
-              (!memoryEnabled || saving) && "opacity-50"
-            )}
-          >
-            <span
-              className={clsx(
-                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-[var(--bg-card)] shadow ring-0 transition duration-200 ease-in-out",
-                memoryQmdEnabled && !saving ? "translate-x-5" : "translate-x-0"
-              )}
-            />
-          </button>
-        </SettingsRow>
-        {memoryQmdError && (
-          <div className="px-4 pb-4 pt-2 text-xs text-red-500">{memoryQmdError}</div>
-        )}
-
-        <SettingsRow
-          label="Conversation Memory Indexing"
-          icon={Sparkles}
-          description={
-            memorySessionIndexing
-              ? "Index conversation summaries in qmd memory"
-              : memoryEnabled
-                ? "Conversation indexing disabled"
-                : "Enable memory first to start indexing"
-          }
-        >
-          <button
-            onClick={() => handleMemorySessionIndexingChange(!memorySessionIndexing)}
-            disabled={saving || !memoryEnabled}
-            className={clsx(
-              "relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
-              memorySessionIndexing && !saving ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-4)]",
-              (!memoryEnabled || saving) && "opacity-50"
-            )}
-          >
-            <span
-              className={clsx(
-                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-[var(--bg-card)] shadow ring-0 transition duration-200 ease-in-out",
-                memorySessionIndexing && !saving ? "translate-x-5" : "translate-x-0"
-              )}
-            />
-          </button>
-        </SettingsRow>
-        {memorySessionIndexingError && (
-          <div className="px-4 pb-4 pt-2 text-xs text-red-500">{memorySessionIndexingError}</div>
         )}
 
         <SettingsRow
@@ -1990,9 +1863,6 @@ export function Settings({
               <div className="text-[12px] text-[var(--text-secondary)] mb-3">
                 Refresh the runtime manifest and cache the newest OpenClaw runtime tar for faster startup and updates.
               </div>
-              {runtimeVersionLoading && (
-                <SettingsLoadingHint label="Loading runtime asset metadata…" className="mb-3" />
-              )}
               {(runtimeVersionInfo?.runtime_download_asset_name || runtimeVersionInfo?.runtime_download_size_bytes != null) && (
                 <div className="text-[11px] text-[var(--text-tertiary)] mb-3">
                   Selected asset: {runtimeVersionInfo?.runtime_download_asset_name ?? "unknown"}

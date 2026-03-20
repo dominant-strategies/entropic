@@ -52,6 +52,7 @@ import {
 } from "lucide-react";
 import { loadOnboardingData } from "../lib/profile";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
+import { loadDesktopSettings, updateDesktopSettings } from "../lib/settingsStore";
 const PluginStore = lazy(() => import("./Store").then((m) => ({ default: m.Store })));
 const SkillsStore = lazy(() => import("./Store").then((m) => ({ default: m.Store })));
 const Channels = lazy(() => import("./Channels").then((m) => ({ default: m.Channels })));
@@ -1210,10 +1211,10 @@ export function Files({
     loadOnboardingData().then((d) => {
       if (d?.agentName) setAgentName(d.agentName);
     });
-    Store.load("entropic-settings.json").then(async (s) => {
-      const wp = (await s.get("desktopWallpaper")) as string | null;
+    loadDesktopSettings().then((settings) => {
+      const wp = settings.desktopWallpaper;
       if (wp) setWallpaperId(wp);
-      const cwp = (await s.get("desktopCustomWallpaper")) as string | null;
+      const cwp = settings.desktopCustomWallpaper;
       if (cwp) setCustomWallpaper(cwp);
     }).catch(() => {});
   }, []);
@@ -1446,13 +1447,10 @@ export function Files({
     setWallpaperId(id);
     if (custom !== undefined) setCustomWallpaper(custom);
     try {
-      const store = await Store.load("entropic-settings.json");
-      await store.set("desktopWallpaper", id);
-      if (custom !== undefined) {
-        if (custom) await store.set("desktopCustomWallpaper", custom);
-        else await store.delete("desktopCustomWallpaper");
-      }
-      await store.save();
+      await updateDesktopSettings({
+        desktopWallpaper: id,
+        desktopCustomWallpaper: custom !== undefined ? custom ?? undefined : customWallpaper ?? undefined,
+      });
     } catch {}
   }
 

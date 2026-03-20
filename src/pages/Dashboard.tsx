@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from "react";
+import { lazy, Suspense, useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
+import { Cpu, Image, Loader2, Shield, User } from "lucide-react";
 import { Layout, Page } from "../components/Layout";
 import {
   SANDBOX_STARTUP_FACTS,
@@ -14,7 +15,6 @@ import { Files } from "./Files";
 import { Tasks } from "./Tasks";
 import { Jobs } from "./Jobs";
 import { BillingPage } from "./BillingPage";
-import { Settings } from "./Settings";
 import { useAuth } from "../contexts/AuthContext";
 import { createGatewayToken, getProxyUrl, getBalance, ApiRequestError } from "../lib/auth";
 import { getLocalCreditBalance } from "../lib/localCredits";
@@ -33,13 +33,18 @@ import {
   PROXY_IMAGE_GENERATION_MODEL_IDS,
   PROXY_MODEL_IDS,
 } from "../components/ModelSelector";
-import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { hideEmbeddedPreviewWebview } from "../lib/nativePreview";
 import {
   defaultUseLocalKeys,
   entropicSitePath,
   hostedFeaturesEnabled,
 } from "../lib/buildProfile";
+import {
+  primeDesktopSettings,
+  type DesktopSettingsSnapshot,
+  updateDesktopSettings,
+} from "../lib/settingsStore";
+import { loadSettingsWarmState } from "../lib/settingsWarmState";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -49,6 +54,274 @@ type RuntimeStatus = {
 };
 
 type GatewayLaunchMode = "stopped" | "local" | "proxy";
+
+type AppBootstrapState = {
+  settings: DesktopSettingsSnapshot;
+  gatewayLaunchMode: GatewayLaunchMode;
+  gatewayContainerRunning: boolean;
+  gatewayHealthStatus: string;
+};
+
+type DashboardBootstrapState = {
+  status: "loading" | "ready" | "error";
+  gatewayRunning: boolean;
+  gatewayContainerRunning: boolean;
+  gatewayLaunchMode: GatewayLaunchMode;
+  gatewayHealthStatus: string;
+  error: string | null;
+};
+
+type DashboardBootstrapAction =
+  | { type: "bootstrap_loading" }
+  | { type: "bootstrap_loaded"; payload: AppBootstrapState }
+  | { type: "bootstrap_error"; error: string }
+  | {
+      type: "gateway_snapshot";
+      gatewayRunning?: boolean;
+      gatewayContainerRunning?: boolean;
+      gatewayLaunchMode?: GatewayLaunchMode;
+      gatewayHealthStatus?: string;
+    };
+
+let settingsPagePrefetchPromise: Promise<unknown> | null = null;
+
+function loadSettingsPage() {
+  return import("./Settings");
+}
+
+function prefetchSettingsPage() {
+  if (!settingsPagePrefetchPromise) {
+    settingsPagePrefetchPromise = loadSettingsPage().catch(() => undefined);
+  }
+  return settingsPagePrefetchPromise;
+}
+
+const Settings = lazy(() => loadSettingsPage().then((m) => ({ default: m.Settings })));
+
+const initialDashboardBootstrapState: DashboardBootstrapState = {
+  status: "loading",
+  gatewayRunning: false,
+  gatewayContainerRunning: false,
+  gatewayLaunchMode: "stopped",
+  gatewayHealthStatus: "stopped",
+  error: null,
+};
+
+function isGatewayHealthyStatus(status: string, gatewayContainerRunning: boolean) {
+  if (!gatewayContainerRunning) {
+    return false;
+  }
+  return status.trim().toLowerCase() === "healthy";
+}
+
+function dashboardBootstrapReducer(
+  state: DashboardBootstrapState,
+  action: DashboardBootstrapAction,
+): DashboardBootstrapState {
+  switch (action.type) {
+    case "bootstrap_loading":
+      return {
+        ...state,
+        status: "loading",
+        error: null,
+      };
+    case "bootstrap_loaded":
+      return {
+        status: "ready",
+        gatewayRunning: isGatewayHealthyStatus(
+          action.payload.gatewayHealthStatus,
+          action.payload.gatewayContainerRunning,
+        ),
+        gatewayContainerRunning: action.payload.gatewayContainerRunning,
+        gatewayLaunchMode: action.payload.gatewayLaunchMode,
+        gatewayHealthStatus: action.payload.gatewayHealthStatus,
+        error: null,
+      };
+    case "bootstrap_error":
+      return {
+        ...state,
+        status: "error",
+        error: action.error,
+      };
+    case "gateway_snapshot": {
+      const gatewayContainerRunning =
+        action.gatewayContainerRunning ?? state.gatewayContainerRunning;
+      const gatewayHealthStatus = action.gatewayHealthStatus ?? state.gatewayHealthStatus;
+      const explicitGatewayRunning = action.gatewayRunning;
+      return {
+        ...state,
+        gatewayRunning:
+          typeof explicitGatewayRunning === "boolean"
+            ? explicitGatewayRunning
+            : isGatewayHealthyStatus(gatewayHealthStatus, gatewayContainerRunning),
+        gatewayContainerRunning,
+        gatewayLaunchMode: action.gatewayLaunchMode ?? state.gatewayLaunchMode,
+        gatewayHealthStatus,
+      };
+    }
+    default:
+      return state;
+  }
+}
+
+function SettingsShellRow({
+  label,
+  value,
+  icon: Icon,
+  subtle = false,
+}: {
+  label: string;
+  value: string;
+  icon: typeof Shield;
+  subtle?: boolean;
+}) {
+  return (
+    <div className="p-4 flex items-center justify-between gap-4 border-b border-[var(--border-subtle)] last:border-b-0">
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="w-7 h-7 rounded-md bg-[var(--system-blue)]/10 text-[var(--system-blue)] flex items-center justify-center flex-shrink-0">
+          <Icon className="w-4 h-4" />
+        </div>
+        <div className="min-w-0">
+          <div className="text-[14px] font-medium text-[var(--text-primary)]">{label}</div>
+        </div>
+      </div>
+      <div
+        className={
+          subtle
+            ? "text-[12px] text-[var(--text-secondary)]"
+            : "text-[13px] text-[var(--text-primary)] truncate max-w-[50%] text-right"
+        }
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function SettingsShellGroup({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="mb-8">
+      <h3 className="text-[13px] font-medium text-[var(--text-secondary)] uppercase tracking-wide mb-2 px-1">
+        {title}
+      </h3>
+      <div className="bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl overflow-hidden shadow-sm">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function SettingsShellSkeletonRow({
+  icon: Icon,
+  widthClass = "w-40",
+}: {
+  icon: typeof Shield;
+  widthClass?: string;
+}) {
+  return (
+    <div className="p-4 flex items-center justify-between gap-4 border-b border-[var(--border-subtle)] last:border-b-0">
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="w-7 h-7 rounded-md bg-[var(--system-blue)]/10 text-[var(--system-blue)] flex items-center justify-center flex-shrink-0">
+          <Icon className="w-4 h-4" />
+        </div>
+        <div className="space-y-2 min-w-0">
+          <div className={`h-3 rounded bg-[var(--system-gray-5)] animate-pulse ${widthClass}`} />
+          <div className="h-3 w-28 rounded bg-[var(--system-gray-6)] animate-pulse" />
+        </div>
+      </div>
+      <div className="inline-flex items-center text-xs text-[var(--text-secondary)]">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      </div>
+    </div>
+  );
+}
+
+function SettingsLoadingShell({
+  gatewayRunning,
+  useLocalKeys,
+  selectedModel,
+  codeModel,
+  imageGenerationModel,
+}: {
+  gatewayRunning: boolean;
+  useLocalKeys: boolean;
+  selectedModel: string;
+  codeModel: string;
+  imageGenerationModel: string;
+}) {
+  return (
+    <div className="h-full overflow-auto px-6 py-6">
+      <div className="max-w-4xl mx-auto">
+        <div className="mb-6">
+          <div className="text-[28px] font-semibold text-[var(--text-primary)]">Settings</div>
+        </div>
+
+        <SettingsShellGroup title="Profile">
+          <div className="p-4 flex items-start gap-6 border-b border-[var(--border-subtle)]">
+            <div className="w-20 h-20 rounded-full bg-[var(--system-gray-5)] animate-pulse shrink-0" />
+            <div className="flex-1 space-y-4 pt-1">
+              <div className="space-y-2">
+                <div className="h-3 w-14 rounded bg-[var(--system-gray-5)] animate-pulse" />
+                <div className="h-7 w-48 rounded bg-[var(--system-gray-6)] animate-pulse" />
+              </div>
+              <div className="space-y-2">
+                <div className="h-3 w-20 rounded bg-[var(--system-gray-5)] animate-pulse" />
+                <div className="h-4 w-full rounded bg-[var(--system-gray-6)] animate-pulse" />
+                <div className="h-4 w-3/4 rounded bg-[var(--system-gray-6)] animate-pulse" />
+              </div>
+            </div>
+          </div>
+          <SettingsShellSkeletonRow icon={User} widthClass="w-24" />
+        </SettingsShellGroup>
+
+        <SettingsShellGroup title="Appearance">
+          <SettingsShellSkeletonRow icon={Image} widthClass="w-24" />
+          <SettingsShellSkeletonRow icon={Image} widthClass="w-36" />
+        </SettingsShellGroup>
+
+        <SettingsShellGroup title="Intelligence">
+          <SettingsShellRow label="Primary Model" value={selectedModel} icon={Cpu} />
+          <SettingsShellRow label="Coding Model" value={codeModel} icon={Cpu} />
+          <SettingsShellRow label="Image Generation Model" value={imageGenerationModel} icon={Image} />
+        </SettingsShellGroup>
+
+        <SettingsShellGroup title="System">
+          <SettingsShellRow
+            label="Gateway Status"
+            value={gatewayRunning ? "Running on localhost:19789" : "Secure sandbox stopped"}
+            icon={Shield}
+          />
+          <SettingsShellSkeletonRow icon={Cpu} widthClass="w-28" />
+          <SettingsShellSkeletonRow icon={Shield} widthClass="w-44" />
+        </SettingsShellGroup>
+
+        <SettingsShellGroup title="Keys">
+          <SettingsShellRow
+            label="Use Local Keys"
+            value={useLocalKeys ? "Enabled" : "Proxy mode"}
+            icon={Shield}
+          />
+          <SettingsShellSkeletonRow icon={Shield} widthClass="w-24" />
+          <SettingsShellSkeletonRow icon={Shield} widthClass="w-24" />
+        </SettingsShellGroup>
+
+        <SettingsShellGroup title="Diagnostics">
+          <SettingsShellSkeletonRow icon={Shield} widthClass="w-36" />
+        </SettingsShellGroup>
+
+        <SettingsShellGroup title="Data Management">
+          <SettingsShellSkeletonRow icon={Cpu} widthClass="w-48" />
+        </SettingsShellGroup>
+      </div>
+    </div>
+  );
+}
 
 type Props = {
   status: RuntimeStatus | null;
@@ -190,9 +463,12 @@ function buildProxyUnavailableStartupError() {
 
 export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const { isAuthenticated, isAuthConfigured, refreshBalance } = useAuth();
+  const [bootstrapState, dispatchBootstrap] = useReducer(
+    dashboardBootstrapReducer,
+    initialDashboardBootstrapState,
+  );
   const [useLocalKeys, setUseLocalKeys] = useState(defaultUseLocalKeys);
   const [currentPage, setCurrentPage] = useState<Page>("chat");
-  const [gatewayRunning, setGatewayRunning] = useState(false);
   const [isTogglingGateway, setIsTogglingGateway] = useState(false);
   const [showGatewayStartup, setShowGatewayStartup] = useState(false);
   const [gatewayStartupStage, setGatewayStartupStage] = useState<GatewayStartupStage>("idle");
@@ -204,7 +480,6 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [startupFactIndex, setStartupFactIndex] = useState(0);
   const [integrationsSyncing, setIntegrationsSyncing] = useState(false);
   const [integrationsMissing, setIntegrationsMissing] = useState(false);
-  const [prefsLoaded, setPrefsLoaded] = useState(false);
   const [selectedModel, setSelectedModel] = useState(
     defaultUseLocalKeys ? DEFAULT_LOCAL_MODEL : DEFAULT_PROXY_MODEL,
   );
@@ -236,7 +511,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     newProvider: string;
     newModel: string;
   } | null>(null);
+  const [settingsPageMounted, setSettingsPageMounted] = useState(currentPage === "settings");
   const gatewayHealthFailureStreakRef = useRef(0);
+  const gatewayRunning = bootstrapState.gatewayRunning;
+  const prefsLoaded = bootstrapState.status !== "loading";
 
   async function openFeedbackPage() {
     if (!FEEDBACK_FORM_URL) {
@@ -258,6 +536,48 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         detail: { source: "credits" },
       })
     );
+  }
+
+  function updateGatewayState(snapshot: {
+    gatewayRunning?: boolean;
+    gatewayContainerRunning?: boolean;
+    gatewayLaunchMode?: GatewayLaunchMode;
+    gatewayHealthStatus?: string;
+  }) {
+    dispatchBootstrap({
+      type: "gateway_snapshot",
+      gatewayRunning: snapshot.gatewayRunning,
+      gatewayContainerRunning: snapshot.gatewayContainerRunning,
+      gatewayLaunchMode: snapshot.gatewayLaunchMode,
+      gatewayHealthStatus: snapshot.gatewayHealthStatus,
+    });
+  }
+
+  function markGatewayStopped() {
+    updateGatewayState({
+      gatewayRunning: false,
+      gatewayContainerRunning: false,
+      gatewayLaunchMode: "stopped",
+      gatewayHealthStatus: "stopped",
+    });
+  }
+
+  function markGatewayStarting(mode: GatewayLaunchMode) {
+    updateGatewayState({
+      gatewayRunning: false,
+      gatewayContainerRunning: true,
+      gatewayLaunchMode: mode,
+      gatewayHealthStatus: "starting",
+    });
+  }
+
+  function markGatewayReady(mode: GatewayLaunchMode) {
+    updateGatewayState({
+      gatewayRunning: true,
+      gatewayContainerRunning: true,
+      gatewayLaunchMode: mode,
+      gatewayHealthStatus: "healthy",
+    });
   }
 
   function buildOutOfCreditsStartupError() {
@@ -287,58 +607,73 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
   }
 
-  // Load saved model preference
   useEffect(() => {
-    async function loadModel() {
+    let cancelled = false;
+    dispatchBootstrap({ type: "bootstrap_loading" });
+
+    async function loadBootstrap() {
       try {
-        const store = await TauriStore.load("entropic-settings.json");
-        const storedUseLocal = await store.get("useLocalKeys") as boolean | null;
+        const bootstrap = await invoke<AppBootstrapState>("get_app_bootstrap_state");
+        if (cancelled) return;
+
+        primeDesktopSettings(bootstrap.settings);
+
         const authRequiresLocalKeys = !isAuthConfigured;
+        const storedUseLocal = bootstrap.settings.useLocalKeys;
         const isLocal = authRequiresLocalKeys
           ? true
           : typeof storedUseLocal === "boolean"
             ? storedUseLocal
             : defaultUseLocalKeys;
-        setUseLocalKeys(isLocal);
-
-        const saved = await store.get("selectedModel") as string | null;
-        const nextSelectedModel = saved
-          ? remapModelForMode(saved, isLocal)
+        const nextSelectedModel = bootstrap.settings.selectedModel
+          ? remapModelForMode(bootstrap.settings.selectedModel, isLocal)
           : isLocal
             ? DEFAULT_LOCAL_MODEL
             : DEFAULT_PROXY_MODEL;
-        setSelectedModel(nextSelectedModel);
-
-        const savedCode = await store.get("codeModel") as string | null;
-        if (savedCode) setCodeModel(savedCode);
-        const savedImage = await store.get("imageModel") as string | null;
-        if (savedImage) setImageModel(savedImage);
-        const savedImageGeneration = await store.get("imageGenerationModel") as string | null;
+        const nextCodeModel = bootstrap.settings.codeModel || "openai/gpt-5.3-codex";
+        const nextImageModel =
+          bootstrap.settings.imageModel || "google/gemini-3.1-flash-image-preview";
         const nextImageGenerationModel = remapImageGenerationModelForMode(
-          savedImageGeneration || "",
+          bootstrap.settings.imageGenerationModel || "",
           isLocal,
           nextSelectedModel,
         );
-        setImageGenerationModel(nextImageGenerationModel);
 
-        if (
-          storedUseLocal !== isLocal ||
-          saved !== nextSelectedModel ||
-          savedImageGeneration !== nextImageGenerationModel
-        ) {
-          await store.set("useLocalKeys", isLocal);
-          await store.set("selectedModel", nextSelectedModel);
-          await store.set("imageGenerationModel", nextImageGenerationModel);
-          await store.save();
+        setUseLocalKeys(isLocal);
+        setSelectedModel(nextSelectedModel);
+        setCodeModel(nextCodeModel);
+        setImageModel(nextImageModel);
+        setImageGenerationModel(nextImageGenerationModel);
+        dispatchBootstrap({ type: "bootstrap_loaded", payload: bootstrap });
+
+        const normalizedPatch: Partial<DesktopSettingsSnapshot> = {};
+        if (storedUseLocal !== isLocal) {
+          normalizedPatch.useLocalKeys = isLocal;
+        }
+        if (bootstrap.settings.selectedModel !== nextSelectedModel) {
+          normalizedPatch.selectedModel = nextSelectedModel;
+        }
+        if (bootstrap.settings.imageGenerationModel !== nextImageGenerationModel) {
+          normalizedPatch.imageGenerationModel = nextImageGenerationModel;
+        }
+        if (Object.keys(normalizedPatch).length > 0) {
+          await updateDesktopSettings(normalizedPatch);
         }
       } catch (error) {
-        console.error("[Entropic] Failed to load model preference:", error);
-      } finally {
-        setPrefsLoaded(true);
+        if (cancelled) return;
+        console.error("[Entropic] Failed to load app bootstrap state:", error);
+        dispatchBootstrap({
+          type: "bootstrap_error",
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
-    loadModel();
-  }, []);
+
+    void loadBootstrap();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthConfigured]);
 
   useEffect(() => {
     if (isAuthenticated || !isAuthConfigured) {
@@ -374,6 +709,38 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       window.clearInterval(pollInterval);
     };
   }, [isAuthenticated, isAuthConfigured, refreshBalance]);
+
+  useEffect(() => {
+    let timeoutId: number | null = null;
+    let cancelled = false;
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    const preload = () => {
+      if (cancelled) return;
+      void prefetchSettingsPage();
+      void loadSettingsWarmState().catch(() => undefined);
+    };
+
+    if (typeof idleWindow.requestIdleCallback === "function") {
+      const idleId = idleWindow.requestIdleCallback(preload, { timeout: 1500 });
+      return () => {
+        cancelled = true;
+        if (typeof idleId === "number") {
+          idleWindow.cancelIdleCallback?.(idleId);
+        }
+      };
+    }
+
+    timeoutId = globalThis.setTimeout(preload, 700);
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) {
+        globalThis.clearTimeout(timeoutId);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!showGatewayStartup) {
@@ -620,6 +987,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
     setShowGatewayStartup(true);
     setGatewayStartupStage("launch");
+    markGatewayStarting("local");
     await invoke("start_gateway", { model: selectedModel });
     setGatewayStartupStage("health");
     await new Promise((r) => setTimeout(r, 2000));
@@ -639,7 +1007,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         });
         setShowGatewayStartup(true);
         setGatewayStartupStage("launch");
-        setGatewayRunning(false);
+        markGatewayStopped();
         try {
           await invoke("stop_gateway");
         } catch (error) {
@@ -738,7 +1106,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     setShowGatewayStartup(true);
     setGatewayStartupStage("credits");
     gatewayHealthFailureStreakRef.current = 0;
-    setGatewayRunning(false);
+    markGatewayStarting("proxy");
     try {
       if (stopFirst) {
         try {
@@ -824,7 +1192,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         }
       }
       gatewayHealthFailureStreakRef.current = 0;
-      setGatewayRunning(true);
+      markGatewayReady("proxy");
       runtimeAutoRefreshAttemptedRef.current = false;
       runtimeAutoCleanupAttemptedRef.current = false;
       clearGatewayRetry();
@@ -978,10 +1346,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         return;
       }
 
-      // Check if gateway is already running
-      const alreadyRunning = await getGatewayStatusCached({ force: true });
+      const alreadyRunning = bootstrapState.gatewayContainerRunning;
       const currentGatewayMode = alreadyRunning
-        ? await invoke<GatewayLaunchMode>("get_gateway_launch_mode").catch(() => "local" as GatewayLaunchMode)
+        ? bootstrapState.gatewayLaunchMode
         : "stopped";
       console.log(
         "[Entropic] Auto-start: alreadyRunning =",
@@ -992,6 +1359,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         useLocalKeys,
         "gatewayMode =",
         currentGatewayMode,
+        "gatewayHealth =",
+        bootstrapState.gatewayHealthStatus,
       );
 
       if (alreadyRunning) {
@@ -1005,7 +1374,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         if (proxyEnabled) {
           // Proxy mode — refresh token/config so stale gateway tokens don't persist across app launches.
           console.log("[Entropic] Auto-start: existing container found, refreshing proxy config...");
-          setGatewayRunning(true);
+          markGatewayStarting("proxy");
           setIsTogglingGateway(true);
           try {
             await startGatewayProxyFlow({
@@ -1024,6 +1393,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           console.log("[Entropic] Auto-start: existing container found but we're in local-keys mode — restarting with local keys...");
           setShowGatewayStartup(true);
           setGatewayStartupStage("launch");
+          markGatewayStarting("local");
           setIsTogglingGateway(true);
         try {
           await invoke("stop_gateway");
@@ -1062,9 +1432,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           } finally {
             setIsTogglingGateway(false);
           }
-          setGatewayRunning(false);
+          markGatewayStopped();
         } else {
-          setGatewayRunning(true);
+          markGatewayReady(currentGatewayMode === "proxy" ? "proxy" : "local");
         }
         return;
       }
@@ -1093,6 +1463,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         console.log("[Entropic] Auto-starting gateway in local-keys mode (no existing container)...");
         setShowGatewayStartup(true);
         setGatewayStartupStage("launch");
+        markGatewayStarting("local");
         setIsTogglingGateway(true);
         try {
           await invoke("start_gateway", { model: selectedModel });
@@ -1131,6 +1502,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     selectedModel,
     gatewayRetryIn,
     imageModel,
+    bootstrapState.gatewayContainerRunning,
+    bootstrapState.gatewayHealthStatus,
+    bootstrapState.gatewayLaunchMode,
   ]);
 
   // When auth state changes (anonymous <-> signed-in), rotate gateway token so
@@ -1178,7 +1552,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       const running = await getGatewayStatusCached({ force: true });
       if (running) {
         gatewayHealthFailureStreakRef.current = 0;
-        setGatewayRunning(true);
+        markGatewayReady(
+          bootstrapState.gatewayLaunchMode === "proxy"
+            ? "proxy"
+            : useLocalKeys
+              ? "local"
+              : "proxy",
+        );
         console.log("[Entropic] Gateway health check: healthy");
         setGatewayStartupStage("idle");
         setShowGatewayStartup(false);
@@ -1195,7 +1575,25 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         return true;
       }
 
-      setGatewayRunning(false);
+      if (
+        !gatewayRunning &&
+        bootstrapState.gatewayContainerRunning &&
+        bootstrapState.gatewayLaunchMode !== "stopped"
+      ) {
+        updateGatewayState({
+          gatewayRunning: false,
+          gatewayContainerRunning: true,
+          gatewayLaunchMode: bootstrapState.gatewayLaunchMode,
+          gatewayHealthStatus:
+            bootstrapState.gatewayHealthStatus === "healthy"
+              ? "starting"
+              : bootstrapState.gatewayHealthStatus,
+        });
+        console.log("[Entropic] Gateway health check: container still recovering");
+        return false;
+      }
+
+      markGatewayStopped();
       console.log("[Entropic] Gateway health check: not responding");
       return false;
     } catch (error) {
@@ -1208,7 +1606,25 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         );
         return true;
       }
-      setGatewayRunning(false);
+
+      if (
+        !gatewayRunning &&
+        bootstrapState.gatewayContainerRunning &&
+        bootstrapState.gatewayLaunchMode !== "stopped"
+      ) {
+        updateGatewayState({
+          gatewayRunning: false,
+          gatewayContainerRunning: true,
+          gatewayLaunchMode: bootstrapState.gatewayLaunchMode,
+          gatewayHealthStatus:
+            bootstrapState.gatewayHealthStatus === "healthy"
+              ? "starting"
+              : bootstrapState.gatewayHealthStatus,
+        });
+        return false;
+      }
+
+      markGatewayStopped();
       return false;
     }
   }
@@ -1223,11 +1639,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         console.log("[Entropic] Gateway stopped successfully");
         gatewayHealthFailureStreakRef.current = 0;
         autoStartAttemptedRef.current = false;
-        setGatewayRunning(false);
+        markGatewayStopped();
       } else {
         console.log("[Entropic] Starting gateway...");
         gatewayHealthFailureStreakRef.current = 0;
-        setGatewayRunning(false);
         if (!useLocalKeys && !isAuthConfigured) {
           setStartupError(buildProxyUnavailableStartupError());
           return;
@@ -1256,6 +1671,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           return;
         } else {
           // Local keys mode (or auth disabled), use direct API keys.
+          markGatewayStarting("local");
           await invoke("start_gateway", { model: selectedModel });
         }
 
@@ -1265,6 +1681,65 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       await checkGateway();
     } catch (error) {
       console.error("[Entropic] Failed to toggle gateway:", error);
+      const message = extractGatewayStartError(error);
+      const recoveredRuntime = await tryAutoRecoverRuntime(message);
+      if (recoveredRuntime) {
+        clearGatewayRetry();
+        scheduleGatewayRetry(() => {
+          void retryGatewayStartup();
+        });
+      } else {
+        setStartupError({ message });
+      }
+    } finally {
+      setIsTogglingGateway(false);
+    }
+  }
+
+  async function restartGatewayFromSettings() {
+    setIsTogglingGateway(true);
+    setStartupError(null);
+    try {
+      gatewayHealthFailureStreakRef.current = 0;
+
+      if (!useLocalKeys && !isAuthConfigured) {
+        setStartupError(buildProxyUnavailableStartupError());
+        return;
+      }
+
+      const proxyEnabled =
+        isAuthConfigured &&
+        !useLocalKeys &&
+        (isAuthenticated || (localCreditBalanceCents ?? 0) > 0);
+
+      if (proxyEnabled) {
+        const started = await startGatewayProxyFlow({
+          model: selectedModel,
+          image: imageModel,
+          stopFirst: gatewayRunning,
+          allowRetry: true,
+        });
+        if (!started) {
+          return;
+        }
+      } else if (isAuthConfigured && !useLocalKeys) {
+        setStartupError(buildOutOfCreditsStartupError());
+        return;
+      } else {
+        setShowGatewayStartup(true);
+        setGatewayStartupStage("launch");
+        markGatewayStarting("local");
+        if (gatewayRunning) {
+          await invoke("restart_gateway", { model: selectedModel });
+        } else {
+          await invoke("start_gateway", { model: selectedModel });
+        }
+      }
+
+      await new Promise((r) => setTimeout(r, 2000));
+      await checkGateway();
+    } catch (error) {
+      console.error("[Entropic] Failed to restart gateway:", error);
       const message = extractGatewayStartError(error);
       const recoveredRuntime = await tryAutoRecoverRuntime(message);
       if (recoveredRuntime) {
@@ -1298,7 +1773,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       await invoke("stop_runtime");
       gatewayHealthFailureStreakRef.current = 0;
       autoStartAttemptedRef.current = false;
-      setGatewayRunning(false);
+      markGatewayStopped();
 
       if (!useLocalKeys && !isAuthConfigured) {
         setStartupError(buildProxyUnavailableStartupError());
@@ -1331,6 +1806,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       }
 
       setGatewayStartupStage("launch");
+      markGatewayStarting("local");
       await invoke("start_gateway", { model: selectedModel });
       setGatewayStartupStage("health");
 
@@ -1353,7 +1829,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
       gatewayHealthFailureStreakRef.current = 0;
       runtimeAutoRefreshAttemptedRef.current = false;
-      setGatewayRunning(true);
+      markGatewayReady("local");
       setStartupError(null);
       setGatewayStartupStage("idle");
       setShowGatewayStartup(false);
@@ -1418,11 +1894,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     setProviderSwitchConfirm(null);
     setSelectedModel(newModel);
 
-    // Save preference
     try {
-      const store = await TauriStore.load("entropic-settings.json");
-      await store.set("selectedModel", newModel);
-      await store.save();
+      await updateDesktopSettings({ selectedModel: newModel });
     } catch (error) {
       console.error("[Entropic] Failed to save model preference:", error);
     }
@@ -1457,6 +1930,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         console.log("[Entropic] Provider switch in local-keys mode, restarting gateway with:", newModel);
         setShowGatewayStartup(true);
         setGatewayStartupStage("launch");
+        markGatewayStarting("local");
         setIsTogglingGateway(true);
         try {
           await invoke("restart_gateway", { model: newModel });
@@ -1481,17 +1955,119 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
   }
 
+  async function handleUseLocalKeysChange(value: boolean) {
+    if (!value && !isAuthConfigured) {
+      setStartupError(buildProxyUnavailableStartupError());
+      return;
+    }
+
+    autoStartAttemptedRef.current = false;
+    setIsTogglingGateway(true);
+    setUseLocalKeys(value);
+
+    const newModel = remapModelForMode(selectedModel, value);
+    const newImageGenerationModel = remapImageGenerationModelForMode(
+      imageGenerationModel,
+      value,
+      newModel,
+    );
+    if (newModel !== selectedModel) {
+      setSelectedModel(newModel);
+    }
+    if (newImageGenerationModel !== imageGenerationModel) {
+      setImageGenerationModel(newImageGenerationModel);
+    }
+
+    try {
+      await updateDesktopSettings({
+        useLocalKeys: value,
+        selectedModel: newModel,
+        imageGenerationModel: newImageGenerationModel,
+      });
+    } catch (error) {
+      console.error("[Entropic] Failed to save useLocalKeys:", error);
+    }
+
+    if (gatewayRunning) {
+      try {
+        await invoke("stop_gateway");
+      } catch (error) {
+        console.error("[Entropic] Failed to stop gateway:", error);
+      }
+      markGatewayStopped();
+    }
+
+    setIsTogglingGateway(false);
+  }
+
+  async function handleCodeModelChange(value: string) {
+    setCodeModel(value);
+    try {
+      await updateDesktopSettings({ codeModel: value });
+    } catch (error) {
+      console.error("[Entropic] Failed to save codeModel:", error);
+    }
+  }
+
+  async function handleImageGenerationModelChange(value: string) {
+    setImageGenerationModel(value);
+    try {
+      await updateDesktopSettings({ imageGenerationModel: value });
+    } catch (error) {
+      console.error("[Entropic] Failed to save imageGenerationModel:", error);
+    }
+  }
+
+  async function handleImageModelChange(value: string) {
+    setImageModel(value);
+    try {
+      await updateDesktopSettings({ imageModel: value });
+    } catch (error) {
+      console.error("[Entropic] Failed to save imageModel:", error);
+    }
+
+    if (
+      gatewayRunning &&
+      isAuthConfigured &&
+      !useLocalKeys &&
+      gatewayTokenRef.current &&
+      (isAuthenticated || (localCreditBalanceCents ?? 0) > 0)
+    ) {
+      try {
+        await startGatewayProxyFlow({
+          model: selectedModel,
+          image: value,
+          stopFirst: true,
+          allowRetry: true,
+        });
+      } catch (error) {
+        console.error("[Entropic] Failed to restart gateway with new image model:", error);
+      }
+    }
+  }
+
   useEffect(() => {
     if (currentPage === "files") return;
     void hideEmbeddedPreviewWebview().catch(() => {});
+  }, [currentPage]);
+
+  useEffect(() => {
+    if (currentPage === "settings") {
+      setSettingsPageMounted(true);
+    }
   }, [currentPage]);
 
   function renderChatPage() {
     const gatewayBootstrapPending =
       !prefsLoaded ||
       (!isAuthenticated && isAuthConfigured && !useLocalKeys && localCreditBalanceCents === null);
+    const gatewayRecovering =
+      bootstrapState.gatewayContainerRunning &&
+      !gatewayRunning &&
+      bootstrapState.gatewayLaunchMode !== "stopped";
     const gatewayStarting =
       gatewayBootstrapPending ||
+      gatewayRecovering ||
       showGatewayStartup ||
       (isTogglingGateway && !gatewayRunning) ||
       gatewayRetryIn !== null;
@@ -1535,6 +2111,39 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     );
   }
 
+  function renderSettingsPage() {
+    return (
+      <Suspense
+        fallback={
+          <SettingsLoadingShell
+            gatewayRunning={gatewayRunning}
+            useLocalKeys={useLocalKeys}
+            selectedModel={selectedModel}
+            codeModel={codeModel}
+            imageGenerationModel={imageGenerationModel}
+          />
+        }
+      >
+        <Settings
+          gatewayRunning={gatewayRunning}
+          onGatewayToggle={restartGatewayFromSettings}
+          onApplyRuntimeResources={applyRuntimeResourcesAndRestart}
+          isTogglingGateway={isTogglingGateway}
+          selectedModel={selectedModel}
+          onModelChange={handleModelChange}
+          useLocalKeys={useLocalKeys}
+          onUseLocalKeysChange={handleUseLocalKeysChange}
+          codeModel={codeModel}
+          imageModel={imageModel}
+          imageGenerationModel={imageGenerationModel}
+          onCodeModelChange={handleCodeModelChange}
+          onImageGenerationModelChange={handleImageGenerationModelChange}
+          onImageModelChange={handleImageModelChange}
+        />
+      </Suspense>
+    );
+  }
+
   function renderPage() {
     switch (currentPage) {
       case "chat":
@@ -1562,15 +2171,15 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             onRecoverProxyAuth={recoverProxyAuthFromChat}
             isTogglingGateway={isTogglingGateway}
             selectedModel={selectedModel}
-            onModelChange={setSelectedModel}
+            onModelChange={handleModelChange}
             useLocalKeys={useLocalKeys}
-            onUseLocalKeysChange={setUseLocalKeys}
+            onUseLocalKeysChange={handleUseLocalKeysChange}
             codeModel={codeModel}
             imageModel={imageModel}
             imageGenerationModel={imageGenerationModel}
-            onCodeModelChange={setCodeModel}
-            onImageGenerationModelChange={setImageGenerationModel}
-            onImageModelChange={setImageModel}
+            onCodeModelChange={handleCodeModelChange}
+            onImageGenerationModelChange={handleImageGenerationModelChange}
+            onImageModelChange={handleImageModelChange}
           />
         );
       case "tasks":
@@ -1580,120 +2189,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       case "billing":
         return <BillingPage />;
       case "settings":
-        return (
-          <Settings
-            gatewayRunning={gatewayRunning}
-            onGatewayToggle={toggleGateway}
-            onApplyRuntimeResources={applyRuntimeResourcesAndRestart}
-            isTogglingGateway={isTogglingGateway}
-            selectedModel={selectedModel}
-            onModelChange={handleModelChange}
-            useLocalKeys={useLocalKeys}
-            onUseLocalKeysChange={async (value) => {
-              if (!value && !isAuthConfigured) {
-                setStartupError(buildProxyUnavailableStartupError());
-                return;
-              }
-
-              // Reset the auto-start guard and block the effect from running
-              // until we're fully done stopping/saving. This must happen before
-              // any awaits so the effect can't race ahead and see a stale guard.
-              autoStartAttemptedRef.current = false;
-              setIsTogglingGateway(true);
-              setUseLocalKeys(value);
-
-              const newModel = remapModelForMode(selectedModel, value);
-              const newImageGenerationModel = remapImageGenerationModelForMode(
-                imageGenerationModel,
-                value,
-                newModel,
-              );
-              if (newModel !== selectedModel) {
-                setSelectedModel(newModel);
-              }
-              if (newImageGenerationModel !== imageGenerationModel) {
-                setImageGenerationModel(newImageGenerationModel);
-              }
-
-              try {
-                const store = await TauriStore.load("entropic-settings.json");
-                await store.set("useLocalKeys", value);
-                await store.set("selectedModel", newModel);
-                await store.set("imageGenerationModel", newImageGenerationModel);
-                await store.save();
-              } catch (error) {
-                console.error("[Entropic] Failed to save useLocalKeys:", error);
-              }
-
-              // Stop existing container — the auto-start effect will restart
-              // in the correct mode once isTogglingGateway is cleared.
-              if (gatewayRunning) {
-                try {
-                  await invoke("stop_gateway");
-                } catch (error) {
-                  console.error("[Entropic] Failed to stop gateway:", error);
-                }
-                setGatewayRunning(false);
-              }
-
-              // Unblock the auto-start effect — it will now re-run with the
-              // new useLocalKeys value and autoStartAttemptedRef = false.
-              setIsTogglingGateway(false);
-            }}
-            codeModel={codeModel}
-            imageModel={imageModel}
-            imageGenerationModel={imageGenerationModel}
-            onCodeModelChange={async (value) => {
-              setCodeModel(value);
-              try {
-                const store = await TauriStore.load("entropic-settings.json");
-                await store.set("codeModel", value);
-                await store.save();
-              } catch (error) {
-                console.error("[Entropic] Failed to save codeModel:", error);
-              }
-            }}
-            onImageGenerationModelChange={async (value) => {
-              setImageGenerationModel(value);
-              try {
-                const store = await TauriStore.load("entropic-settings.json");
-                await store.set("imageGenerationModel", value);
-                await store.save();
-              } catch (error) {
-                console.error("[Entropic] Failed to save imageGenerationModel:", error);
-              }
-            }}
-            onImageModelChange={async (value) => {
-              setImageModel(value);
-              try {
-                const store = await TauriStore.load("entropic-settings.json");
-                await store.set("imageModel", value);
-                await store.save();
-              } catch (error) {
-                console.error("[Entropic] Failed to save imageModel:", error);
-              }
-
-              if (
-                gatewayRunning &&
-                isAuthConfigured &&
-                !useLocalKeys &&
-                gatewayTokenRef.current &&
-                (isAuthenticated || (localCreditBalanceCents ?? 0) > 0)
-              ) {
-                try {
-                  await startGatewayProxyFlow({
-                    model: selectedModel,
-                    image: value,
-                    stopFirst: true,
-                    allowRetry: true,
-                  });
-                } catch (error) {
-                  console.error("[Entropic] Failed to restart gateway with new image model:", error);
-                }
-              }
-            }}
-          />
-        );
+        return null;
       default:
         return null;
     }
@@ -1785,6 +2281,14 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       <div className={currentPage === "chat" ? "h-full" : "hidden"} aria-hidden={currentPage !== "chat"}>
         {renderChatPage()}
       </div>
+      {settingsPageMounted && (
+        <div
+          className={currentPage === "settings" ? "h-full" : "hidden"}
+          aria-hidden={currentPage !== "settings"}
+        >
+          {renderSettingsPage()}
+        </div>
+      )}
       {renderPage()}
     </Layout>
   );

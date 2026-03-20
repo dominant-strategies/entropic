@@ -160,6 +160,7 @@ pub fn run() {
             commands::stop_gateway,
             commands::restart_gateway,
             commands::update_gateway_model,
+            commands::get_app_bootstrap_state,
             commands::get_gateway_status,
             commands::get_gateway_launch_mode,
             commands::get_gateway_ws_url,

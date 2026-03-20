@@ -3525,6 +3525,28 @@ pub struct GatewayAuthPayload {
     pub token: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopSettingsSnapshot {
+    pub use_local_keys: Option<bool>,
+    pub experimental_desktop: Option<bool>,
+    pub selected_model: Option<String>,
+    pub code_model: Option<String>,
+    pub image_model: Option<String>,
+    pub image_generation_model: Option<String>,
+    pub desktop_wallpaper: Option<String>,
+    pub desktop_custom_wallpaper: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppBootstrapState {
+    pub settings: DesktopSettingsSnapshot,
+    pub gateway_launch_mode: String,
+    pub gateway_container_running: bool,
+    pub gateway_health_status: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TelegramTokenValidationResult {
     pub valid: bool,
@@ -8835,6 +8857,35 @@ fn default_agent_settings() -> StoredAgentSettings {
     StoredAgentSettings::default()
 }
 
+fn desktop_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("entropic-settings.json"))
+        .map_err(|_| "Failed to resolve app data dir".to_string())
+}
+
+fn load_desktop_settings_snapshot(app: &AppHandle) -> DesktopSettingsSnapshot {
+    let Ok(path) = desktop_settings_path(app) else {
+        return DesktopSettingsSnapshot::default();
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return DesktopSettingsSnapshot::default();
+    };
+    serde_json::from_str::<DesktopSettingsSnapshot>(&raw).unwrap_or_default()
+}
+
+fn current_gateway_launch_mode() -> String {
+    if !gateway_container_exists(true) {
+        return "stopped".to_string();
+    }
+
+    if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
+        return "proxy".to_string();
+    }
+
+    "local".to_string()
+}
+
 fn runtime_vm_config_from_settings(settings: &StoredAgentSettings) -> RuntimeVmConfig {
     RuntimeVmConfig {
         cpu: settings.runtime_cpu.clamp(1, 16),
@@ -10316,21 +10367,30 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
+pub async fn get_app_bootstrap_state(app: AppHandle) -> Result<AppBootstrapState, String> {
+    let gateway_container_running = gateway_container_exists(true);
+    let gateway_health_status = if gateway_container_running {
+        container_health_status().unwrap_or_else(|| "unknown".to_string())
+    } else {
+        "stopped".to_string()
+    };
+
+    Ok(AppBootstrapState {
+        settings: load_desktop_settings_snapshot(&app),
+        gateway_launch_mode: current_gateway_launch_mode(),
+        gateway_container_running,
+        gateway_health_status,
+    })
+}
+
+#[tauri::command]
 pub async fn get_gateway_ws_url() -> Result<String, String> {
     Ok(gateway_ws_url())
 }
 
 #[tauri::command]
 pub async fn get_gateway_launch_mode() -> Result<String, String> {
-    if !gateway_container_exists(true) {
-        return Ok("stopped".to_string());
-    }
-
-    if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
-        return Ok("proxy".to_string());
-    }
-
-    Ok("local".to_string())
+    Ok(current_gateway_launch_mode())
 }
 
 #[tauri::command]

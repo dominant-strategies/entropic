@@ -318,6 +318,25 @@ function XLogo({ className }: { className?: string }) {
 const CHAT_STORE_FILE = "entropic-chat-history.json";
 const MAX_PERSISTED_SESSIONS = 50;
 const MAX_PERSISTED_MESSAGES = 1000;
+const MAX_PERSISTED_OUTBOX = 16;
+
+type PersistedPendingSendAttachment = {
+  fileName?: string;
+  mimeType?: string;
+  content?: string;
+};
+
+type PersistedPendingSend = {
+  id: string;
+  sessionKey: string;
+  outboundMessageContent: string;
+  routingContent: string;
+  attachments: PersistedPendingSendAttachment[];
+  idempotencyKey: string;
+  createdAt: number;
+  attemptCount: number;
+  nextAttemptAt: number;
+};
 
 type PersistedChatData = {
   sessions: ChatSession[];
@@ -328,6 +347,7 @@ type PersistedChatData = {
   composerModeBySession: Record<string, ComposerMode>;
   terminalBySession: Record<string, ChatTerminalState>;
   currentSession: string | null;
+  outbox: PersistedPendingSend[];
 };
 
 function normalizeSessionsList(list: ChatSession[]): ChatSession[] {
@@ -383,12 +403,87 @@ async function getChatStore(): Promise<TauriStore> {
   return _chatStore;
 }
 
+function normalizePersistedPendingSend(raw: unknown): PersistedPendingSend | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  const id = typeof record.id === "string" ? record.id.trim() : "";
+  const sessionKey = typeof record.sessionKey === "string" ? record.sessionKey.trim() : "";
+  const outboundMessageContent =
+    typeof record.outboundMessageContent === "string" ? record.outboundMessageContent : "";
+  const routingContent =
+    typeof record.routingContent === "string" ? record.routingContent : outboundMessageContent;
+  const idempotencyKey =
+    typeof record.idempotencyKey === "string" ? record.idempotencyKey.trim() : "";
+  const createdAt =
+    typeof record.createdAt === "number" && Number.isFinite(record.createdAt)
+      ? record.createdAt
+      : Date.now();
+  const attemptCount =
+    typeof record.attemptCount === "number" && Number.isFinite(record.attemptCount)
+      ? Math.max(0, Math.floor(record.attemptCount))
+      : 0;
+  const nextAttemptAt =
+    typeof record.nextAttemptAt === "number" && Number.isFinite(record.nextAttemptAt)
+      ? record.nextAttemptAt
+      : createdAt;
+  const attachments = Array.isArray(record.attachments)
+    ? record.attachments.reduce<PersistedPendingSendAttachment[]>((list, attachment) => {
+        if (!attachment || typeof attachment !== "object") {
+          return list;
+        }
+        const value = attachment as Record<string, unknown>;
+        list.push({
+          fileName: typeof value.fileName === "string" ? value.fileName : undefined,
+          mimeType: typeof value.mimeType === "string" ? value.mimeType : undefined,
+          content: typeof value.content === "string" ? value.content : undefined,
+        });
+        return list;
+      }, [])
+    : [];
+
+  if (!id || !sessionKey || !idempotencyKey) {
+    return null;
+  }
+  if (!outboundMessageContent.trim() && attachments.length === 0) {
+    return null;
+  }
+
+  return {
+    id,
+    sessionKey,
+    outboundMessageContent,
+    routingContent,
+    attachments,
+    idempotencyKey,
+    createdAt,
+    attemptCount,
+    nextAttemptAt,
+  };
+}
+
 async function persistChatData(data: PersistedChatData): Promise<void> {
   try {
     const store = await getChatStore();
+    const protectedSessionKeys = new Set<string>();
+    if (typeof data.currentSession === "string" && data.currentSession.trim()) {
+      protectedSessionKeys.add(data.currentSession);
+    }
+    for (const entry of data.outbox || []) {
+      if (entry.sessionKey?.trim()) {
+        protectedSessionKeys.add(entry.sessionKey);
+      }
+    }
+    const orderedSessions = normalizeSessionsList(data.sessions);
+    const protectedSessions = orderedSessions.filter((session) =>
+      protectedSessionKeys.has(session.key),
+    );
+    const otherSessions = orderedSessions.filter((session) => !protectedSessionKeys.has(session.key));
+    const sessionLimit = Math.max(MAX_PERSISTED_SESSIONS, protectedSessions.length);
     // Keep only recent sessions
     const trimmed: PersistedChatData = {
-      sessions: data.sessions.slice(0, MAX_PERSISTED_SESSIONS),
+      sessions: [...protectedSessions, ...otherSessions].slice(0, sessionLimit),
       messages: {},
       drafts: {},
       shellDrafts: {},
@@ -396,7 +491,9 @@ async function persistChatData(data: PersistedChatData): Promise<void> {
       composerModeBySession: {},
       terminalBySession: {},
       currentSession: data.currentSession,
+      outbox: [],
     };
+    const allowedKeys = new Set(trimmed.sessions.map((session) => session.key));
     for (const s of trimmed.sessions) {
       const msgs = data.messages[s.key];
       if (msgs && msgs.length > 0) {
@@ -448,6 +545,17 @@ async function persistChatData(data: PersistedChatData): Promise<void> {
         trimmed.composerModeBySession[trimmed.currentSession] = currentMode;
       }
     }
+    trimmed.outbox = (data.outbox || [])
+      .filter((entry) => allowedKeys.has(entry.sessionKey))
+      .slice(0, MAX_PERSISTED_OUTBOX)
+      .map((entry) => ({
+        ...entry,
+        attachments: (entry.attachments || []).map((attachment) => ({
+          fileName: attachment.fileName,
+          mimeType: attachment.mimeType,
+          content: attachment.content,
+        })),
+      }));
     await store.set("chatData", trimmed);
     await store.save();
   } catch (err) {
@@ -508,6 +616,12 @@ async function loadPersistedChatData(): Promise<PersistedChatData | null> {
       typeof data.currentSession === "string" && allowedKeys.has(data.currentSession)
         ? data.currentSession
         : null;
+    const outbox = Array.isArray(data.outbox)
+      ? data.outbox
+          .map(normalizePersistedPendingSend)
+          .filter((entry): entry is PersistedPendingSend => entry !== null)
+          .filter((entry) => allowedKeys.has(entry.sessionKey))
+      : [];
 
     return {
       sessions,
@@ -518,6 +632,7 @@ async function loadPersistedChatData(): Promise<PersistedChatData | null> {
       composerModeBySession,
       terminalBySession,
       currentSession,
+      outbox,
     };
   } catch (err) {
     console.warn("[Entropic] Failed to load persisted chat data:", err);
@@ -951,6 +1066,7 @@ export function Chat({
   const [error, setError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSession, setCurrentSession] = useState<string | null>(null);
+  const [outboxEntries, setOutboxEntries] = useState<PersistedPendingSend[]>([]);
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<Provider | null>(null);
   const [keyInput, setKeyInput] = useState("");
@@ -1009,6 +1125,7 @@ export function Chat({
   const draftsRef = useRef<Record<string, string>>({});
   const shellDraftsRef = useRef<Record<string, string>>({});
   const imageDraftsRef = useRef<Record<string, string>>({});
+  const outboxEntriesRef = useRef<PersistedPendingSend[]>([]);
   const composerModeBySessionRef = useRef<Record<string, ComposerMode>>({});
   const terminalStateBySessionRef = useRef<Record<string, ChatTerminalState>>({});
   const handledRequestedSessionRef = useRef<string | null>(null);
@@ -1043,6 +1160,9 @@ export function Chat({
   const builderSessionsRef = useRef<Set<string>>(new Set());
   const avatarUploadDataUrlByFileNameRef = useRef<Map<string, string>>(new Map());
   const wasVisibleRef = useRef(isVisible !== false);
+  const outboxReplayInFlightRef = useRef(false);
+  const outboxWakeTimerRef = useRef<number | null>(null);
+  const [outboxWakeTick, setOutboxWakeTick] = useState(0);
   const activeComposerMode = currentSession
     ? composerModeBySession[currentSession] || DEFAULT_COMPOSER_MODE
     : DEFAULT_COMPOSER_MODE;
@@ -1630,6 +1750,7 @@ export function Chat({
         setDraftsBySession(cached.drafts || {});
         setShellDraftsBySession(cached.shellDrafts || {});
         setImageDraftsBySession(cached.imageDrafts || {});
+        replaceOutboxEntries(cached.outbox || []);
         setComposerModeBySession(cached.composerModeBySession || {});
         setTerminalStateBySession(cached.terminalBySession || {});
         const restoreKey = cached.currentSession || cached.sessions[0].key;
@@ -1656,6 +1777,7 @@ export function Chat({
       const draftsSnap = { ...draftsRef.current };
       const shellDraftsSnap = { ...shellDraftsRef.current };
       const imageDraftsSnap = { ...imageDraftsRef.current };
+      const outboxSnap = [...outboxEntriesRef.current];
       const composerModeSnap = { ...composerModeBySessionRef.current };
       const terminalSnap = { ...terminalStateBySessionRef.current };
       persistChatData({
@@ -1667,6 +1789,7 @@ export function Chat({
         composerModeBySession: composerModeSnap,
         terminalBySession: terminalSnap,
         currentSession: currentSnap,
+        outbox: outboxSnap,
       });
     }, 500);
   }, []);
@@ -1792,6 +1915,14 @@ export function Chat({
       }
     }
 
+    if (outboxEntriesRef.current.some((entry) => entry.sessionKey === from)) {
+      replaceOutboxEntries(
+        outboxEntriesRef.current.map((entry) =>
+          entry.sessionKey === from ? { ...entry, sessionKey: to } : entry,
+        ),
+      );
+    }
+
     setSessions((prev) => {
       const byKey = new Map<string, ChatSession>();
       for (const session of prev) {
@@ -1849,6 +1980,10 @@ export function Chat({
   }, [imageDraftsBySession]);
 
   useEffect(() => {
+    outboxEntriesRef.current = outboxEntries;
+  }, [outboxEntries]);
+
+  useEffect(() => {
     composerModeBySessionRef.current = composerModeBySession;
   }, [composerModeBySession]);
 
@@ -1868,9 +2003,10 @@ export function Chat({
       const draftsSnap = { ...draftsRef.current };
       const shellDraftsSnap = { ...shellDraftsRef.current };
       const imageDraftsSnap = { ...imageDraftsRef.current };
+      const outboxSnap = [...outboxEntriesRef.current];
       const composerModeSnap = { ...composerModeBySessionRef.current };
       const terminalSnap = { ...terminalStateBySessionRef.current };
-      if (sessionsSnap.length > 0) {
+      if (sessionsSnap.length > 0 || outboxSnap.length > 0) {
         persistChatData({
           sessions: sessionsSnap,
           messages: messagesSnap,
@@ -1880,7 +2016,12 @@ export function Chat({
           composerModeBySession: composerModeSnap,
           terminalBySession: terminalSnap,
           currentSession: currentSnap,
+          outbox: outboxSnap,
         });
+      }
+      if (outboxWakeTimerRef.current) {
+        window.clearTimeout(outboxWakeTimerRef.current);
+        outboxWakeTimerRef.current = null;
       }
     };
   }, []);
@@ -1890,6 +2031,95 @@ export function Chat({
       source: "chat",
       message,
     });
+  }
+
+  function sortOutboxEntries(entries: PersistedPendingSend[]): PersistedPendingSend[] {
+    return [...entries].sort((a, b) => {
+      if (a.nextAttemptAt !== b.nextAttemptAt) {
+        return a.nextAttemptAt - b.nextAttemptAt;
+      }
+      return a.createdAt - b.createdAt;
+    });
+  }
+
+  function clearOutboxWakeTimer() {
+    if (outboxWakeTimerRef.current !== null) {
+      window.clearTimeout(outboxWakeTimerRef.current);
+      outboxWakeTimerRef.current = null;
+    }
+  }
+
+  function scheduleOutboxWake(entries: PersistedPendingSend[] = outboxEntriesRef.current) {
+    clearOutboxWakeTimer();
+    if (entries.length === 0) {
+      return;
+    }
+    const nextAttemptAt = entries.reduce<number | null>((soonest, entry) => {
+      if (soonest === null) return entry.nextAttemptAt;
+      return Math.min(soonest, entry.nextAttemptAt);
+    }, null);
+    if (nextAttemptAt === null) {
+      return;
+    }
+    const delayMs = Math.max(0, nextAttemptAt - Date.now());
+    if (delayMs === 0) {
+      setOutboxWakeTick((tick) => tick + 1);
+      return;
+    }
+    outboxWakeTimerRef.current = window.setTimeout(() => {
+      outboxWakeTimerRef.current = null;
+      setOutboxWakeTick((tick) => tick + 1);
+    }, delayMs);
+  }
+
+  function replaceOutboxEntries(nextEntries: PersistedPendingSend[]) {
+    const next = sortOutboxEntries(nextEntries);
+    outboxEntriesRef.current = next;
+    setOutboxEntries(next);
+    scheduleOutboxWake(next);
+    schedulePersist();
+  }
+
+  function upsertOutboxEntry(entry: PersistedPendingSend) {
+    const next = [
+      ...outboxEntriesRef.current.filter((current) => current.id !== entry.id),
+      entry,
+    ];
+    replaceOutboxEntries(next);
+  }
+
+  function removeOutboxEntry(entryId: string) {
+    if (!outboxEntriesRef.current.some((entry) => entry.id === entryId)) {
+      return;
+    }
+    replaceOutboxEntries(outboxEntriesRef.current.filter((entry) => entry.id !== entryId));
+  }
+
+  function updateOutboxEntry(
+    entryId: string,
+    updater: (entry: PersistedPendingSend) => PersistedPendingSend | null,
+  ) {
+    const next: PersistedPendingSend[] = [];
+    let changed = false;
+    for (const entry of outboxEntriesRef.current) {
+      if (entry.id !== entryId) {
+        next.push(entry);
+        continue;
+      }
+      const updated = updater(entry);
+      changed = true;
+      if (updated) {
+        next.push(updated);
+      }
+    }
+    if (!changed) {
+      return;
+    }
+    replaceOutboxEntries(next);
+  }
+
+  function pendingSendBackoffMs(attemptCount: number) {
+    return Math.min(30_000, 1_000 * Math.pow(2, Math.min(attemptCount, 5)));
   }
 
   function isTransientGatewayConnectState() {
@@ -2197,6 +2427,51 @@ export function Chat({
     createNewSession();
     addDiag("auto-created session after connect");
   }, [connected]);
+
+  useEffect(() => {
+    if (activeRunIdRef.current) {
+      return;
+    }
+    const currentQueued = currentSession
+      ? outboxEntries.find((entry) => entry.sessionKey === currentSession)
+      : null;
+    if (currentQueued) {
+      setIsLoading(true);
+      setThinkingStatus("Waiting for reconnect");
+      return;
+    }
+    if (thinkingStatus === "Waiting for reconnect") {
+      setThinkingStatus(null);
+      setIsLoading(false);
+    }
+  }, [currentSession, outboxEntries, thinkingStatus]);
+
+  useEffect(() => {
+    if (!connected || gatewayStarting || isConnecting || showOutOfCreditsModal) {
+      return;
+    }
+    if (activeRunIdRef.current || outboxReplayInFlightRef.current) {
+      return;
+    }
+    const now = Date.now();
+    const nextEntry = outboxEntries.find((entry) => entry.nextAttemptAt <= now);
+    if (!nextEntry) {
+      scheduleOutboxWake(outboxEntries);
+      return;
+    }
+    void replayOutboxEntry(nextEntry);
+  }, [
+    connected,
+    gatewayStarting,
+    isConnecting,
+    showOutOfCreditsModal,
+    outboxEntries,
+    outboxWakeTick,
+    selectedModel,
+    proxyEnabled,
+    connectedProvider,
+    gatewayRunning,
+  ]);
 
   async function connectToGateway() {
     if (connectInFlightRef.current || showOutOfCreditsModal) return;
@@ -2945,6 +3220,19 @@ export function Chat({
       });
     }
 
+    if (localToGateway.size > 0 && outboxEntriesRef.current.length > 0) {
+      const remappedOutbox = outboxEntriesRef.current.map((entry) => {
+        const targetKey = localToGateway.get(entry.sessionKey);
+        return targetKey ? { ...entry, sessionKey: targetKey } : entry;
+      });
+      const changed = remappedOutbox.some(
+        (entry, index) => entry.sessionKey !== outboxEntriesRef.current[index]?.sessionKey,
+      );
+      if (changed) {
+        replaceOutboxEntries(remappedOutbox);
+      }
+    }
+
     if (nextSessions.length > 0) {
       // Prefer the active session, then persisted session, then first in list.
       const activeKeyRaw = currentSessionRef.current;
@@ -3073,6 +3361,7 @@ export function Chat({
       const snapshotIntegrationSetup = integrationSetupBySession[action.key] || null;
       const snapshotQuickSuggestion = quickSuggestionBySession[action.key] || null;
       const snapshotBuilderChecklist = builderChecklistBySession[action.key] || null;
+      const snapshotOutbox = outboxEntriesRef.current.filter((entry) => entry.sessionKey === action.key);
       const deletingCurrent = currentSessionRef.current === action.key;
       const remaining = normalizeSessionsList(
         sessionsRef.current.filter((session) => session.key !== action.key),
@@ -3125,6 +3414,11 @@ export function Chat({
         delete next[action.key];
         return next;
       });
+      if (snapshotOutbox.length > 0) {
+        replaceOutboxEntries(
+          outboxEntriesRef.current.filter((entry) => entry.sessionKey !== action.key),
+        );
+      }
       schedulePersist();
 
       if (deletingCurrent) {
@@ -3179,6 +3473,9 @@ export function Chat({
           }
           if (snapshotBuilderChecklist) {
             setBuilderChecklistBySession((prev) => ({ ...prev, [action.key]: snapshotBuilderChecklist }));
+          }
+          if (snapshotOutbox.length > 0) {
+            replaceOutboxEntries([...outboxEntriesRef.current, ...snapshotOutbox]);
           }
           schedulePersist();
           if (deletingCurrent) {
@@ -3276,6 +3573,180 @@ export function Chat({
       setError(message);
       appendAssistantNotice(`I couldn't update the task board: ${message}`, sessionKey);
       return true;
+    }
+  }
+
+  function isRecoverablePendingSendError(error: unknown, message: string): boolean {
+    if (
+      isProviderOAuthExpiryFailure(message) ||
+      isProxyAuthFailure(message) ||
+      isGatewayAuthRateLimited(message) ||
+      isContainerRestartingError(message) ||
+      isTransientGatewayConnectCloseMessage(message)
+    ) {
+      return true;
+    }
+    if (error instanceof GatewayError) {
+      if (error.code === "ws.closed" || error.code === "timeout") {
+        return true;
+      }
+    }
+    return /gateway|socket|connection|connect|network|reconnect|timeout|draining|restart/i.test(
+      message,
+    );
+  }
+
+  async function prepareSessionModelForSend(sessionKey: string, routingContent: string) {
+    const routingEnabled = import.meta.env.VITE_MODEL_ROUTING === "1";
+    const fastModelOverride = normalizeModelId(import.meta.env.VITE_FAST_MODEL, proxyEnabled);
+    const reasoningOverride = normalizeModelId(import.meta.env.VITE_REASONING_MODEL, proxyEnabled);
+    const defaultModel = normalizeModelId(selectedModel, proxyEnabled);
+    const fastModel = fastModelOverride ?? defaultModel;
+    const reasoningModel = reasoningOverride ?? defaultModel;
+    const decision = getRoutingDecision(routingContent);
+    const chosenModel = routingEnabled
+      ? decision.useReasoning
+        ? reasoningModel
+        : fastModel
+      : null;
+    const targetModel = routingEnabled ? chosenModel ?? defaultModel : defaultModel;
+
+    if (targetModel && sessionKey && clientRef.current) {
+      const lastModel = sessionModelRef.current[sessionKey];
+      if (lastModel !== targetModel) {
+        sessionModelRef.current[sessionKey] = targetModel;
+        try {
+          await clientRef.current.patchSession(sessionKey, { model: targetModel });
+          if (routingEnabled && chosenModel) {
+            addDiag(`routing model=${targetModel} reason=${decision.reason}`);
+          } else {
+            addDiag(`session model=${targetModel}`);
+          }
+        } catch (err: unknown) {
+          addDiag(`session model patch failed: ${String(err)}`);
+        }
+      }
+    }
+
+    return {
+      routingEnabled,
+      chosenModel,
+      fastModel,
+      reasoningModel,
+      targetModel,
+      decision,
+    };
+  }
+
+  function maybeSyncIntegrationsBeforeSend() {
+    const now = Date.now();
+    if (
+      gatewayRunning &&
+      (connectedProvider || proxyEnabled) &&
+      now - lastIntegrationsSyncRef.current > 60_000
+    ) {
+      lastIntegrationsSyncRef.current = now;
+      syncAllIntegrationsToGateway().then(
+        (providers) => addDiag(`integrations synced: ${providers.length ? providers.join(", ") : "none"}`),
+        (err: unknown) => addDiag(`integrations sync failed: ${String(err)}`),
+      );
+    }
+  }
+
+  async function dispatchPendingSend(entry: PersistedPendingSend): Promise<string> {
+    const liveClient = clientRef.current;
+    if (!liveClient || !liveClient.isConnected()) {
+      throw new Error("Gateway is still connecting. The message remains queued.");
+    }
+
+    const sendStart = Date.now();
+    const {
+      routingEnabled,
+      chosenModel,
+      fastModel,
+      reasoningModel,
+    } = await prepareSessionModelForSend(entry.sessionKey, entry.routingContent);
+    maybeSyncIntegrationsBeforeSend();
+
+    if (!entry.outboundMessageContent.trim() && entry.attachments.length === 0) {
+      throw new Error("Message content is empty. Please type a message before sending.");
+    }
+
+    addDiag(
+      `send -> session=${entry.sessionKey} len=${entry.outboundMessageContent.length} attachments=${entry.attachments.length}`,
+    );
+    const runId = await liveClient.sendMessage(
+      entry.sessionKey,
+      entry.outboundMessageContent,
+      entry.attachments,
+      entry.idempotencyKey,
+    );
+    if (!runId) {
+      throw new Error("Failed to start response stream");
+    }
+
+    scheduleActiveRunTimeout(runId, entry.sessionKey);
+    removeOutboxEntry(entry.id);
+    runTimingsRef.current[runId] = { startedAt: sendStart, ackAt: Date.now() };
+    addDiag(`timing send_ack runId=${runId} t=${runTimingsRef.current[runId].ackAt! - sendStart}ms`);
+    addDiag(`send ok runId=${runId}`);
+    if (routingEnabled && chosenModel && fastModel && reasoningModel && chosenModel !== fastModel) {
+      runRevertModelRef.current[runId] = fastModel;
+    }
+    const capturedRunId = runId;
+    setTimeout(() => {
+      if (!lastEventByRunIdRef.current[capturedRunId]) {
+        addDiag(`no chat event within 15s runId=${capturedRunId}`);
+      }
+    }, 15000);
+    return runId;
+  }
+
+  async function replayOutboxEntry(entry: PersistedPendingSend) {
+    if (outboxReplayInFlightRef.current) {
+      return;
+    }
+    outboxReplayInFlightRef.current = true;
+    setIsLoading(true);
+    setThinkingStatus("Waiting for reconnect");
+    setError(null);
+
+    try {
+      await dispatchPendingSend(entry);
+      setThinkingStatus("Thinking");
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Send failed";
+      let handledProviderOAuth = false;
+      if (proxyEnabled && isProviderOAuthExpiryFailure(errorMessage)) {
+        triggerProxyAuthRecovery("queued send");
+        handledProviderOAuth = true;
+      } else {
+        handledProviderOAuth = await recoverExpiredProviderOAuth("queued send", errorMessage);
+      }
+      if (!handledProviderOAuth && isProxyAuthFailure(errorMessage)) {
+        triggerProxyAuthRecovery("queued send");
+      }
+
+      if (isRecoverablePendingSendError(error, errorMessage)) {
+        updateOutboxEntry(entry.id, (current) => ({
+          ...current,
+          attemptCount: current.attemptCount + 1,
+          nextAttemptAt: Date.now() + pendingSendBackoffMs(current.attemptCount + 1),
+        }));
+        if (!handledProviderOAuth) {
+          setError(null);
+        }
+        setThinkingStatus("Waiting for reconnect");
+      } else {
+        removeOutboxEntry(entry.id);
+        setError(errorMessage);
+        setIsLoading(false);
+        setThinkingStatus(null);
+      }
+      addDiag(`queued send failed: ${errorMessage}`);
+      return;
+    } finally {
+      outboxReplayInFlightRef.current = false;
     }
   }
 
@@ -3517,7 +3988,9 @@ export function Chat({
     }
 
     const liveClient = clientRef.current;
-    if (!liveClient || !liveClient.isConnected()) {
+    const shouldQueueForReconnect =
+      gatewayStarting || isConnecting || connectInFlightRef.current || gatewayRunning;
+    if ((!liveClient || !liveClient.isConnected()) && !shouldQueueForReconnect) {
       if (!connectInFlightRef.current) {
         void connectToGateway();
       }
@@ -3528,8 +4001,6 @@ export function Chat({
       );
       return;
     }
-
-    await refreshTrialCredits();
 
     const userMessage: Message = {
       id: crypto.randomUUID(),
@@ -3657,76 +4128,39 @@ export function Chat({
       addDiag(`x intent detected; routing via X integration topic=${xIntent.topic ? "yes" : "no"}`);
     }
 
+    const pendingSend: PersistedPendingSend = {
+      id: userMessage.id,
+      sessionKey: sendSession,
+      outboundMessageContent,
+      routingContent: messageContent,
+      attachments: attachmentsPayload,
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: Date.now(),
+      attemptCount: 0,
+      nextAttemptAt: Date.now(),
+    };
+    upsertOutboxEntry(pendingSend);
+    setPendingAttachments([]);
+
+    if (!liveClient || !liveClient.isConnected()) {
+      if (!connectInFlightRef.current) {
+        void connectToGateway();
+      }
+      setIsLoading(true);
+      setThinkingStatus("Waiting for reconnect");
+      setError(null);
+      addDiag(
+        `send queued: gateway reconnect pending session=${sendSession} attachments=${attachmentsPayload.length}`,
+      );
+      return;
+    }
+
+    await refreshTrialCredits();
     setIsLoading(true);
     setThinkingStatus("Thinking");
     setError(null);
     try {
-      const routingEnabled = import.meta.env.VITE_MODEL_ROUTING === "1";
-      const fastModelOverride = normalizeModelId(import.meta.env.VITE_FAST_MODEL, proxyEnabled);
-      const reasoningOverride = normalizeModelId(import.meta.env.VITE_REASONING_MODEL, proxyEnabled);
-      const defaultModel = normalizeModelId(selectedModel, proxyEnabled);
-      const fastModel = fastModelOverride ?? defaultModel;
-      const reasoningModel = reasoningOverride ?? defaultModel;
-      const decision = getRoutingDecision(messageContent);
-      const chosenModel = routingEnabled
-        ? decision.useReasoning
-          ? reasoningModel
-          : fastModel
-        : null;
-
-      const targetModel = routingEnabled ? chosenModel ?? defaultModel : defaultModel;
-      if (targetModel && sendSession && clientRef.current) {
-        const lastModel = sessionModelRef.current[sendSession];
-        if (lastModel !== targetModel) {
-          sessionModelRef.current[sendSession] = targetModel;
-          try {
-            await clientRef.current.patchSession(sendSession, { model: targetModel });
-            if (routingEnabled && chosenModel) {
-              addDiag(`routing model=${targetModel} reason=${decision.reason}`);
-            } else {
-              addDiag(`session model=${targetModel}`);
-            }
-          } catch (err: unknown) {
-            addDiag(`session model patch failed: ${String(err)}`);
-          }
-        }
-      }
-      const sendStart = Date.now();
-      const now = Date.now();
-      if (gatewayRunning && (connectedProvider || proxyEnabled) && now - lastIntegrationsSyncRef.current > 60_000) {
-        lastIntegrationsSyncRef.current = now;
-        syncAllIntegrationsToGateway().then(
-          (providers) => addDiag(`integrations synced: ${providers.length ? providers.join(", ") : "none"}`),
-          (err: unknown) => addDiag(`integrations sync failed: ${String(err)}`),
-        );
-      }
-      if (!outboundMessageContent.trim() && attachmentsPayload.length === 0) {
-        addDiag("send blocked: outbound message is empty after transformations");
-        throw new Error("Message content is empty. Please type a message before sending.");
-      }
-      addDiag(
-        `send -> session=${sendSession} len=${outboundMessageContent.length} attachments=${attachmentsPayload.length}`
-      );
-      const runId = await liveClient.sendMessage(sendSession, outboundMessageContent, attachmentsPayload);
-      if (!runId) {
-        throw new Error("Failed to start response stream");
-      }
-      if (runId) {
-        scheduleActiveRunTimeout(runId, sendSession);
-        runTimingsRef.current[runId] = { startedAt: sendStart, ackAt: Date.now() };
-        addDiag(`timing send_ack runId=${runId} t=${runTimingsRef.current[runId].ackAt! - sendStart}ms`);
-        addDiag(`send ok runId=${runId}`);
-        if (routingEnabled && chosenModel && fastModel && reasoningModel && chosenModel !== fastModel) {
-          runRevertModelRef.current[runId] = fastModel;
-        }
-        const capturedRunId = runId;
-        setTimeout(() => {
-          if (!lastEventByRunIdRef.current[capturedRunId]) {
-            addDiag(`no chat event within 15s runId=${capturedRunId}`);
-          }
-        }, 15000);
-      }
-      setPendingAttachments([]);
+      await dispatchPendingSend(pendingSend);
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : "Send failed";
       let handledProviderOAuth = false;
@@ -3736,14 +4170,35 @@ export function Chat({
       } else {
         handledProviderOAuth = await recoverExpiredProviderOAuth("send failed", errorMessage);
       }
-      if (!handledProviderOAuth) {
-        setError(errorMessage);
+      if (!handledProviderOAuth && isProxyAuthFailure(errorMessage)) {
+        triggerProxyAuthRecovery("send failed");
       }
-      setIsLoading(false);
-      clearActiveRunTracking();
+      if (isRecoverablePendingSendError(e, errorMessage)) {
+        updateOutboxEntry(pendingSend.id, (current) => ({
+          ...current,
+          attemptCount: current.attemptCount + 1,
+          nextAttemptAt: Date.now() + pendingSendBackoffMs(current.attemptCount + 1),
+        }));
+        if (!handledProviderOAuth) {
+          setError(null);
+        }
+        setThinkingStatus("Waiting for reconnect");
+      } else {
+        removeOutboxEntry(pendingSend.id);
+        if (!handledProviderOAuth) {
+          setError(errorMessage);
+        }
+        setIsLoading(false);
+        setThinkingStatus(null);
+      }
       await refreshTrialCredits();
       addDiag(`send failed: ${e instanceof Error ? e.message : "unknown"}`);
-      if (failedDraftRestore !== null && sendSession && currentSessionRef.current === sendSession) {
+      if (
+        !isRecoverablePendingSendError(e, errorMessage) &&
+        failedDraftRestore !== null &&
+        sendSession &&
+        currentSessionRef.current === sendSession
+      ) {
         if (composerMode === "shell") {
           setShellDraftsBySession((prev) => ({ ...prev, [sendSession]: failedDraftRestore }));
         } else {
