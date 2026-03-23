@@ -108,6 +108,17 @@ type TelegramTokenValidationResult = {
   message: string;
 };
 
+type SavedChannelsState = {
+  telegram_enabled: boolean;
+  telegram_token: string;
+  telegram_dm_policy?: string;
+  telegram_group_policy?: string;
+  telegram_config_writes?: boolean;
+  telegram_require_mention?: boolean;
+  telegram_reply_to_mode?: string;
+  telegram_link_preview?: boolean;
+};
+
 export function Channels() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [telegramEnabled, setTelegramEnabled] = useState(false);
@@ -171,16 +182,7 @@ export function Channels() {
       let telegramEnabledLoaded = false;
       let telegramTokenLoaded = "";
       try {
-        const state = await invoke<{
-          telegram_enabled: boolean;
-          telegram_token: string;
-          telegram_dm_policy?: string;
-          telegram_group_policy?: string;
-          telegram_config_writes?: boolean;
-          telegram_require_mention?: boolean;
-          telegram_reply_to_mode?: string;
-          telegram_link_preview?: boolean;
-        }>("get_agent_profile_state");
+        const state = await invoke<SavedChannelsState>("get_saved_channels_state");
         if (cancelled) return;
 
         telegramEnabledLoaded = state.telegram_enabled ?? false;
@@ -528,17 +530,14 @@ export function Channels() {
       });
       console.log("[Channels] approve_pairing succeeded:", result);
       setTelegramPairingStatus(result || "Pairing approved.");
-      const connected = await invoke<boolean>("get_telegram_connection_status").catch(() => true);
-      setTelegramConnected(Boolean(connected));
+      setTelegramConnected(true);
       setTelegramPairingCode("");
 
       // Send welcome message after successful pairing
-      if (connected) {
-        console.log("[Channels] Pairing approved, sending welcome message...");
-        invoke("send_telegram_welcome_message").catch((err) => {
-          console.error("[Channels] Failed to send welcome message:", err);
-        });
-      }
+      console.log("[Channels] Pairing approved, sending welcome message...");
+      invoke("send_telegram_welcome_message").catch((err) => {
+        console.error("[Channels] Failed to send welcome message:", err);
+      });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       console.error("[Channels] approve_pairing failed:", detail);

@@ -711,7 +711,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }, [isAuthenticated, isAuthConfigured, refreshBalance]);
 
   useEffect(() => {
-    let timeoutId: number | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
     const idleWindow = window as Window & {
       requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
@@ -1566,6 +1566,31 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         return true;
       }
 
+      let liveBootstrap: AppBootstrapState | null = null;
+      try {
+        liveBootstrap = await invoke<AppBootstrapState>("get_app_bootstrap_state");
+        updateGatewayState({
+          gatewayContainerRunning: liveBootstrap.gatewayContainerRunning,
+          gatewayLaunchMode: liveBootstrap.gatewayLaunchMode,
+          gatewayHealthStatus: liveBootstrap.gatewayHealthStatus,
+        });
+      } catch (bootstrapError) {
+        console.warn("[Entropic] Failed to refresh gateway bootstrap state:", bootstrapError);
+      }
+
+      if (
+        liveBootstrap?.gatewayContainerRunning &&
+        liveBootstrap.gatewayHealthStatus.trim().toLowerCase() === "healthy"
+      ) {
+        gatewayHealthFailureStreakRef.current = 0;
+        markGatewayReady(liveBootstrap.gatewayLaunchMode);
+        console.log("[Entropic] Gateway bootstrap state reports healthy container");
+        setGatewayStartupStage("idle");
+        setShowGatewayStartup(false);
+        clearGatewayRetry();
+        return true;
+      }
+
       gatewayHealthFailureStreakRef.current += 1;
       const failureStreak = gatewayHealthFailureStreakRef.current;
       if (gatewayRunning && failureStreak < GATEWAY_FAILURE_THRESHOLD) {
@@ -1577,17 +1602,17 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
       if (
         !gatewayRunning &&
-        bootstrapState.gatewayContainerRunning &&
-        bootstrapState.gatewayLaunchMode !== "stopped"
+        (liveBootstrap?.gatewayContainerRunning ?? bootstrapState.gatewayContainerRunning) &&
+        (liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode) !== "stopped"
       ) {
         updateGatewayState({
           gatewayRunning: false,
           gatewayContainerRunning: true,
-          gatewayLaunchMode: bootstrapState.gatewayLaunchMode,
+          gatewayLaunchMode: liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode,
           gatewayHealthStatus:
-            bootstrapState.gatewayHealthStatus === "healthy"
+            (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus) === "healthy"
               ? "starting"
-              : bootstrapState.gatewayHealthStatus,
+              : (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus),
         });
         console.log("[Entropic] Gateway health check: container still recovering");
         return false;
@@ -1598,6 +1623,28 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       return false;
     } catch (error) {
       console.error("[Entropic] Gateway check failed:", error);
+      let liveBootstrap: AppBootstrapState | null = null;
+      try {
+        liveBootstrap = await invoke<AppBootstrapState>("get_app_bootstrap_state");
+        updateGatewayState({
+          gatewayContainerRunning: liveBootstrap.gatewayContainerRunning,
+          gatewayLaunchMode: liveBootstrap.gatewayLaunchMode,
+          gatewayHealthStatus: liveBootstrap.gatewayHealthStatus,
+        });
+        if (
+          liveBootstrap.gatewayContainerRunning &&
+          liveBootstrap.gatewayHealthStatus.trim().toLowerCase() === "healthy"
+        ) {
+          gatewayHealthFailureStreakRef.current = 0;
+          markGatewayReady(liveBootstrap.gatewayLaunchMode);
+          setGatewayStartupStage("idle");
+          setShowGatewayStartup(false);
+          clearGatewayRetry();
+          return true;
+        }
+      } catch (bootstrapError) {
+        console.warn("[Entropic] Failed to refresh gateway bootstrap state after check error:", bootstrapError);
+      }
       gatewayHealthFailureStreakRef.current += 1;
       const failureStreak = gatewayHealthFailureStreakRef.current;
       if (gatewayRunning && failureStreak < GATEWAY_FAILURE_THRESHOLD) {
@@ -1609,17 +1656,17 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
       if (
         !gatewayRunning &&
-        bootstrapState.gatewayContainerRunning &&
-        bootstrapState.gatewayLaunchMode !== "stopped"
+        (liveBootstrap?.gatewayContainerRunning ?? bootstrapState.gatewayContainerRunning) &&
+        (liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode) !== "stopped"
       ) {
         updateGatewayState({
           gatewayRunning: false,
           gatewayContainerRunning: true,
-          gatewayLaunchMode: bootstrapState.gatewayLaunchMode,
+          gatewayLaunchMode: liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode,
           gatewayHealthStatus:
-            bootstrapState.gatewayHealthStatus === "healthy"
+            (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus) === "healthy"
               ? "starting"
-              : bootstrapState.gatewayHealthStatus,
+              : (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus),
         });
         return false;
       }

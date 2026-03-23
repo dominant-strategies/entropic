@@ -539,6 +539,33 @@ fn normalize_proxy_gateway_model(model: &str) -> String {
     }
 }
 
+fn proxy_auth_profile_providers_for_model(model: &str) -> Vec<&'static str> {
+    let trimmed = model.trim();
+    let base_model = trimmed.split(':').next().unwrap_or(trimmed).trim();
+    let Some((provider, _raw_model)) = base_model.split_once('/') else {
+        return Vec::new();
+    };
+    match provider.trim() {
+        "anthropic" => vec!["anthropic"],
+        "google" => vec!["google"],
+        "openai" => vec!["openai"],
+        "openai-codex" => vec!["openai", "openai-codex"],
+        "openrouter" => vec!["openrouter"],
+        _ => Vec::new(),
+    }
+}
+
+fn normalize_proxy_runtime_model_ref(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return format!("openrouter/{}", DEFAULT_PROXY_GATEWAY_MODEL);
+    }
+    if trimmed.starts_with("openrouter/") {
+        return trimmed.to_string();
+    }
+    format!("openrouter/{}", trimmed)
+}
+
 fn local_gateway_model_key_provider(provider: &str) -> Option<&'static str> {
     match provider {
         "anthropic" => Some("anthropic"),
@@ -3473,6 +3500,25 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
     result
 }
 
+async fn check_gateway_http_health() -> Result<bool, String> {
+    let base = if std::path::Path::new("/.dockerenv").exists() {
+        format!("http://{}:18789", OPENCLAW_CONTAINER)
+    } else {
+        "http://127.0.0.1:19789".to_string()
+    };
+    let url = format!("{}/healthz", base);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(3000))
+        .build()
+        .map_err(|e| format!("Failed to build health client: {}", e))?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP health request failed: {}", e))?;
+    Ok(response.status().is_success())
+}
+
 pub struct AppState {
     pub setup_progress: Mutex<SetupProgress>,
     pub api_keys: Mutex<HashMap<String, String>>,
@@ -3585,6 +3631,29 @@ pub struct AgentProfileState {
     pub runtime_memory_gb: u16,
     pub runtime_disk_gb: u16,
     pub capabilities: Vec<CapabilityState>,
+    pub discord_enabled: bool,
+    pub discord_token: String,
+    pub telegram_enabled: bool,
+    pub telegram_token: String,
+    pub telegram_dm_policy: String,
+    pub telegram_group_policy: String,
+    pub telegram_config_writes: bool,
+    pub telegram_require_mention: bool,
+    pub telegram_reply_to_mode: String,
+    pub telegram_link_preview: bool,
+    pub slack_enabled: bool,
+    pub slack_bot_token: String,
+    pub slack_app_token: String,
+    pub googlechat_enabled: bool,
+    pub googlechat_service_account: String,
+    pub googlechat_audience_type: String,
+    pub googlechat_audience: String,
+    pub whatsapp_enabled: bool,
+    pub whatsapp_allow_from: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SavedChannelsState {
     pub discord_enabled: bool,
     pub discord_token: String,
     pub telegram_enabled: bool,
@@ -7639,22 +7708,44 @@ Use it for durable decisions, preferences, and facts that should persist across 
                 "[Entropic] Writing OpenRouter proxy credentials to auth-profiles.json (key len={})",
                 key.len()
             );
-            // Include placeholder Anthropic key to satisfy diagnostic checks
-            // Actual requests will use the proxy, so this key is never used
+            let mut profiles = serde_json::Map::new();
+            profiles.insert(
+                "openrouter:default".to_string(),
+                serde_json::json!({
+                    "type": "api_key",
+                    "provider": "openrouter",
+                    "key": key
+                }),
+            );
+
+            let mut provider_aliases = vec!["openrouter"];
+            if let Some(model_id) = model.as_deref() {
+                provider_aliases.extend(proxy_auth_profile_providers_for_model(model_id));
+            }
+            if let Some(image_model_id) = image_model.as_deref() {
+                provider_aliases.extend(proxy_auth_profile_providers_for_model(image_model_id));
+            }
+            provider_aliases.sort_unstable();
+            provider_aliases.dedup();
+
+            for provider in provider_aliases {
+                let profile_id = format!("{}:default", provider);
+                if profiles.contains_key(&profile_id) {
+                    continue;
+                }
+                profiles.insert(
+                    profile_id,
+                    serde_json::json!({
+                        "type": "api_key",
+                        "provider": provider,
+                        "key": key
+                    }),
+                );
+            }
+
             let auth_profiles = serde_json::json!({
                 "version": 1,
-                "profiles": {
-                    "openrouter:default": {
-                        "type": "api_key",
-                        "provider": "openrouter",
-                        "key": key
-                    },
-                    "anthropic:default": {
-                        "type": "api_key",
-                        "provider": "anthropic",
-                        "key": "proxy-placeholder"
-                    }
-                }
+                "profiles": serde_json::Value::Object(profiles)
             });
             let payload =
                 serde_json::to_string_pretty(&auth_profiles).map_err(|e| e.to_string())?;
@@ -8269,9 +8360,10 @@ async fn wait_for_gateway_health_strict(token: &str, attempts: usize) -> Result<
     let ws_url = gateway_ws_url();
     let mut last_error = String::new();
     for attempt in 1..=attempts {
+        let health_status = container_health_status();
         let mut should_probe_ws = true;
-        if let Some(status) = container_health_status() {
-            match status.as_str() {
+        if let Some(status) = health_status.as_deref() {
+            match status {
                 "starting" => {
                     last_error = "container health=starting".to_string();
                     // While Docker reports "starting", still probe WS after the first
@@ -8293,6 +8385,18 @@ async fn wait_for_gateway_health_strict(token: &str, attempts: usize) -> Result<
                     last_error = "health rpc rejected".to_string();
                 }
                 Err(err) => {
+                    let http_ready = match health_status.as_deref() {
+                        Some("starting") if gateway_health_error_is_startup_transient(&err) => {
+                            matches!(check_gateway_http_health().await, Ok(true))
+                        }
+                        _ => false,
+                    };
+                    if http_ready {
+                        println!(
+                            "[Entropic] Gateway WS health probe is still warming up, but /healthz is ready; tolerating transient startup lag.",
+                        );
+                        return Ok(());
+                    }
                     last_error = err;
                 }
             }
@@ -9874,6 +9978,14 @@ pub async fn start_gateway_with_proxy(
     let resolved_proxy_url = resolve_container_proxy_base(&proxy_url)?;
     let docker_proxy_api_url = resolve_container_openai_base(&resolved_proxy_url);
     let normalized_model = normalize_proxy_gateway_model(&model);
+    let runtime_model_ref = normalize_proxy_runtime_model_ref(&normalized_model);
+    let normalized_image_model = image_model
+        .as_deref()
+        .map(normalize_proxy_gateway_model)
+        .filter(|model| !model.trim().is_empty());
+    let runtime_image_model_ref = normalized_image_model
+        .as_deref()
+        .map(normalize_proxy_runtime_model_ref);
     if normalized_model != model.trim() {
         println!(
             "[Entropic] Proxy gateway model normalized from {:?} to {:?}",
@@ -9928,7 +10040,7 @@ pub async fn start_gateway_with_proxy(
                 "ENTROPIC_GATEWAY_SCHEMA_VERSION",
                 ENTROPIC_GATEWAY_SCHEMA_VERSION,
             ),
-            ("OPENCLAW_MODEL", normalized_model.as_str()),
+            ("OPENCLAW_MODEL", runtime_model_ref.as_str()),
             ("OPENCLAW_MEMORY_SLOT", "memory-core"),
             ("ENTROPIC_PROXY_MODE", "1"),
             ("OPENROUTER_API_KEY", gateway_token.as_str()),
@@ -9958,10 +10070,8 @@ pub async fn start_gateway_with_proxy(
             ("ENTROPIC_BROWSER_PROFILE", "/data/browser/profile"),
             ("ENTROPIC_TOOLS_PATH", "/data/tools"),
         ];
-        if let Some(image_model) = image_model.as_deref() {
-            if !image_model.trim().is_empty() {
-                env_entries.push(("OPENCLAW_IMAGE_MODEL", image_model));
-            }
+        if let Some(image_model) = runtime_image_model_ref.as_deref() {
+            env_entries.push(("OPENCLAW_IMAGE_MODEL", image_model));
         }
         let env_file = gateway_env_file(&env_entries)?;
         let env_file_path = docker_host_path_for_command(&env_file.path);
@@ -10047,14 +10157,14 @@ pub async fn start_gateway_with_proxy(
             read_container_env("ENTROPIC_BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS");
         let current_container_image_id = container_image_id(OPENCLAW_CONTAINER);
         let latest_runtime_image_id = image_id("openclaw-runtime:latest");
-        let expected_image = image_model.clone().unwrap_or_default();
+        let expected_image = runtime_image_model_ref.clone().unwrap_or_default();
 
         let proxy_matches = current_proxy.as_deref() == Some(expected_proxy_env.as_str());
         let web_base_matches = current_web_base.as_deref() == Some(expected_web_base_env.as_str());
         let gateway_token_matches =
             current_gateway_token.as_deref() == Some(local_gateway_token.as_str());
         let schema_matches = current_schema.as_deref() == Some(ENTROPIC_GATEWAY_SCHEMA_VERSION);
-        let model_matches = current_model.as_deref() == Some(normalized_model.as_str());
+        let model_matches = current_model.as_deref() == Some(runtime_model_ref.as_str());
         let image_matches =
             expected_image.is_empty() || current_image.as_deref() == Some(expected_image.as_str());
         let container_image_matches_latest = match (
@@ -10261,13 +10371,18 @@ pub fn update_gateway_model(model: String) -> Result<(), String> {
     } else {
         "off"
     };
+    let config_model = if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
+        normalize_proxy_runtime_model_ref(base_model)
+    } else {
+        base_model.to_string()
+    };
 
     let mut cfg = read_openclaw_config();
     normalize_openclaw_config(&mut cfg);
     set_openclaw_config_value(
         &mut cfg,
         &["agents", "defaults", "model", "primary"],
-        serde_json::json!(base_model),
+        serde_json::json!(config_model),
     );
 
     if thinking_level != "off" {
@@ -10347,6 +10462,12 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
     if let Some(health_status) = container_health_status() {
         println!("[Entropic] Container health status: {}", health_status);
         if health_status == "starting" {
+            if matches!(check_gateway_http_health().await, Ok(true)) {
+                println!(
+                    "[Entropic] HTTP /healthz is ready while WS handshake is still finishing; reporting gateway as starting.",
+                );
+                return Ok(true);
+            }
             println!(
                 "[Entropic] Gateway WS probe failed while container health is starting; reporting not running until WS recovers.",
             );
@@ -10715,6 +10836,32 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         googlechat_audience,
         whatsapp_enabled,
         whatsapp_allow_from,
+    })
+}
+
+#[tauri::command]
+pub async fn get_saved_channels_state(app: AppHandle) -> Result<SavedChannelsState, String> {
+    let settings = load_agent_settings(&app);
+    Ok(SavedChannelsState {
+        discord_enabled: settings.discord_enabled,
+        discord_token: settings.discord_token,
+        telegram_enabled: settings.telegram_enabled,
+        telegram_token: settings.telegram_token,
+        telegram_dm_policy: settings.telegram_dm_policy,
+        telegram_group_policy: settings.telegram_group_policy,
+        telegram_config_writes: settings.telegram_config_writes,
+        telegram_require_mention: settings.telegram_require_mention,
+        telegram_reply_to_mode: settings.telegram_reply_to_mode,
+        telegram_link_preview: settings.telegram_link_preview,
+        slack_enabled: settings.slack_enabled,
+        slack_bot_token: settings.slack_bot_token,
+        slack_app_token: settings.slack_app_token,
+        googlechat_enabled: settings.googlechat_enabled,
+        googlechat_service_account: settings.googlechat_service_account,
+        googlechat_audience_type: settings.googlechat_audience_type,
+        googlechat_audience: settings.googlechat_audience,
+        whatsapp_enabled: settings.whatsapp_enabled,
+        whatsapp_allow_from: settings.whatsapp_allow_from,
     })
 }
 
@@ -11170,12 +11317,27 @@ pub async fn set_channels_config(
         if let Some(container) = container {
             let clear_script = r#"
 const fs = require('fs');
-const paths = [
-  '/data/credentials/telegram-default-allowFrom.json',
-  '/data/credentials/telegram-allowFrom.json',
-];
-for (const p of paths) {
-  try { fs.unlinkSync(p); } catch {}
+const path = require('path');
+const dir = '/data/credentials';
+try {
+  for (const entry of fs.readdirSync(dir)) {
+    if (/^telegram(?:-[^/]+)?-allowFrom\.json$/.test(entry)) {
+      try { fs.unlinkSync(path.join(dir, entry)); } catch {}
+    }
+  }
+} catch {}
+try {
+  fs.unlinkSync(path.join(dir, 'telegram-pairing.json'));
+} catch {}
+try {
+  fs.unlinkSync(path.join(dir, 'telegram-default-pairing.json'));
+} catch {}
+for (const entry of (() => {
+  try { return fs.readdirSync(dir); } catch { return []; }
+})()) {
+  if (/^telegram(?:-[^/]+)?-pairing\.json$/.test(entry)) {
+    try { fs.unlinkSync(path.join(dir, entry)); } catch {}
+  }
 }
 process.stdout.write('ok');
 "#;
@@ -11275,11 +11437,18 @@ pub async fn get_telegram_connection_status() -> Result<bool, String> {
         return Ok(false);
     };
 
-    // Treat Telegram as "connected" once pairing allowFrom store has at least one entry.
-    // This aligns with OpenClaw DM/group authorization flow backed by pairing store.
+    // Treat Telegram as "connected" once any account-scoped pairing allowFrom store
+    // has at least one approved sender.
     let script = r#"const fs=require('fs');
-const paths=['/data/credentials/telegram-default-allowFrom.json','/data/credentials/telegram-allowFrom.json'];
+const path=require('path');
+const dir='/data/credentials';
 let connected=false;
+let paths=[];
+try {
+  paths=fs.readdirSync(dir)
+    .filter(name => /^telegram(?:-[^/]+)?-allowFrom\.json$/.test(name))
+    .map(name => path.join(dir, name));
+} catch {}
 for (const p of paths) {
   try {
     const parsed=JSON.parse(fs.readFileSync(p,'utf8'));
@@ -11398,19 +11567,25 @@ pub async fn send_telegram_welcome_message() -> Result<(), String> {
 
     // Read bot token and authorized chat IDs from gateway container
     let script = r#"const fs=require('fs');
+const path=require('path');
 const config=JSON.parse(fs.readFileSync('/home/node/.openclaw/openclaw.json','utf8'));
 const token=config.channels?.telegram?.botToken || '';
-const paths=['/data/credentials/telegram-default-allowFrom.json','/data/credentials/telegram-allowFrom.json'];
 let chatIds=[];
+let paths=[];
+try {
+  paths=fs.readdirSync('/data/credentials')
+    .filter(name => /^telegram(?:-[^/]+)?-allowFrom\.json$/.test(name))
+    .map(name => path.join('/data/credentials', name));
+} catch {}
 for (const p of paths) {
   try {
     const parsed=JSON.parse(fs.readFileSync(p,'utf8'));
     if (Array.isArray(parsed.allowFrom)) {
-      chatIds=parsed.allowFrom.filter(v => String(v ?? '').trim().length > 0);
-      break;
+      chatIds.push(...parsed.allowFrom.filter(v => String(v ?? '').trim().length > 0));
     }
   } catch {}
 }
+chatIds=[...new Set(chatIds)];
 console.log(JSON.stringify({token,chatIds}));"#;
 
     let args = ["exec", container, "node", "-e", script];

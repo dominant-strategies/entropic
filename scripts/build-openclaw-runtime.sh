@@ -188,6 +188,31 @@ rsync -a --delete "$OPENCLAW_SOURCE/dist/" "$STAGING_DIR/dist/"
 # Copy package.json
 rsync -a "$OPENCLAW_SOURCE/package.json" "$STAGING_DIR/package.json"
 
+# Build a compatibility dependency list from all upstream extension manifests.
+# OpenClaw's compiled root dist can statically import channel SDKs even when we
+# choose not to bundle those extensions into Nova's runtime image, so the image
+# still needs their runtime packages available at the root node_modules level.
+python3 - <<'PY' "$OPENCLAW_SOURCE" "$STAGING_DIR/all-extension-runtime-deps.txt"
+import json
+import pathlib
+import sys
+
+source_root = pathlib.Path(sys.argv[1]) / "extensions"
+output_path = pathlib.Path(sys.argv[2])
+merged = {}
+
+for manifest in sorted(source_root.glob("*/package.json")):
+    pkg = json.loads(manifest.read_text())
+    for group in ("dependencies", "optionalDependencies"):
+        for dep, spec in (pkg.get(group) or {}).items():
+            merged.setdefault(dep, spec)
+
+output_path.write_text(
+    " ".join(f"{dep}@{spec}" for dep, spec in sorted(merged.items())) + "\n",
+    encoding="utf-8",
+)
+PY
+
 # Copy docs/reference/templates (required for agent workspace)
 echo "Copying templates..."
 mkdir -p "$STAGING_DIR/docs/reference"
@@ -202,14 +227,7 @@ PLUGINS_TO_BUNDLE=(
     "memory-lancedb"
     "lossless-claw"
     "entropic-integrations"
-    "discord"
     "telegram"
-    "slack"
-    "whatsapp"
-    "msteams"
-    "voice-call"
-    "matrix"
-    "googlechat"
 )
 
 for plugin in "${PLUGINS_TO_BUNDLE[@]}"; do
