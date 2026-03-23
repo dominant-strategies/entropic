@@ -172,6 +172,7 @@ pub fn run() {
             commands::set_active_provider,
             commands::get_auth_state,
             commands::get_agent_profile_state,
+            commands::get_saved_channels_state,
             commands::get_runtime_resource_usage,
             commands::get_apple_automation_status,
             commands::set_personality,

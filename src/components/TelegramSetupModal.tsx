@@ -8,6 +8,28 @@ type Props = {
   onSetupComplete: () => void;
 };
 
+type SavedChannelsState = {
+  discord_enabled?: boolean;
+  discord_token?: string;
+  telegram_enabled?: boolean;
+  telegram_token?: string;
+  telegram_dm_policy?: string;
+  telegram_group_policy?: string;
+  telegram_config_writes?: boolean;
+  telegram_require_mention?: boolean;
+  telegram_reply_to_mode?: string;
+  telegram_link_preview?: boolean;
+  slack_enabled?: boolean;
+  slack_bot_token?: string;
+  slack_app_token?: string;
+  googlechat_enabled?: boolean;
+  googlechat_service_account?: string;
+  googlechat_audience_type?: string;
+  googlechat_audience?: string;
+  whatsapp_enabled?: boolean;
+  whatsapp_allow_from?: string;
+};
+
 export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) {
   const [loadingState, setLoadingState] = useState(false);
   const [savingToken, setSavingToken] = useState(false);
@@ -26,10 +48,7 @@ export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) 
     setErrorMsg(null);
     setStatusMsg(null);
     Promise.all([
-      invoke<{
-        telegram_enabled?: boolean;
-        telegram_token?: string;
-      }>("get_agent_profile_state"),
+      invoke<SavedChannelsState>("get_saved_channels_state"),
       invoke<boolean>("get_telegram_connection_status").catch(() => false),
     ])
       .then(([state, telegramConnected]) => {
@@ -91,25 +110,7 @@ export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) 
         return;
       }
 
-      const state = await invoke<{
-        discord_enabled?: boolean;
-        discord_token?: string;
-        telegram_dm_policy?: string;
-        telegram_group_policy?: string;
-        telegram_config_writes?: boolean;
-        telegram_require_mention?: boolean;
-        telegram_reply_to_mode?: string;
-        telegram_link_preview?: boolean;
-        slack_enabled?: boolean;
-        slack_bot_token?: string;
-        slack_app_token?: string;
-        googlechat_enabled?: boolean;
-        googlechat_service_account?: string;
-        googlechat_audience_type?: string;
-        googlechat_audience?: string;
-        whatsapp_enabled?: boolean;
-        whatsapp_allow_from?: string;
-      }>("get_agent_profile_state");
+      const state = await invoke<SavedChannelsState>("get_saved_channels_state");
 
       await invoke("set_channels_config", {
         discordEnabled: state.discord_enabled ?? false,
@@ -172,11 +173,11 @@ export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) 
       });
       setPairingCode("");
       setStatusMsg(result || "Pairing approved.");
-      const telegramConnected = await invoke<boolean>("get_telegram_connection_status").catch(() => false);
-      setConnected(Boolean(telegramConnected));
-      if (telegramConnected) {
-        onSetupComplete();
-      }
+      setConnected(true);
+      invoke("send_telegram_welcome_message").catch(() => {
+        // Non-fatal. Pairing already succeeded.
+      });
+      onSetupComplete();
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       setErrorMsg(`Failed to approve pairing: ${detail}`);

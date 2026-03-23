@@ -2119,7 +2119,7 @@ export function Chat({
   }
 
   function pendingSendBackoffMs(attemptCount: number) {
-    return Math.min(30_000, 1_000 * Math.pow(2, Math.min(attemptCount, 5)));
+    return Math.min(5_000, 500 * Math.pow(2, Math.min(attemptCount, 4)));
   }
 
   function isTransientGatewayConnectState() {
@@ -2134,6 +2134,30 @@ export function Chat({
       window.clearTimeout(activeRunTimeoutRef.current);
       activeRunTimeoutRef.current = null;
     }
+  }
+
+  function recoverInterruptedActiveRun(reason: string) {
+    const runId = activeRunIdRef.current;
+    const sessionKey =
+      activeRunSessionRef.current ||
+      (runId ? runSessionKeyRef.current[runId] || "" : "") ||
+      currentSessionRef.current ||
+      "";
+    if (!runId || !sessionKey) {
+      setIsLoading(false);
+      setThinkingStatus(null);
+      clearActiveRunTracking();
+      return;
+    }
+
+    addDiag(`${reason} runId=${runId}; waiting for reconnect/history recovery`);
+    setIsLoading(true);
+    setThinkingStatus("Finalizing response");
+    setError(null);
+    clearActiveRunTracking();
+    void recoverFinalRunFromHistory(runId, sessionKey).finally(() => {
+      setIsLoading(false);
+    });
   }
 
   function refreshActiveRunTimeout(runId: string) {
@@ -2363,7 +2387,7 @@ export function Chat({
 
   // Reconnect-polling: when the gateway is running but the WS socket isn't
   // established yet (e.g. during the warm-up window after a container start),
-  // retry connectToGateway() every 3 s rather than waiting for a dep change.
+  // retry connectToGateway() every 1 s rather than waiting for a dep change.
   useEffect(() => {
     const shouldPoll =
       gatewayRunning && !gatewayStarting && !connected && !showOutOfCreditsModal && (connectedProvider || proxyEnabled);
@@ -2372,7 +2396,7 @@ export function Chat({
       if (!connectInFlightRef.current && !clientRef.current?.isConnected()) {
         void connectToGateway();
       }
-    }, 3000);
+    }, 1000);
     return () => window.clearInterval(id);
   }, [gatewayRunning, gatewayStarting, connected, connectedProvider, proxyEnabled, showOutOfCreditsModal]);
 
@@ -2531,10 +2555,14 @@ export function Chat({
         setConnected(false);
         setIsConnecting(false);
         if (activeRunIdRef.current) {
-          setIsLoading(false);
-          setError("Connection lost while waiting for response. Please retry.");
-          addDiag(`active run interrupted by disconnect runId=${activeRunIdRef.current}`);
-          clearActiveRunTracking();
+          if (isTransientGatewayConnectState()) {
+            recoverInterruptedActiveRun("active run interrupted by disconnect");
+          } else {
+            setIsLoading(false);
+            setError("Connection lost while waiting for response. Please retry.");
+            addDiag(`active run interrupted by disconnect runId=${activeRunIdRef.current}`);
+            clearActiveRunTracking();
+          }
         }
         if (isTransientGatewayConnectState()) {
           addDiag("gateway reconnect pending");
@@ -2599,9 +2627,13 @@ export function Chat({
 
         setIsConnecting(false);
         if (activeRunIdRef.current) {
-          setIsLoading(false);
-          addDiag(`active run interrupted by gateway error runId=${activeRunIdRef.current}`);
-          clearActiveRunTracking();
+          if (suppressError || isTransientGatewayConnectState()) {
+            recoverInterruptedActiveRun("active run interrupted by gateway error");
+          } else {
+            setIsLoading(false);
+            addDiag(`active run interrupted by gateway error runId=${activeRunIdRef.current}`);
+            clearActiveRunTracking();
+          }
         }
         setLastGatewayError(normalizedError);
         if (!isProxyAuthFailure(normalizedError)) {
@@ -2714,6 +2746,7 @@ export function Chat({
     if (runHistoryRecoveryRef.current[runId]) return;
 
     runHistoryRecoveryRef.current[runId] = true;
+    setIsLoading(true);
     try {
       for (let attempt = 0; attempt < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS; attempt += 1) {
         const client = clientRef.current;
@@ -2835,6 +2868,8 @@ export function Chat({
             ];
           });
           setThinkingStatus(null);
+          setError(null);
+          setIsLoading(false);
           if (isBillingIssueMessage(text)) {
             setError(BILLING_RECOVERY_MESSAGE);
             setShowOutOfCreditsModal(true);
@@ -2854,11 +2889,13 @@ export function Chat({
               connected,
             }),
           );
+          setIsLoading(false);
           addDiag(`final recovery failed runId=${runId}: ${String(err)}`);
           return;
         }
       }
     } finally {
+      setIsLoading(false);
       delete runHistoryRecoveryRef.current[runId];
     }
   }
@@ -3185,7 +3222,15 @@ export function Chat({
       ...(cached?.sessions || []),
       ...sessionsRef.current,
     ]);
-    const nextSessions = merged.length > 0 ? merged : fallbackSessions;
+    let nextSessions = merged.length > 0 ? merged : fallbackSessions;
+    const latestCurrent = currentSessionRef.current;
+    if (latestCurrent && !nextSessions.some((session) => session.key === latestCurrent)) {
+      const inMemoryCurrent =
+        sessionsRef.current.find((session) => session.key === latestCurrent) ||
+        cached?.sessions?.find((session) => session.key === latestCurrent) ||
+        { key: latestCurrent, updatedAt: Date.now() };
+      nextSessions = normalizeSessionsList([inMemoryCurrent, ...nextSessions]);
+    }
     setSessions((prev) =>
       applySessionTitles(
         overlaySessionMetadata(nextSessions, [...(cached?.sessions || []), ...prev]),
@@ -3690,6 +3735,7 @@ export function Chat({
     runTimingsRef.current[runId] = { startedAt: sendStart, ackAt: Date.now() };
     addDiag(`timing send_ack runId=${runId} t=${runTimingsRef.current[runId].ackAt! - sendStart}ms`);
     addDiag(`send ok runId=${runId}`);
+    setThinkingStatus("Starting");
     if (routingEnabled && chosenModel && fastModel && reasoningModel && chosenModel !== fastModel) {
       runRevertModelRef.current[runId] = fastModel;
     }
@@ -3713,7 +3759,6 @@ export function Chat({
 
     try {
       await dispatchPendingSend(entry);
-      setThinkingStatus("Thinking");
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Send failed";
       let handledProviderOAuth = false;

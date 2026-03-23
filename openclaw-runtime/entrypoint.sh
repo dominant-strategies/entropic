@@ -49,14 +49,49 @@ append_auth_profile() {
     provider="$2"
     value="$3"
 
+    case "|${AUTH_PROFILE_KEYS}|" in
+        *"|${key}|"*) return ;;
+    esac
+
     if [ -n "${AUTH_PROFILES}" ]; then
         AUTH_PROFILES="${AUTH_PROFILES},"
     fi
     AUTH_PROFILES="${AUTH_PROFILES}
     \"${key}\": { \"type\": \"api_key\", \"provider\": \"${provider}\", \"key\": \"${value}\" }"
+    if [ -n "${AUTH_PROFILE_KEYS}" ]; then
+        AUTH_PROFILE_KEYS="${AUTH_PROFILE_KEYS}|"
+    fi
+    AUTH_PROFILE_KEYS="${AUTH_PROFILE_KEYS}${key}"
+}
+
+append_proxy_model_auth_aliases() {
+    model="$1"
+    value="$2"
+    base_model="${model%%:*}"
+    provider="${base_model%%/*}"
+
+    case "$provider" in
+        anthropic)
+            append_auth_profile "anthropic:default" "anthropic" "$value"
+            ;;
+        google)
+            append_auth_profile "google:default" "google" "$value"
+            ;;
+        openai)
+            append_auth_profile "openai:default" "openai" "$value"
+            ;;
+        openai-codex)
+            append_auth_profile "openai:default" "openai" "$value"
+            append_auth_profile "openai-codex:default" "openai-codex" "$value"
+            ;;
+        openrouter)
+            append_auth_profile "openrouter:default" "openrouter" "$value"
+            ;;
+    esac
 }
 
 AUTH_PROFILES=""
+AUTH_PROFILE_KEYS=""
 
 AUTH_DIR="/home/node/.openclaw/agents/main/agent"
 mkdir -p "$AUTH_DIR"
@@ -65,7 +100,10 @@ if [ -n "$ANTHROPIC_API_KEY" ]; then
     append_auth_profile "anthropic:default" "anthropic" "$(json_escape "${ANTHROPIC_API_KEY}")"
 fi
 if [ -n "$OPENROUTER_API_KEY" ]; then
-    append_auth_profile "openrouter:default" "openrouter" "$(json_escape "${OPENROUTER_API_KEY}")"
+    OPENROUTER_API_KEY_ESC="$(json_escape "${OPENROUTER_API_KEY}")"
+    append_auth_profile "openrouter:default" "openrouter" "${OPENROUTER_API_KEY_ESC}"
+    append_proxy_model_auth_aliases "${OPENCLAW_MODEL:-}" "${OPENROUTER_API_KEY_ESC}"
+    append_proxy_model_auth_aliases "${OPENCLAW_IMAGE_MODEL:-}" "${OPENROUTER_API_KEY_ESC}"
 fi
 if [ -n "$OPENAI_API_KEY" ]; then
     append_auth_profile "openai:default" "openai" "$(json_escape "${OPENAI_API_KEY}")"
