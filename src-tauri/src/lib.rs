@@ -163,6 +163,7 @@ pub fn run() {
             commands::get_gateway_status,
             commands::get_gateway_ws_url,
             commands::get_gateway_auth,
+            commands::discover_local_model_ids,
             commands::test_local_model_connection,
             commands::get_gateway_logs,
             commands::get_gateway_config,

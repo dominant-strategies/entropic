@@ -76,7 +76,7 @@ import {
   syncEmbeddedPreviewWebview,
 } from "../lib/nativePreview";
 import { hostedFeaturesEnabled } from "../lib/buildProfile";
-import type { LocalModelConfig, Model } from "../lib/auth";
+import type { ConnectionMode, LocalModelConfig, Model } from "../lib/auth";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -98,7 +98,8 @@ type Props = {
   selectedModel: string;
   onModelChange: (model: string) => void;
   useLocalKeys: boolean;
-  onUseLocalKeysChange: (value: boolean) => void;
+  connectionMode: ConnectionMode;
+  onConnectionModeChange: (value: ConnectionMode) => void | Promise<void>;
   codeModel: string;
   imageModel: string;
   imageGenerationModel: string;
@@ -805,7 +806,8 @@ export function Files({
   selectedModel,
   onModelChange,
   useLocalKeys,
-  onUseLocalKeysChange,
+  connectionMode,
+  onConnectionModeChange,
   codeModel,
   imageModel,
   imageGenerationModel,
@@ -3849,7 +3851,10 @@ export function Files({
                       gatewayRetryIn={gatewayRetryIn ?? null}
                       onStartGateway={onGatewayToggle}
                       onRecoverProxyAuth={onRecoverProxyAuth}
-                      useLocalKeys={useLocalKeys}
+                      connectionMode={connectionMode}
+                      onConnectionModeChange={onConnectionModeChange}
+                      localModelConfig={localModelConfig}
+                      onLocalModelConfigChange={onLocalModelConfigChange}
                       selectedModel={selectedModel}
                       onModelChange={onModelChange}
                       imageModel={imageModel}
@@ -4413,8 +4418,8 @@ export function Files({
                   isTogglingGateway={isTogglingGateway}
                   selectedModel={selectedModel}
                   onModelChange={onModelChange}
-                  useLocalKeys={useLocalKeys}
-                  onUseLocalKeysChange={onUseLocalKeysChange}
+                  connectionMode={connectionMode}
+                  onConnectionModeChange={onConnectionModeChange}
                   codeModel={codeModel}
                   imageModel={imageModel}
                   imageGenerationModel={imageGenerationModel}

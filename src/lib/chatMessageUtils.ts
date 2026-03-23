@@ -249,7 +249,7 @@ export function sanitizeGatewayErrorMessage(raw?: string | null): string {
   const providerMatches = [...message.matchAll(/No API key found for provider "([^"]+)"/g)];
   const providers = [...new Set(providerMatches.map((m) => m[1]).filter(Boolean))];
   if (providers.length > 0) {
-    return `Missing API key for ${providers.join(", ")}. Add provider keys in Settings, or disable Use Local Keys.`;
+    return `Missing API key for ${providers.join(", ")}. Add provider keys in Settings, or switch back to Managed Provider mode.`;
   }
 
   return sanitizeAuthStoreDetails(message);

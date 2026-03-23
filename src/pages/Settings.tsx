@@ -13,13 +13,20 @@ import {
   type AgentProfile,
 } from "../lib/profile";
 import { useAuth } from "../contexts/AuthContext";
+import { ConnectionModeSelector } from "../components/ConnectionModeSelector";
+import { LocalAiServiceForm } from "../components/LocalAiServiceForm";
 import {
   LOCAL_IMAGE_GENERATION_MODELS,
   ModelSelector,
   PROXY_IMAGE_GENERATION_MODELS,
 } from "../components/ModelSelector";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
-import { getProxyUrl, signOut as authSignOut, type LocalModelConfig } from "../lib/auth";
+import {
+  getProxyUrl,
+  type ConnectionMode,
+  signOut as authSignOut,
+  type LocalModelConfig,
+} from "../lib/auth";
 import { disconnectIntegration, resetIntegrationState } from "../lib/integrations";
 import { resetIntegrationVaultSession } from "../lib/vault";
 import { Logs } from "./Logs";
@@ -37,8 +44,8 @@ type Props = {
   isTogglingGateway: boolean;
   selectedModel: string;
   onModelChange: (model: string) => void;
-  useLocalKeys: boolean;
-  onUseLocalKeysChange: (value: boolean) => void | Promise<void>;
+  connectionMode: ConnectionMode;
+  onConnectionModeChange: (value: ConnectionMode) => void | Promise<void>;
   codeModel: string;
   imageModel: string;
   imageGenerationModel: string;
@@ -220,8 +227,8 @@ export function Settings({
   isTogglingGateway,
   selectedModel,
   onModelChange,
-  useLocalKeys,
-  onUseLocalKeysChange,
+  connectionMode,
+  onConnectionModeChange,
   codeModel,
   imageModel,
   imageGenerationModel,
@@ -233,7 +240,10 @@ export function Settings({
   localModel,
 }: Props) {
   const { isAuthenticated, isAuthConfigured, user, signOut } = useAuth();
-  const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
+  const managedMode = connectionMode === "managed";
+  const byokMode = connectionMode === "byok";
+  const localModelsMode = connectionMode === "local-models";
+  const proxyEnabled = isAuthConfigured && isAuthenticated && managedMode;
   const [apiKeys, setApiKeys] = useState({ anthropic: "", openai: "", google: "" });
   const [localKeySavingProvider, setLocalKeySavingProvider] =
     useState<LocalKeyProvider | null>(null);
@@ -345,10 +355,6 @@ export function Settings({
     }
     // "system" uses neither class — CSS media query handles it
   }
-
-  // Local model test state
-  const [localModelTestStatus, setLocalModelTestStatus] = useState<"idle" | "testing" | "success" | "error">("idle");
-  const [localModelTestError, setLocalModelTestError] = useState<string | null>(null);
 
   // Wallpaper state
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
@@ -570,8 +576,8 @@ export function Settings({
       const state = await refreshAuthStateSnapshot();
       setApiKeys((prev) => ({ ...prev, [provider]: "" }));
       const anyKeyRemaining = state.providers.some((entry) => entry.has_key);
-      if (!anyKeyRemaining && useLocalKeys) {
-        await onUseLocalKeysChange(false);
+      if (!anyKeyRemaining && byokMode) {
+        await onConnectionModeChange("managed");
       }
       setLocalKeyNotice(
         gatewayRunning
@@ -589,7 +595,7 @@ export function Settings({
   }
 
   useEffect(() => {
-    if (!useLocalKeys || authMetaLoading || localImageGenerationProviders.length === 0) {
+    if (!byokMode || authMetaLoading || localImageGenerationProviders.length === 0) {
       return;
     }
     const allowedModelIds = new Set(
@@ -612,7 +618,7 @@ export function Settings({
     imageGenerationModel,
     localImageGenerationProviderKey,
     onImageGenerationModelChange,
-    useLocalKeys,
+    byokMode,
   ]);
 
   useEffect(() => {
@@ -753,8 +759,8 @@ export function Settings({
       await invoke<{ access_token: string; provider: string }>("start_openai_oauth");
       await refreshAuthStateSnapshot();
       // OAuth sets a local API key — switch to local keys mode and restart gateway
-      if (!useLocalKeys) {
-        await onUseLocalKeysChange(true);
+      if (!byokMode) {
+        await onConnectionModeChange("byok");
         // Small delay to let React state propagate before toggling gateway
         await new Promise(r => setTimeout(r, 200));
       }
@@ -780,8 +786,8 @@ export function Settings({
       setAnthropicCodeInput("");
       await refreshAuthStateSnapshot();
       // OAuth sets a local API key — switch to local keys mode and restart gateway
-      if (!useLocalKeys) {
-        await onUseLocalKeysChange(true);
+      if (!byokMode) {
+        await onConnectionModeChange("byok");
         await new Promise(r => setTimeout(r, 200));
       }
       if (!isTogglingGateway) onGatewayToggle();
@@ -804,8 +810,8 @@ export function Settings({
       const state = await refreshAuthStateSnapshot();
       // If no provider keys remain, switch back to proxy (managed) mode.
       const anyKeyRemaining = state.providers.some((p) => p.has_key);
-      if (!anyKeyRemaining && useLocalKeys) {
-        await onUseLocalKeysChange(false);
+      if (!anyKeyRemaining && byokMode) {
+        await onConnectionModeChange("managed");
       }
     } catch (e) {
       console.error(`[Entropic] OAuth disconnect failed for ${provider}:`, e);
@@ -1253,21 +1259,43 @@ export function Settings({
 
       <div className="relative">
         <SettingsGroup title="Intelligence">
-          <SettingsRow label="Primary Model" icon={Cpu}>
-            <div className="w-80">
-              <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} localModel={localModel} />
-            </div>
-          </SettingsRow>
-          {!useLocalKeys && (
+          {localModelsMode ? (
+            <SettingsRow
+              label="Primary Model"
+              icon={Cpu}
+              description={
+                localModel
+                  ? `${localModel.name}`
+                  : "Select Local Models below to choose the model exposed by your local service."
+              }
+            >
+              <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)]">
+                {localModel ? localModel.id : "Configure Local Models below"}
+              </div>
+            </SettingsRow>
+          ) : (
+            <SettingsRow label="Primary Model" icon={Cpu}>
+              <div className="w-80">
+                <ModelSelector
+                  selectedModel={selectedModel}
+                  onModelChange={onModelChange}
+                  useLocalKeys={byokMode}
+                  connectedProviders={byokMode ? connectedProviders : undefined}
+                  localModel={null}
+                />
+              </div>
+            </SettingsRow>
+          )}
+          {managedMode && (
             <>
               <SettingsRow label="Coding Model" icon={Cpu}>
                 <div className="w-80">
-                  <ModelSelector selectedModel={codeModel} onModelChange={onCodeModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
+                  <ModelSelector selectedModel={codeModel} onModelChange={onCodeModelChange} />
                 </div>
               </SettingsRow>
               <SettingsRow label="Vision Model" icon={Image}>
                 <div className="w-80">
-                  <ModelSelector selectedModel={imageModel} onModelChange={onImageModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
+                  <ModelSelector selectedModel={imageModel} onModelChange={onImageModelChange} />
                 </div>
               </SettingsRow>
               <SettingsRow
@@ -1285,7 +1313,7 @@ export function Settings({
               </SettingsRow>
             </>
           )}
-          {useLocalKeys && !authMetaLoading && localImageGenerationProviders.length > 0 && (
+          {byokMode && !authMetaLoading && localImageGenerationProviders.length > 0 && (
             <>
               <SettingsRow
                 label="Image Generation Model"
@@ -1307,10 +1335,16 @@ export function Settings({
               </div>
             </>
           )}
-          {useLocalKeys && !authMetaLoading && localImageGenerationProviders.length === 0 && (
+          {byokMode && !authMetaLoading && localImageGenerationProviders.length === 0 && (
             <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
               Connect an OpenAI or Google API key to use local image generation. Anthropic local
               keys accept image input, but do not generate image output.
+            </div>
+          )}
+          {localModelsMode && (
+            <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
+              Local Models mode uses the model served by your local AI service below. Cloud image
+              generation settings stay under Bring Your Own Keys or Managed Provider.
             </div>
           )}
         </SettingsGroup>
@@ -1498,117 +1532,43 @@ export function Settings({
         )}
       </SettingsGroup>
 
-      <SettingsGroup title="Local Model">
-        <SettingsRow
-          label="Enable Local Model"
-          icon={Cpu}
-          description="Connect to an OpenAI-compatible local server (Ollama, LM Studio, etc.)"
-        >
-          <button
-            onClick={() => onLocalModelConfigChange({ ...localModelConfig, enabled: !localModelConfig.enabled })}
-            className={clsx(
-              "relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
-              localModelConfig.enabled ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-4)]"
-            )}
-          >
-            <span className={clsx(
-              "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
-              localModelConfig.enabled ? "translate-x-5" : "translate-x-0"
-            )} />
-          </button>
-        </SettingsRow>
-        {localModelConfig.enabled && (
-          <>
-            <SettingsRow label="Base URL" icon={Key} description="e.g. http://localhost:11434/v1">
-              <input
-                type="text"
-                value={localModelConfig.baseUrl}
-                onChange={(e) => onLocalModelConfigChange({ ...localModelConfig, baseUrl: e.target.value })}
-                className="w-80 px-3 py-2 text-sm bg-white border border-[var(--border-subtle)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/30"
-                placeholder="http://localhost:11434/v1"
-              />
-            </SettingsRow>
-            <SettingsRow label="API Key (optional)" icon={Key} description="Defaults to local-placeholder for local servers">
-              <input
-                type="password"
-                value={localModelConfig.apiKey}
-                onChange={(e) => onLocalModelConfigChange({ ...localModelConfig, apiKey: e.target.value })}
-                className="w-80 px-3 py-2 text-sm bg-white border border-[var(--border-subtle)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/30"
-                placeholder="local-placeholder"
-              />
-            </SettingsRow>
-            <SettingsRow label="Model Name" icon={Cpu} description="e.g. llama3.2, mistral, codestral">
-              <input
-                type="text"
-                value={localModelConfig.modelName}
-                onChange={(e) => onLocalModelConfigChange({ ...localModelConfig, modelName: e.target.value })}
-                className="w-80 px-3 py-2 text-sm bg-white border border-[var(--border-subtle)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/30"
-                placeholder="llama3.2"
-              />
-            </SettingsRow>
-            <SettingsRow label="Test Connection" icon={Shield}>
-              <div className="flex items-center gap-3">
-                {localModelTestStatus === "success" && <span className="text-green-600 text-sm font-medium">Connected</span>}
-                {localModelTestStatus === "error" && <span className="text-red-500 text-sm max-w-[200px] truncate" title={localModelTestError || undefined}>{localModelTestError}</span>}
-                <button
-                  onClick={async () => {
-                    setLocalModelTestStatus("testing");
-                    setLocalModelTestError(null);
-                    try {
-                      await invoke("test_local_model_connection", {
-                        baseUrl: localModelConfig.baseUrl,
-                        apiKey: localModelConfig.apiKey || null,
-                        modelName: localModelConfig.modelName,
-                      });
-                      setLocalModelTestStatus("success");
-                    } catch (error: any) {
-                      setLocalModelTestStatus("error");
-                      setLocalModelTestError(String(error));
-                    }
-                  }}
-                  disabled={localModelTestStatus === "testing" || !localModelConfig.modelName || !localModelConfig.baseUrl}
-                  className="px-4 py-2 text-sm font-medium rounded-lg bg-[var(--system-blue)] text-white hover:opacity-90 disabled:opacity-50 transition-opacity"
-                >
-                  {localModelTestStatus === "testing" ? "Testing..." : "Test"}
-                </button>
-              </div>
-            </SettingsRow>
-          </>
-        )}
+      <SettingsGroup title="AI Connection">
+        <div className="p-4 space-y-4">
+          <ConnectionModeSelector
+            value={connectionMode}
+            onChange={(value) => {
+              void onConnectionModeChange(value);
+            }}
+          />
+          <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-4 py-3 text-sm text-[var(--text-secondary)]">
+            {managedMode
+              ? isAuthConfigured
+                ? proxyEnabled
+                  ? `Managed Provider is active via ${getProxyUrl()}.`
+                  : "Managed Provider uses your Entropic account and trial or paid credits."
+                : "Managed Provider is unavailable in this build because hosted auth is not configured."
+              : byokMode
+                ? "Bring Your Own Keys uses provider OAuth or API keys stored locally on this machine."
+                : "Local Models connects your own Ollama, LM Studio, vLLM, LiteLLM, or OpenAI-compatible endpoint."}
+          </div>
+        </div>
       </SettingsGroup>
 
-      <SettingsGroup title="Keys">
-        <SettingsRow
-          label="Use Local Keys"
-          icon={Key}
-          description={
-            useLocalKeys
-              ? "Local provider keys in the gateway container"
-              : proxyEnabled
-                ? `Proxy mode via ${getProxyUrl()}`
-                : isAuthConfigured
-                  ? "Sign in to enable proxy mode"
-                  : "Auth not configured; local keys only"
-          }
-        >
-          <button
-            onClick={() => onUseLocalKeysChange(!useLocalKeys)}
-            className={clsx(
-              "relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
-              useLocalKeys ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-4)]"
-            )}
-          >
-            <span
-              className={clsx(
-                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-[var(--bg-card)] shadow ring-0 transition duration-200 ease-in-out",
-                useLocalKeys ? "translate-x-5" : "translate-x-0"
-              )}
+      {localModelsMode && (
+        <SettingsGroup title="Local Models">
+          <div className="p-4">
+            <LocalAiServiceForm
+              config={{ ...localModelConfig, enabled: true }}
+              onChange={(config) => {
+                onLocalModelConfigChange({ ...config, enabled: true });
+              }}
             />
-          </button>
-        </SettingsRow>
+          </div>
+        </SettingsGroup>
+      )}
 
-        {useLocalKeys && (
-          <>
+      {byokMode && (
+        <SettingsGroup title="Bring Your Own Keys">
             {/* ── Anthropic ── */}
             <div className="px-4 pt-3 pb-1">
               <span className="text-[11px] font-medium uppercase tracking-wider text-[var(--text-tertiary)]">Anthropic</span>
@@ -1890,9 +1850,8 @@ export function Settings({
                 {localKeyNotice && <div className="text-xs text-green-500">{localKeyNotice}</div>}
               </div>
             )}
-          </>
-        )}
-      </SettingsGroup>
+        </SettingsGroup>
+      )}
 
       <SettingsGroup title="Diagnostics">
         <div>

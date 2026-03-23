@@ -72,6 +72,11 @@ ensure_docker_ready_for_mode() {
         return 0
     fi
 
+    if entropic_linux_uses_native_docker && entropic_default_docker_is_ready "$DOCKER_BIN"; then
+        ACTIVE_DOCKER_HOST=""
+        return 0
+    fi
+
     ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
     if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "$COLIMA_BIN" ]; then
         echo "Starting Colima for $(entropic_mode_label) runtime build..."
@@ -85,6 +90,15 @@ ensure_docker_ready_for_mode() {
     if entropic_default_context_allowed && "$DOCKER_BIN" info >/dev/null 2>&1; then
         echo "WARNING: Using default Docker context because ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1."
         return 0
+    fi
+
+    if entropic_linux_uses_native_docker; then
+        echo "ERROR: Docker daemon is not reachable on Linux."
+        echo "Make sure Docker Engine is installed and running, and that your user can access the Docker socket."
+        echo "Example fixes:"
+        echo "  sudo systemctl start docker"
+        echo "  sudo usermod -aG docker \$USER"
+        return 1
     fi
 
     echo "ERROR: No $(entropic_mode_label) Colima Docker socket is reachable."

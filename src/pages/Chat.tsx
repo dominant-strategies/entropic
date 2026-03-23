@@ -14,8 +14,6 @@ import {
   Activity,
   TrendingUp,
   Terminal,
-  ChevronDown,
-  ChevronUp,
   Bot,
   User,
 } from "lucide-react";
@@ -43,6 +41,8 @@ import {
 import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
 import { TelegramSetupModal } from "../components/TelegramSetupModal";
 import { MarkdownContent } from "../components/MarkdownContent";
+import { ConnectionModeSelector } from "../components/ConnectionModeSelector";
+import { LocalAiServiceForm } from "../components/LocalAiServiceForm";
 import { useAuth } from "../contexts/AuthContext";
 import {
   syncAllIntegrationsToGateway,
@@ -82,6 +82,9 @@ import {
   signUpWithEmail,
   createCheckout,
   getBalance,
+  resolveLocalModelGatewayModel,
+  type ConnectionMode,
+  type LocalModelConfig,
 } from "../lib/auth";
 import entropicLogo from "../assets/entropic-logo.png";
 import type { Page } from "../components/Layout";
@@ -576,6 +579,7 @@ const TERMS_URL = entropicSitePath("/terms");
 const PRIVACY_URL = entropicSitePath("/privacy");
 const HISTORY_LIMIT = 500;
 const ACTIVE_RUN_IDLE_TIMEOUT_MS = 120_000;
+const LOCAL_MODEL_ACTIVE_RUN_IDLE_TIMEOUT_MS = 600_000;
 const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 4;
 const MAX_IMAGE_ATTACHMENT_BYTES = 5_000_000;
 const GENERATED_IMAGES_DEST_PATH = "generated-images";
@@ -839,13 +843,14 @@ function integrationRequirementLabel(requirement: IntegrationQuickActionRequirem
   return requirement.label;
 }
 
-function normalizeModelId(id: string | null | undefined, proxyMode: boolean): string | null {
+function normalizeModelId(
+  id: string | null | undefined,
+  proxyMode: boolean,
+  localModelConfig?: Pick<LocalModelConfig, "serviceType"> | null,
+): string | null {
   if (!id) return null;
-  // Local models use OpenClaw's native Ollama provider.
-  if (id.startsWith("local/")) {
-    const rest = id.slice(6);
-    return `ollama/${rest}`;
-  }
+  const localModel = resolveLocalModelGatewayModel(id, localModelConfig);
+  if (localModel !== id) return localModel;
   if (!proxyMode) return id;
   if (id.startsWith("openrouter/")) return id;
   return `openrouter/${id}`;
@@ -943,7 +948,10 @@ export function Chat({
   gatewayRetryIn,
   onStartGateway,
   onRecoverProxyAuth,
-  useLocalKeys,
+  connectionMode,
+  onConnectionModeChange,
+  localModelConfig,
+  onLocalModelConfigChange,
   selectedModel,
   onModelChange: _onModelChange,
   imageModel: _imageModel,
@@ -962,7 +970,10 @@ export function Chat({
   gatewayRetryIn: number | null;
   onStartGateway?: () => void;
   onRecoverProxyAuth?: () => Promise<boolean> | boolean;
-  useLocalKeys: boolean;
+  connectionMode: ConnectionMode;
+  onConnectionModeChange?: (mode: ConnectionMode) => void | Promise<void>;
+  localModelConfig?: LocalModelConfig | null;
+  onLocalModelConfigChange?: (config: LocalModelConfig) => void | Promise<void>;
   selectedModel: string;
   onModelChange?: (model: string) => void;
   imageModel: string;
@@ -976,12 +987,24 @@ export function Chat({
   wideLayout?: boolean;
 }) {
   const { isAuthenticated, isAuthConfigured, refreshBalance } = useAuth();
+  const managedMode = connectionMode === "managed";
+  const byokMode = connectionMode === "byok";
+  const localModelsMode = connectionMode === "local-models";
+  const localModelReady = Boolean(
+    localModelsMode &&
+      localModelConfig?.enabled &&
+      localModelConfig?.modelName?.trim() &&
+      localModelConfig?.baseUrl?.trim(),
+  );
+  const activeRunIdleTimeoutMs = localModelsMode
+    ? LOCAL_MODEL_ACTIVE_RUN_IDLE_TIMEOUT_MS
+    : ACTIVE_RUN_IDLE_TIMEOUT_MS;
   const [localCreditsCents, setLocalCreditsCents] = useState<number | null>(null);
   const localTrialLoading =
-    !isAuthenticated && isAuthConfigured && !useLocalKeys && localCreditsCents === null;
+    !isAuthenticated && isAuthConfigured && managedMode && localCreditsCents === null;
   const proxyEnabled =
     isAuthConfigured &&
-    !useLocalKeys &&
+    managedMode &&
     (isAuthenticated || (localCreditsCents ?? 0) > 0);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
@@ -1008,7 +1031,6 @@ export function Chat({
   const [emailAuthMode, setEmailAuthMode] = useState<"signin" | "signup">("signin");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
-  const [showOwnProviderOptions, setShowOwnProviderOptions] = useState(false);
   const [providerStatus, setProviderStatus] = useState<AuthState["providers"]>([]);
   const [gatewayUrl, setGatewayUrl] = useState(DEFAULT_GATEWAY_URL);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
@@ -1332,7 +1354,7 @@ export function Chat({
   }
 
   async function refreshTrialCredits() {
-    if (isAuthenticated || !isAuthConfigured || useLocalKeys) {
+    if (isAuthenticated || !isAuthConfigured || !managedMode) {
       return;
     }
     try {
@@ -1474,7 +1496,7 @@ export function Chat({
   }
 
   async function getRecoveryCreditBalanceCents(): Promise<number | null> {
-    if (!isAuthConfigured || useLocalKeys) {
+    if (!isAuthConfigured || !managedMode) {
       return null;
     }
 
@@ -1864,15 +1886,19 @@ export function Chat({
       if (activeRunIdRef.current !== runId) return;
       const lastActivity = lastEventByRunIdRef.current[runId] ?? Date.now();
       const idleMs = Date.now() - lastActivity;
-      if (idleMs < ACTIVE_RUN_IDLE_TIMEOUT_MS) {
+      if (idleMs < activeRunIdleTimeoutMs) {
         refreshActiveRunTimeout(runId);
         return;
       }
       setIsLoading(false);
-      setError("Response timed out waiting for stream activity. Please retry.");
-      addDiag(`run timeout after ${Math.round(ACTIVE_RUN_IDLE_TIMEOUT_MS / 1000)}s idle runId=${runId}`);
+      setError(
+        localModelsMode
+          ? "Response timed out waiting for local model stream activity. The model may still be warming up or overloaded. Please retry."
+          : "Response timed out waiting for stream activity. Please retry.",
+      );
+      addDiag(`run timeout after ${Math.round(activeRunIdleTimeoutMs / 1000)}s idle runId=${runId}`);
       clearActiveRunTracking();
-    }, ACTIVE_RUN_IDLE_TIMEOUT_MS);
+    }, activeRunIdleTimeoutMs);
   }
 
   function scheduleActiveRunTimeout(runId: string, sessionKey: string) {
@@ -1982,7 +2008,7 @@ export function Chat({
   }, []);
 
   useEffect(() => {
-    if (isAuthenticated || !isAuthConfigured || useLocalKeys) {
+    if (isAuthenticated || !isAuthConfigured || !managedMode) {
       setLocalCreditsCents(null);
       return;
     }
@@ -2006,7 +2032,7 @@ export function Chat({
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, isAuthConfigured, useLocalKeys]);
+  }, [isAuthenticated, isAuthConfigured, managedMode]);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -2055,7 +2081,10 @@ export function Chat({
 
   // Keep a single gateway socket alive while gateway + provider are available.
   useEffect(() => {
-    const shouldConnect = gatewayRunning && !gatewayStarting && (connectedProvider || proxyEnabled);
+    const shouldConnect =
+      gatewayRunning &&
+      !gatewayStarting &&
+      (connectedProvider || proxyEnabled || localModelReady);
     if (!shouldConnect) {
       if (clientRef.current) {
         detachGatewayListeners(clientRef.current);
@@ -2077,14 +2106,18 @@ export function Chat({
       }
       void connectToGateway();
     }
-  }, [gatewayRunning, gatewayStarting, connectedProvider, proxyEnabled, connected]);
+  }, [gatewayRunning, gatewayStarting, connectedProvider, proxyEnabled, localModelReady, connected]);
 
   // Reconnect-polling: when the gateway is running but the WS socket isn't
   // established yet (e.g. during the warm-up window after a container start),
   // retry connectToGateway() every 3 s rather than waiting for a dep change.
   useEffect(() => {
     const shouldPoll =
-      gatewayRunning && !gatewayStarting && !connected && !showOutOfCreditsModal && (connectedProvider || proxyEnabled);
+      gatewayRunning &&
+      !gatewayStarting &&
+      !connected &&
+      !showOutOfCreditsModal &&
+      (connectedProvider || proxyEnabled || localModelReady);
     if (!shouldPoll) return;
     const id = window.setInterval(() => {
       if (!connectInFlightRef.current && !clientRef.current?.isConnected()) {
@@ -2092,7 +2125,15 @@ export function Chat({
       }
     }, 3000);
     return () => window.clearInterval(id);
-  }, [gatewayRunning, gatewayStarting, connected, connectedProvider, proxyEnabled, showOutOfCreditsModal]);
+  }, [
+    gatewayRunning,
+    gatewayStarting,
+    connected,
+    connectedProvider,
+    proxyEnabled,
+    localModelReady,
+    showOutOfCreditsModal,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -3365,8 +3406,9 @@ export function Chat({
     }
 
     if (composerMode === "image") {
-      if (!useLocalKeys && !proxyEnabled) {
-        const message = "Image generation currently requires proxy mode in Settings.";
+      if (!(proxyEnabled || byokMode)) {
+        const message =
+          "Image generation currently requires Managed Provider or Bring Your Own Keys mode in Settings.";
         setError(message);
         appendAssistantNotice(message, sendSession);
         return;
@@ -3594,9 +3636,17 @@ export function Chat({
     setError(null);
     try {
       const routingEnabled = import.meta.env.VITE_MODEL_ROUTING === "1";
-      const fastModelOverride = normalizeModelId(import.meta.env.VITE_FAST_MODEL, proxyEnabled);
-      const reasoningOverride = normalizeModelId(import.meta.env.VITE_REASONING_MODEL, proxyEnabled);
-      const defaultModel = normalizeModelId(selectedModel, proxyEnabled);
+      const fastModelOverride = normalizeModelId(
+        import.meta.env.VITE_FAST_MODEL,
+        proxyEnabled,
+        localModelConfig,
+      );
+      const reasoningOverride = normalizeModelId(
+        import.meta.env.VITE_REASONING_MODEL,
+        proxyEnabled,
+        localModelConfig,
+      );
+      const defaultModel = normalizeModelId(selectedModel, proxyEnabled, localModelConfig);
       const fastModel = fastModelOverride ?? defaultModel;
       const reasoningModel = reasoningOverride ?? defaultModel;
       const decision = getRoutingDecision(messageContent);
@@ -4604,158 +4654,158 @@ export function Chat({
   );
 
   const renderNoProvider = () => {
-    const accountSignInAvailable = isAuthConfigured && !useLocalKeys && !isAuthenticated;
+    const accountSignInAvailable = isAuthConfigured && managedMode && !isAuthenticated;
     const trialCreditsExhausted =
       accountSignInAvailable &&
       localCreditsCents !== null &&
       localCreditsCents <= 0;
-    const ownProviderExpanded =
-      !accountSignInAvailable || showOwnProviderOptions || anthropicCodePending;
 
     return (
       <>
-        <div className="h-full flex flex-col items-center justify-center p-6 text-center">
-          <div className={accountSignInAvailable
-            ? "w-full max-w-[420px] bg-[var(--bg-card)] rounded-3xl shadow-xl p-10 border border-[var(--border-subtle)]"
-            : "bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-2xl shadow-sm p-8 max-w-md"}
-          >
-            {accountSignInAvailable ? (
-              <div className="text-center mb-8">
-                <div className="w-20 h-20 rounded-[2rem] bg-transparent mx-auto flex items-center justify-center mb-6">
-                  <img src={entropicLogo} alt="Entropic" className="w-20 h-20 rounded-[2rem] shadow-xl" />
-                </div>
-                <h2 className="text-3xl font-bold text-[var(--text-primary)] mb-3 tracking-tight">Continue with Entropic</h2>
-                <p className="text-sm text-[var(--text-secondary)]">
-                  {trialCreditsExhausted
-                    ? "Your free credits are used. Sign in to continue, or use your own provider."
-                    : "Sign in with your Entropic account, or use your own provider."}
-                </p>
-              </div>
-            ) : (
-              <>
-                <Sparkles className="w-10 h-10 mx-auto mb-4 text-[var(--text-accent)]" />
-                <h2 className="text-xl font-semibold mb-2 text-[var(--text-primary)]">Connect an AI Service</h2>
-                <p className="mb-6 text-[var(--text-secondary)]">Use provider OAuth or add an API key.</p>
-              </>
-            )}
-
-            {accountSignInAvailable ? (
-              <div className="space-y-3 mb-6">
-                {authError ? (
-                  <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-500 text-center">
-                    {authError}
-                  </div>
-                ) : null}
-                {authNotice ? (
-                  <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-500 text-center">
-                    {authNotice}
-                  </div>
-                ) : null}
-                <button
-                  onClick={() => handleEntropicOAuthSignIn("google")}
-                  disabled={authLoading !== null || oauthLoading !== null}
-                  className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[var(--bg-card)] hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)] font-medium rounded-2xl border border-[var(--border-default)] transition-all hover:border-[var(--border-primary)] active:scale-95 duration-200 disabled:opacity-50"
-                >
-                  <GoogleIcon className="w-5 h-5" />
-                  {authLoading === "google" ? "Opening Google..." : "Continue with Google"}
-                </button>
-                <button
-                  onClick={() => handleEntropicOAuthSignIn("discord")}
-                  disabled={authLoading !== null || oauthLoading !== null}
-                  className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[#5865F2] hover:bg-[#4752C4] text-white font-medium rounded-2xl transition-all shadow-md hover:shadow-lg active:scale-95 duration-200 disabled:opacity-50"
-                >
-                  <DiscordIcon className="w-5 h-5" />
-                  {authLoading === "discord" ? "Opening Discord..." : "Continue with Discord"}
-                </button>
-                <div className="relative py-2">
-                  <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-[var(--border-subtle)]" />
-                  </div>
-                  <div className="relative flex justify-center text-[10px] uppercase tracking-wider">
-                    <span className="bg-[var(--bg-card)] px-2 text-[var(--text-tertiary)]">or</span>
-                  </div>
-                </div>
-                <button
-                  onClick={() => {
-                    setShowEmailAuth((prev) => !prev);
-                    setAuthError(null);
-                    setAuthNotice(null);
-                  }}
-                  disabled={authLoading !== null || oauthLoading !== null}
-                  className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[var(--bg-tertiary)] hover:bg-[var(--bg-secondary)] text-[var(--text-primary)] font-medium rounded-2xl transition-all active:scale-95 duration-200 disabled:opacity-50"
-                >
-                  <Mail className="w-5 h-5 text-[var(--text-secondary)]" />
-                  <span>Continue with Email</span>
-                </button>
-                {showEmailAuth ? (
-                  <form onSubmit={handleEntropicEmailAuthSubmit} className="space-y-3 rounded-2xl bg-[var(--bg-tertiary)] p-4 text-left">
-                    <input
-                      type="email"
-                      value={authEmail}
-                      onChange={(event) => setAuthEmail(event.target.value)}
-                      placeholder="name@example.com"
-                      className="w-full px-4 py-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border-default)] focus:ring-2 focus:ring-[var(--purple-accent-subtle)] focus:outline-none text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] text-sm transition-all"
-                      required
-                    />
-                    <input
-                      type="password"
-                      value={authPassword}
-                      onChange={(event) => setAuthPassword(event.target.value)}
-                      placeholder={emailAuthMode === "signup" ? "Create password" : "Password"}
-                      className="w-full px-4 py-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border-default)] focus:ring-2 focus:ring-[var(--purple-accent-subtle)] focus:outline-none text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] text-sm transition-all"
-                      required
-                      minLength={emailAuthMode === "signup" ? 8 : undefined}
-                    />
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="submit"
-                        disabled={authLoading !== null}
-                        className="px-4 py-2.5 rounded-xl bg-[#1A1A2E] hover:opacity-80 text-white text-xs font-semibold transition-all disabled:opacity-50"
-                      >
-                        {emailAuthMode === "signup"
-                          ? authLoading === "email-signup"
-                            ? "Creating..."
-                            : "Create account"
-                          : authLoading === "email-signin"
-                            ? "Signing in..."
-                            : "Sign in"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEmailAuthMode((prev) => (prev === "signup" ? "signin" : "signup"));
-                          setAuthError(null);
-                          setAuthNotice(null);
-                        }}
-                        className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
-                      >
-                        {emailAuthMode === "signup"
-                          ? "Have an account? Sign in"
-                          : "Need an account? Sign up"}
-                      </button>
-                    </div>
-                  </form>
-                ) : null}
-              </div>
-            ) : null}
-
-            <button
-              onClick={() => setShowOwnProviderOptions((prev) => !prev)}
-              className={accountSignInAvailable
-                ? "w-full mb-2 flex flex-col items-center justify-center gap-0.5 text-[11px] uppercase tracking-[0.16em] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors"
-                : "w-full mb-2 flex flex-col items-center justify-center gap-0.5 text-[11px] uppercase tracking-[0.16em] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors"}
-            >
-              <span>Use your own provider</span>
-              {ownProviderExpanded ? (
-                <ChevronUp className="w-3.5 h-3.5" />
+        <div className="h-full flex flex-col items-center overflow-y-auto p-6 text-center">
+          <div className="my-auto w-full max-w-[720px] shrink-0 rounded-3xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-8 shadow-xl">
+            <div className="text-center mb-6">
+              {managedMode ? (
+                <img src={entropicLogo} alt="Entropic" className="mx-auto mb-4 h-16 w-16 rounded-2xl shadow-lg" />
               ) : (
-                <ChevronDown className="w-3.5 h-3.5" />
+                <Sparkles className="mx-auto mb-4 h-8 w-8 text-[var(--text-accent)]" />
               )}
-            </button>
+              <h2 className="text-2xl font-semibold text-[var(--text-primary)]">
+                Connect an AI Service
+              </h2>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">
+                Choose how to connect: through Entropic, with your own API keys, or using local models.
+              </p>
+            </div>
 
-            {ownProviderExpanded ? (
-              <>
-                <div className="space-y-2 mb-4">
+            <ConnectionModeSelector
+              value={connectionMode}
+              onChange={(value) => {
+                void onConnectionModeChange?.(value);
+              }}
+              className="mb-6"
+            />
+
+            {managedMode ? (
+              <div className="mx-auto max-w-[420px] space-y-3">
+                {accountSignInAvailable ? (
+                  <>
+                    <p className="text-sm text-[var(--text-secondary)]">
+                      {trialCreditsExhausted
+                        ? "Your free credits have been used. Sign in to continue, or choose a different option above."
+                        : "Sign in with your Entropic account to use the managed provider."}
+                    </p>
+                    {authError ? (
+                      <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-500 text-center">
+                        {authError}
+                      </div>
+                    ) : null}
+                    {authNotice ? (
+                      <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-500 text-center">
+                        {authNotice}
+                      </div>
+                    ) : null}
+                    <button
+                      onClick={() => handleEntropicOAuthSignIn("google")}
+                      disabled={authLoading !== null || oauthLoading !== null}
+                      className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[var(--bg-card)] hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)] font-medium rounded-2xl border border-[var(--border-default)] transition-all hover:border-[var(--border-primary)] active:scale-95 duration-200 disabled:opacity-50"
+                    >
+                      <GoogleIcon className="w-5 h-5" />
+                      {authLoading === "google" ? "Opening Google..." : "Continue with Google"}
+                    </button>
+                    <button
+                      onClick={() => handleEntropicOAuthSignIn("discord")}
+                      disabled={authLoading !== null || oauthLoading !== null}
+                      className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[#5865F2] hover:bg-[#4752C4] text-white font-medium rounded-2xl transition-all shadow-md hover:shadow-lg active:scale-95 duration-200 disabled:opacity-50"
+                    >
+                      <DiscordIcon className="w-5 h-5" />
+                      {authLoading === "discord" ? "Opening Discord..." : "Continue with Discord"}
+                    </button>
+                    <div className="relative py-2">
+                      <div className="absolute inset-0 flex items-center">
+                        <div className="w-full border-t border-[var(--border-subtle)]" />
+                      </div>
+                      <div className="relative flex justify-center text-[10px] uppercase tracking-wider">
+                        <span className="bg-[var(--bg-card)] px-2 text-[var(--text-tertiary)]">or</span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setShowEmailAuth((prev) => !prev);
+                        setAuthError(null);
+                        setAuthNotice(null);
+                      }}
+                      disabled={authLoading !== null || oauthLoading !== null}
+                      className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[var(--bg-tertiary)] hover:bg-[var(--bg-secondary)] text-[var(--text-primary)] font-medium rounded-2xl transition-all active:scale-95 duration-200 disabled:opacity-50"
+                    >
+                      <Mail className="w-5 h-5 text-[var(--text-secondary)]" />
+                      <span>Continue with Email</span>
+                    </button>
+                    {showEmailAuth ? (
+                      <form onSubmit={handleEntropicEmailAuthSubmit} className="space-y-3 rounded-2xl bg-[var(--bg-tertiary)] p-4 text-left">
+                        <input
+                          type="email"
+                          value={authEmail}
+                          onChange={(event) => setAuthEmail(event.target.value)}
+                          placeholder="name@example.com"
+                          className="w-full px-4 py-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border-default)] focus:ring-2 focus:ring-[var(--purple-accent-subtle)] focus:outline-none text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] text-sm transition-all"
+                          required
+                        />
+                        <input
+                          type="password"
+                          value={authPassword}
+                          onChange={(event) => setAuthPassword(event.target.value)}
+                          placeholder={emailAuthMode === "signup" ? "Create password" : "Password"}
+                          className="w-full px-4 py-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border-default)] focus:ring-2 focus:ring-[var(--purple-accent-subtle)] focus:outline-none text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] text-sm transition-all"
+                          required
+                          minLength={emailAuthMode === "signup" ? 8 : undefined}
+                        />
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="submit"
+                            disabled={authLoading !== null}
+                            className="px-4 py-2.5 rounded-xl bg-[#1A1A2E] hover:opacity-80 text-white text-xs font-semibold transition-all disabled:opacity-50"
+                          >
+                            {emailAuthMode === "signup"
+                              ? authLoading === "email-signup"
+                                ? "Creating..."
+                                : "Create account"
+                              : authLoading === "email-signin"
+                                ? "Signing in..."
+                                : "Sign in"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEmailAuthMode((prev) => (prev === "signup" ? "signin" : "signup"));
+                              setAuthError(null);
+                              setAuthNotice(null);
+                            }}
+                            className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+                          >
+                            {emailAuthMode === "signup"
+                              ? "Have an account? Sign in"
+                              : "Need an account? Sign up"}
+                          </button>
+                        </div>
+                      </form>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-4 py-4 text-sm text-[var(--text-secondary)] text-left">
+                    {isAuthConfigured
+                      ? "You're connected through the managed provider. Switch to Bring Your Own Keys or Local Models to use a different service."
+                      : "The managed provider isn't available in this version. Use Bring Your Own Keys or Local Models instead."}
+                  </div>
+                )}
+              </div>
+            ) : byokMode ? (
+              <div className="space-y-5 text-left">
+                <p className="text-sm text-[var(--text-secondary)]">
+                  Sign in to a provider or enter an API key directly.
+                </p>
+
+                <div className="space-y-2">
                   {anthropicCodePending ? (
                     <div className="p-3 rounded-lg bg-[var(--border-subtle)]">
                       <p className="text-sm font-medium text-[var(--text-primary)] mb-1">Paste the code from your browser</p>
@@ -4816,7 +4866,7 @@ export function Chat({
                     </div>
                     <div className="flex-1">
                       <p className="font-medium text-[var(--text-primary)]">Sign in with OpenAI</p>
-                      <p className="text-xs text-[var(--text-tertiary)]">Use your existing subscription</p>
+                      <p className="text-xs text-[var(--text-tertiary)]">Use your existing subscription or API key</p>
                     </div>
                     {oauthLoading === "openai" ? (
                       <Loader2 className="w-4 h-4 animate-spin text-[var(--text-tertiary)]" />
@@ -4826,29 +4876,62 @@ export function Chat({
                   </button>
                 </div>
 
-                <div className="flex items-center gap-3 my-4">
+                <div className="flex items-center gap-3">
                   <div className="flex-1 h-px bg-[var(--border-default)]" />
                   <span className="text-xs text-[var(--text-tertiary)] font-medium">or use an API key</span>
                   <div className="flex-1 h-px bg-[var(--border-default)]" />
                 </div>
 
                 <div className="space-y-2">
-                  {PROVIDERS.map(p => (
-                    <button key={p.id} onClick={() => { setSelectedProvider(p); setShowKeyModal(true); }}
-                      className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors hover:bg-[var(--border-subtle)]">
+                  {PROVIDERS.map((provider) => (
+                    <button
+                      key={provider.id}
+                      onClick={() => {
+                        setSelectedProvider(provider);
+                        setShowKeyModal(true);
+                      }}
+                      className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors hover:bg-[var(--border-subtle)]"
+                    >
                       <div className="w-9 h-9 rounded-md bg-[var(--border-subtle)] flex items-center justify-center font-semibold text-[var(--text-accent)]">
-                        {p.icon}
+                        {provider.icon}
                       </div>
                       <div className="flex-1">
-                        <p className="font-medium text-[var(--text-primary)]">{p.name}</p>
+                        <p className="font-medium text-[var(--text-primary)]">{provider.name}</p>
                       </div>
                       <ExternalLink className="w-4 h-4 text-[var(--text-tertiary)]" />
                     </button>
                   ))}
                 </div>
-                <p className="text-xs mt-6 text-[var(--text-tertiary)]">Your credentials are stored locally and securely.</p>
-              </>
-            ) : null}
+              </div>
+            ) : (
+              <div className="space-y-5 text-left">
+                <p className="text-sm text-[var(--text-secondary)]">
+                  Connect a local model service. Models will be detected automatically.
+                </p>
+                <LocalAiServiceForm
+                  config={{
+                    ...(localModelConfig ?? {
+                      enabled: true,
+                      serviceType: "ollama",
+                      apiMode: "ollama",
+                      baseUrl: "http://localhost:11434/v1",
+                      apiKey: "local-placeholder",
+                      modelName: "",
+                      allowNonLocal: false,
+                    }),
+                    enabled: true,
+                  }}
+                  onChange={(config) => {
+                    void onLocalModelConfigChange?.({ ...config, enabled: true });
+                  }}
+                />
+                {localModelReady ? (
+                  <p className="text-xs text-[var(--text-secondary)]">
+                    Your local model will be ready to use once the sandbox starts.
+                  </p>
+                ) : null}
+              </div>
+            )}
 
             {TERMS_URL && PRIVACY_URL ? (
               <p className="text-xs text-center text-[var(--text-tertiary)] mt-6 pt-4 border-t border-[var(--border-subtle)] leading-relaxed">
@@ -4949,6 +5032,23 @@ export function Chat({
     </div>
   );
 
+  async function finalizeByokConnection(provider: string) {
+    setConnectedProvider(provider);
+    if (connectionMode !== "byok") {
+      await onConnectionModeChange?.("byok");
+      return;
+    }
+    if (gatewayRunning) {
+      await invoke("restart_gateway", { model: selectedModel });
+      return;
+    }
+    if (onStartGateway) {
+      await onStartGateway();
+      return;
+    }
+    await invoke("start_gateway", { model: selectedModel });
+  }
+
   async function connectWithKey() {
     if (!selectedProvider || !keyInput.trim()) return;
     try {
@@ -4958,14 +5058,9 @@ export function Chat({
         key: keyInput.trim(),
       });
       await invoke("set_active_provider", { provider });
-      setConnectedProvider(provider);
       setKeyInput("");
       setShowKeyModal(false);
-      if (gatewayRunning) {
-        await invoke("restart_gateway", { model: selectedModel });
-      } else {
-        await invoke("start_gateway", { model: selectedModel });
-      }
+      await finalizeByokConnection(provider);
     } catch (e) {
       console.error("Failed to set API key:", e);
       setError("Failed to save API key");
@@ -4986,12 +5081,7 @@ export function Chat({
       }
       // OpenAI: single-step localhost callback
       await invoke<{ access_token: string; provider: string }>("start_openai_oauth");
-      setConnectedProvider(provider);
-      if (gatewayRunning) {
-        await invoke("restart_gateway", { model: selectedModel });
-      } else {
-        await invoke("start_gateway", { model: selectedModel });
-      }
+      await finalizeByokConnection(provider);
     } catch (e) {
       console.error(`OAuth login failed for ${provider}:`, e);
       setError(typeof e === "string" ? e : `OAuth login failed`);
@@ -5010,12 +5100,7 @@ export function Chat({
       });
       setAnthropicCodePending(false);
       setAnthropicCodeInput("");
-      setConnectedProvider("anthropic");
-      if (gatewayRunning) {
-        await invoke("restart_gateway", { model: selectedModel });
-      } else {
-        await invoke("start_gateway", { model: selectedModel });
-      }
+      await finalizeByokConnection("anthropic");
     } catch (e) {
       console.error("Anthropic OAuth code exchange failed:", e);
       setError(typeof e === "string" ? e : "Failed to exchange authorization code");
@@ -5102,7 +5187,7 @@ export function Chat({
 
   if (isConnecting) return renderConnecting();
   if (localTrialLoading) return renderConnecting();
-  if (!connectedProvider && !proxyEnabled) return renderNoProvider();
+  if (!connectedProvider && !proxyEnabled && !localModelReady) return renderNoProvider();
   const autoStartExpected = proxyEnabled && !gatewayRunning;
   const showGatewayWarmupBanner =
     gatewayStarting || autoStartExpected || (!gatewayRunning && !showGatewayOfflineCta);

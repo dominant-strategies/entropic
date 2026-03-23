@@ -10,6 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 RUNTIME_COMMON="$SCRIPT_DIR/runtime-common.sh"
 RESOURCES_DIR="$PROJECT_ROOT/src-tauri/resources"
+DEV_RESOURCES_DIR="$PROJECT_ROOT/src-tauri/target/debug/resources"
 IMAGE="${IMAGE:-openclaw-runtime:latest}"
 OUTPUT="${OUTPUT:-$RESOURCES_DIR/openclaw-runtime.tar.gz}"
 GZIP_LEVEL="${ENTROPIC_IMAGE_GZIP_LEVEL:-6}"
@@ -26,6 +27,7 @@ export ENTROPIC_COLIMA_HOME="${ENTROPIC_COLIMA_HOME:-$(entropic_default_colima_h
 DOCKER_BIN="$(entropic_find_docker_binary "$PROJECT_ROOT" || true)"
 COLIMA_BIN="$(entropic_find_colima_binary "$PROJECT_ROOT" || true)"
 ACTIVE_DOCKER_HOST=""
+NATIVE_DOCKER_READY="0"
 
 if [ -z "$DOCKER_BIN" ]; then
     echo "ERROR: Docker CLI not found." >&2
@@ -36,15 +38,25 @@ if [ -n "${DOCKER_HOST:-}" ]; then
     ACTIVE_DOCKER_HOST="$DOCKER_HOST"
 elif [ -n "${WSL_DISTRO_NAME:-}" ] && env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock "$DOCKER_BIN" info >/dev/null 2>&1; then
     ACTIVE_DOCKER_HOST="unix:///var/run/docker.sock"
+elif entropic_linux_uses_native_docker && entropic_default_docker_is_ready "$DOCKER_BIN"; then
+    NATIVE_DOCKER_READY="1"
 else
     ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
 fi
 
-if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "$COLIMA_BIN" ]; then
+if [ "$NATIVE_DOCKER_READY" != "1" ] && [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "$COLIMA_BIN" ]; then
     ACTIVE_DOCKER_HOST="$(entropic_start_colima_for_mode "$DOCKER_BIN" "$COLIMA_BIN" "$PROJECT_ROOT" || true)"
 fi
 
-if [ -z "$ACTIVE_DOCKER_HOST" ] && ! entropic_default_context_allowed; then
+if [ "$NATIVE_DOCKER_READY" != "1" ] && [ -z "$ACTIVE_DOCKER_HOST" ] && ! entropic_default_context_allowed; then
+    if entropic_linux_uses_native_docker; then
+        echo "ERROR: Docker daemon is not reachable on Linux."
+        echo "Make sure Docker Engine is installed and running, and that your user can access the Docker socket."
+        echo "Example fixes:"
+        echo "  sudo systemctl start docker"
+        echo "  sudo usermod -aG docker \$USER"
+        exit 1
+    fi
     echo "ERROR: No $(entropic_mode_label) Colima Docker host is available for bundling."
     echo "Set ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 for one-off Docker Desktop fallback."
     exit 1
@@ -103,3 +115,9 @@ OUTPUT_SIZE=$(stat -f%z "$OUTPUT" 2>/dev/null || stat -c%s "$OUTPUT" 2>/dev/null
 OUTPUT_SIZE_MB=$((OUTPUT_SIZE / 1024 / 1024))
 echo ""
 echo "✅ Image exported: $OUTPUT (${OUTPUT_SIZE_MB}MB compressed)"
+
+if [ "${ENTROPIC_RUNTIME_MODE:-dev}" = "dev" ] && [ "$OUTPUT" = "$RESOURCES_DIR/openclaw-runtime.tar.gz" ]; then
+    mkdir -p "$DEV_RESOURCES_DIR"
+    cp -f "$OUTPUT" "$DEV_RESOURCES_DIR/openclaw-runtime.tar.gz"
+    echo "Synced dev resource: $DEV_RESOURCES_DIR/openclaw-runtime.tar.gz"
+fi

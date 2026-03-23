@@ -458,11 +458,244 @@ export interface Model {
   tier: string;
 }
 
+export type ConnectionMode = "managed" | "byok" | "local-models";
+
+export const CONNECTION_MODE_OPTIONS: Array<{
+  value: ConnectionMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "managed",
+    label: "Managed Provider",
+    description: "Sign in with your Entropic account.",
+  },
+  {
+    value: "byok",
+    label: "Bring Your Own Keys",
+    description: "Sign in to a provider or use an API key.",
+  },
+  {
+    value: "local-models",
+    label: "Local Models",
+    description: "Use Ollama, LM Studio, vLLM, or another local service.",
+  },
+];
+
+export function normalizeConnectionMode(
+  mode: unknown,
+  fallback: ConnectionMode = "managed",
+): ConnectionMode {
+  return mode === "managed" || mode === "byok" || mode === "local-models"
+    ? mode
+    : fallback;
+}
+
+export type LocalModelServiceType =
+  | "ollama"
+  | "lmstudio"
+  | "vllm"
+  | "litellm"
+  | "openai-compatible";
+
+export type LocalModelApiMode =
+  | "ollama"
+  | "openai-responses"
+  | "openai-completions";
+
 export interface LocalModelConfig {
   enabled: boolean;
+  serviceType: LocalModelServiceType;
+  apiMode: LocalModelApiMode;
   baseUrl: string;
   apiKey: string;
   modelName: string;
+  allowNonLocal: boolean;
+}
+
+export const DEFAULT_LOCAL_MODEL_API_KEY = "local-placeholder";
+
+export const LOCAL_MODEL_SERVICE_OPTIONS: Array<{
+  value: LocalModelServiceType;
+  label: string;
+}> = [
+  { value: "ollama", label: "Ollama" },
+  { value: "lmstudio", label: "LM Studio" },
+  { value: "vllm", label: "vLLM" },
+  { value: "litellm", label: "LiteLLM" },
+  { value: "openai-compatible", label: "OpenAI-Compatible" },
+];
+
+export const LOCAL_MODEL_API_MODE_OPTIONS: Array<{
+  value: Exclude<LocalModelApiMode, "ollama">;
+  label: string;
+}> = [
+  { value: "openai-responses", label: "Responses API" },
+  { value: "openai-completions", label: "Chat Completions" },
+];
+
+export function defaultLocalModelBaseUrl(serviceType: LocalModelServiceType): string {
+  switch (serviceType) {
+    case "ollama":
+      return "http://localhost:11434/v1";
+    case "lmstudio":
+      return "http://localhost:1234/v1";
+    case "vllm":
+      return "http://localhost:8000/v1";
+    case "litellm":
+      return "http://localhost:4000/v1";
+    case "openai-compatible":
+      return "http://localhost:1234/v1";
+  }
+}
+
+export function defaultLocalModelApiMode(serviceType: LocalModelServiceType): LocalModelApiMode {
+  switch (serviceType) {
+    case "ollama":
+      return "ollama";
+    case "lmstudio":
+      return "openai-responses";
+    case "vllm":
+    case "litellm":
+    case "openai-compatible":
+      return "openai-completions";
+  }
+}
+
+function inferLocalModelServiceType(baseUrl: string | null | undefined): LocalModelServiceType {
+  const normalized = (baseUrl || "").trim().toLowerCase();
+  if (!normalized) return "ollama";
+  if (normalized.includes("11434") || normalized.includes("ollama")) return "ollama";
+  if (normalized.includes("1234") || normalized.includes("lmstudio")) return "lmstudio";
+  if (normalized.includes("8000") || normalized.includes("vllm")) return "vllm";
+  if (normalized.includes("4000") || normalized.includes("litellm")) return "litellm";
+  return "openai-compatible";
+}
+
+export function normalizeLocalModelConfig(
+  config?: Partial<LocalModelConfig> | null,
+): LocalModelConfig {
+  const serviceType =
+    config?.serviceType || inferLocalModelServiceType(config?.baseUrl);
+  const apiMode = config?.apiMode || defaultLocalModelApiMode(serviceType);
+  return {
+    enabled: Boolean(config?.enabled),
+    serviceType,
+    apiMode: serviceType === "ollama" ? "ollama" : apiMode,
+    baseUrl: config?.baseUrl?.trim() || defaultLocalModelBaseUrl(serviceType),
+    apiKey: config?.apiKey?.trim() || DEFAULT_LOCAL_MODEL_API_KEY,
+    modelName: config?.modelName?.trim() || "",
+    allowNonLocal: config?.allowNonLocal === true,
+  };
+}
+
+export type LocalModelEndpointSecurity =
+  | { status: "empty" }
+  | { status: "invalid"; message: string }
+  | { status: "local"; host: string }
+  | { status: "non-local"; host: string; encrypted: boolean };
+
+function isLoopbackLikeHost(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase();
+  if (!host) return false;
+  if (host === "localhost" || host === "host.docker.internal") return true;
+  if (host === "::1") return true;
+  return /^127(?:\.\d{1,3}){3}$/.test(host);
+}
+
+export function inspectLocalModelEndpoint(
+  baseUrl: string | null | undefined,
+): LocalModelEndpointSecurity {
+  const trimmed = (baseUrl || "").trim();
+  if (!trimmed) {
+    return { status: "empty" };
+  }
+
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return {
+      status: "invalid",
+      message: "Enter a full http:// or https:// base URL.",
+    };
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return {
+      status: "invalid",
+      message: "Only http:// and https:// model endpoints are supported.",
+    };
+  }
+
+  if (url.username || url.password) {
+    return {
+      status: "invalid",
+      message: "Do not embed credentials in the URL. Use the API Key field instead.",
+    };
+  }
+
+  if (url.search || url.hash) {
+    return {
+      status: "invalid",
+      message: "Remove query strings or fragments from the base URL.",
+    };
+  }
+
+  const host = url.hostname.trim().toLowerCase();
+  if (!host) {
+    return {
+      status: "invalid",
+      message: "Base URL must include a hostname.",
+    };
+  }
+
+  if (host === "0.0.0.0" || host === "::") {
+    return {
+      status: "invalid",
+      message: "Use localhost instead of 0.0.0.0 or :: for a local model service.",
+    };
+  }
+
+  if (isLoopbackLikeHost(host)) {
+    return { status: "local", host };
+  }
+
+  return {
+    status: "non-local",
+    host,
+    encrypted: url.protocol === "https:",
+  };
+}
+
+export function localModelProviderId(
+  config?: Pick<LocalModelConfig, "serviceType"> | null,
+): string {
+  switch (config?.serviceType || "ollama") {
+    case "openai-compatible":
+      return "local";
+    default:
+      return config?.serviceType || "ollama";
+  }
+}
+
+export function localModelProviderLabel(
+  config?: Pick<LocalModelConfig, "serviceType"> | null,
+): string {
+  const providerId = localModelProviderId(config);
+  return (
+    LOCAL_MODEL_SERVICE_OPTIONS.find((option) => localModelProviderId({ serviceType: option.value }) === providerId)
+      ?.label || "Local"
+  );
+}
+
+export function resolveLocalModelGatewayModel(
+  modelId: string | null | undefined,
+  config?: Pick<LocalModelConfig, "serviceType"> | null,
+): string | null {
+  if (!modelId) return null;
+  if (!modelId.startsWith("local/")) return modelId;
+  return `${localModelProviderId(config)}/${modelId.slice(6)}`;
 }
 
 /**

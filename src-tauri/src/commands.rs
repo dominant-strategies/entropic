@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
+use std::net::IpAddr;
 #[cfg(target_os = "macos")]
 use std::os::raw::c_uchar;
 #[cfg(unix)]
@@ -585,6 +586,10 @@ fn normalize_local_gateway_model(
         .map(str::trim)
         .filter(|model| !model.is_empty())
     {
+        if requested_model.starts_with("local/") {
+            return requested_model.to_string();
+        }
+
         if let Some((provider, raw_model)) = requested_model.split_once('/') {
             let provider = provider.trim();
             let raw_model = raw_model.trim();
@@ -627,6 +632,21 @@ fn normalize_local_gateway_model(
 
     let fallback_provider = choose_local_gateway_provider(active_provider, api_keys);
     default_local_gateway_model_for_provider(fallback_provider).to_string()
+}
+
+#[cfg(test)]
+mod local_gateway_model_tests {
+    use super::normalize_local_gateway_model;
+    use std::collections::HashMap;
+
+    #[test]
+    fn preserves_local_model_ids_without_provider_keys() {
+        let api_keys = HashMap::new();
+
+        let model = normalize_local_gateway_model(Some("local/qwen3:14b"), Some("anthropic"), &api_keys);
+
+        assert_eq!(model, "local/qwen3:14b");
+    }
 }
 
 fn local_image_generation_provider_name(provider: &str) -> &str {
@@ -1224,18 +1244,27 @@ fn get_docker_host() -> Option<String> {
             if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
                 let socket = format!("{}/docker.sock", runtime_dir);
                 if std::path::Path::new(&socket).exists() {
-                    return Some(format!("unix://{}", socket));
+                    let host = format!("unix://{}", socket);
+                    if docker_host_usable(&host) {
+                        return Some(host);
+                    }
                 }
             }
 
             if let Some(home) = dirs::home_dir() {
-                let desktop_socket = home.join(".docker/desktop/docker.sock");
-                if desktop_socket.exists() {
-                    return Some(format!("unix://{}", desktop_socket.display()));
-                }
                 let run_socket = home.join(".docker/run/docker.sock");
                 if run_socket.exists() {
-                    return Some(format!("unix://{}", run_socket.display()));
+                    let host = format!("unix://{}", run_socket.display());
+                    if docker_host_usable(&host) {
+                        return Some(host);
+                    }
+                }
+                let desktop_socket = home.join(".docker/desktop/docker.sock");
+                if desktop_socket.exists() {
+                    let host = format!("unix://{}", desktop_socket.display());
+                    if docker_host_usable(&host) {
+                        return Some(host);
+                    }
                 }
             }
 
@@ -1364,6 +1393,17 @@ fn windows_path_to_wsl(path: &Path) -> String {
     }
 
     normalized
+}
+
+fn docker_host_usable(host: &str) -> bool {
+    let docker_bin = find_docker_binary();
+    let mut cmd = Command::new(&docker_bin);
+    cmd.arg("info")
+        .env("DOCKER_HOST", host)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    apply_windows_no_window(&mut cmd);
+    cmd.status().map(|status| status.success()).unwrap_or(false)
 }
 
 fn docker_host_path_for_command(path: &Path) -> String {
@@ -2858,11 +2898,24 @@ fn resolve_applied_runtime_from_cache(image_id: &str) -> Option<(String, Option<
     Some((manifest.version, commit))
 }
 
+fn existing_nonempty_file(path: PathBuf) -> Option<PathBuf> {
+    let metadata = fs::metadata(&path).ok()?;
+    if metadata.is_file() && metadata.len() > 0 {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 fn find_local_runtime_tar() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
 
     let mut search_dirs = Vec::new();
+
+    if cfg!(debug_assertions) {
+        search_dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"));
+    }
 
     // Release bundle: .../Contents/MacOS/Entropic → .../Contents/Resources/
     if let Some(contents_dir) = exe_dir.parent() {
@@ -2884,8 +2937,8 @@ fn find_local_runtime_tar() -> Option<PathBuf> {
     for dir in search_dirs {
         for name in &names {
             let tar_path = dir.join(name);
-            if tar_path.is_file() {
-                return Some(tar_path);
+            if let Some(valid_path) = existing_nonempty_file(tar_path) {
+                return Some(valid_path);
             }
         }
     }
@@ -2893,43 +2946,15 @@ fn find_local_runtime_tar() -> Option<PathBuf> {
     None
 }
 
-fn should_prefer_cached_runtime_tar() -> bool {
-    if cfg!(debug_assertions) || !runtime_cached_tar_valid() {
-        return false;
-    }
-
-    let Some(manifest) = read_cached_runtime_manifest() else {
-        return false;
-    };
-
-    let cached_version = manifest.version.trim();
-    !cached_version.is_empty() && cached_version != runtime_release_tag()
-}
-
-fn find_runtime_tar() -> Option<PathBuf> {
-    if should_prefer_cached_runtime_tar() {
-        if let Some(cached_path) = runtime_cached_tar_path() {
-            if cached_path.is_file() {
-                return Some(cached_path);
-            }
-        }
-    }
-    if let Some(local_path) = find_local_runtime_tar() {
-        return Some(local_path);
-    }
-    if let Some(cached_path) = runtime_cached_tar_path() {
-        if cached_path.is_file() {
-            return Some(cached_path);
-        }
-    }
-    None
-}
-
-fn find_scanner_tar() -> Option<PathBuf> {
+fn find_local_scanner_tar() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
 
     let mut search_dirs = Vec::new();
+
+    if cfg!(debug_assertions) {
+        search_dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"));
+    }
 
     // Release bundle: .../Contents/MacOS/Entropic → .../Contents/Resources/
     if let Some(contents_dir) = exe_dir.parent() {
@@ -2953,12 +2978,51 @@ fn find_scanner_tar() -> Option<PathBuf> {
     for dir in search_dirs {
         for name in &names {
             let tar_path = dir.join(name);
-            if tar_path.exists() {
-                return Some(tar_path);
+            if let Some(valid_path) = existing_nonempty_file(tar_path) {
+                return Some(valid_path);
             }
         }
     }
 
+    None
+}
+
+fn find_scanner_tar() -> Option<PathBuf> {
+    if let Some(local_path) = find_local_scanner_tar() {
+        return Some(local_path);
+    }
+    None
+}
+
+fn should_prefer_cached_runtime_tar() -> bool {
+    if cfg!(debug_assertions) || !runtime_cached_tar_valid() {
+        return false;
+    }
+
+    let Some(manifest) = read_cached_runtime_manifest() else {
+        return false;
+    };
+
+    let cached_version = manifest.version.trim();
+    !cached_version.is_empty() && cached_version != runtime_release_tag()
+}
+
+fn find_runtime_tar() -> Option<PathBuf> {
+    if should_prefer_cached_runtime_tar() {
+        if let Some(cached_path) = runtime_cached_tar_path() {
+            if let Some(valid_path) = existing_nonempty_file(cached_path) {
+                return Some(valid_path);
+            }
+        }
+    }
+    if let Some(local_path) = find_local_runtime_tar() {
+        return Some(local_path);
+    }
+    if let Some(cached_path) = runtime_cached_tar_path() {
+        if let Some(valid_path) = existing_nonempty_file(cached_path) {
+            return Some(valid_path);
+        }
+    }
     None
 }
 
@@ -7057,34 +7121,31 @@ Use it for durable decisions, preferences, and facts that should persist across 
             );
         }
     } else {
-        // Non-proxy mode: check if a local Ollama-compatible model is configured.
-        let local_base_url = read_container_env("ENTROPIC_LOCAL_MODEL_BASE_URL");
-        let local_model_name = read_container_env("ENTROPIC_LOCAL_MODEL_NAME");
-        if let (Some(base_url), Some(model_name)) = (&local_base_url, &local_model_name) {
-            if !model_name.is_empty() && !base_url.is_empty() {
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &["models", "providers", "ollama"],
-                    serde_json::json!({
-                        "baseUrl": base_url,
-                        "api": "ollama",
-                        "models": [{
-                            "id": model_name,
-                            "name": model_name,
-                            "input": ["text"],
-                            "reasoning": false,
-                            "contextWindow": 128000,
-                            "maxTokens": 4096,
-                            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-                        }]
-                    }),
-                );
-            } else {
-                remove_openclaw_config_value(&mut cfg, &["models", "providers", "ollama"]);
-            }
-        } else {
-            // No proxy and no local model: remove ollama config to avoid validation errors
-            remove_openclaw_config_value(&mut cfg, &["models", "providers", "ollama"]);
+        clear_local_model_provider_configs(&mut cfg);
+        if let Some(local_model_config) = read_container_local_model_config() {
+            let provider_id = local_model_config.provider_id();
+            let base_url = local_model_config.gateway_base_url();
+            let api_key = local_model_config.api_key.clone();
+            let api = local_model_config.provider_api();
+            let model_name = local_model_config.model_name.clone();
+            set_openclaw_config_value(
+                &mut cfg,
+                &["models", "providers", provider_id],
+                serde_json::json!({
+                    "baseUrl": base_url,
+                    "apiKey": api_key,
+                    "api": api,
+                    "models": [{
+                        "id": model_name,
+                        "name": model_name,
+                        "input": ["text"],
+                        "reasoning": false,
+                        "contextWindow": 128000,
+                        "maxTokens": 8192,
+                        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+                    }]
+                }),
+            );
         }
     }
 
@@ -7673,24 +7734,19 @@ Use it for durable decisions, preferences, and facts that should persist across 
         }
     }
 
-    // Ensure ollama:default auth profile exists for local models.
+    // Ensure local provider auth profile exists for local models.
     // Previous blocks (Codex OAuth, proxy) may have overwritten auth-profiles.json.
     {
-        let local_base_url = read_container_env("ENTROPIC_LOCAL_MODEL_BASE_URL");
-        let local_model_name = read_container_env("ENTROPIC_LOCAL_MODEL_NAME");
-        if local_base_url.is_some() && local_model_name.as_deref().map_or(false, |n| !n.is_empty())
-        {
-            let local_api_key = read_container_env("ENTROPIC_LOCAL_MODEL_API_KEY")
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "local-placeholder".to_string());
-            // Read existing auth-profiles.json and merge in the openrouter:default entry
+        if let Some(local_model_config) = read_container_local_model_config() {
+            let local_api_key = local_model_config.api_key.clone();
+            let auth_profile_id = local_model_config.auth_profile_id();
             let mut auth_json = read_main_agent_auth_profiles();
             if let Some(profiles) = auth_json.get_mut("profiles").and_then(|p| p.as_object_mut()) {
                 profiles.insert(
-                    "ollama:default".to_string(),
+                    auth_profile_id.clone(),
                     serde_json::json!({
                         "type": "api_key",
-                        "provider": "ollama",
+                        "provider": local_model_config.provider_id(),
                         "key": local_api_key
                     }),
                 );
@@ -7698,7 +7754,8 @@ Use it for durable decisions, preferences, and facts that should persist across 
             let payload =
                 serde_json::to_string_pretty(&auth_json).map_err(|e| e.to_string())?;
             println!(
-                "[Entropic] Writing ollama:default auth profile for local model (key len={})",
+                "[Entropic] Writing {} auth profile for local model (key len={})",
+                auth_profile_id,
                 local_api_key.len()
             );
             write_main_agent_auth_profiles(&payload);
@@ -9520,7 +9577,7 @@ pub async fn start_gateway(
         || has_configured_provider_key(&api_keys, "google");
     if !has_any_local_api_key {
         return Err(
-            "No local API key configured. Add an Anthropic/OpenAI/Google key in Settings, or sign in and disable 'Use Local Keys'."
+            "No provider key configured. Add an Anthropic/OpenAI/Google key in Settings, or switch to Managed Provider or Local Models."
                 .to_string(),
         );
     }
@@ -9557,18 +9614,20 @@ pub async fn start_gateway(
         .and_then(|p| p.strip_prefix("reasoning="))
         .unwrap_or("");
 
-    // Local models use OpenClaw's native Ollama provider.
-    let openclaw_model = if base_model.starts_with("local/") {
-        format!("ollama/{}", &base_model[6..])
-    } else {
-        base_model.to_string()
-    };
-    let expected_local_model_config = if base_model.starts_with("local/") {
-        read_local_model_config(&app).map(|(base_url, api_key, model_name)| {
-            (rewrite_localhost_for_docker(&base_url), api_key, model_name)
-        })
+    let expected_local_model_config = if let Some(model_name) = base_model.strip_prefix("local/") {
+        let mut local_model_config = read_local_model_config(&app)?.ok_or_else(|| {
+            "Configure your local AI service in Settings before starting a local model."
+                .to_string()
+        })?;
+        local_model_config.model_name = model_name.to_string();
+        Some(local_model_config)
     } else {
         None
+    };
+    let openclaw_model = if let Some(local_model_config) = expected_local_model_config.as_ref() {
+        local_model_config.gateway_model_ref(None)
+    } else {
+        base_model.to_string()
     };
 
     cleanup_legacy_gateway_artifacts();
@@ -9590,6 +9649,8 @@ pub async fn start_gateway(
         let current_local_base_url = read_container_env("ENTROPIC_LOCAL_MODEL_BASE_URL");
         let current_local_api_key = read_container_env("ENTROPIC_LOCAL_MODEL_API_KEY");
         let current_local_model_name = read_container_env("ENTROPIC_LOCAL_MODEL_NAME");
+        let current_local_service_type = read_container_env("ENTROPIC_LOCAL_MODEL_SERVICE_TYPE");
+        let current_local_api = read_container_env("ENTROPIC_LOCAL_MODEL_API");
         // Check legacy environment variable for backward compatibility during migration
         let legacy_proxy_mode = read_container_env("NOVA_PROXY_MODE");
         // Check if the Anthropic auth type matches (OAuth token vs API key)
@@ -9610,16 +9671,25 @@ pub async fn start_gateway(
             (Some(current), Some(latest)) => current == latest,
             _ => true,
         };
-        let local_config_matches = if let Some((expected_base_url, expected_api_key, expected_model_name)) =
+        let local_config_matches = if let Some(expected_local_model_config) =
             &expected_local_model_config
         {
-            current_local_base_url.as_deref() == Some(expected_base_url.as_str())
-                && current_local_model_name.as_deref() == Some(expected_model_name.as_str())
-                && current_local_api_key.as_deref().unwrap_or("") == expected_api_key.as_str()
+            current_local_base_url.as_deref()
+                == Some(expected_local_model_config.gateway_base_url().as_str())
+                && current_local_model_name.as_deref()
+                    == Some(expected_local_model_config.model_name.as_str())
+                && current_local_api_key.as_deref()
+                    == Some(expected_local_model_config.api_key.as_str())
+                && current_local_service_type.as_deref()
+                    == Some(expected_local_model_config.service_type_name())
+                && current_local_api.as_deref()
+                    == Some(expected_local_model_config.api_mode_name())
         } else {
             current_local_base_url.is_none()
                 && current_local_api_key.is_none()
                 && current_local_model_name.is_none()
+                && current_local_service_type.is_none()
+                && current_local_api.is_none()
         };
         if !is_proxy_container
             && auth_type_matches
@@ -9756,26 +9826,27 @@ pub async fn start_gateway(
         env_entries.push(("ENTROPIC_WEB_BASE_URL", base));
     }
 
-    // Local model support: pass base URL, API key, and model name to container
+    // Local model support: pass service type, adapter, base URL, API key, and model name.
     let local_model_config = expected_local_model_config.clone();
     let local_base_url_docker: String;
     let local_api_key: String;
     let local_model_name_str: String;
-    if let Some((base_url, api_key, model_name)) = &local_model_config {
-        local_base_url_docker = rewrite_localhost_for_docker(base_url)
-            .trim_end_matches('/')
-            .trim_end_matches("/v1")
-            .to_string();
-        local_api_key = if api_key.is_empty() {
-            "local-placeholder".to_string()
-        } else {
-            api_key.clone()
-        };
-        local_model_name_str = model_name.clone();
+    let local_service_type_str: String;
+    let local_api_mode_str: String;
+    if let Some(local_model_config) = &local_model_config {
+        local_base_url_docker = local_model_config.gateway_base_url();
+        local_api_key = local_model_config.api_key.clone();
+        local_model_name_str = local_model_config.model_name.clone();
+        local_service_type_str = local_model_config.service_type_name().to_string();
+        local_api_mode_str = local_model_config.api_mode_name().to_string();
         env_entries.push(("ENTROPIC_LOCAL_MODEL_BASE_URL", &local_base_url_docker));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_API_KEY", &local_api_key));
-        env_entries.push(("OLLAMA_API_KEY", &local_api_key));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_NAME", &local_model_name_str));
+        env_entries.push(("ENTROPIC_LOCAL_MODEL_SERVICE_TYPE", &local_service_type_str));
+        env_entries.push(("ENTROPIC_LOCAL_MODEL_API", &local_api_mode_str));
+        if local_model_config.provider_id() == "ollama" {
+            env_entries.push(("OLLAMA_API_KEY", &local_api_key));
+        }
     }
 
     let env_file = gateway_env_file(&env_entries)?;
@@ -10308,9 +10379,20 @@ pub async fn start_gateway_with_proxy(
 /// Hot-swap the model in openclaw.json without restarting the container.
 /// Only works for same-provider changes (API keys stay the same).
 #[tauri::command]
-pub fn update_gateway_model(model: String) -> Result<(), String> {
-    let (base_model, thinking_enabled, reasoning_effort) = if model.starts_with("local/") {
-        (format!("ollama/{}", &model[6..]), false, String::new())
+pub fn update_gateway_model(app: AppHandle, model: String) -> Result<(), String> {
+    let local_model_name = model.strip_prefix("local/").map(str::to_string);
+    let (base_model, thinking_enabled, reasoning_effort) = if let Some(model_name) =
+        local_model_name.as_deref()
+    {
+        let local_model_config = read_local_model_config(&app)?.ok_or_else(|| {
+            "Configure your local AI service in Settings before using a local model."
+                .to_string()
+        })?;
+        (
+            local_model_config.gateway_model_ref(Some(model_name)),
+            false,
+            String::new(),
+        )
     } else {
         let base_model = model.split(':').next().unwrap_or(&model);
         let thinking_enabled = model.contains(":thinking");
@@ -10336,6 +10418,33 @@ pub fn update_gateway_model(model: String) -> Result<(), String> {
         &["agents", "defaults", "model", "primary"],
         serde_json::json!(base_model),
     );
+    if let Some(model_name) = local_model_name.as_deref() {
+        if let Some(local_model_config) = read_local_model_config(&app)? {
+            let provider_id = local_model_config.provider_id();
+            let base_url = local_model_config.gateway_base_url();
+            let api_key = local_model_config.api_key.clone();
+            let api = local_model_config.provider_api();
+            clear_local_model_provider_configs(&mut cfg);
+            set_openclaw_config_value(
+                &mut cfg,
+                &["models", "providers", provider_id],
+                serde_json::json!({
+                    "baseUrl": base_url,
+                    "apiKey": api_key,
+                    "api": api,
+                    "models": [{
+                        "id": model_name,
+                        "name": model_name,
+                        "input": ["text"],
+                        "reasoning": false,
+                        "contextWindow": 128000,
+                        "maxTokens": 8192,
+                        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+                    }]
+                }),
+            );
+        }
+    }
 
     if thinking_level != "off" {
         set_openclaw_config_value(
@@ -10443,54 +10552,438 @@ pub async fn get_gateway_auth(app: AppHandle) -> Result<GatewayAuthPayload, Stri
     })
 }
 
-fn read_local_model_config(app: &AppHandle) -> Option<(String, String, String)> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalModelServiceType {
+    Ollama,
+    LmStudio,
+    Vllm,
+    LiteLlm,
+    OpenAiCompatible,
+}
+
+impl LocalModelServiceType {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "ollama" => Some(Self::Ollama),
+            "lmstudio" => Some(Self::LmStudio),
+            "vllm" => Some(Self::Vllm),
+            "litellm" => Some(Self::LiteLlm),
+            "openai-compatible" => Some(Self::OpenAiCompatible),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::LmStudio => "lmstudio",
+            Self::Vllm => "vllm",
+            Self::LiteLlm => "litellm",
+            Self::OpenAiCompatible => "openai-compatible",
+        }
+    }
+
+    fn provider_id(self) -> &'static str {
+        match self {
+            Self::OpenAiCompatible => "local",
+            Self::Ollama => "ollama",
+            Self::LmStudio => "lmstudio",
+            Self::Vllm => "vllm",
+            Self::LiteLlm => "litellm",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalModelApiMode {
+    Ollama,
+    OpenAiResponses,
+    OpenAiCompletions,
+}
+
+impl LocalModelApiMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "ollama" => Some(Self::Ollama),
+            "openai-responses" => Some(Self::OpenAiResponses),
+            "openai-completions" => Some(Self::OpenAiCompletions),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::OpenAiResponses => "openai-responses",
+            Self::OpenAiCompletions => "openai-completions",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalModelRuntimeConfig {
+    service_type: LocalModelServiceType,
+    api_mode: LocalModelApiMode,
+    base_url: String,
+    api_key: String,
+    model_name: String,
+}
+
+impl LocalModelRuntimeConfig {
+    fn from_endpoint_parts(
+        service_type: Option<LocalModelServiceType>,
+        api_mode: Option<LocalModelApiMode>,
+        base_url: Option<String>,
+        api_key: Option<String>,
+    ) -> Option<Self> {
+        let base_url = base_url.unwrap_or_default().trim().trim_end_matches('/').to_string();
+        if base_url.is_empty() {
+            return None;
+        }
+        let service_type =
+            service_type.unwrap_or_else(|| infer_local_model_service_type(base_url.as_str()));
+        let api_mode = if service_type == LocalModelServiceType::Ollama {
+            LocalModelApiMode::Ollama
+        } else {
+            api_mode.unwrap_or_else(|| default_local_model_api_mode(service_type))
+        };
+        let api_key = api_key.unwrap_or_default().trim().to_string();
+        Some(Self {
+            service_type,
+            api_mode,
+            base_url,
+            api_key: if api_key.is_empty() {
+                "local-placeholder".to_string()
+            } else {
+                api_key
+            },
+            model_name: String::new(),
+        })
+    }
+
+    fn from_parts(
+        enabled: bool,
+        service_type: Option<LocalModelServiceType>,
+        api_mode: Option<LocalModelApiMode>,
+        base_url: Option<String>,
+        api_key: Option<String>,
+        model_name: Option<String>,
+    ) -> Option<Self> {
+        if !enabled {
+            return None;
+        }
+        let base_url = base_url.unwrap_or_default().trim().trim_end_matches('/').to_string();
+        let model_name = model_name.unwrap_or_default().trim().to_string();
+        if base_url.is_empty() || model_name.is_empty() {
+            return None;
+        }
+        let service_type =
+            service_type.unwrap_or_else(|| infer_local_model_service_type(base_url.as_str()));
+        let api_mode = if service_type == LocalModelServiceType::Ollama {
+            LocalModelApiMode::Ollama
+        } else {
+            api_mode.unwrap_or_else(|| default_local_model_api_mode(service_type))
+        };
+        let api_key = api_key.unwrap_or_default().trim().to_string();
+        Some(Self {
+            service_type,
+            api_mode,
+            base_url,
+            api_key: if api_key.is_empty() {
+                "local-placeholder".to_string()
+            } else {
+                api_key
+            },
+            model_name,
+        })
+    }
+
+    fn provider_id(&self) -> &'static str {
+        self.service_type.provider_id()
+    }
+
+    fn provider_api(&self) -> &'static str {
+        self.api_mode.as_str()
+    }
+
+    fn service_type_name(&self) -> &'static str {
+        self.service_type.as_str()
+    }
+
+    fn api_mode_name(&self) -> &'static str {
+        self.api_mode.as_str()
+    }
+
+    fn gateway_base_url(&self) -> String {
+        let rewritten = rewrite_localhost_for_docker(&self.base_url);
+        let trimmed = rewritten.trim().trim_end_matches('/').to_string();
+        if self.api_mode == LocalModelApiMode::Ollama {
+            trimmed.trim_end_matches("/v1").to_string()
+        } else {
+            trimmed
+        }
+    }
+
+    fn gateway_model_ref(&self, model_name_override: Option<&str>) -> String {
+        let model_name = model_name_override.unwrap_or(self.model_name.as_str());
+        format!("{}/{}", self.provider_id(), model_name)
+    }
+
+    fn auth_profile_id(&self) -> String {
+        format!("{}:default", self.provider_id())
+    }
+
+    fn discovery_url(&self) -> String {
+        if self.api_mode == LocalModelApiMode::Ollama {
+            build_ollama_models_url(&self.base_url)
+        } else {
+            build_openai_models_url(&self.base_url)
+        }
+    }
+}
+
+fn infer_local_model_service_type(base_url: &str) -> LocalModelServiceType {
+    let normalized = base_url.trim().to_lowercase();
+    if normalized.contains("11434") || normalized.contains("ollama") {
+        return LocalModelServiceType::Ollama;
+    }
+    if normalized.contains("1234") || normalized.contains("lmstudio") {
+        return LocalModelServiceType::LmStudio;
+    }
+    if normalized.contains("8000") || normalized.contains("vllm") {
+        return LocalModelServiceType::Vllm;
+    }
+    if normalized.contains("4000") || normalized.contains("litellm") {
+        return LocalModelServiceType::LiteLlm;
+    }
+    LocalModelServiceType::OpenAiCompatible
+}
+
+fn default_local_model_api_mode(service_type: LocalModelServiceType) -> LocalModelApiMode {
+    match service_type {
+        LocalModelServiceType::Ollama => LocalModelApiMode::Ollama,
+        LocalModelServiceType::LmStudio => LocalModelApiMode::OpenAiResponses,
+        LocalModelServiceType::Vllm
+        | LocalModelServiceType::LiteLlm
+        | LocalModelServiceType::OpenAiCompatible => LocalModelApiMode::OpenAiCompletions,
+    }
+}
+
+fn build_openai_models_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.ends_with("/models") {
+        trimmed.to_string()
+    } else if trimmed.ends_with("/v1") {
+        format!("{}/models", trimmed)
+    } else {
+        format!("{}/v1/models", trimmed)
+    }
+}
+
+fn build_ollama_models_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.ends_with("/api/tags") {
+        trimmed.to_string()
+    } else {
+        format!("{}/api/tags", trimmed.trim_end_matches("/v1"))
+    }
+}
+
+const LOCAL_MODEL_PROVIDER_IDS: &[&str] = &["ollama", "lmstudio", "vllm", "litellm", "local"];
+
+fn clear_local_model_provider_configs(cfg: &mut serde_json::Value) {
+    for provider_id in LOCAL_MODEL_PROVIDER_IDS {
+        remove_openclaw_config_value(cfg, &["models", "providers", provider_id]);
+    }
+}
+
+fn read_container_local_model_config() -> Option<LocalModelRuntimeConfig> {
+    let base_url = read_container_env("ENTROPIC_LOCAL_MODEL_BASE_URL");
+    let model_name = read_container_env("ENTROPIC_LOCAL_MODEL_NAME");
+    let service_type = read_container_env("ENTROPIC_LOCAL_MODEL_SERVICE_TYPE")
+        .and_then(|value| LocalModelServiceType::parse(value.as_str()));
+    let api_mode = read_container_env("ENTROPIC_LOCAL_MODEL_API")
+        .and_then(|value| LocalModelApiMode::parse(value.as_str()));
+    LocalModelRuntimeConfig::from_parts(
+        base_url.is_some() || model_name.is_some(),
+        service_type,
+        api_mode,
+        base_url,
+        read_container_env("ENTROPIC_LOCAL_MODEL_API_KEY"),
+        model_name,
+    )
+}
+
+fn read_local_model_config(app: &AppHandle) -> Result<Option<LocalModelRuntimeConfig>, String> {
     let store_path = app
         .path()
         .app_data_dir()
-        .ok()?
+        .map_err(|e| format!("Failed to resolve app data directory: {}", e))?
         .join("entropic-settings.json");
-    let content = fs::read_to_string(&store_path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let config = json.get("localModelConfig")?;
-    let enabled = config.get("enabled")?.as_bool()?;
-    if !enabled {
-        return None;
+    let content = match fs::read_to_string(&store_path) {
+        Ok(content) => content,
+        Err(_) => return Ok(None),
+    };
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse local model settings: {}", e))?;
+    let Some(config) = json.get("localModelConfig") else {
+        return Ok(None);
+    };
+    let allow_non_local = config
+        .get("allowNonLocal")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let local_model_config = LocalModelRuntimeConfig::from_parts(
+        config
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        config
+            .get("serviceType")
+            .and_then(|value| value.as_str())
+            .and_then(LocalModelServiceType::parse),
+        config
+            .get("apiMode")
+            .and_then(|value| value.as_str())
+            .and_then(LocalModelApiMode::parse),
+        config
+            .get("baseUrl")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        config
+            .get("apiKey")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        config
+            .get("modelName")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+    );
+    if let Some(local_model_config) = local_model_config.as_ref() {
+        validate_local_model_endpoint(&local_model_config.base_url, allow_non_local)?;
     }
-    let base_url = config.get("baseUrl")?.as_str()?.to_string();
-    let api_key = config
-        .get("apiKey")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let model_name = config.get("modelName")?.as_str()?.to_string();
-    if model_name.is_empty() || base_url.is_empty() {
-        return None;
+    Ok(local_model_config)
+}
+
+fn local_model_endpoint_is_loopback_host(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|addr| addr.is_loopback())
+            .unwrap_or(false)
+}
+
+fn local_model_endpoint_is_local(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("host.docker.internal")
+        || host
+            .parse::<IpAddr>()
+            .map(|addr| addr.is_loopback())
+            .unwrap_or(false)
+}
+
+fn validate_local_model_endpoint(base_url: &str, allow_non_local: bool) -> Result<(), String> {
+    let parsed = Url::parse(base_url.trim())
+        .map_err(|_| "Enter a valid http:// or https:// base URL.".to_string())?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err("Only http:// and https:// model endpoints are supported.".to_string());
+        }
     }
-    Some((base_url, api_key, model_name))
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(
+            "Do not embed credentials in the local model URL. Use the API Key field instead."
+                .to_string(),
+        );
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("Base URL must not include a query string or fragment.".to_string());
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Base URL must include a hostname.".to_string())?;
+    if host.eq_ignore_ascii_case("0.0.0.0") || host == "::" {
+        return Err(
+            "Use localhost instead of 0.0.0.0 or :: for a local model service.".to_string(),
+        );
+    }
+
+    if !allow_non_local && !local_model_endpoint_is_local(&parsed) {
+        return Err(format!(
+            "Non-local model endpoints are blocked by default. '{}' is not loopback-only. Enable 'Allow non-local endpoint' in Settings if you trust this server.",
+            host
+        ));
+    }
+
+    Ok(())
 }
 
 fn rewrite_localhost_for_docker(url: &str) -> String {
-    url.replace("localhost", "host.docker.internal")
-        .replace("127.0.0.1", "host.docker.internal")
+    let Ok(mut parsed) = Url::parse(url) else {
+        return url.to_string();
+    };
+    if local_model_endpoint_is_loopback_host(&parsed) {
+        let _ = parsed.set_host(Some("host.docker.internal"));
+        return parsed.to_string();
+    }
+    url.to_string()
 }
 
-#[tauri::command]
-pub async fn test_local_model_connection(
-    base_url: String,
-    api_key: Option<String>,
-    model_name: String,
-) -> Result<(), String> {
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
+#[cfg(test)]
+mod local_model_endpoint_security_tests {
+    use super::{rewrite_localhost_for_docker, validate_local_model_endpoint};
+
+    #[test]
+    fn loopback_endpoints_are_allowed_by_default() {
+        assert!(validate_local_model_endpoint("http://localhost:11434/v1", false).is_ok());
+        assert!(validate_local_model_endpoint("http://127.0.0.1:1234/v1", false).is_ok());
+    }
+
+    #[test]
+    fn non_local_endpoints_require_explicit_opt_in() {
+        let err = validate_local_model_endpoint("http://192.168.1.50:8000/v1", false)
+            .expect_err("expected non-local endpoint to be blocked");
+        assert!(err.contains("Non-local model endpoints are blocked by default"));
+        assert!(validate_local_model_endpoint("http://192.168.1.50:8000/v1", true).is_ok());
+    }
+
+    #[test]
+    fn rewrite_only_changes_loopback_hosts() {
+        assert_eq!(
+            rewrite_localhost_for_docker("http://localhost:11434/v1"),
+            "http://host.docker.internal:11434/v1"
+        );
+        assert_eq!(
+            rewrite_localhost_for_docker("http://192.168.1.50:11434/v1"),
+            "http://192.168.1.50:11434/v1"
+        );
+    }
+}
+
+async fn discover_local_model_ids_inner(
+    local_model_config: &LocalModelRuntimeConfig,
+    request_api_key: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let url = local_model_config.discovery_url();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     let mut req = client.get(&url);
-    if let Some(key) = &api_key {
-        if !key.is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", key));
-        }
+    if let Some(key) = request_api_key.map(str::trim).filter(|value| !value.is_empty()) {
+        req = req.header("Authorization", format!("Bearer {}", key));
     }
 
     let resp = req
@@ -10502,28 +10995,119 @@ pub async fn test_local_model_connection(
         return Err(format!("Server returned status {}", resp.status()));
     }
 
-    // Check if the specified model exists in the response
-    if let Ok(body) = resp.json::<serde_json::Value>().await {
-        if let Some(models) = body.get("data").and_then(|d| d.as_array()) {
-            let found = models.iter().any(|m| {
-                m.get("id")
-                    .and_then(|id| id.as_str())
-                    .map(|id| id == model_name)
-                    .unwrap_or(false)
-            });
-            if !found && !models.is_empty() {
-                let available: Vec<String> = models
+    let body = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Connected, but failed to parse the model list: {}", e))?;
+
+    let raw_models: Vec<String> = if local_model_config.api_mode == LocalModelApiMode::Ollama {
+        body.get("models")
+            .and_then(|value| value.as_array())
+            .map(|models| {
+                models
                     .iter()
-                    .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(String::from))
-                    .take(5)
-                    .collect();
-                return Err(format!(
-                    "Model '{}' not found. Available: {}",
-                    model_name,
-                    available.join(", ")
-                ));
-            }
+                    .filter_map(|model| {
+                        model
+                            .get("name")
+                            .or_else(|| model.get("model"))
+                            .and_then(|value| value.as_str())
+                            .map(String::from)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        body.get("data")
+            .and_then(|value| value.as_array())
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|model| {
+                        model
+                            .get("id")
+                            .and_then(|value| value.as_str())
+                            .map(String::from)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut deduped = Vec::new();
+    for model in raw_models {
+        let trimmed = model.trim();
+        if trimmed.is_empty() || deduped.iter().any(|existing| existing == trimmed) {
+            continue;
         }
+        deduped.push(trimmed.to_string());
+    }
+
+    Ok(deduped)
+}
+
+#[tauri::command]
+pub async fn discover_local_model_ids(
+    service_type: Option<String>,
+    api_mode: Option<String>,
+    base_url: String,
+    api_key: Option<String>,
+    allow_non_local: Option<bool>,
+) -> Result<Vec<String>, String> {
+    let local_model_config = LocalModelRuntimeConfig::from_endpoint_parts(
+        service_type
+            .as_deref()
+            .and_then(LocalModelServiceType::parse),
+        api_mode.as_deref().and_then(LocalModelApiMode::parse),
+        Some(base_url),
+        api_key.clone(),
+    )
+    .ok_or_else(|| "Enter a base URL before discovering models.".to_string())?;
+    validate_local_model_endpoint(
+        &local_model_config.base_url,
+        allow_non_local.unwrap_or(false),
+    )?;
+    discover_local_model_ids_inner(&local_model_config, api_key.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn test_local_model_connection(
+    service_type: Option<String>,
+    api_mode: Option<String>,
+    base_url: String,
+    api_key: Option<String>,
+    model_name: String,
+    allow_non_local: Option<bool>,
+) -> Result<(), String> {
+    let trimmed_model_name = model_name.trim().to_string();
+    if trimmed_model_name.is_empty() {
+        return Err("Enter a model id before testing the connection.".to_string());
+    }
+    let request_api_key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let local_model_config = LocalModelRuntimeConfig::from_endpoint_parts(
+        service_type
+            .as_deref()
+            .and_then(LocalModelServiceType::parse),
+        api_mode.as_deref().and_then(LocalModelApiMode::parse),
+        Some(base_url),
+        api_key,
+    )
+    .ok_or_else(|| "Enter a base URL and model id before testing the connection.".to_string())?;
+    validate_local_model_endpoint(
+        &local_model_config.base_url,
+        allow_non_local.unwrap_or(false),
+    )?;
+    let available =
+        discover_local_model_ids_inner(&local_model_config, request_api_key.as_deref()).await?;
+    if !available.is_empty() && !available.iter().any(|value| value == &trimmed_model_name) {
+        return Err(format!(
+            "Model '{}' not found. Available: {}",
+            trimmed_model_name,
+            available.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+        ));
     }
 
     Ok(())
