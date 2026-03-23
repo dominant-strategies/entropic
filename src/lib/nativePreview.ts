@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 
 const CONTAINER_LOCAL_BROWSER_BASE = "http://container.localhost:19791";
+const ONLYOFFICE_DESKTOP_BASE = "http://127.0.0.1:19796";
+const ONLYOFFICE_BROWSER_EXTS = new Set(["docx", "xlsx", "pptx"]);
+const SPREADSHEET_BROWSER_EXTS = new Set(["xls", "csv"]);
 const LOCAL_PREVIEW_HOSTS = new Set([
   "container.localhost",
   "runtime.localhost",
@@ -9,6 +12,13 @@ const LOCAL_PREVIEW_HOSTS = new Set([
 ]);
 
 export function workspaceBrowserUrl(path: string): string {
+  const ext = path.split("/").filter(Boolean).pop()?.split(".").pop()?.toLowerCase() || "";
+  if (ONLYOFFICE_BROWSER_EXTS.has(ext)) {
+    return `${ONLYOFFICE_DESKTOP_BASE}/__onlyoffice__/open?path=${encodeURIComponent(path)}`;
+  }
+  if (SPREADSHEET_BROWSER_EXTS.has(ext)) {
+    return `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace_editor__/spreadsheet?path=${encodeURIComponent(path)}`;
+  }
   const normalized = path
     .split("/")
     .filter(Boolean)
