@@ -50,7 +50,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ln -sfn /data/qmd-models /home/node/.cache/qmd/models && \
     chown -R node:node /data /home/node/.openclaw /home/node/.bun /home/node/.cache
 
-RUN python3 -m pip install --no-cache-dir --break-system-packages openpyxl==3.1.5
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+    openpyxl==3.1.5 \
+    python-pptx==1.0.2
 
 # Install patchright's patched Chromium:
 # 1. Symlink to /usr/bin/chromium (OpenClaw's findChromeExecutableLinux() searches there)
