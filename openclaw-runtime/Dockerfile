@@ -50,6 +50,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ln -sfn /data/qmd-models /home/node/.cache/qmd/models && \
     chown -R node:node /data /home/node/.openclaw /home/node/.bun /home/node/.cache
 
+RUN python3 -m pip install --no-cache-dir --break-system-packages openpyxl==3.1.5
+
 # Install patchright's patched Chromium:
 # 1. Symlink to /usr/bin/chromium (OpenClaw's findChromeExecutableLinux() searches there)
 # 2. Copy browsers to /opt/patchright-browsers/ so entrypoint can symlink into
@@ -105,6 +107,9 @@ RUN for skill in /app/bundled-skills/*/; do \
 RUN if [ -f /app/browser-service/package.json ]; then \
       cd /app/browser-service && npm install --omit=dev && cd /; \
     fi
+
+RUN chmod +x /app/browser-service/office_tools.py && \
+    ln -sfn /app/browser-service/office_tools.py /usr/local/bin/entropic-office
 
 # Fix clipboard module for ARM64 Linux (create stub)
 RUN echo "module.exports = { read: () => '', write: () => {}, readSync: () => '', writeSync: () => {}, clear: () => {}, clearSync: () => {} };" > /app/node_modules/.pnpm/@mariozechner+clipboard@0.3.0/node_modules/@mariozechner/clipboard/index.js || true
