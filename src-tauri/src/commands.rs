@@ -6262,11 +6262,7 @@ fn signal_gateway_config_reload() {
         .output();
 }
 
-async fn wait_for_gateway_after_config_reload(
-    app: &AppHandle,
-    context: &str,
-    attempts: usize,
-) {
+async fn wait_for_gateway_after_config_reload(app: &AppHandle, context: &str, attempts: usize) {
     if let Ok(token) = effective_gateway_token(app) {
         eprintln!(
             "[Entropic] {}: waiting for gateway health after config reload...",
