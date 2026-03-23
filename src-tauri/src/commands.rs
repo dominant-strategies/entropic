@@ -34,7 +34,7 @@ use tauri::{
 };
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -3540,6 +3540,16 @@ pub struct DesktopSettingsSnapshot {
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OnlyOfficeStatus {
+    pub running: bool,
+    pub ready: bool,
+    pub public_url: String,
+    pub image: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppBootstrapState {
     pub settings: DesktopSettingsSnapshot,
     pub gateway_launch_mode: String,
@@ -3949,6 +3959,14 @@ const OPENCLAW_DATA_VOLUME: &str = "entropic-openclaw-data";
 const LEGACY_OPENCLAW_DATA_VOLUME: &str = "nova-openclaw-data";
 const SCANNER_CONTAINER: &str = "entropic-skill-scanner";
 const SCANNER_HOST_PORT: &str = "19791";
+const ONLYOFFICE_CONTAINER: &str = "entropic-onlyoffice";
+const ONLYOFFICE_DEFAULT_IMAGE: &str = "onlyoffice/documentserver:latest";
+const ONLYOFFICE_HOST_PORT: &str = "19794";
+const ONLYOFFICE_HTTP_PORT: &str = "80";
+const ONLYOFFICE_BRIDGE_PORT: &str = "19796";
+const ONLYOFFICE_PUBLIC_BASE_URL: &str = "/__onlyoffice_proxy__";
+const ONLYOFFICE_INTERNAL_BASE_URL: &str = "http://entropic-openclaw:19791";
+const ONLYOFFICE_UPSTREAM_BASE_URL: &str = "http://entropic-onlyoffice";
 const ENTROPIC_GATEWAY_SCHEMA_VERSION: &str = "2026-02-13";
 const OPENCLAW_STATE_ROOT: &str = "/home/node/.openclaw";
 const OPENCLAW_PERSISTED_CONFIG_PATH: &str = "/data/openclaw.persisted.json";
@@ -3973,6 +3991,7 @@ const MANAGED_PLUGIN_IDS: &[&str] = &[
 ];
 static GATEWAY_START_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 static APPLIED_AGENT_SETTINGS_FINGERPRINT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static ONLYOFFICE_BRIDGE_START_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 
 fn gateway_start_lock() -> &'static AsyncMutex<()> {
     GATEWAY_START_LOCK.get_or_init(|| AsyncMutex::new(()))
@@ -3980,6 +3999,10 @@ fn gateway_start_lock() -> &'static AsyncMutex<()> {
 
 fn applied_agent_settings_fingerprint() -> &'static Mutex<Option<String>> {
     APPLIED_AGENT_SETTINGS_FINGERPRINT.get_or_init(|| Mutex::new(None))
+}
+
+fn onlyoffice_bridge_start_lock() -> &'static AsyncMutex<()> {
+    ONLYOFFICE_BRIDGE_START_LOCK.get_or_init(|| AsyncMutex::new(()))
 }
 
 fn clear_applied_agent_settings_fingerprint() -> Result<(), String> {
@@ -4671,6 +4694,1114 @@ fn start_scanner_sidecar() {
 
 fn stop_scanner_sidecar() {
     let _ = docker_command().args(["stop", SCANNER_CONTAINER]).output();
+}
+
+fn onlyoffice_image_name() -> String {
+    std::env::var("ENTROPIC_ONLYOFFICE_IMAGE")
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or_else(|| ONLYOFFICE_DEFAULT_IMAGE.to_string())
+}
+
+fn onlyoffice_container_image() -> Option<String> {
+    let output = docker_command()
+        .args([
+            "container",
+            "inspect",
+            ONLYOFFICE_CONTAINER,
+            "--format",
+            "{{.Config.Image}}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let image = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if image.is_empty() {
+        None
+    } else {
+        Some(image)
+    }
+}
+
+fn onlyoffice_jwt_secret_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
+    fs::create_dir_all(&app_dir).map_err(|e| format!("Failed to create app data dir: {}", e))?;
+    Ok(app_dir.join("onlyoffice-jwt-secret.txt"))
+}
+
+fn load_or_create_onlyoffice_jwt_secret(app: &AppHandle) -> Result<String, String> {
+    let path = onlyoffice_jwt_secret_path(app)?;
+    if path.exists() {
+        let existing = fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read ONLYOFFICE JWT secret: {}", e))?;
+        let trimmed = existing.trim().to_string();
+        if !trimmed.is_empty() {
+            return Ok(trimmed);
+        }
+    }
+
+    let mut secret_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut secret_bytes);
+    let secret = URL_SAFE_NO_PAD.encode(secret_bytes);
+    fs::write(&path, format!("{}\n", secret))
+        .map_err(|e| format!("Failed to persist ONLYOFFICE JWT secret: {}", e))?;
+    Ok(secret)
+}
+
+const ONLYOFFICE_HOST_HTML: &str =
+    include_str!("../../openclaw-runtime/browser-service/onlyoffice-host.html");
+const ONLYOFFICE_URL_TOKEN_TTL_SECS: u64 = 15 * 60;
+
+#[derive(Debug, Clone, Copy)]
+struct OnlyOfficeFileSpec {
+    document_type: &'static str,
+    file_type: &'static str,
+    content_type: &'static str,
+}
+
+#[derive(Debug)]
+struct OnlyOfficeBridgeRequest {
+    method: String,
+    target: String,
+    body: Vec<u8>,
+}
+
+fn onlyoffice_bridge_local_origin() -> String {
+    format!("http://127.0.0.1:{}", ONLYOFFICE_BRIDGE_PORT)
+}
+
+fn onlyoffice_bridge_container_origin() -> String {
+    format!("http://host.docker.internal:{}", ONLYOFFICE_BRIDGE_PORT)
+}
+
+fn onlyoffice_document_server_origin() -> String {
+    format!("http://127.0.0.1:{}", ONLYOFFICE_HOST_PORT)
+}
+
+fn onlyoffice_file_spec_for_path(path: &str) -> Result<OnlyOfficeFileSpec, String> {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "docx" => Ok(OnlyOfficeFileSpec {
+            document_type: "word",
+            file_type: "docx",
+            content_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }),
+        "xlsx" => Ok(OnlyOfficeFileSpec {
+            document_type: "cell",
+            file_type: "xlsx",
+            content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }),
+        "pptx" => Ok(OnlyOfficeFileSpec {
+            document_type: "slide",
+            file_type: "pptx",
+            content_type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        }),
+        _ => Err("This office file type is not supported by ONLYOFFICE in Entropic yet.".to_string()),
+    }
+}
+
+fn onlyoffice_jwt_payload_bytes(payload: &serde_json::Value) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(payload).map_err(|e| format!("Failed to encode ONLYOFFICE token payload: {}", e))
+}
+
+fn hmac_sha256_bytes(key: &[u8], data: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 64;
+    let mut normalized_key = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let digest = Sha256::digest(key);
+        normalized_key[..digest.len()].copy_from_slice(&digest);
+    } else {
+        normalized_key[..key.len()].copy_from_slice(key);
+    }
+
+    let mut inner_pad = [0x36u8; BLOCK_SIZE];
+    let mut outer_pad = [0x5cu8; BLOCK_SIZE];
+    for index in 0..BLOCK_SIZE {
+        inner_pad[index] ^= normalized_key[index];
+        outer_pad[index] ^= normalized_key[index];
+    }
+
+    let inner_hash = Sha256::new()
+        .chain_update(inner_pad)
+        .chain_update(data)
+        .finalize();
+    let outer_hash = Sha256::new()
+        .chain_update(outer_pad)
+        .chain_update(inner_hash)
+        .finalize();
+    let mut output = [0u8; 32];
+    output.copy_from_slice(&outer_hash);
+    output
+}
+
+fn sign_onlyoffice_jwt(secret: &str, payload: &serde_json::Value) -> Result<String, String> {
+    let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let body = URL_SAFE_NO_PAD.encode(onlyoffice_jwt_payload_bytes(payload)?);
+    let signing_input = format!("{}.{}", header, body);
+    let signature = URL_SAFE_NO_PAD.encode(hmac_sha256_bytes(
+        secret.as_bytes(),
+        signing_input.as_bytes(),
+    ));
+    Ok(format!("{}.{}", signing_input, signature))
+}
+
+fn verify_onlyoffice_jwt(secret: &str, token: &str) -> Result<serde_json::Value, String> {
+    let mut parts = token.split('.');
+    let header = parts.next().unwrap_or_default();
+    let body = parts.next().unwrap_or_default();
+    let signature = parts.next().unwrap_or_default();
+    if header.is_empty() || body.is_empty() || signature.is_empty() || parts.next().is_some() {
+        return Err("Invalid ONLYOFFICE token.".to_string());
+    }
+
+    let signing_input = format!("{}.{}", header, body);
+    let expected = URL_SAFE_NO_PAD.encode(hmac_sha256_bytes(
+        secret.as_bytes(),
+        signing_input.as_bytes(),
+    ));
+    if expected != signature {
+        return Err("Invalid ONLYOFFICE token signature.".to_string());
+    }
+
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(body.as_bytes())
+        .map_err(|_| "Invalid ONLYOFFICE token payload.".to_string())?;
+    let payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
+        .map_err(|_| "Invalid ONLYOFFICE token payload.".to_string())?;
+    if let Some(exp) = payload.get("exp").and_then(|value| value.as_u64()) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now >= exp {
+            return Err("ONLYOFFICE token expired.".to_string());
+        }
+    }
+    Ok(payload)
+}
+
+fn sign_onlyoffice_path_token(
+    secret: &str,
+    kind: &str,
+    relative_path: &str,
+) -> Result<String, String> {
+    let exp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_add(ONLYOFFICE_URL_TOKEN_TTL_SECS);
+    sign_onlyoffice_jwt(
+        secret,
+        &serde_json::json!({
+            "kind": kind,
+            "path": relative_path,
+            "exp": exp,
+        }),
+    )
+}
+
+fn verify_onlyoffice_path_token(
+    secret: &str,
+    token: &str,
+    expected_kind: &str,
+    expected_path: &str,
+) -> Result<(), String> {
+    let payload = verify_onlyoffice_jwt(secret, token)?;
+    let kind = payload
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let path = payload
+        .get("path")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    if kind != expected_kind || path != expected_path {
+        return Err("ONLYOFFICE token does not match the requested file.".to_string());
+    }
+    Ok(())
+}
+
+fn onlyoffice_document_key(relative_path: &str, size: u64, modified_at: u64) -> String {
+    URL_SAFE_NO_PAD
+        .encode(Sha256::digest(
+            format!("{}:{}:{}", relative_path, size, modified_at).as_bytes(),
+        ))
+        .chars()
+        .take(48)
+        .collect()
+}
+
+fn onlyoffice_bridge_reason(status: http::StatusCode) -> &'static str {
+    status.canonical_reason().unwrap_or("OK")
+}
+
+async fn read_http_request(socket: &mut TcpStream) -> Result<OnlyOfficeBridgeRequest, String> {
+    let mut buffer = Vec::with_capacity(8192);
+    let mut temp = [0u8; 4096];
+    let header_end = loop {
+        if buffer.len() > 1024 * 1024 {
+            return Err("Request headers exceeded the maximum size.".to_string());
+        }
+        let size = socket
+            .read(&mut temp)
+            .await
+            .map_err(|e| format!("Failed to read office bridge request: {}", e))?;
+        if size == 0 {
+            return Err("Connection closed before request headers were received.".to_string());
+        }
+        buffer.extend_from_slice(&temp[..size]);
+        if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            break position + 4;
+        }
+    };
+
+    let header_text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+    let mut lines = header_text.lines();
+    let first_line = lines
+        .next()
+        .ok_or_else(|| "Office bridge request line was missing.".to_string())?;
+    let mut request_parts = first_line.split_whitespace();
+    let method = request_parts
+        .next()
+        .ok_or_else(|| "Office bridge request method was missing.".to_string())?
+        .to_string();
+    let target = request_parts
+        .next()
+        .ok_or_else(|| "Office bridge request target was missing.".to_string())?;
+
+    let mut headers = HashMap::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = buffer[header_end..].to_vec();
+    while body.len() < content_length {
+        let size = socket
+            .read(&mut temp)
+            .await
+            .map_err(|e| format!("Failed to read office bridge body: {}", e))?;
+        if size == 0 {
+            break;
+        }
+        body.extend_from_slice(&temp[..size]);
+    }
+    if body.len() > content_length {
+        body.truncate(content_length);
+    }
+
+    Url::parse(&format!("http://127.0.0.1{}", target))
+        .map_err(|e| format!("Invalid office bridge URL: {}", e))?;
+
+    Ok(OnlyOfficeBridgeRequest {
+        method,
+        target: target.to_string(),
+        body,
+    })
+}
+
+async fn write_http_response(
+    socket: &mut TcpStream,
+    status: http::StatusCode,
+    headers: &[(&str, String)],
+    body: &[u8],
+) -> Result<(), String> {
+    let has_content_length = headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("Content-Length"));
+    let mut response = format!("HTTP/1.1 {} {}\r\nConnection: close\r\n", status.as_u16(), onlyoffice_bridge_reason(status));
+    if !has_content_length {
+        response.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    for (name, value) in headers {
+        response.push_str(name);
+        response.push_str(": ");
+        response.push_str(value);
+        response.push_str("\r\n");
+    }
+    response.push_str("\r\n");
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|e| format!("Failed to write office bridge response headers: {}", e))?;
+    if !body.is_empty() {
+        socket
+            .write_all(body)
+            .await
+            .map_err(|e| format!("Failed to write office bridge response body: {}", e))?;
+    }
+    socket
+        .shutdown()
+        .await
+        .map_err(|e| format!("Failed to close office bridge response: {}", e))
+}
+
+async fn write_json_response(
+    socket: &mut TcpStream,
+    status: http::StatusCode,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    let body = serde_json::to_vec(payload)
+        .map_err(|e| format!("Failed to encode office bridge JSON response: {}", e))?;
+    write_http_response(
+        socket,
+        status,
+        &[
+            ("Content-Type", "application/json; charset=utf-8".to_string()),
+            ("Cache-Control", "no-store".to_string()),
+        ],
+        &body,
+    )
+    .await
+}
+
+async fn write_text_response(
+    socket: &mut TcpStream,
+    status: http::StatusCode,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), String> {
+    write_http_response(
+        socket,
+        status,
+        &[
+            ("Content-Type", content_type.to_string()),
+            ("Cache-Control", "no-store".to_string()),
+        ],
+        body,
+    )
+    .await
+}
+
+fn normalize_onlyoffice_callback_source_url(raw_url: &str) -> Result<Url, String> {
+    let mut parsed =
+        Url::parse(raw_url).map_err(|e| format!("ONLYOFFICE callback returned an invalid source URL: {}", e))?;
+    let host = parsed
+        .host_str()
+        .map(|value| value.to_ascii_lowercase())
+        .ok_or_else(|| "ONLYOFFICE callback URL host is missing.".to_string())?;
+    match host.as_str() {
+        "127.0.0.1" | "localhost" | "host.docker.internal" | "entropic-onlyoffice" => {
+            let _ = parsed.set_scheme("http");
+            parsed
+                .set_host(Some("127.0.0.1"))
+                .map_err(|_| "Failed to normalize ONLYOFFICE callback host.".to_string())?;
+            if parsed.port().is_none() {
+                parsed
+                    .set_port(Some(ONLYOFFICE_HOST_PORT.parse::<u16>().unwrap_or(19794)))
+                    .map_err(|_| "Failed to normalize ONLYOFFICE callback port.".to_string())?;
+            }
+            Ok(parsed)
+        }
+        _ => Err("ONLYOFFICE save callback used an unexpected source host.".to_string()),
+    }
+}
+
+fn normalize_onlyoffice_spreadsheet_if_needed(relative_path: &str) {
+    let ext = Path::new(relative_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    if ext != "xlsx" {
+        return;
+    }
+
+    let full_path = workspace_file(relative_path);
+    let output = docker_command()
+        .args([
+            "exec",
+            OPENCLAW_CONTAINER,
+            "entropic-office",
+            "api",
+            "normalize-spreadsheet",
+            &full_path,
+        ])
+        .output();
+    match output {
+        Ok(result) if result.status.success() => {}
+        Ok(result) => {
+            let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
+            if !stderr.is_empty() {
+                eprintln!(
+                    "[Entropic] ONLYOFFICE spreadsheet normalization skipped for {}: {}",
+                    relative_path, stderr
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "[Entropic] ONLYOFFICE spreadsheet normalization unavailable for {}: {}",
+                relative_path, error
+            );
+        }
+    }
+}
+
+fn read_workspace_file_bytes(path: &str) -> Result<Vec<u8>, String> {
+    let sanitized = sanitize_workspace_path(path)?;
+    if sanitized.is_empty() {
+        return Err("Invalid path".to_string());
+    }
+    let full_path = workspace_file(&sanitized);
+    let output = docker_command()
+        .args(["exec", OPENCLAW_CONTAINER, "cat", "--", &full_path])
+        .output()
+        .map_err(|e| format!("Failed to read workspace file: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "File not found or unreadable".to_string()
+        } else {
+            stderr
+        });
+    }
+    Ok(output.stdout)
+}
+
+fn workspace_file_metadata(path: &str) -> Result<(u64, u64), String> {
+    let sanitized = sanitize_workspace_path(path)?;
+    if sanitized.is_empty() {
+        return Err("Invalid path".to_string());
+    }
+    let full_path = workspace_file(&sanitized);
+    let raw = docker_exec_output(&[
+        "exec",
+        OPENCLAW_CONTAINER,
+        "stat",
+        "-c",
+        "%s %Y",
+        "--",
+        &full_path,
+    ])?;
+    let mut parts = raw.split_whitespace();
+    let size = parts
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "Failed to read workspace file size".to_string())?;
+    let modified_at = parts
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "Failed to read workspace file timestamp".to_string())?;
+    Ok((size, modified_at))
+}
+
+fn write_workspace_file_bytes_atomically(path: &str, bytes: &[u8]) -> Result<(), String> {
+    let sanitized = sanitize_workspace_path(path)?;
+    if sanitized.is_empty() {
+        return Err("Invalid path".to_string());
+    }
+    let full_path = workspace_file(&sanitized);
+    let parent = Path::new(&full_path)
+        .parent()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| WORKSPACE_ROOT.to_string());
+    let encoded = STANDARD.encode(bytes);
+    let script = format!(
+        "set -eu\n\
+dir={dir}\n\
+path={path}\n\
+mkdir -p -- \"$dir\"\n\
+tmp=$(mktemp \"$dir/.entropic-onlyoffice.XXXXXX\")\n\
+trap 'rm -f -- \"$tmp\"' EXIT HUP INT TERM\n\
+printf %s {encoded} | base64 -d > \"$tmp\"\n\
+mv -f -- \"$tmp\" \"$path\"\n",
+        dir = sh_single_quote(&parent),
+        path = sh_single_quote(&full_path),
+        encoded = sh_single_quote(&encoded),
+    );
+    run_container_write_script(&script, &full_path)
+}
+
+fn onlyoffice_config_payload(app: &AppHandle, raw_path: &str) -> Result<serde_json::Value, String> {
+    let relative_path = sanitize_workspace_path(raw_path)?;
+    if relative_path.is_empty() {
+        return Err("A workspace file path is required.".to_string());
+    }
+    let spec = onlyoffice_file_spec_for_path(&relative_path)?;
+    normalize_onlyoffice_spreadsheet_if_needed(&relative_path);
+    let (size, modified_at) = workspace_file_metadata(&relative_path)?;
+    let key = onlyoffice_document_key(&relative_path, size, modified_at);
+    let encoded_path = url::form_urlencoded::byte_serialize(relative_path.as_bytes()).collect::<String>();
+    let secret = load_or_create_onlyoffice_jwt_secret(app)?;
+    let download_token = sign_onlyoffice_path_token(&secret, "download", &relative_path)?;
+    let callback_token = sign_onlyoffice_path_token(&secret, "callback", &relative_path)?;
+    let title = Path::new(&relative_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("office-file")
+        .to_string();
+    let user_name = load_agent_settings(app).identity_name;
+    let config = serde_json::json!({
+        "documentType": spec.document_type,
+        "type": "desktop",
+        "document": {
+            "title": title,
+            "fileType": spec.file_type,
+            "key": key,
+            "url": format!(
+                "{}/__onlyoffice_api__/file?path={}&token={}",
+                onlyoffice_bridge_container_origin(),
+                encoded_path,
+                url::form_urlencoded::byte_serialize(download_token.as_bytes()).collect::<String>(),
+            ),
+            "permissions": {
+                "edit": true,
+                "download": true,
+                "print": true,
+                "review": true,
+                "comment": true,
+                "fillForms": true,
+                "copy": true,
+            },
+        },
+        "editorConfig": {
+            "mode": "edit",
+            "lang": "en",
+            "callbackUrl": format!(
+                "{}/__onlyoffice_api__/callback?path={}&token={}",
+                onlyoffice_bridge_container_origin(),
+                encoded_path,
+                url::form_urlencoded::byte_serialize(callback_token.as_bytes()).collect::<String>(),
+            ),
+            "user": {
+                "id": "entropic-desktop",
+                "name": user_name,
+            },
+            "coEditing": {
+                "mode": "fast",
+                "change": true,
+            },
+            "customization": {
+                "autosave": true,
+                "forcesave": true,
+                "compactHeader": false,
+                "compactToolbar": false,
+                "toolbarNoTabs": false,
+            },
+        },
+    });
+    let mut signed_config = config.clone();
+    signed_config
+        .as_object_mut()
+        .ok_or_else(|| "ONLYOFFICE config is not an object".to_string())?
+        .insert(
+            "token".to_string(),
+            serde_json::Value::String(sign_onlyoffice_jwt(&secret, &config)?),
+        );
+    Ok(serde_json::json!({
+        "documentServerUrl": onlyoffice_document_server_origin(),
+        "fileKey": key,
+        "path": relative_path,
+        "updatedAt": modified_at.saturating_mul(1000),
+        "config": signed_config
+    }))
+}
+
+async fn handle_onlyoffice_bridge_connection(
+    mut socket: TcpStream,
+    app: AppHandle,
+) -> Result<(), String> {
+    let request = read_http_request(&mut socket).await?;
+    let parsed = Url::parse(&format!("http://127.0.0.1{}", request.target))
+        .map_err(|e| format!("Invalid office bridge route: {}", e))?;
+    let path = parsed.path();
+
+    if request.method == "GET" && path == "/__onlyoffice__/open" {
+        return write_text_response(
+            &mut socket,
+            http::StatusCode::OK,
+            "text/html; charset=utf-8",
+            ONLYOFFICE_HOST_HTML.as_bytes(),
+        )
+        .await;
+    }
+
+    if path == "/__onlyoffice_api__/health" {
+        return write_json_response(
+            &mut socket,
+            http::StatusCode::OK,
+            &serde_json::json!({ "ok": true }),
+        )
+        .await;
+    }
+
+    if request.method == "GET" && path == "/__onlyoffice_api__/config" {
+        let relative_path = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "path")
+            .map(|(_, value)| value.to_string())
+            .unwrap_or_default();
+        match onlyoffice_config_payload(&app, &relative_path) {
+            Ok(payload) => {
+                return write_json_response(&mut socket, http::StatusCode::OK, &payload).await;
+            }
+            Err(error) => {
+                return write_json_response(
+                    &mut socket,
+                    http::StatusCode::BAD_REQUEST,
+                    &serde_json::json!({ "error": error }),
+                )
+                .await;
+            }
+        }
+    }
+
+    if (request.method == "GET" || request.method == "HEAD") && path == "/__onlyoffice_api__/file" {
+        let relative_path = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "path")
+            .map(|(_, value)| value.to_string())
+            .unwrap_or_default();
+        let token = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "token")
+            .map(|(_, value)| value.to_string())
+            .unwrap_or_default();
+        let secret = match load_or_create_onlyoffice_jwt_secret(&app) {
+            Ok(secret) => secret,
+            Err(error) => {
+                return write_json_response(
+                    &mut socket,
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": error }),
+                )
+                .await;
+            }
+        };
+        if let Err(error) = verify_onlyoffice_path_token(&secret, &token, "download", &relative_path) {
+            return write_json_response(
+                &mut socket,
+                http::StatusCode::FORBIDDEN,
+                &serde_json::json!({ "error": error }),
+            )
+            .await;
+        }
+        let spec = match onlyoffice_file_spec_for_path(&relative_path) {
+            Ok(spec) => spec,
+            Err(error) => {
+                return write_json_response(
+                    &mut socket,
+                    http::StatusCode::BAD_REQUEST,
+                    &serde_json::json!({ "error": error }),
+                )
+                .await;
+            }
+        };
+        let (size, _) = match workspace_file_metadata(&relative_path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return write_json_response(
+                    &mut socket,
+                    http::StatusCode::NOT_FOUND,
+                    &serde_json::json!({ "error": error }),
+                )
+                .await;
+            }
+        };
+        if request.method == "HEAD" {
+            return write_http_response(
+                &mut socket,
+                http::StatusCode::OK,
+                &[
+                    ("Content-Type", spec.content_type.to_string()),
+                    ("Cache-Control", "no-store".to_string()),
+                    ("Content-Length", size.to_string()),
+                    ("Accept-Ranges", "bytes".to_string()),
+                ],
+                &[],
+            )
+            .await;
+        }
+        match read_workspace_file_bytes(&relative_path) {
+            Ok(bytes) => {
+                return write_http_response(
+                    &mut socket,
+                    http::StatusCode::OK,
+                    &[
+                        ("Content-Type", spec.content_type.to_string()),
+                        ("Cache-Control", "no-store".to_string()),
+                        ("Accept-Ranges", "bytes".to_string()),
+                    ],
+                    &bytes,
+                )
+                .await;
+            }
+            Err(error) => {
+                return write_json_response(
+                    &mut socket,
+                    http::StatusCode::NOT_FOUND,
+                    &serde_json::json!({ "error": error }),
+                )
+                .await;
+            }
+        }
+    }
+
+    if request.method == "POST" && path == "/__onlyoffice_api__/callback" {
+        let relative_path = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "path")
+            .map(|(_, value)| value.to_string())
+            .unwrap_or_default();
+        let token = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "token")
+            .map(|(_, value)| value.to_string())
+            .unwrap_or_default();
+        let secret = match load_or_create_onlyoffice_jwt_secret(&app) {
+            Ok(secret) => secret,
+            Err(error) => {
+                return write_json_response(
+                    &mut socket,
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": error }),
+                )
+                .await;
+            }
+        };
+        if let Err(error) = verify_onlyoffice_path_token(&secret, &token, "callback", &relative_path) {
+            return write_json_response(
+                &mut socket,
+                http::StatusCode::FORBIDDEN,
+                &serde_json::json!({ "error": error }),
+            )
+            .await;
+        }
+        let body: serde_json::Value = match serde_json::from_slice(&request.body) {
+            Ok(body) => body,
+            Err(error) => {
+                return write_json_response(
+                    &mut socket,
+                    http::StatusCode::BAD_REQUEST,
+                    &serde_json::json!({ "error": format!("Invalid ONLYOFFICE callback body: {}", error) }),
+                )
+                .await;
+            }
+        };
+        let status = body.get("status").and_then(|value| value.as_i64()).unwrap_or(0);
+        if (status == 2 || status == 6)
+            && body.get("url").and_then(|value| value.as_str()).is_some()
+        {
+            let source_url = match normalize_onlyoffice_callback_source_url(
+                body.get("url").and_then(|value| value.as_str()).unwrap_or_default(),
+            ) {
+                Ok(url) => url,
+                Err(error) => {
+                    return write_json_response(
+                        &mut socket,
+                        http::StatusCode::BAD_REQUEST,
+                        &serde_json::json!({ "error": error }),
+                    )
+                    .await;
+                }
+            };
+            let client = match reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    return write_json_response(
+                        &mut socket,
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        &serde_json::json!({ "error": format!("Failed to build ONLYOFFICE callback client: {}", error) }),
+                    )
+                    .await;
+                }
+            };
+            let response = match client.get(source_url.clone()).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    return write_json_response(
+                        &mut socket,
+                        http::StatusCode::BAD_GATEWAY,
+                        &serde_json::json!({ "error": format!("ONLYOFFICE save download failed: {}", error) }),
+                    )
+                    .await;
+                }
+            };
+            if !response.status().is_success() {
+                return write_json_response(
+                    &mut socket,
+                    http::StatusCode::BAD_GATEWAY,
+                    &serde_json::json!({ "error": format!("ONLYOFFICE save download failed with {}", response.status()) }),
+                )
+                .await;
+            }
+            let bytes = match response.bytes().await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return write_json_response(
+                        &mut socket,
+                        http::StatusCode::BAD_GATEWAY,
+                        &serde_json::json!({ "error": format!("Failed to read ONLYOFFICE save bytes: {}", error) }),
+                    )
+                    .await;
+                }
+            };
+            if let Err(error) = write_workspace_file_bytes_atomically(&relative_path, &bytes) {
+                return write_json_response(
+                    &mut socket,
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": error }),
+                )
+                .await;
+            }
+        }
+        return write_json_response(
+            &mut socket,
+            http::StatusCode::OK,
+            &serde_json::json!({ "error": 0 }),
+        )
+        .await;
+    }
+
+    write_json_response(
+        &mut socket,
+        http::StatusCode::NOT_FOUND,
+        &serde_json::json!({ "error": "Route not found" }),
+    )
+    .await
+}
+
+async fn wait_for_onlyoffice_bridge_health() -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("Failed to build ONLYOFFICE bridge client: {}", e))?;
+    let url = format!("{}/__onlyoffice_api__/health", onlyoffice_bridge_local_origin());
+    let mut last_error = "ONLYOFFICE bridge did not report readiness yet".to_string();
+    for _ in 0..30 {
+        match client.get(url.as_str()).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => {
+                last_error = format!("ONLYOFFICE bridge returned {}", response.status());
+            }
+            Err(error) => {
+                last_error = error.to_string();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    Err(format!(
+        "Timed out waiting for ONLYOFFICE bridge readiness: {}",
+        last_error
+    ))
+}
+
+async fn start_onlyoffice_bridge(app: AppHandle) -> Result<(), String> {
+    if wait_for_onlyoffice_bridge_health().await.is_ok() {
+        return Ok(());
+    }
+
+    let _guard = onlyoffice_bridge_start_lock().lock().await;
+    if wait_for_onlyoffice_bridge_health().await.is_ok() {
+        return Ok(());
+    }
+
+    let bind_addr = format!("0.0.0.0:{}", ONLYOFFICE_BRIDGE_PORT);
+    match TcpListener::bind(bind_addr.as_str()).await {
+        Ok(listener) => {
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let (socket, _) = match listener.accept().await {
+                        Ok(values) => values,
+                        Err(error) => {
+                            eprintln!("[Entropic] ONLYOFFICE bridge accept failed: {}", error);
+                            break;
+                        }
+                    };
+                    let app_handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = handle_onlyoffice_bridge_connection(socket, app_handle).await {
+                            eprintln!("[Entropic] ONLYOFFICE bridge request failed: {}", error);
+                        }
+                    });
+                }
+            });
+        }
+        Err(error) => {
+            if wait_for_onlyoffice_bridge_health().await.is_err() {
+                return Err(format!(
+                    "Failed to bind ONLYOFFICE desktop bridge on {}: {}",
+                    bind_addr, error
+                ));
+            }
+        }
+    }
+
+    wait_for_onlyoffice_bridge_health().await
+}
+
+async fn wait_for_onlyoffice_health() -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .map_err(|e| format!("Failed to build ONLYOFFICE health client: {}", e))?;
+    let url = format!(
+        "http://127.0.0.1:{}/web-apps/apps/api/documents/api.js",
+        ONLYOFFICE_HOST_PORT
+    );
+    let mut last_error = "ONLYOFFICE did not report readiness yet".to_string();
+    for _ in 0..90 {
+        match client.get(url.as_str()).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => {
+                last_error = format!("ONLYOFFICE returned {}", response.status());
+            }
+            Err(error) => {
+                last_error = error.to_string();
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    Err(format!(
+        "Timed out waiting for ONLYOFFICE readiness: {}",
+        last_error
+    ))
+}
+
+fn onlyoffice_status_from_error(error: Option<String>) -> OnlyOfficeStatus {
+    let running = named_gateway_container_exists(ONLYOFFICE_CONTAINER, true);
+    OnlyOfficeStatus {
+        running,
+        ready: running && error.is_none(),
+        public_url: onlyoffice_bridge_local_origin(),
+        image: onlyoffice_image_name(),
+        error,
+    }
+}
+
+fn ensure_onlyoffice_image() -> Result<(), String> {
+    let image = onlyoffice_image_name();
+    let check = docker_command()
+        .args(["image", "inspect", image.as_str()])
+        .output()
+        .map_err(|e| format!("Failed to check ONLYOFFICE image: {}", e))?;
+    if check.status.success() {
+        return Ok(());
+    }
+
+    let pull = docker_command()
+        .args(["pull", image.as_str()])
+        .output()
+        .map_err(|e| format!("Failed to pull ONLYOFFICE image {}: {}", image, e))?;
+    if pull.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&pull.stderr).trim().to_string();
+    Err(format!(
+        "Failed to pull ONLYOFFICE image {}: {}",
+        image,
+        if stderr.is_empty() {
+            "unknown error".to_string()
+        } else {
+            stderr
+        }
+    ))
+}
+
+async fn start_onlyoffice_sidecar(app: &AppHandle) -> Result<(), String> {
+    let expected_image = onlyoffice_image_name();
+    let check = docker_command()
+        .args(["ps", "-q", "-f", &format!("name={}", ONLYOFFICE_CONTAINER)])
+        .output()
+        .map_err(|e| format!("Failed to check ONLYOFFICE container: {}", e))?;
+    if !check.stdout.is_empty()
+        && onlyoffice_container_image().as_deref() == Some(expected_image.as_str())
+    {
+        wait_for_onlyoffice_health().await?;
+        return Ok(());
+    }
+    if !check.stdout.is_empty() {
+        let _ = docker_command()
+            .args(["rm", "-f", ONLYOFFICE_CONTAINER])
+            .output();
+    }
+
+    let check_all = docker_command()
+        .args(["ps", "-aq", "-f", &format!("name={}", ONLYOFFICE_CONTAINER)])
+        .output()
+        .map_err(|e| format!("Failed to inspect ONLYOFFICE container state: {}", e))?;
+    if !check_all.stdout.is_empty() {
+        if onlyoffice_container_image().as_deref() == Some(expected_image.as_str()) {
+            let start = docker_command()
+                .args(["start", ONLYOFFICE_CONTAINER])
+                .output()
+                .map_err(|e| format!("Failed to start ONLYOFFICE container: {}", e))?;
+            if start.status.success() {
+                wait_for_onlyoffice_health().await?;
+                return Ok(());
+            }
+        }
+        let _ = docker_command()
+            .args(["rm", "-f", ONLYOFFICE_CONTAINER])
+            .output();
+    }
+
+    let _ = docker_command()
+        .args(["network", "create", OPENCLAW_NETWORK])
+        .output();
+    ensure_onlyoffice_image()?;
+    let jwt_secret = load_or_create_onlyoffice_jwt_secret(app)?;
+
+    let docker_args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        ONLYOFFICE_CONTAINER.to_string(),
+        "--restart".to_string(),
+        "unless-stopped".to_string(),
+        "--network".to_string(),
+        OPENCLAW_NETWORK.to_string(),
+        "--add-host".to_string(),
+        docker_host_alias_arg(),
+        "-e".to_string(),
+        "JWT_ENABLED=true".to_string(),
+        "-e".to_string(),
+        format!("JWT_SECRET={}", jwt_secret),
+        "-p".to_string(),
+        format!(
+            "127.0.0.1:{}:{}",
+            ONLYOFFICE_HOST_PORT, ONLYOFFICE_HTTP_PORT
+        ),
+        expected_image,
+    ];
+
+    let run = docker_command()
+        .args(&docker_args)
+        .output()
+        .map_err(|e| format!("Failed to start ONLYOFFICE container: {}", e))?;
+    if !run.status.success() {
+        let stderr = String::from_utf8_lossy(&run.stderr).trim().to_string();
+        return Err(format!(
+            "Failed to start ONLYOFFICE container: {}",
+            if stderr.is_empty() {
+                "unknown error".to_string()
+            } else {
+                stderr
+            }
+        ));
+    }
+
+    wait_for_onlyoffice_health().await?;
+    Ok(())
 }
 
 /// Preserve Entropic containers on app exit; keep state for faster resume.
@@ -5841,12 +6972,28 @@ fn native_preview_navigation_allowed(url: &Url) -> bool {
         None => return false,
     };
     let host_port = BROWSER_SERVICE_HOST_PORT.parse::<u16>().unwrap_or(19792);
+    let onlyoffice_bridge_port = ONLYOFFICE_BRIDGE_PORT.parse::<u16>().unwrap_or(19796);
+    let onlyoffice_host_port = ONLYOFFICE_HOST_PORT.parse::<u16>().unwrap_or(19794);
     let current_port = url.port_or_known_default().unwrap_or(host_port);
-    if current_port != host_port {
-        return false;
-    }
     if host == "127.0.0.1" || host == "localhost" {
-        return url.path() == "/__workspace__/" || url.path().starts_with("/__workspace__/");
+        if current_port == onlyoffice_bridge_port {
+            let path = url.path();
+            return path.starts_with("/__onlyoffice__/") || path.starts_with("/__onlyoffice_api__/");
+        }
+        if current_port == onlyoffice_host_port {
+            return true;
+        }
+        if current_port != host_port {
+            return false;
+        }
+        let path = url.path();
+        return path == "/__workspace__/"
+            || path.starts_with("/__workspace__/")
+            || path.starts_with("/__workspace_editor__/")
+            || path.starts_with("/__onlyoffice__/")
+            || path.starts_with("/__onlyoffice_api__/")
+            || path == "/__onlyoffice_proxy__"
+            || path.starts_with("/__onlyoffice_proxy__/");
     }
     if let Some(port_text) = host
         .strip_prefix('p')
@@ -5881,6 +7028,8 @@ fn resolve_native_preview_target_url(raw: &str) -> Result<Url, String> {
         .ok_or_else(|| "Preview URL host is required".to_string())?;
     let host_port = BROWSER_SERVICE_HOST_PORT.parse::<u16>().unwrap_or(19792);
     let browser_service_port = BROWSER_SERVICE_PORT.parse::<u16>().unwrap_or(19791);
+    let onlyoffice_bridge_port = ONLYOFFICE_BRIDGE_PORT.parse::<u16>().unwrap_or(19796);
+    let onlyoffice_host_port = ONLYOFFICE_HOST_PORT.parse::<u16>().unwrap_or(19794);
 
     if native_preview_navigation_allowed(&parsed) {
         return Ok(parsed);
@@ -5894,16 +7043,24 @@ fn resolve_native_preview_target_url(raw: &str) -> Result<Url, String> {
         let target_port = parsed
             .port_or_known_default()
             .ok_or_else(|| "Preview URL must include an explicit local port".to_string())?;
-        if target_port == browser_service_port
-            && (parsed.path() == "/__workspace__/" || parsed.path().starts_with("/__workspace__/"))
-        {
+        if target_port == browser_service_port {
             parsed
                 .set_host(Some("127.0.0.1"))
-                .map_err(|_| "Failed to normalize workspace preview host".to_string())?;
+                .map_err(|_| "Failed to normalize browser preview host".to_string())?;
             parsed
                 .set_port(Some(host_port))
-                .map_err(|_| "Failed to normalize workspace preview port".to_string())?;
-            return Ok(parsed);
+                .map_err(|_| "Failed to normalize browser preview port".to_string())?;
+            if native_preview_navigation_allowed(&parsed) {
+                return Ok(parsed);
+            }
+        }
+        if target_port == onlyoffice_bridge_port || target_port == onlyoffice_host_port {
+            parsed
+                .set_host(Some("127.0.0.1"))
+                .map_err(|_| "Failed to normalize office preview host".to_string())?;
+            if native_preview_navigation_allowed(&parsed) {
+                return Ok(parsed);
+            }
         }
         if target_port == host_port && native_preview_navigation_allowed(&parsed) {
             return Ok(parsed);
@@ -6193,11 +7350,7 @@ fn signal_gateway_config_reload() {
         .output();
 }
 
-async fn wait_for_gateway_after_config_reload(
-    app: &AppHandle,
-    context: &str,
-    attempts: usize,
-) {
+async fn wait_for_gateway_after_config_reload(app: &AppHandle, context: &str, attempts: usize) {
     if let Ok(token) = effective_gateway_token(app) {
         eprintln!(
             "[Entropic] {}: waiting for gateway health after config reload...",
@@ -6875,6 +8028,9 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
         let mark = if cap.enabled { "x" } else { " " };
         tools_body.push_str(&format!("- [{}] {}\n", mark, cap.label));
     }
+    tools_body.push_str(
+        "\n## Office Files\n- Use `entropic-office spreadsheet todo /data/workspace/todo.xlsx \"Task 1\" \"Task 2\"` to create a workbook.\n- Use `entropic-office spreadsheet new /data/workspace/file.xlsx` for a blank workbook.\n- Use `entropic-office document new /data/workspace/file.docx` or `entropic-office document lines /data/workspace/file.docx \"Line 1\" \"Line 2\"` for docx files.\n",
+    );
 
     let mut id_body = String::from("# IDENTITY.md - Who Am I?\n\n");
     id_body.push_str(&format!("- **Name:** {}\n", settings.identity_name.trim()));
@@ -7980,6 +9136,7 @@ fn save_auth(app: &AppHandle, data: &StoredAuth) -> Result<(), String> {
     fs::write(&path, payload).map_err(|e| format!("Failed to write auth store: {}", e))?;
     Ok(())
 }
+
 
 fn gateway_ws_url() -> String {
     if std::path::Path::new("/.dockerenv").exists() {
@@ -9648,6 +10805,7 @@ pub async fn start_gateway(
     } else {
         "off"
     };
+    let onlyoffice_jwt_secret = load_or_create_onlyoffice_jwt_secret(&app)?;
 
     // Build docker run command - pass API keys as env vars
     let mut env_entries: Vec<(&str, &str)> = vec![
@@ -9685,6 +10843,26 @@ pub async fn start_gateway(
         ("ENTROPIC_BROWSER_BIND", "0.0.0.0"),
         ("ENTROPIC_BROWSER_PROFILE", "/data/browser/profile"),
         ("ENTROPIC_TOOLS_PATH", "/data/tools"),
+        (
+            "ENTROPIC_ONLYOFFICE_PUBLIC_BASE",
+            ONLYOFFICE_PUBLIC_BASE_URL,
+        ),
+        (
+            "ENTROPIC_ONLYOFFICE_INTERNAL_BASE",
+            ONLYOFFICE_INTERNAL_BASE_URL,
+        ),
+        (
+            "ENTROPIC_ONLYOFFICE_UPSTREAM_BASE",
+            ONLYOFFICE_UPSTREAM_BASE_URL,
+        ),
+        (
+            "ENTROPIC_ONLYOFFICE_JWT_SECRET",
+            onlyoffice_jwt_secret.as_str(),
+        ),
+        (
+            "ENTROPIC_ONLYOFFICE_USER_NAME",
+            settings.identity_name.as_str(),
+        ),
     ];
 
     // Anthropic: use ANTHROPIC_OAUTH_TOKEN for OAuth tokens (sk-ant-oat01-...), ANTHROPIC_API_KEY for regular keys
@@ -9924,6 +11102,8 @@ pub async fn start_gateway_with_proxy(
         startup_started.elapsed().as_millis()
     );
     let local_gateway_token = expected_gateway_token(&app)?;
+    let onlyoffice_jwt_secret = load_or_create_onlyoffice_jwt_secret(&app)?;
+    let onlyoffice_user_name = load_agent_settings(&app).identity_name;
     let build_proxy_docker_args = || -> Result<(Vec<String>, GatewayEnvFile), String> {
         let mut env_entries: Vec<(&str, &str)> = vec![
             ("OPENCLAW_GATEWAY_TOKEN", local_gateway_token.as_str()),
@@ -9960,6 +11140,26 @@ pub async fn start_gateway_with_proxy(
             ("ENTROPIC_BROWSER_BIND", "0.0.0.0"),
             ("ENTROPIC_BROWSER_PROFILE", "/data/browser/profile"),
             ("ENTROPIC_TOOLS_PATH", "/data/tools"),
+            (
+                "ENTROPIC_ONLYOFFICE_PUBLIC_BASE",
+                ONLYOFFICE_PUBLIC_BASE_URL,
+            ),
+            (
+                "ENTROPIC_ONLYOFFICE_INTERNAL_BASE",
+                ONLYOFFICE_INTERNAL_BASE_URL,
+            ),
+            (
+                "ENTROPIC_ONLYOFFICE_UPSTREAM_BASE",
+                ONLYOFFICE_UPSTREAM_BASE_URL,
+            ),
+            (
+                "ENTROPIC_ONLYOFFICE_JWT_SECRET",
+                onlyoffice_jwt_secret.as_str(),
+            ),
+            (
+                "ENTROPIC_ONLYOFFICE_USER_NAME",
+                onlyoffice_user_name.as_str(),
+            ),
         ];
         if let Some(image_model) = image_model.as_deref() {
             if !image_model.trim().is_empty() {
@@ -10978,6 +12178,9 @@ pub async fn set_capabilities(app: AppHandle, list: Vec<CapabilityState>) -> Res
         let mark = if cap.enabled { "x" } else { " " };
         body.push_str(&format!("- [{}] {}\n", mark, cap.label));
     }
+    body.push_str(
+        "\n## Office Files\n- Use `entropic-office spreadsheet todo /data/workspace/todo.xlsx \"Task 1\" \"Task 2\"` to create a workbook.\n- Use `entropic-office spreadsheet new /data/workspace/file.xlsx` for a blank workbook.\n- Use `entropic-office document new /data/workspace/file.docx` or `entropic-office document lines /data/workspace/file.docx \"Line 1\" \"Line 2\"` for docx files.\n",
+    );
     write_container_file(&workspace_file("TOOLS.md"), &body)?;
     let mut settings = load_agent_settings(&app);
     settings.capabilities = list;
@@ -13478,6 +14681,27 @@ pub async fn upload_workspace_file(
         return Err("Failed to upload file to container".to_string());
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_onlyoffice_status() -> Result<OnlyOfficeStatus, String> {
+    if !named_gateway_container_exists(ONLYOFFICE_CONTAINER, true) {
+        return Ok(onlyoffice_status_from_error(None));
+    }
+    match wait_for_onlyoffice_health().await {
+        Ok(()) => match wait_for_onlyoffice_bridge_health().await {
+            Ok(()) => Ok(onlyoffice_status_from_error(None)),
+            Err(error) => Ok(onlyoffice_status_from_error(Some(error))),
+        },
+        Err(error) => Ok(onlyoffice_status_from_error(Some(error))),
+    }
+}
+
+#[tauri::command]
+pub async fn ensure_onlyoffice_ready(app: AppHandle) -> Result<OnlyOfficeStatus, String> {
+    start_onlyoffice_sidecar(&app).await?;
+    start_onlyoffice_bridge(app).await?;
+    Ok(onlyoffice_status_from_error(None))
 }
 
 #[tauri::command]
