@@ -495,7 +495,6 @@ export type LocalModelServiceType =
   | "ollama"
   | "lmstudio"
   | "vllm"
-  | "litellm"
   | "openai-compatible";
 
 export type LocalModelApiMode =
@@ -522,7 +521,6 @@ export const LOCAL_MODEL_SERVICE_OPTIONS: Array<{
   { value: "ollama", label: "Ollama" },
   { value: "lmstudio", label: "LM Studio" },
   { value: "vllm", label: "vLLM" },
-  { value: "litellm", label: "LiteLLM" },
   { value: "openai-compatible", label: "OpenAI-Compatible" },
 ];
 
@@ -542,8 +540,6 @@ export function defaultLocalModelBaseUrl(serviceType: LocalModelServiceType): st
       return "http://localhost:1234/v1";
     case "vllm":
       return "http://localhost:8000/v1";
-    case "litellm":
-      return "http://localhost:4000/v1";
     case "openai-compatible":
       return "http://localhost:1234/v1";
   }
@@ -556,7 +552,6 @@ export function defaultLocalModelApiMode(serviceType: LocalModelServiceType): Lo
     case "lmstudio":
       return "openai-responses";
     case "vllm":
-    case "litellm":
     case "openai-compatible":
       return "openai-completions";
   }
@@ -568,7 +563,6 @@ function inferLocalModelServiceType(baseUrl: string | null | undefined): LocalMo
   if (normalized.includes("11434") || normalized.includes("ollama")) return "ollama";
   if (normalized.includes("1234") || normalized.includes("lmstudio")) return "lmstudio";
   if (normalized.includes("8000") || normalized.includes("vllm")) return "vllm";
-  if (normalized.includes("4000") || normalized.includes("litellm")) return "litellm";
   return "openai-compatible";
 }
 

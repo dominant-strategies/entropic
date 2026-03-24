@@ -10842,7 +10842,6 @@ enum LocalModelServiceType {
     Ollama,
     LmStudio,
     Vllm,
-    LiteLlm,
     OpenAiCompatible,
 }
 
@@ -10852,7 +10851,6 @@ impl LocalModelServiceType {
             "ollama" => Some(Self::Ollama),
             "lmstudio" => Some(Self::LmStudio),
             "vllm" => Some(Self::Vllm),
-            "litellm" => Some(Self::LiteLlm),
             "openai-compatible" => Some(Self::OpenAiCompatible),
             _ => None,
         }
@@ -10863,7 +10861,6 @@ impl LocalModelServiceType {
             Self::Ollama => "ollama",
             Self::LmStudio => "lmstudio",
             Self::Vllm => "vllm",
-            Self::LiteLlm => "litellm",
             Self::OpenAiCompatible => "openai-compatible",
         }
     }
@@ -10874,7 +10871,6 @@ impl LocalModelServiceType {
             Self::Ollama => "ollama",
             Self::LmStudio => "lmstudio",
             Self::Vllm => "vllm",
-            Self::LiteLlm => "litellm",
         }
     }
 }
@@ -11038,9 +11034,6 @@ fn infer_local_model_service_type(base_url: &str) -> LocalModelServiceType {
     if normalized.contains("8000") || normalized.contains("vllm") {
         return LocalModelServiceType::Vllm;
     }
-    if normalized.contains("4000") || normalized.contains("litellm") {
-        return LocalModelServiceType::LiteLlm;
-    }
     LocalModelServiceType::OpenAiCompatible
 }
 
@@ -11048,9 +11041,9 @@ fn default_local_model_api_mode(service_type: LocalModelServiceType) -> LocalMod
     match service_type {
         LocalModelServiceType::Ollama => LocalModelApiMode::Ollama,
         LocalModelServiceType::LmStudio => LocalModelApiMode::OpenAiResponses,
-        LocalModelServiceType::Vllm
-        | LocalModelServiceType::LiteLlm
-        | LocalModelServiceType::OpenAiCompatible => LocalModelApiMode::OpenAiCompletions,
+        LocalModelServiceType::Vllm | LocalModelServiceType::OpenAiCompatible => {
+            LocalModelApiMode::OpenAiCompletions
+        }
     }
 }
 
@@ -11074,7 +11067,7 @@ fn build_ollama_models_url(base_url: &str) -> String {
     }
 }
 
-const LOCAL_MODEL_PROVIDER_IDS: &[&str] = &["ollama", "lmstudio", "vllm", "litellm", "local"];
+const LOCAL_MODEL_PROVIDER_IDS: &[&str] = &["ollama", "lmstudio", "vllm", "local"];
 
 fn clear_local_model_provider_configs(cfg: &mut serde_json::Value) {
     for provider_id in LOCAL_MODEL_PROVIDER_IDS {

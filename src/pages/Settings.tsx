@@ -1457,7 +1457,7 @@ export function Settings({
                 : "Managed Provider is unavailable in this build because hosted auth is not configured."
               : byokMode
                 ? "Bring Your Own Keys uses provider OAuth or API keys stored locally on this machine."
-                : "Local Models connects your own Ollama, LM Studio, vLLM, LiteLLM, or OpenAI-compatible endpoint."}
+                : "Local Models connects your own Ollama, LM Studio, vLLM, or OpenAI-compatible endpoint."}
           </div>
         </div>
       </SettingsGroup>
