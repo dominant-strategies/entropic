@@ -30,6 +30,10 @@ type SavedChannelsState = {
   whatsapp_allow_from?: string;
 };
 
+type GatewayMutationResult = {
+  wsReconnectExpected: boolean;
+};
+
 export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) {
   const [loadingState, setLoadingState] = useState(false);
   const [savingToken, setSavingToken] = useState(false);
@@ -112,40 +116,43 @@ export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) 
 
       const state = await invoke<SavedChannelsState>("get_saved_channels_state");
 
-      await invoke("set_channels_config", {
-        discordEnabled: state.discord_enabled ?? false,
-        discordToken: state.discord_token ?? "",
-        telegramEnabled: true,
-        telegramToken: trimmedToken,
-        telegramDmPolicy: state.telegram_dm_policy ?? "pairing",
-        telegramGroupPolicy: state.telegram_group_policy ?? "allowlist",
-        telegramConfigWrites: state.telegram_config_writes ?? false,
-        telegramRequireMention: state.telegram_require_mention ?? true,
-        telegramReplyToMode: state.telegram_reply_to_mode ?? "off",
-        telegramLinkPreview: state.telegram_link_preview ?? true,
-        slackEnabled: state.slack_enabled ?? false,
-        slackBotToken: state.slack_bot_token ?? "",
-        slackAppToken: state.slack_app_token ?? "",
-        googlechatEnabled: state.googlechat_enabled ?? false,
-        googlechatServiceAccount: state.googlechat_service_account ?? "",
-        googlechatAudienceType: state.googlechat_audience_type ?? "app-url",
-        googlechatAudience: state.googlechat_audience ?? "",
-        whatsappEnabled: state.whatsapp_enabled ?? false,
-        whatsappAllowFrom: state.whatsapp_allow_from ?? "",
+      const result = await invoke<GatewayMutationResult>("apply_gateway_mutation", {
+        request: {
+          channels: {
+            discordEnabled: state.discord_enabled ?? false,
+            discordToken: state.discord_token ?? "",
+            telegramEnabled: true,
+            telegramToken: trimmedToken,
+            telegramDmPolicy: state.telegram_dm_policy ?? "pairing",
+            telegramGroupPolicy: state.telegram_group_policy ?? "allowlist",
+            telegramConfigWrites: state.telegram_config_writes ?? false,
+            telegramRequireMention: state.telegram_require_mention ?? true,
+            telegramReplyToMode: state.telegram_reply_to_mode ?? "off",
+            telegramLinkPreview: state.telegram_link_preview ?? true,
+            slackEnabled: state.slack_enabled ?? false,
+            slackBotToken: state.slack_bot_token ?? "",
+            slackAppToken: state.slack_app_token ?? "",
+            googlechatEnabled: state.googlechat_enabled ?? false,
+            googlechatServiceAccount: state.googlechat_service_account ?? "",
+            googlechatAudienceType: state.googlechat_audience_type ?? "app-url",
+            googlechatAudience: state.googlechat_audience ?? "",
+            whatsappEnabled: state.whatsapp_enabled ?? false,
+            whatsappAllowFrom: state.whatsapp_allow_from ?? "",
+          },
+          reason: "telegram_modal_save_token",
+        },
       });
 
       setTokenSaved(true);
       const botHandle = validation.username?.trim() ? ` (@${validation.username.trim()})` : "";
 
-      // Restart or start gateway so the new token takes effect immediately
       const gatewayRunning = await invoke<boolean>("get_gateway_status").catch(() => false);
       if (gatewayRunning) {
-        setStatusMsg(`Bot token saved${botHandle}. Restarting gateway...`);
-        try {
-          await invoke("restart_gateway_in_place");
-        } catch {
-          // Non-fatal — token is saved, gateway restart can be done manually
-        }
+        setStatusMsg(
+          result.wsReconnectExpected
+            ? `Bot token saved${botHandle}. Gateway is reloading Telegram configuration...`
+            : `Bot token saved${botHandle}.`,
+        );
       } else {
         setStatusMsg(`Bot token saved${botHandle}. Starting gateway...`);
         window.dispatchEvent(new CustomEvent("entropic-start-gateway"));

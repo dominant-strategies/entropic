@@ -107,6 +107,88 @@ const initialDashboardBootstrapState: DashboardBootstrapState = {
   error: null,
 };
 
+type GatewayMutationPlan = "noop" | "config_reload" | "container_restart" | "container_recreate";
+type GatewayLifecycleMode = "idle" | "starting" | "reloading" | "restarting" | "recreating";
+
+type GatewayMutationResult = {
+  plan: GatewayMutationPlan;
+  applied: boolean;
+  gatewayHealthStatus: string;
+  effectiveModel?: string | null;
+  effectiveImageModel?: string | null;
+  wsReconnectExpected: boolean;
+};
+
+function lifecycleModeFromPlan(plan: GatewayMutationPlan): GatewayLifecycleMode {
+  switch (plan) {
+    case "config_reload":
+      return "reloading";
+    case "container_restart":
+      return "restarting";
+    case "container_recreate":
+      return "recreating";
+    default:
+      return "idle";
+  }
+}
+
+function gatewayLifecycleLabel(params: {
+  showGatewayStartup: boolean;
+  gatewayStartupStage: GatewayStartupStage;
+  gatewayRetryIn: number | null;
+  gatewayLifecycleMode: GatewayLifecycleMode;
+  gatewayHealthStatus: string;
+  gatewayContainerRunning: boolean;
+}) {
+  const {
+    showGatewayStartup,
+    gatewayStartupStage,
+    gatewayRetryIn,
+    gatewayLifecycleMode,
+    gatewayHealthStatus,
+    gatewayContainerRunning,
+  } = params;
+
+  if (gatewayRetryIn) {
+    return `Gateway reconnecting — retrying in ${gatewayRetryIn}s`;
+  }
+
+  if (showGatewayStartup) {
+    switch (gatewayStartupStage) {
+      case "credits":
+      case "token":
+        return "Securing gateway credentials";
+      case "launch":
+        if (gatewayLifecycleMode === "recreating") return "Recreating secure sandbox";
+        if (gatewayLifecycleMode === "restarting") return "Restarting secure sandbox";
+        return "Provisioning isolated container";
+      case "health":
+        return "Verifying sandbox health";
+      case "connect":
+        return "Connecting to your assistant";
+      default:
+        return "Starting secure sandbox";
+    }
+  }
+
+  switch (gatewayLifecycleMode) {
+    case "reloading":
+      return "Reloading gateway configuration";
+    case "restarting":
+      return "Restarting secure sandbox";
+    case "recreating":
+      return "Recreating secure sandbox";
+    case "starting":
+      return gatewayContainerRunning || gatewayHealthStatus === "starting"
+        ? "Verifying sandbox health"
+        : "Starting secure sandbox";
+    default:
+      return gatewayContainerRunning && gatewayHealthStatus === "starting"
+        ? "Verifying sandbox health"
+        : "Connecting to your assistant";
+  }
+}
+
 function isGatewayHealthyStatus(status: string, gatewayContainerRunning: boolean) {
   if (!gatewayContainerRunning) {
     return false;
@@ -472,6 +554,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [isTogglingGateway, setIsTogglingGateway] = useState(false);
   const [showGatewayStartup, setShowGatewayStartup] = useState(false);
   const [gatewayStartupStage, setGatewayStartupStage] = useState<GatewayStartupStage>("idle");
+  const [gatewayLifecycleMode, setGatewayLifecycleMode] = useState<GatewayLifecycleMode>("idle");
+  const [awaitingChatConnection, setAwaitingChatConnection] = useState(false);
   const [startupError, setStartupError] = useState<{
     message: string;
     actions?: Array<{ label: string; onClick: () => void }>;
@@ -496,6 +580,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [pendingChatAction, setPendingChatAction] = useState<ChatSessionActionRequest | null>(null);
   const [localCreditBalanceCents, setLocalCreditBalanceCents] = useState<number | null>(null);
   const gatewayTokenRef = useRef<string | null>(null);
+  const selectedModelRef = useRef(selectedModel);
+  const imageModelRef = useRef(imageModel);
   const autoStartAttemptedRef = useRef(false);
   const lastAuthStateRef = useRef<boolean | null>(null);
   const startGatewayAttemptRef = useRef(0);
@@ -515,6 +601,14 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const gatewayHealthFailureStreakRef = useRef(0);
   const gatewayRunning = bootstrapState.gatewayRunning;
   const prefsLoaded = bootstrapState.status !== "loading";
+
+  useEffect(() => {
+    selectedModelRef.current = selectedModel;
+  }, [selectedModel]);
+
+  useEffect(() => {
+    imageModelRef.current = imageModel;
+  }, [imageModel]);
 
   async function openFeedbackPage() {
     if (!FEEDBACK_FORM_URL) {
@@ -554,6 +648,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }
 
   function markGatewayStopped() {
+    setAwaitingChatConnection(false);
+    setGatewayLifecycleMode("idle");
     updateGatewayState({
       gatewayRunning: false,
       gatewayContainerRunning: false,
@@ -563,6 +659,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }
 
   function markGatewayStarting(mode: GatewayLaunchMode) {
+    setAwaitingChatConnection(false);
+    setGatewayLifecycleMode((current) => (current === "recreating" || current === "restarting" ? current : "starting"));
     updateGatewayState({
       gatewayRunning: false,
       gatewayContainerRunning: true,
@@ -572,12 +670,38 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }
 
   function markGatewayReady(mode: GatewayLaunchMode) {
+    setGatewayLifecycleMode("idle");
     updateGatewayState({
       gatewayRunning: true,
       gatewayContainerRunning: true,
       gatewayLaunchMode: mode,
       gatewayHealthStatus: "healthy",
     });
+  }
+
+  function completeGatewayReady(mode: GatewayLaunchMode) {
+    gatewayHealthFailureStreakRef.current = 0;
+    markGatewayReady(mode);
+    clearGatewayRetry();
+    if (currentPage === "chat" && showGatewayStartup) {
+      setAwaitingChatConnection(true);
+      setGatewayStartupStage("connect");
+      setShowGatewayStartup(true);
+      return true;
+    }
+    setAwaitingChatConnection(false);
+    setGatewayStartupStage("idle");
+    setShowGatewayStartup(false);
+    return true;
+  }
+
+  function handleGatewayConnectionReady() {
+    if (!awaitingChatConnection) {
+      return;
+    }
+    setAwaitingChatConnection(false);
+    setGatewayStartupStage("idle");
+    setShowGatewayStartup(false);
   }
 
   function buildOutOfCreditsStartupError() {
@@ -638,6 +762,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           isLocal,
           nextSelectedModel,
         );
+
+        selectedModelRef.current = nextSelectedModel;
+        imageModelRef.current = nextImageModel;
 
         setUseLocalKeys(isLocal);
         setSelectedModel(nextSelectedModel);
@@ -1104,6 +1231,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     const attemptId = ++startGatewayAttemptRef.current;
     setStartupError(null);
     setShowGatewayStartup(true);
+    setGatewayLifecycleMode(stopFirst ? "recreating" : "starting");
     setGatewayStartupStage("credits");
     gatewayHealthFailureStreakRef.current = 0;
     markGatewayStarting("proxy");
@@ -1120,14 +1248,16 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         if (isAuthenticated) {
           const balance = await getBalance();
           if (balance.balance_cents <= 0) {
-            setStartupError(buildOutOfCreditsStartupError());
-            setShowGatewayStartup(false);
-            return false;
+        setStartupError(buildOutOfCreditsStartupError());
+        setShowGatewayStartup(false);
+        setGatewayLifecycleMode("idle");
+        return false;
           }
         } else {
           if (anonymousBalanceCents <= 0) {
             setStartupError(buildOutOfCreditsStartupError());
             setShowGatewayStartup(false);
+            setGatewayLifecycleMode("idle");
             return false;
           }
         }
@@ -1226,6 +1356,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         setStartupError(buildOutOfCreditsStartupError());
         setGatewayStartupStage("idle");
         setShowGatewayStartup(false);
+        setGatewayLifecycleMode("idle");
         return false;
       }
 
@@ -1243,6 +1374,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         );
         setGatewayStartupStage("idle");
         setShowGatewayStartup(false);
+        setGatewayLifecycleMode("idle");
         return false;
       }
 
@@ -1256,6 +1388,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         });
         setGatewayStartupStage("idle");
         setShowGatewayStartup(false);
+        setGatewayLifecycleMode("idle");
         return false;
       }
 
@@ -1278,6 +1411,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         clearGatewayRetry();
         setGatewayStartupStage("idle");
         setShowGatewayStartup(false);
+        setGatewayLifecycleMode("idle");
         return false;
       }
 
@@ -1310,6 +1444,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       } else {
         setGatewayStartupStage("idle");
         setShowGatewayStartup(false);
+        setGatewayLifecycleMode("idle");
       }
       return false;
     } finally {
@@ -1325,6 +1460,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
 
     async function autoStartGateway() {
+      const desiredModel = selectedModelRef.current;
+      const desiredImageModel = imageModelRef.current;
       const proxyEnabled =
         isAuthConfigured &&
         !useLocalKeys &&
@@ -1378,8 +1515,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           setIsTogglingGateway(true);
           try {
             await startGatewayProxyFlow({
-              model: selectedModel,
-              image: imageModel,
+              model: desiredModel,
+              image: desiredImageModel,
               stopFirst: false,
               allowRetry: true,
             });
@@ -1398,7 +1535,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         try {
           await invoke("stop_gateway");
           console.log("[Entropic] Auto-start: stopped stale container, starting with local keys...");
-          await invoke("start_gateway", { model: selectedModel });
+          await invoke("start_gateway", { model: desiredModel });
             setGatewayStartupStage("health");
             await new Promise((r) => setTimeout(r, 2000));
           await checkGateway();
@@ -1447,8 +1584,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         setIsTogglingGateway(true);
         try {
           const result = await startGatewayProxyFlow({
-            model: selectedModel,
-            image: imageModel,
+            model: desiredModel,
+            image: desiredImageModel,
             stopFirst: false,
             allowRetry: true,
           });
@@ -1466,7 +1603,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         markGatewayStarting("local");
         setIsTogglingGateway(true);
         try {
-          await invoke("start_gateway", { model: selectedModel });
+          await invoke("start_gateway", { model: desiredModel });
           setGatewayStartupStage("health");
           await new Promise((r) => setTimeout(r, 2000));
           await checkGateway();
@@ -1530,8 +1667,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
     setIsTogglingGateway(true);
     void startGatewayProxyFlow({
-      model: selectedModel,
-      image: imageModel,
+      model: selectedModelRef.current,
+      image: imageModelRef.current,
       stopFirst: false,
       allowRetry: true,
     }).finally(() => {
@@ -1551,19 +1688,14 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     try {
       const running = await getGatewayStatusCached({ force: true });
       if (running) {
-        gatewayHealthFailureStreakRef.current = 0;
-        markGatewayReady(
+        console.log("[Entropic] Gateway health check: healthy");
+        return completeGatewayReady(
           bootstrapState.gatewayLaunchMode === "proxy"
             ? "proxy"
             : useLocalKeys
               ? "local"
-              : "proxy",
+              : "proxy"
         );
-        console.log("[Entropic] Gateway health check: healthy");
-        setGatewayStartupStage("idle");
-        setShowGatewayStartup(false);
-        clearGatewayRetry();
-        return true;
       }
 
       let liveBootstrap: AppBootstrapState | null = null;
@@ -1576,19 +1708,6 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         });
       } catch (bootstrapError) {
         console.warn("[Entropic] Failed to refresh gateway bootstrap state:", bootstrapError);
-      }
-
-      if (
-        liveBootstrap?.gatewayContainerRunning &&
-        liveBootstrap.gatewayHealthStatus.trim().toLowerCase() === "healthy"
-      ) {
-        gatewayHealthFailureStreakRef.current = 0;
-        markGatewayReady(liveBootstrap.gatewayLaunchMode);
-        console.log("[Entropic] Gateway bootstrap state reports healthy container");
-        setGatewayStartupStage("idle");
-        setShowGatewayStartup(false);
-        clearGatewayRetry();
-        return true;
       }
 
       gatewayHealthFailureStreakRef.current += 1;
@@ -1605,16 +1724,24 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         (liveBootstrap?.gatewayContainerRunning ?? bootstrapState.gatewayContainerRunning) &&
         (liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode) !== "stopped"
       ) {
+        const reportedHealthStatus =
+          liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus;
+        const awaitingOperatorConnection =
+          reportedHealthStatus.trim().toLowerCase() === "healthy";
         updateGatewayState({
           gatewayRunning: false,
           gatewayContainerRunning: true,
           gatewayLaunchMode: liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode,
-          gatewayHealthStatus:
-            (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus) === "healthy"
-              ? "starting"
-              : (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus),
+          gatewayHealthStatus: reportedHealthStatus,
         });
-        console.log("[Entropic] Gateway health check: container still recovering");
+        if (showGatewayStartup && awaitingOperatorConnection) {
+          setGatewayStartupStage("connect");
+        }
+        console.log(
+          awaitingOperatorConnection
+            ? "[Entropic] Gateway health check: container healthy, awaiting operator connection"
+            : "[Entropic] Gateway health check: container still recovering"
+        );
         return false;
       }
 
@@ -1631,17 +1758,6 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           gatewayLaunchMode: liveBootstrap.gatewayLaunchMode,
           gatewayHealthStatus: liveBootstrap.gatewayHealthStatus,
         });
-        if (
-          liveBootstrap.gatewayContainerRunning &&
-          liveBootstrap.gatewayHealthStatus.trim().toLowerCase() === "healthy"
-        ) {
-          gatewayHealthFailureStreakRef.current = 0;
-          markGatewayReady(liveBootstrap.gatewayLaunchMode);
-          setGatewayStartupStage("idle");
-          setShowGatewayStartup(false);
-          clearGatewayRetry();
-          return true;
-        }
       } catch (bootstrapError) {
         console.warn("[Entropic] Failed to refresh gateway bootstrap state after check error:", bootstrapError);
       }
@@ -1659,15 +1775,19 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         (liveBootstrap?.gatewayContainerRunning ?? bootstrapState.gatewayContainerRunning) &&
         (liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode) !== "stopped"
       ) {
+        const reportedHealthStatus =
+          liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus;
+        const awaitingOperatorConnection =
+          reportedHealthStatus.trim().toLowerCase() === "healthy";
         updateGatewayState({
           gatewayRunning: false,
           gatewayContainerRunning: true,
           gatewayLaunchMode: liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode,
-          gatewayHealthStatus:
-            (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus) === "healthy"
-              ? "starting"
-              : (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus),
+          gatewayHealthStatus: reportedHealthStatus,
         });
+        if (showGatewayStartup && awaitingOperatorConnection) {
+          setGatewayStartupStage("connect");
+        }
         return false;
       }
 
@@ -1938,8 +2058,14 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
   // Handle confirmed provider switch (called from confirmation modal)
   async function executeModelChange(newModel: string) {
+    const previousModel = selectedModel;
+    const oldProvider = previousModel.split("/")[0];
+    const newProvider = newModel.split("/")[0];
+    const expectsRestart = useLocalKeys && oldProvider !== newProvider;
+
     setProviderSwitchConfirm(null);
     setSelectedModel(newModel);
+    selectedModelRef.current = newModel;
 
     try {
       await updateDesktopSettings({ selectedModel: newModel });
@@ -1949,55 +2075,40 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
     if (!gatewayRunning) return;
 
-    if (
-      isAuthConfigured &&
-      !useLocalKeys &&
-      (isAuthenticated || (localCreditBalanceCents ?? 0) > 0)
-    ) {
-      // Proxy mode — restart with new model via proxy flow
-      setIsTogglingGateway(true);
-      try {
-        await startGatewayProxyFlow({
+    setIsTogglingGateway(true);
+    if (expectsRestart) {
+      setShowGatewayStartup(true);
+      setGatewayLifecycleMode("restarting");
+      setGatewayStartupStage("launch");
+      markGatewayStarting("local");
+    }
+    try {
+      const result = await invoke<GatewayMutationResult>("apply_gateway_mutation", {
+        request: {
           model: newModel,
-          image: imageModel,
-          stopFirst: true,
-          allowRetry: true,
-        });
+          reason: "dashboard_model_change",
+        },
+      });
+
+      setGatewayLifecycleMode(lifecycleModeFromPlan(result.plan));
+      if (result.plan === "container_restart" || result.plan === "container_recreate") {
+        setGatewayStartupStage("health");
+      }
+
+      if (result.wsReconnectExpected) {
+        await new Promise((r) =>
+          setTimeout(r, result.plan === "config_reload" ? 1200 : 2000),
+        );
+        await checkGateway();
+      }
       } catch (error) {
-        console.error("[Entropic] Failed to restart gateway with new model:", error);
+        console.error("[Entropic] Failed to apply model change:", error);
+        setGatewayLifecycleMode("idle");
       } finally {
         setIsTogglingGateway(false);
-      }
-    } else if (useLocalKeys) {
-      const oldProvider = selectedModel.split("/")[0];
-      const newProvider = newModel.split("/")[0];
-      if (oldProvider !== newProvider) {
-        // Provider switch — full container restart needed (different API keys/env vars)
-        console.log("[Entropic] Provider switch in local-keys mode, restarting gateway with:", newModel);
-        setShowGatewayStartup(true);
-        setGatewayStartupStage("launch");
-        markGatewayStarting("local");
-        setIsTogglingGateway(true);
-        try {
-          await invoke("restart_gateway", { model: newModel });
-          setGatewayStartupStage("health");
-          await new Promise((r) => setTimeout(r, 2000));
-          await checkGateway();
-        } catch (error) {
-          console.error("[Entropic] Failed to restart gateway with new model:", error);
-        } finally {
-          setIsTogglingGateway(false);
+        if (expectsRestart) {
           setShowGatewayStartup(false);
         }
-      } else {
-        // Same provider — hot-swap model in config (no container restart)
-        console.log("[Entropic] Same-provider model change, hot-swapping to:", newModel);
-        try {
-          await invoke("update_gateway_model", { model: newModel });
-        } catch (error) {
-          console.error("[Entropic] Failed to hot-swap model:", error);
-        }
-      }
     }
   }
 
@@ -2066,27 +2177,29 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
   async function handleImageModelChange(value: string) {
     setImageModel(value);
+    imageModelRef.current = value;
     try {
       await updateDesktopSettings({ imageModel: value });
     } catch (error) {
       console.error("[Entropic] Failed to save imageModel:", error);
     }
 
-    if (
-      gatewayRunning &&
-      isAuthConfigured &&
-      !useLocalKeys &&
-      (isAuthenticated || (localCreditBalanceCents ?? 0) > 0)
-    ) {
+    if (gatewayRunning) {
       try {
-        await startGatewayProxyFlow({
-          model: selectedModel,
-          image: value,
-          stopFirst: true,
-          allowRetry: true,
+        const result = await invoke<GatewayMutationResult>("apply_gateway_mutation", {
+          request: {
+            imageModel: value,
+            reason: "dashboard_image_model_change",
+          },
         });
+        setGatewayLifecycleMode(lifecycleModeFromPlan(result.plan));
+        if (result.wsReconnectExpected) {
+          await new Promise((r) => setTimeout(r, 1200));
+          await checkGateway();
+        }
       } catch (error) {
-        console.error("[Entropic] Failed to restart gateway with new image model:", error);
+        console.error("[Entropic] Failed to apply image model change:", error);
+        setGatewayLifecycleMode("idle");
       }
     }
   }
@@ -2116,12 +2229,22 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       showGatewayStartup ||
       (isTogglingGateway && !gatewayRunning) ||
       gatewayRetryIn !== null;
+    const gatewayLifecycleText = gatewayLifecycleLabel({
+      showGatewayStartup,
+      gatewayStartupStage,
+      gatewayRetryIn,
+      gatewayLifecycleMode,
+      gatewayHealthStatus: bootstrapState.gatewayHealthStatus,
+      gatewayContainerRunning: bootstrapState.gatewayContainerRunning,
+    });
     return (
       <Chat
         isVisible={currentPage === "chat"}
         gatewayRunning={gatewayRunning}
         gatewayStarting={gatewayStarting}
         gatewayRetryIn={gatewayRetryIn}
+        gatewayLifecycleLabel={gatewayLifecycleText}
+        onGatewayConnectionReady={handleGatewayConnectionReady}
         onStartGateway={startGatewayFromChat}
         onRecoverProxyAuth={recoverProxyAuthFromChat}
         useLocalKeys={useLocalKeys}
