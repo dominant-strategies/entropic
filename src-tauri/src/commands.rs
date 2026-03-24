@@ -497,6 +497,27 @@ fn bundled_plugin_entry_exists(plugin_id: &str) -> bool {
         || container_path_exists(&format!("/app/dist/extensions/{}/index.mjs", plugin_id))
 }
 
+fn remove_bundled_plugin_load_paths(cfg: &mut serde_json::Value, plugin_id: &str) {
+    let bundled_roots = [
+        format!("/app/extensions/{}", plugin_id),
+        format!("/app/dist/extensions/{}", plugin_id),
+    ];
+    if let Some(list) = cfg
+        .pointer_mut("/plugins/load/paths")
+        .and_then(|value| value.as_array_mut())
+    {
+        list.retain(|entry| {
+            let Some(path) = entry.as_str() else {
+                return true;
+            };
+            let trimmed = path.trim();
+            !bundled_roots
+                .iter()
+                .any(|root| trimmed == root || trimmed.starts_with(&format!("{}/", root)))
+        });
+    }
+}
+
 fn normalize_proxy_gateway_model(model: &str) -> String {
     let trimmed = model.trim();
     if trimmed.is_empty() {
@@ -6233,8 +6254,31 @@ fn resolve_managed_plugin_id(primary: &'static str, legacy: &'static str) -> Opt
     }
 }
 
+fn build_tools_markdown(capabilities: &[CapabilityState]) -> String {
+    let mut body = String::from("# TOOLS.md - Local Notes\n\n## Capabilities\n");
+    for cap in capabilities {
+        let mark = if cap.enabled { "x" } else { " " };
+        body.push_str(&format!("- [{}] {}\n", mark, cap.label));
+    }
+    if container_plugin_exists("lossless-claw") {
+        body.push_str("\n## LCM\n");
+        body.push_str(
+            "- If lossless-claw is enabled, confirm it by calling `lcm_grep`, `lcm_describe`, `lcm_expand`, or `lcm_expand_query`.\n",
+        );
+        body.push_str(
+            "- Do not infer lossless-claw availability from `plugins.load.paths`; bundled plugins may load without appearing there.\n",
+        );
+        body.push_str(
+            "- A successful `lcm_grep` call with zero matches still proves the plugin is installed and callable.\n",
+        );
+    }
+    body
+}
+
 fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
-    let payload = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    let mut normalized = value.clone();
+    normalize_openclaw_config(&mut normalized);
+    let payload = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
     let config_path = state_file("openclaw.json");
     // Only write if the content actually changed to avoid triggering the
     // gateway's config file watcher and causing unnecessary SIGUSR1 restarts.
@@ -6940,11 +6984,7 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
             }
         }
     }
-    let mut tools_body = String::from("# TOOLS.md - Local Notes\n\n## Capabilities\n");
-    for cap in &settings.capabilities {
-        let mark = if cap.enabled { "x" } else { " " };
-        tools_body.push_str(&format!("- [{}] {}\n", mark, cap.label));
-    }
+    let mut tools_body = build_tools_markdown(&settings.capabilities);
 
     let mut id_body = String::from("# IDENTITY.md - Who Am I?\n\n");
     id_body.push_str(&format!("- **Name:** {}\n", settings.identity_name.trim()));
@@ -7171,6 +7211,9 @@ Use it for durable decisions, preferences, and facts that should persist across 
             &["plugins", "entries", "lossless-claw", "enabled"],
             serde_json::json!(true),
         );
+        if bundled_plugin_entry_exists("lossless-claw") {
+            remove_bundled_plugin_load_paths(&mut cfg, "lossless-claw");
+        }
     } else {
         set_openclaw_config_value(
             &mut cfg,
@@ -7306,7 +7349,6 @@ Use it for durable decisions, preferences, and facts that should persist across 
             );
         }
     };
-
     if container_plugin_exists("lossless-claw") && !bundled_plugin_entry_exists("lossless-claw") {
         if let Some(path) = resolve_managed_plugin_path("lossless-claw") {
             ensure_plugin_load_path(&mut cfg, path);
@@ -7316,12 +7358,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
     // Bundled gateway plugins should not also be force-loaded from /app/extensions,
     // otherwise OpenClaw warns that the config plugin overrides the bundled one.
     if container_plugin_exists("lossless-claw") && bundled_plugin_entry_exists("lossless-claw") {
-        if let Some(list) = cfg
-            .pointer_mut("/plugins/load/paths")
-            .and_then(|value| value.as_array_mut())
-        {
-            list.retain(|entry| entry.as_str() != Some("/app/extensions/lossless-claw"));
-        }
+        remove_bundled_plugin_load_paths(&mut cfg, "lossless-claw");
     }
 
     // Enable x plugin if it exists (entropic-x or legacy nova-x).
@@ -7497,16 +7534,19 @@ Use it for durable decisions, preferences, and facts that should persist across 
         &["channels", "telegram", "linkPreview"],
         serde_json::json!(settings.telegram_link_preview),
     );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["plugins", "entries", "telegram", "enabled"],
-        serde_json::json!(settings.telegram_enabled),
-    );
-    // Add Telegram plugin path to plugins.load.paths so the gateway can find it.
-    // This mirrors the X plugin block above.
-    if settings.telegram_enabled {
-        if let Some(path) = resolve_managed_plugin_path("telegram") {
-            ensure_plugin_load_path(&mut cfg, path);
+    remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "telegram"]);
+    if container_plugin_exists("telegram") && bundled_plugin_entry_exists("telegram") {
+        remove_bundled_plugin_load_paths(&mut cfg, "telegram");
+    } else {
+        set_openclaw_config_value(
+            &mut cfg,
+            &["plugins", "entries", "telegram", "enabled"],
+            serde_json::json!(settings.telegram_enabled),
+        );
+        if settings.telegram_enabled {
+            if let Some(path) = resolve_managed_plugin_path("telegram") {
+                ensure_plugin_load_path(&mut cfg, path);
+            }
         }
     }
 
@@ -8242,16 +8282,14 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
             "http://127.0.0.1:5174"
         ]),
     );
-    // In the local Docker desktop setup, connections arrive from the Docker bridge
-    // IP (172.17.x.x), not loopback, so isLocalClient is always false even though
-    // allowInsecureAuth is true. dangerouslyDisableDeviceAuth bypasses the
-    // device-identity requirement for Control UI, which is safe here because
-    // the gateway is only reachable via 127.0.0.1:19789 on the host machine
-    // and is protected by the gateway token.
+    // Current OpenClaw control-ui auth clears self-declared scopes when device auth
+    // is bypassed. Entropic now provides a real device identity via Tauri, so keep
+    // device auth enabled and let the desktop auto-approve local pairing instead of
+    // forcing the break-glass bypass.
     set_openclaw_config_value(
         cfg,
         &["gateway", "controlUi", "dangerouslyDisableDeviceAuth"],
-        serde_json::json!(true),
+        serde_json::json!(false),
     );
     remove_openclaw_config_value(
         cfg,
@@ -8269,6 +8307,27 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         &["gateway", "reload", "mode"],
         serde_json::json!("hybrid"),
     );
+
+    // Managed bundled plugins should not carry stale /app/extensions override
+    // paths from older Entropic/OpenClaw installs. Those override paths make
+    // OpenClaw treat bundled plugins as config plugins on first boot, which
+    // causes duplicate-id warnings until a later rewrite. Keep the intended
+    // enablement for lossless-claw, but scrub bundled override paths here so
+    // any config read/write cycle self-heals persisted configs.
+    if container_plugin_exists("lossless-claw") {
+        remove_bundled_plugin_load_paths(cfg, "lossless-claw");
+        if bundled_plugin_entry_exists("lossless-claw") {
+            set_openclaw_config_value(
+                cfg,
+                &["plugins", "entries", "lossless-claw", "enabled"],
+                serde_json::json!(true),
+            );
+        }
+    }
+    if container_plugin_exists("telegram") && bundled_plugin_entry_exists("telegram") {
+        remove_bundled_plugin_load_paths(cfg, "telegram");
+        remove_openclaw_config_value(cfg, &["plugins", "entries", "telegram"]);
+    }
 
     let telegram_dm_policy = cfg
         .get("channels")
@@ -11129,11 +11188,7 @@ pub async fn set_memory_session_indexing(app: AppHandle, enabled: bool) -> Resul
 
 #[tauri::command]
 pub async fn set_capabilities(app: AppHandle, list: Vec<CapabilityState>) -> Result<(), String> {
-    let mut body = String::from("# TOOLS.md - Local Notes\n\n## Capabilities\n");
-    for cap in &list {
-        let mark = if cap.enabled { "x" } else { " " };
-        body.push_str(&format!("- [{}] {}\n", mark, cap.label));
-    }
+    let body = build_tools_markdown(&list);
     write_container_file(&workspace_file("TOOLS.md"), &body)?;
     let mut settings = load_agent_settings(&app);
     settings.capabilities = list;
@@ -11304,11 +11359,24 @@ pub async fn set_channels_config(
         &["channels", "telegram", "linkPreview"],
         serde_json::json!(telegram_link_preview),
     );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["plugins", "entries", "telegram", "enabled"],
-        serde_json::json!(telegram_enabled),
-    );
+    if bundled_plugin_entry_exists("telegram") {
+        remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "telegram"]);
+        remove_bundled_plugin_load_paths(&mut cfg, "telegram");
+    } else {
+        set_openclaw_config_value(
+            &mut cfg,
+            &["plugins", "entries", "telegram", "enabled"],
+            serde_json::json!(telegram_enabled),
+        );
+    }
+    if bundled_plugin_entry_exists("lossless-claw") {
+        set_openclaw_config_value(
+            &mut cfg,
+            &["plugins", "entries", "lossless-claw", "enabled"],
+            serde_json::json!(true),
+        );
+        remove_bundled_plugin_load_paths(&mut cfg, "lossless-claw");
+    }
 
     eprintln!("[set_channels_config] Writing OpenClaw config...");
     write_openclaw_config(&cfg)?;

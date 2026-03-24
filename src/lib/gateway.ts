@@ -382,13 +382,23 @@ export class GatewayClient {
         try {
           const clientId = "openclaw-control-ui";
           const clientMode = "ui";
-          const scopes = ["operator.read", "operator.admin", "operator.approvals", "operator.pairing"];
+          const scopes = [
+            "operator.admin",
+            "operator.read",
+            "operator.write",
+            "operator.approvals",
+            "operator.pairing",
+          ];
           const nonce =
             frame.payload && typeof frame.payload === "object" && "nonce" in frame.payload
               ? String((frame.payload as { nonce?: unknown }).nonce ?? "")
               : "";
           this.connectNonce = nonce;
-          const isSecureContext = typeof window !== "undefined" && window.isSecureContext;
+          // Entropic signs gateway device payloads through Tauri commands, so the
+          // correct gate here is "running inside Tauri", not browser secure-context
+          // WebCrypto availability.
+          const canUseTauriDeviceIdentity =
+            typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
           let device: {
             id: string;
             publicKey: string;
@@ -396,16 +406,21 @@ export class GatewayClient {
             signedAt: number;
             nonce: string;
           } | undefined;
-          let authToken = this.token;
+          const explicitGatewayToken = this.token?.trim() || undefined;
+          let authToken = explicitGatewayToken;
 
-          if (isSecureContext) {
+          if (canUseTauriDeviceIdentity) {
             deviceIdentity = await loadGatewayDeviceIdentity();
-            const storedToken = loadDeviceAuthToken({
+            const storedToken =
+              loadDeviceAuthToken({
               deviceId: deviceIdentity.device_id,
               role,
-            })?.token;
-            authToken = storedToken ?? this.token;
-            canFallbackToShared = Boolean(storedToken && this.token);
+            })?.token?.trim() || undefined;
+            // Match current OpenClaw control-ui behavior: prefer the shared gateway
+            // token when available, and only fall back to a stored device token when
+            // no shared token exists.
+            authToken = explicitGatewayToken ?? storedToken;
+            canFallbackToShared = Boolean(storedToken && explicitGatewayToken);
 
             const signedAtMs = Date.now();
             const payload = buildDeviceAuthPayload({
@@ -469,7 +484,19 @@ export class GatewayClient {
               this.logError("Failed to auto-approve gateway pairing:", approveError);
             }
           }
-          if (e instanceof GatewayError && deviceIdentity && canFallbackToShared) {
+          const errorDetailCode =
+            e instanceof GatewayError &&
+            e.details &&
+            typeof e.details === "object" &&
+            "code" in e.details
+              ? String((e.details as { code?: unknown }).code ?? "").trim()
+              : "";
+          if (
+            e instanceof GatewayError &&
+            deviceIdentity &&
+            canFallbackToShared &&
+            errorDetailCode === "AUTH_DEVICE_TOKEN_MISMATCH"
+          ) {
             clearDeviceAuthToken({ deviceId: deviceIdentity.device_id, role });
           }
           this.logError("Auth failed:", e);

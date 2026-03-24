@@ -447,7 +447,7 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
       "http://127.0.0.1:5174"
       ],
       "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": true
+      "dangerouslyDisableDeviceAuth": false
     }${GATEWAY_AUTH_BLOCK}
   },
   "plugins": {
@@ -479,6 +479,34 @@ const pruneLegacyControlUiFallback = (value) => {
   const controlUi = gateway.controlUi;
   if (!controlUi || typeof controlUi !== 'object' || Array.isArray(controlUi)) return;
   delete controlUi.dangerouslyAllowHostHeaderOriginFallback;
+  controlUi.dangerouslyDisableDeviceAuth = false;
+};
+
+const stripBundledPluginOverrides = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const plugins = value.plugins;
+  if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return;
+
+  const entries = plugins.entries;
+  if (entries && typeof entries === 'object' && !Array.isArray(entries)) {
+    if (fs.existsSync('/app/dist/extensions/telegram/index.js') || fs.existsSync('/app/dist/extensions/telegram/index.mjs')) {
+      delete entries.telegram;
+    }
+  }
+
+  const load = plugins.load;
+  if (!load || typeof load !== 'object' || Array.isArray(load) || !Array.isArray(load.paths)) return;
+  const bundledRoots = [
+    '/app/extensions/lossless-claw',
+    '/app/dist/extensions/lossless-claw',
+    '/app/extensions/telegram',
+    '/app/dist/extensions/telegram',
+  ];
+  load.paths = load.paths.filter((raw) => {
+    if (typeof raw !== 'string') return true;
+    const path = raw.trim();
+    return !bundledRoots.some((root) => path === root || path.startsWith(`${root}/`));
+  });
 };
 
 const isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -499,9 +527,13 @@ try {
   const persisted = JSON.parse(fs.readFileSync(persistedPath, 'utf8'));
   pruneLegacyControlUiFallback(current);
   pruneLegacyControlUiFallback(persisted);
+  stripBundledPluginOverrides(current);
+  stripBundledPluginOverrides(persisted);
   const merged = mergePreferCurrent(persisted, current);
   pruneLegacyControlUiFallback(merged);
+  stripBundledPluginOverrides(merged);
   fs.writeFileSync(currentPath, JSON.stringify(merged, null, 2));
+  fs.writeFileSync(persistedPath, JSON.stringify(merged, null, 2));
 } catch (error) {
   console.error('[entrypoint] Failed to merge persisted openclaw config:', error?.message || error);
 }
