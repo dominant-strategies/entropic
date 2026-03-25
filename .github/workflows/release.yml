@@ -40,6 +40,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - run: npm install -g pnpm
 
+      - name: Validate release version
+        run: node ./scripts/check-release-version.mjs "${{ steps.version.outputs.tag }}"
+
       - name: Install dependencies
         run: pnpm install
 
@@ -221,15 +224,17 @@ jobs:
           BUNDLE_DIR="src-tauri/target/release/bundle/macos"
           UPDATER_TAR="$BUNDLE_DIR/Entropic.app.tar.gz"
           UPDATER_SIG="$BUNDLE_DIR/Entropic.app.tar.gz.sig"
-
-          if [ -f "$UPDATER_SIG" ]; then
-            echo "sig=$(cat "$UPDATER_SIG")" >> "$GITHUB_OUTPUT"
-            echo "has_updater=true" >> "$GITHUB_OUTPUT"
-            cp "$UPDATER_TAR" "Entropic-${{ steps.version.outputs.tag }}-mac-arm64-updater.tar.gz"
-          else
-            echo "has_updater=false" >> "$GITHUB_OUTPUT"
-            echo "WARNING: No updater signature found. Set TAURI_SIGNING_PRIVATE_KEY to enable auto-updates."
+          if [ ! -f "$UPDATER_TAR" ]; then
+            echo "Missing updater tarball: $UPDATER_TAR"
+            exit 1
           fi
+          if [ ! -s "$UPDATER_SIG" ]; then
+            echo "Missing or empty updater signature: $UPDATER_SIG"
+            exit 1
+          fi
+
+          echo "sig=$(cat "$UPDATER_SIG")" >> "$GITHUB_OUTPUT"
+          cp "$UPDATER_TAR" "Entropic-${{ steps.version.outputs.tag }}-mac-arm64-updater.tar.gz"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -246,8 +251,7 @@ jobs:
           {
             "platform": "darwin-aarch64",
             "url": "https://github.com/dominant-strategies/entropic-releases/releases/download/${VERSION}/Entropic-${VERSION}-mac-arm64-updater.tar.gz",
-            "signature": "${{ steps.updater.outputs.sig }}",
-            "has_updater": "${{ steps.updater.outputs.has_updater }}"
+            "signature": "${{ steps.updater.outputs.sig }}"
           }
           METAEOF
 
@@ -269,6 +273,11 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
       - name: Determine version
         id: version
         run: |
@@ -359,3 +368,18 @@ jobs:
               gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
             fi
           fi
+
+      - name: Validate live public release manifest (macOS)
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if node ./scripts/validate-public-release.mjs \
+              "https://github.com/dominant-strategies/entropic-releases/releases/latest/download/latest.json" \
+              "${{ steps.version.outputs.tag }}" \
+              "darwin-aarch64"; then
+              exit 0
+            fi
+            echo "Manifest validation attempt $attempt failed; retrying in 5s..."
+            sleep 5
+          done
+          echo "Public release manifest validation failed after retries."
+          exit 1

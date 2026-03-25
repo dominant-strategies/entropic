@@ -44,6 +44,10 @@ jobs:
         shell: pwsh
         run: npm install -g pnpm
 
+      - name: Validate release version
+        shell: pwsh
+        run: node .\scripts\check-release-version.mjs "${{ steps.version.outputs.tag }}"
+
       - name: Install dependencies
         shell: pwsh
         run: pnpm install --frozen-lockfile
@@ -198,6 +202,11 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
       - name: Determine version
         id: version
         run: |
@@ -289,3 +298,18 @@ jobs:
               gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
             fi
           fi
+
+      - name: Validate live public release manifest (Windows)
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if node ./scripts/validate-public-release.mjs \
+              "https://github.com/dominant-strategies/entropic-releases/releases/latest/download/latest.json" \
+              "${{ steps.version.outputs.tag }}" \
+              "windows-x86_64"; then
+              exit 0
+            fi
+            echo "Manifest validation attempt $attempt failed; retrying in 5s..."
+            sleep 5
+          done
+          echo "Public release manifest validation failed after retries."
+          exit 1

@@ -68,6 +68,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - run: npm install -g pnpm
 
+      - name: Validate release version
+        run: node ./scripts/check-release-version.mjs "${{ steps.version.outputs.tag }}"
+
       - name: Install dependencies
         run: pnpm install
 
@@ -118,6 +121,10 @@ jobs:
           if [ "${#APPIMAGE_SIG_FILES[@]}" -gt 0 ]; then
             APPIMAGE_SIG="$(cat "${APPIMAGE_SIG_FILES[0]}")"
           fi
+          if [ -z "$APPIMAGE_SIG" ]; then
+            echo "Missing updater signature for Linux AppImage"
+            exit 1
+          fi
           echo "appimage_sig=$APPIMAGE_SIG" >> "$GITHUB_OUTPUT"
 
           TAR_NAME="Entropic-${VERSION}-linux-x86_64.tar.gz"
@@ -165,6 +172,11 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
       - name: Determine version
         id: version
         run: |
@@ -255,3 +267,18 @@ jobs:
               gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
             fi
           fi
+
+      - name: Validate live public release manifest (Linux)
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if node ./scripts/validate-public-release.mjs \
+              "https://github.com/dominant-strategies/entropic-releases/releases/latest/download/latest.json" \
+              "${{ steps.version.outputs.tag }}" \
+              "linux-x86_64"; then
+              exit 0
+            fi
+            echo "Manifest validation attempt $attempt failed; retrying in 5s..."
+            sleep 5
+          done
+          echo "Public release manifest validation failed after retries."
+          exit 1

@@ -38,6 +38,13 @@ import {
   type AuthStateSnapshot,
   type RuntimeVersionInfo,
 } from "../lib/settingsWarmState";
+import {
+  checkForAppUpdates,
+  readUpdaterStatus,
+  updaterStatusEventName,
+  type UpdaterStatus,
+} from "../lib/updater";
+import { updaterEnabled } from "../lib/buildProfile";
 type Props = {
   gatewayRunning: boolean;
   onGatewayToggle: () => void;
@@ -173,6 +180,15 @@ function formatBytes(value?: number | null) {
   return `${next.toFixed(digits)} ${units[unitIndex]}`;
 }
 
+function formatDateTime(value?: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "Never";
+  return new Date(value).toLocaleString();
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled updater status: ${JSON.stringify(value)}`);
+}
+
 function scheduleDeferredSettingsWork(work: () => void, delayMs = 0) {
   let rafId: number | null = null;
   let timeoutId: number | null = null;
@@ -268,6 +284,9 @@ export function Settings({
   const [runtimeVersionLoading, setRuntimeVersionLoading] = useState(false);
   const [authMetaLoading, setAuthMetaLoading] = useState(false);
   const [runtimeFetchLoading, setRuntimeFetchLoading] = useState(false);
+  const [appUpdateState, setAppUpdateState] = useState<UpdaterStatus | null>(() => readUpdaterStatus());
+  const [appUpdateNotice, setAppUpdateNotice] = useState<string | null>(null);
+  const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
   const [profileInfoLoading, setProfileInfoLoading] = useState(!cachedWarmState?.profile);
   const [agentProfileLoading, setAgentProfileLoading] = useState(!cachedAgentProfileState);
   const [wallpaperStateLoading, setWallpaperStateLoading] = useState(true);
@@ -303,6 +322,33 @@ export function Settings({
     runtimeResourceUsage?.disk_used_bytes != null
       ? `${formatBytes(runtimeResourceUsage.disk_used_bytes)} / ${runtimeResourceBaseline.diskGb} GB`
       : "—";
+  const currentAppVersion = appUpdateState?.currentVersion ?? runtimeVersionInfo?.entropic_version ?? "…";
+  const updateCheckedAt = appUpdateState?.checkedAt ?? null;
+
+  function appUpdateSummary(status: UpdaterStatus | null) {
+    if (!status) return "No update check has run yet.";
+    switch (status.kind) {
+      case "disabled":
+        return "Automatic updates are disabled for this build.";
+      case "checking":
+        return "Checking GitHub releases for a newer Entropic build…";
+      case "up-to-date":
+        return `Entropic v${status.currentVersion} is current.`;
+      case "available":
+        return `Entropic v${status.targetVersion} is available.`;
+      case "installing":
+        return `Installing Entropic v${status.targetVersion} now. The app will restart when ready.`;
+      case "installed":
+        return `Entropic v${status.targetVersion} was installed. Restarting…`;
+      case "error":
+        return "The last update check failed.";
+      default:
+        return assertNever(status);
+    }
+  }
+
+  const appUpdateBusy =
+    appUpdateState?.kind === "checking" || appUpdateState?.kind === "installing";
   // Theme state
   type ThemeMode = "system" | "light" | "dark";
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
@@ -415,6 +461,16 @@ export function Settings({
   }, []);
 
   useEffect(() => () => clearPendingIdentityPersist(), []);
+
+  useEffect(() => {
+    const eventName = updaterStatusEventName();
+    const syncUpdateState = (event: Event) => {
+      const detail = (event as CustomEvent<UpdaterStatus>).detail;
+      setAppUpdateState(detail ?? readUpdaterStatus());
+    };
+    window.addEventListener(eventName, syncUpdateState as EventListener);
+    return () => window.removeEventListener(eventName, syncUpdateState as EventListener);
+  }, []);
 
   // Load initial state
   useEffect(() => {
@@ -1720,6 +1776,57 @@ export function Settings({
       </SettingsGroup>
 
       <SettingsGroup title="Diagnostics">
+        {updaterEnabled && (
+          <div className="p-4 space-y-3">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-[14px] font-medium text-[var(--text-primary)]">App Updates</div>
+                <div className="text-[12px] text-[var(--text-secondary)] mt-1">
+                  {appUpdateSummary(appUpdateState)}
+                </div>
+                <div className="text-[11px] text-[var(--text-tertiary)] mt-2 space-y-1">
+                  <div>Current version: v{currentAppVersion}</div>
+                  <div>Last checked: {formatDateTime(updateCheckedAt)}</div>
+                  {appUpdateState?.kind === "available" || appUpdateState?.kind === "installing" || appUpdateState?.kind === "installed" ? (
+                    <div>Target version: v{appUpdateState.targetVersion}</div>
+                  ) : null}
+                  {isMacOS ? (
+                    <div>On macOS, run Entropic from Applications for auto-updates to apply correctly.</div>
+                  ) : null}
+                </div>
+              </div>
+              <button
+                onClick={async () => {
+                  setAppUpdateNotice(null);
+                  setAppUpdateError(null);
+                  const result = await checkForAppUpdates({
+                    source: "manual",
+                    autoInstall: true,
+                  });
+                  if (result.kind === "up-to-date") {
+                    setAppUpdateNotice(`Entropic v${result.currentVersion} is already current.`);
+                  } else if (result.kind === "available" || result.kind === "installing" || result.kind === "installed") {
+                    setAppUpdateNotice(`Updating to Entropic v${result.targetVersion}.`);
+                  } else if (result.kind === "error") {
+                    setAppUpdateError(result.error);
+                  }
+                }}
+                disabled={appUpdateBusy}
+                className="px-3 py-2 rounded-lg bg-[var(--system-blue)] text-white text-xs font-medium hover:bg-[var(--system-blue)]/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {appUpdateBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {appUpdateBusy ? "Checking..." : "Check Now"}
+              </button>
+            </div>
+            {(appUpdateNotice || appUpdateError) && (
+              <div className="space-y-1">
+                {appUpdateNotice && <div className="text-xs text-green-500">{appUpdateNotice}</div>}
+                {appUpdateError && <div className="text-xs text-red-500">{appUpdateError}</div>}
+              </div>
+            )}
+          </div>
+        )}
+
         <div>
           <button
             onClick={() => setGatewayDiagnosticsExpanded((prev) => !prev)}
