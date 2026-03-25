@@ -52,6 +52,7 @@ coverage/
 *.temp
 .cache/
 .build/
+openclaw-runtime/browser-service/__pycache__/
 
 # Entropic local data (contains API keys)
 .entropic-data/
