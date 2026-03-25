@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Entropic Office</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f8fafc;
+        --error: #f87171;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+      }
+
+      #error {
+        display: none;
+        position: absolute;
+        inset: 20px;
+        z-index: 10;
+        padding: 16px 18px;
+        border-radius: 16px;
+        border: 1px solid rgba(248, 113, 113, 0.3);
+        background: rgba(127, 29, 29, 0.9);
+        color: #fecaca;
+        font: 13px/1.5 "SF Pro Display", "Segoe UI", sans-serif;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+      }
+
+      #editor {
+        height: 100%;
+        width: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="error"></div>
+    <div id="editor"></div>
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      const workspacePath = params.get("path") || "";
+      const errorEl = document.getElementById("error");
+
+      let editor = null;
+      let configSnapshot = null;
+      let currentKey = null;
+      let dirty = false;
+      let pendingRefresh = false;
+      let refreshInterval = null;
+      let scriptPromise = null;
+
+      function setStatus() {
+      }
+
+      function showError(message) {
+        errorEl.textContent = message;
+        errorEl.style.display = "block";
+      }
+
+      async function fetchJson(url) {
+        const response = await fetch(url, { cache: "no-store" });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(typeof payload?.error === "string" ? payload.error : `Request failed with ${response.status}`);
+        }
+        return payload;
+      }
+
+      async function loadConfig() {
+        return fetchJson(`/__onlyoffice_api__/config?path=${encodeURIComponent(workspacePath)}`);
+      }
+
+      function ensureOnlyOfficeApi(documentServerUrl) {
+        if (window.DocsAPI) {
+          return Promise.resolve();
+        }
+        if (scriptPromise) {
+          return scriptPromise;
+        }
+        scriptPromise = new Promise((resolve, reject) => {
+          const script = document.createElement("script");
+          script.src = `${documentServerUrl.replace(/\/+$/, "")}/web-apps/apps/api/documents/api.js`;
+          script.async = true;
+          script.onload = () => resolve();
+          script.onerror = () => reject(new Error("Failed to load ONLYOFFICE editor assets."));
+          document.head.appendChild(script);
+        });
+        return scriptPromise;
+      }
+
+      function refreshOpenDocument(nextSnapshot) {
+        configSnapshot = nextSnapshot;
+        currentKey = nextSnapshot.fileKey;
+        pendingRefresh = false;
+        if (editor && typeof editor.refreshFile === "function") {
+          editor.refreshFile(nextSnapshot.config);
+          setStatus("Reloaded latest workspace changes.");
+          return true;
+        }
+        return false;
+      }
+
+      async function pollForExternalChanges() {
+        if (!configSnapshot) {
+          return;
+        }
+        try {
+          const nextSnapshot = await loadConfig();
+          if (nextSnapshot.fileKey === currentKey) {
+            return;
+          }
+          if (dirty) {
+            configSnapshot = nextSnapshot;
+            pendingRefresh = true;
+            setStatus("Workspace file changed outside the editor. Save or reload to pick it up.", "warn");
+            return;
+          }
+          if (!refreshOpenDocument(nextSnapshot)) {
+            setStatus("Workspace file changed. Reload to pick up the latest version.", "warn");
+          }
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : String(error), "error");
+        }
+      }
+
+      async function reloadFromWorkspace() {
+        const nextSnapshot = await loadConfig();
+        if (!refreshOpenDocument(nextSnapshot)) {
+          window.location.reload();
+        }
+      }
+
+      async function boot() {
+        if (!workspacePath) {
+          throw new Error("No workspace file path was provided.");
+        }
+        document.title = workspacePath.split("/").filter(Boolean).pop() || "Entropic Office";
+        const nextSnapshot = await loadConfig();
+        configSnapshot = nextSnapshot;
+        currentKey = nextSnapshot.fileKey;
+        await ensureOnlyOfficeApi(nextSnapshot.documentServerUrl);
+
+        const config = {
+          ...nextSnapshot.config,
+          events: {
+            onAppReady() {},
+            onDocumentReady() {},
+            onDocumentStateChange(event) {
+              dirty = Boolean(event && event.data);
+              if (dirty) return;
+              if (pendingRefresh && configSnapshot) {
+                refreshOpenDocument(configSnapshot);
+              }
+            },
+            onRequestRefreshFile() {
+              void reloadFromWorkspace();
+            },
+            onError(event) {
+              const detail = event && typeof event === "object" && event.data && typeof event.data.errorDescription === "string"
+                ? event.data.errorDescription
+                : "ONLYOFFICE reported an editor error.";
+              showError(detail);
+            },
+          },
+        };
+
+        editor = new window.DocsAPI.DocEditor("editor", config);
+        refreshInterval = window.setInterval(() => {
+          void pollForExternalChanges();
+        }, 2500);
+      }
+
+      window.addEventListener("beforeunload", () => {
+        if (refreshInterval) {
+          window.clearInterval(refreshInterval);
+        }
+      });
+
+      boot().catch((error) => {
+        showError(error instanceof Error ? error.message : String(error));
+      });
+    </script>
+  </body>
+</html>

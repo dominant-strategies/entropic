@@ -246,6 +246,8 @@ pub fn run() {
             commands::read_workspace_file_base64,
             commands::delete_workspace_file,
             commands::upload_workspace_file,
+            commands::get_onlyoffice_status,
+            commands::ensure_onlyoffice_ready,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|error| {

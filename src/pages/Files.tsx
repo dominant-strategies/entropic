@@ -77,6 +77,7 @@ import {
   syncEmbeddedPreviewWebview,
 } from "../lib/nativePreview";
 import { hostedFeaturesEnabled } from "../lib/buildProfile";
+import { ensureOnlyOfficeReady } from "../lib/office";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -84,6 +85,11 @@ type WorkspaceFileEntry = {
   is_directory: boolean;
   size: number;
   modified_at: number;
+};
+
+type WorkspaceImageThumbnail = {
+  dataUrl: string;
+  modifiedAt: number;
 };
 
 type Props = {
@@ -147,6 +153,21 @@ type EmbeddedPreviewState = {
   title: string | null;
 };
 
+type OfficeAppKind = "sheets" | "docs" | "slides";
+
+type OfficeAppSession = {
+  path: string;
+  name: string;
+  url: string;
+  launchToken: number;
+};
+
+type OfficeRecentEntry = {
+  path: string;
+  name: string;
+  openedAt: number;
+};
+
 type BrowserTabState = {
   id: string;
   title: string | null;
@@ -191,15 +212,18 @@ const DEFAULT_WINDOW_Z: Record<string, number> = {
   finder: 60,
   chat: 61,
   browser: 62,
-  terminal: 63,
-  plugins: 64,
-  skills: 65,
-  channels: 66,
-  tasks: 67,
-  jobs: 68,
-  logs: 69,
-  billing: 70,
-  settings: 71,
+  sheets: 63,
+  docs: 64,
+  slides: 65,
+  terminal: 66,
+  plugins: 67,
+  skills: 68,
+  channels: 69,
+  tasks: 70,
+  jobs: 71,
+  logs: 72,
+  billing: 73,
+  settings: 74,
   preview: 80,
 };
 
@@ -207,7 +231,12 @@ const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.m
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
 const HTML_EXTS = new Set(["html", "htm"]);
+const ONLYOFFICE_BROWSER_EXTS = new Set(["docx", "xlsx", "pptx"]);
+const SPREADSHEET_BROWSER_EXTS = new Set(["xlsx", "xls", "csv"]);
+const DOCUMENT_BROWSER_EXTS = new Set(["docx"]);
+const PRESENTATION_BROWSER_EXTS = new Set(["pptx"]);
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
+const DESKTOP_HANDOFF_EVENT = "entropic-desktop-handoff";
 const DESKTOP_SESSION_STORAGE_KEY = "entropic.desktop.session.v1";
 const DEFAULT_DESKTOP_CHAT_TITLE = "New chat";
 const CHAT_WORKSPACE_PREFIXES = [
@@ -219,7 +248,11 @@ const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/n
 const DEFAULT_BROWSER_URL = "https://www.google.com";
 const DEFAULT_BROWSER_LIVE_WS_BASE = "ws://127.0.0.1:19792/live";
 const CONTAINER_LOCAL_BROWSER_BASE = "http://container.localhost:19791";
+const ONLYOFFICE_DESKTOP_BASE = "http://127.0.0.1:19796";
+const MAX_OFFICE_RECENTS = 8;
 const WORKSPACE_FOLDER_REFRESH_MS = 1500;
+const MAX_FINDER_THUMBNAILS = 120;
+const MAX_FINDER_THUMBNAIL_BYTES = 16 * 1024 * 1024;
 const BROWSER_DETAILS_PANEL_HEIGHT = 0;
 const BROWSER_APP_WINDOW_TITLEBAR_HEIGHT = 34;
 const BROWSER_TOOLBAR_HEIGHT = 49;
@@ -265,6 +298,9 @@ type DesktopSessionState = {
   chatOpen: boolean;
   chatNavCollapsed: boolean;
   browserOpen: boolean;
+  sheetsOpen: boolean;
+  docsOpen: boolean;
+  slidesOpen: boolean;
   terminalOpen: boolean;
   pluginsOpen: boolean;
   skillsOpen: boolean;
@@ -280,6 +316,12 @@ type DesktopSessionState = {
   chatSize: WindowSize;
   browserPos: WindowPoint;
   browserSize: WindowSize;
+  sheetsPos: WindowPoint;
+  sheetsSize: WindowSize;
+  docsPos: WindowPoint;
+  docsSize: WindowSize;
+  slidesPos: WindowPoint;
+  slidesSize: WindowSize;
   terminalPos: WindowPoint;
   terminalSize: WindowSize;
   pluginsPos: WindowPoint;
@@ -303,6 +345,9 @@ type DesktopSessionState = {
   browserEmbeddedPreviewTitle: string | null;
   browserTabs: PersistedBrowserTab[];
   activeBrowserTabId: string | null;
+  sheetsRecent: OfficeRecentEntry[];
+  docsRecent: OfficeRecentEntry[];
+  slidesRecent: OfficeRecentEntry[];
   terminalSessionId: string | null;
   terminalInput: string;
   desktopIcons: Record<string, DesktopIcon>;
@@ -468,6 +513,25 @@ function asDesktopIcons(value: unknown): Record<string, DesktopIcon> | null {
   return Object.keys(next).length > 0 ? next : null;
 }
 
+function asOfficeRecentEntries(value: unknown): OfficeRecentEntry[] | null {
+  if (!Array.isArray(value)) return null;
+  const next = value
+    .map((entry) => {
+      if (!isRecord(entry)) return null;
+      const path = typeof entry.path === "string" ? entry.path.trim() : "";
+      const name = typeof entry.name === "string" ? entry.name.trim() : workspacePathName(path);
+      const openedAt = Number(entry.openedAt);
+      if (!path) return null;
+      return {
+        path,
+        name: name || workspacePathName(path),
+        openedAt: Number.isFinite(openedAt) ? openedAt : 0,
+      };
+    })
+    .filter((entry): entry is OfficeRecentEntry => entry !== null);
+  return next;
+}
+
 function formatSize(bytes: number): string {
   if (bytes === 0) return "Zero bytes";
   if (bytes < 1024) return `${bytes} bytes`;
@@ -491,6 +555,22 @@ function formatDate(epochSec: number): string {
     year: d.getFullYear() !== now.getFullYear() ? "numeric" : undefined,
     hour: "numeric", minute: "2-digit",
   });
+}
+
+function workspaceImageMime(name: string): string {
+  const ext = workspacePathName(name).split(".").pop()?.toLowerCase() || "";
+  if (ext === "svg") return "image/svg+xml";
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  return `image/${ext || "png"}`;
+}
+
+function workspaceImageDataUrl(name: string, base64: string): string {
+  return `data:${workspaceImageMime(name)};base64,${base64}`;
+}
+
+function isImageWorkspaceEntry(entry: WorkspaceFileEntry): boolean {
+  const ext = workspacePathName(entry.path).split(".").pop()?.toLowerCase() || "";
+  return !entry.is_directory && IMAGE_EXTS.has(ext);
 }
 
 function getFileIcon(name: string, isDir: boolean) {
@@ -565,6 +645,16 @@ function requestedBrowserViewportSize(width: number, height: number) {
 }
 
 function workspaceBrowserUrl(path: string): string {
+  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
+  if (ONLYOFFICE_BROWSER_EXTS.has(ext)) {
+    return `${ONLYOFFICE_DESKTOP_BASE}/__onlyoffice__/open?path=${encodeURIComponent(path)}`;
+  }
+  if (SPREADSHEET_BROWSER_EXTS.has(ext)) {
+    return `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace_editor__/spreadsheet?path=${encodeURIComponent(path)}`;
+  }
+  if (DOCUMENT_BROWSER_EXTS.has(ext)) {
+    return `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace_editor__/doc?path=${encodeURIComponent(path)}`;
+  }
   const normalized = path
     .split("/")
     .filter(Boolean)
@@ -573,6 +663,64 @@ function workspaceBrowserUrl(path: string): string {
   return normalized
     ? `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace__/${normalized}`
     : `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace__/`;
+}
+
+function workspaceFileCanOpenInBrowser(path: string): boolean {
+  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
+  return (
+    HTML_EXTS.has(ext) ||
+    ONLYOFFICE_BROWSER_EXTS.has(ext) ||
+    SPREADSHEET_BROWSER_EXTS.has(ext) ||
+    DOCUMENT_BROWSER_EXTS.has(ext) ||
+    PRESENTATION_BROWSER_EXTS.has(ext)
+  );
+}
+
+function workspaceFileUsesOnlyOffice(path: string): boolean {
+  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
+  return ONLYOFFICE_BROWSER_EXTS.has(ext);
+}
+
+function officeAppKindForPath(path: string): OfficeAppKind | null {
+  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
+  if (ext === "xlsx") return "sheets";
+  if (ext === "docx") return "docs";
+  if (ext === "pptx") return "slides";
+  return null;
+}
+
+function officeAppLabel(kind: OfficeAppKind): string {
+  switch (kind) {
+    case "sheets":
+      return "Sheets";
+    case "docs":
+      return "Docs";
+    case "slides":
+      return "Slides";
+  }
+}
+
+function officeAppLaunchUrl(session: OfficeAppSession): string {
+  const separator = session.url.includes("?") ? "&" : "?";
+  return `${session.url}${separator}entropic_open=${session.launchToken}`;
+}
+
+function pushOfficeRecentEntry(
+  current: OfficeRecentEntry[],
+  nextEntry: OfficeRecentEntry,
+): OfficeRecentEntry[] {
+  return [
+    nextEntry,
+    ...current.filter((entry) => entry.path !== nextEntry.path),
+  ].slice(0, MAX_OFFICE_RECENTS);
+}
+
+function workspaceOpenLabel(path: string): string {
+  const officeKind = officeAppKindForPath(path);
+  if (officeKind) {
+    return `Open in ${officeAppLabel(officeKind)}`;
+  }
+  return "Open in Browser";
 }
 
 function trimChatWorkspaceToken(raw: string): string {
@@ -592,6 +740,25 @@ function normalizeChatWorkspacePath(raw: string): string | null {
     }
   }
   return null;
+}
+
+function normalizeDesktopWorkspacePath(raw: string): string | null {
+  const normalized = normalizeChatWorkspacePath(raw);
+  if (normalized !== null) {
+    return normalized;
+  }
+  const trimmed = trimChatWorkspaceToken(raw.trim());
+  if (!trimmed) {
+    return "";
+  }
+  if (trimmed.startsWith("/") || trimmed.startsWith("./") || trimmed.startsWith("../")) {
+    return null;
+  }
+  const parts = trimmed.split("/").filter(Boolean);
+  if (parts.length === 0 || parts.some((part) => part === "." || part === "..")) {
+    return null;
+  }
+  return parts.join("/");
 }
 
 function workspacePathName(path: string): string {
@@ -789,6 +956,82 @@ function DockIconButton({
   );
 }
 
+function OfficeHomePanel({
+  kind,
+  recent,
+  onOpenRecent,
+  onOpenChat,
+}: {
+  kind: OfficeAppKind;
+  recent: OfficeRecentEntry[];
+  onOpenRecent: (path: string) => void;
+  onOpenChat: () => void;
+}) {
+  const title = officeAppLabel(kind);
+  const subtitle =
+    kind === "sheets"
+      ? "Create spreadsheets with chat or reopen recent work."
+      : kind === "docs"
+        ? "Create documents with chat or reopen recent work."
+        : "Create presentations with chat or reopen recent work.";
+
+  return (
+    <div className="h-full overflow-auto bg-[linear-gradient(180deg,#f8fafc_0%,#eef5ff_100%)] px-8 py-8">
+      <div className="mx-auto flex h-full max-w-3xl flex-col">
+        <div className="mb-8">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+            {title}
+          </div>
+          <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-900">{title}</h2>
+          <p className="mt-2 max-w-xl text-sm text-slate-600">{subtitle}</p>
+        </div>
+
+        {recent.length > 0 ? (
+          <div className="rounded-[24px] border border-slate-200 bg-white/85 p-4 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur">
+            <div className="mb-3 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
+              Recent
+            </div>
+            <div className="space-y-2">
+              {recent.map((entry) => (
+                <button
+                  key={entry.path}
+                  type="button"
+                  onClick={() => onOpenRecent(entry.path)}
+                  className="flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-slate-300 hover:bg-slate-50"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-slate-900">{entry.name}</div>
+                    <div className="truncate text-xs text-slate-500">{entry.path}</div>
+                  </div>
+                  <div className="ml-4 shrink-0 text-[11px] text-slate-400">
+                    {formatDate(Math.floor(entry.openedAt / 1000))}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-1 items-center justify-center">
+            <div className="max-w-md rounded-[28px] border border-slate-200 bg-white/92 px-8 py-9 text-center shadow-[0_24px_80px_rgba(15,23,42,0.1)] backdrop-blur">
+              <div className="text-lg font-semibold text-slate-900">No recent {title.toLowerCase()} yet</div>
+              <p className="mt-2 text-sm text-slate-600">
+                Open chat and ask Entropic to create one for you, then it will appear here.
+              </p>
+              <button
+                type="button"
+                onClick={onOpenChat}
+                className="mt-5 inline-flex h-11 items-center justify-center rounded-2xl bg-slate-900 px-5 text-sm font-semibold text-white transition hover:bg-slate-800"
+              >
+                Create With Chat
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ═════════════════════════════════════════════════════════════════════
 export function Files({
   gatewayRunning,
@@ -824,6 +1067,9 @@ export function Files({
   const [finderOpen, setFinderOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
+  const [sheetsOpen, setSheetsOpen] = useState(false);
+  const [docsOpen, setDocsOpen] = useState(false);
+  const [slidesOpen, setSlidesOpen] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
@@ -851,6 +1097,18 @@ export function Files({
   const [browserSize, setBrowserSize] = useState({ w: 1180, h: 760 });
   const browserDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
   const browserResizeRef = useRef<WindowResizeState | null>(null);
+  const [sheetsPos, setSheetsPos] = useState({ x: 156, y: 58 });
+  const [sheetsSize, setSheetsSize] = useState({ w: 1100, h: 720 });
+  const sheetsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const sheetsResizeRef = useRef<WindowResizeState | null>(null);
+  const [docsPos, setDocsPos] = useState({ x: 186, y: 78 });
+  const [docsSize, setDocsSize] = useState({ w: 1040, h: 700 });
+  const docsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const docsResizeRef = useRef<WindowResizeState | null>(null);
+  const [slidesPos, setSlidesPos] = useState({ x: 216, y: 98 });
+  const [slidesSize, setSlidesSize] = useState({ w: 1120, h: 720 });
+  const slidesDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const slidesResizeRef = useRef<WindowResizeState | null>(null);
   const [terminalPos, setTerminalPos] = useState({ x: 156, y: 70 });
   const [terminalSize, setTerminalSize] = useState({ w: 920, h: 560 });
   const terminalDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
@@ -892,6 +1150,7 @@ export function Files({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [finderThumbnails, setFinderThumbnails] = useState<Record<string, WorkspaceImageThumbnail>>({});
   const [uploading, setUploading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [selected, setSelected] = useState<string | null>(null);
@@ -906,6 +1165,8 @@ export function Files({
   const createFolderInputRef = useRef<HTMLInputElement>(null);
   const filesFetchSeqRef = useRef(0);
   const filesLoadingSeqRef = useRef(0);
+  const finderThumbnailCacheRef = useRef<Record<string, WorkspaceImageThumbnail>>({});
+  const finderThumbnailInflightRef = useRef(new Set<string>());
 
   // Chat
   const [chatSessions, setChatSessions] = useState<SharedChatSession[]>([]);
@@ -929,6 +1190,12 @@ export function Files({
   const [browserLiveHasFrame, setBrowserLiveHasFrame] = useState(false);
   const [browserLiveConnected, setBrowserLiveConnected] = useState(false);
   const [browserLiveError, setBrowserLiveError] = useState<string | null>(null);
+  const [sheetsSession, setSheetsSession] = useState<OfficeAppSession | null>(null);
+  const [docsSession, setDocsSession] = useState<OfficeAppSession | null>(null);
+  const [slidesSession, setSlidesSession] = useState<OfficeAppSession | null>(null);
+  const [sheetsRecent, setSheetsRecent] = useState<OfficeRecentEntry[]>([]);
+  const [docsRecent, setDocsRecent] = useState<OfficeRecentEntry[]>([]);
+  const [slidesRecent, setSlidesRecent] = useState<OfficeRecentEntry[]>([]);
   const browserLiveSocketRef = useRef<WebSocket | null>(null);
   const browserLiveImageRef = useRef<HTMLImageElement | null>(null);
   const browserViewportRef = useRef<HTMLDivElement | null>(null);
@@ -978,6 +1245,9 @@ export function Files({
       if (typeof saved.chatOpen === "boolean") setChatOpen(saved.chatOpen);
       if (typeof saved.chatNavCollapsed === "boolean") setChatNavCollapsed(saved.chatNavCollapsed);
       const savedBrowserOpen = saved.browserOpen === true;
+      if (typeof saved.sheetsOpen === "boolean") setSheetsOpen(saved.sheetsOpen);
+      if (typeof saved.docsOpen === "boolean") setDocsOpen(saved.docsOpen);
+      if (typeof saved.slidesOpen === "boolean") setSlidesOpen(saved.slidesOpen);
       if (typeof saved.terminalOpen === "boolean") setTerminalOpen(saved.terminalOpen);
       if (typeof saved.pluginsOpen === "boolean") setPluginsOpen(saved.pluginsOpen);
       if (typeof saved.skillsOpen === "boolean") setSkillsOpen(saved.skillsOpen);
@@ -1002,6 +1272,18 @@ export function Files({
       if (nextBrowserPos) setBrowserPos(nextBrowserPos);
       const nextBrowserSize = asWindowSize(saved.browserSize);
       if (nextBrowserSize) setBrowserSize(nextBrowserSize);
+      const nextSheetsPos = asWindowPoint(saved.sheetsPos);
+      if (nextSheetsPos) setSheetsPos(nextSheetsPos);
+      const nextSheetsSize = asWindowSize(saved.sheetsSize);
+      if (nextSheetsSize) setSheetsSize(nextSheetsSize);
+      const nextDocsPos = asWindowPoint(saved.docsPos);
+      if (nextDocsPos) setDocsPos(nextDocsPos);
+      const nextDocsSize = asWindowSize(saved.docsSize);
+      if (nextDocsSize) setDocsSize(nextDocsSize);
+      const nextSlidesPos = asWindowPoint(saved.slidesPos);
+      if (nextSlidesPos) setSlidesPos(nextSlidesPos);
+      const nextSlidesSize = asWindowSize(saved.slidesSize);
+      if (nextSlidesSize) setSlidesSize(nextSlidesSize);
       const nextTerminalPos = asWindowPoint(saved.terminalPos);
       if (nextTerminalPos) setTerminalPos(nextTerminalPos);
       const nextTerminalSize = asWindowSize(saved.terminalSize);
@@ -1051,6 +1333,12 @@ export function Files({
       if (typeof saved.terminalInput === "string") {
         setTerminalInput(saved.terminalInput);
       }
+      const nextSheetsRecent = asOfficeRecentEntries(saved.sheetsRecent);
+      if (nextSheetsRecent) setSheetsRecent(nextSheetsRecent);
+      const nextDocsRecent = asOfficeRecentEntries(saved.docsRecent);
+      if (nextDocsRecent) setDocsRecent(nextDocsRecent);
+      const nextSlidesRecent = asOfficeRecentEntries(saved.slidesRecent);
+      if (nextSlidesRecent) setSlidesRecent(nextSlidesRecent);
       if (
         typeof saved.browserEmbeddedPreviewUrl === "string" ||
         saved.browserEmbeddedPreviewUrl === null
@@ -1269,6 +1557,9 @@ export function Files({
     clampResizableWindow(finderPos, finderSize, { w: 320, h: 240 }, setFinderPos, setFinderSize);
     clampResizableWindow(chatPos, chatSize, chatMinSize, setChatPos, setChatSize);
     clampResizableWindow(browserPos, browserSize, { w: 640, h: 420 }, setBrowserPos, setBrowserSize);
+    clampResizableWindow(sheetsPos, sheetsSize, { w: 720, h: 480 }, setSheetsPos, setSheetsSize);
+    clampResizableWindow(docsPos, docsSize, { w: 720, h: 480 }, setDocsPos, setDocsSize);
+    clampResizableWindow(slidesPos, slidesSize, { w: 720, h: 480 }, setSlidesPos, setSlidesSize);
     clampResizableWindow(terminalPos, terminalSize, { w: 680, h: 360 }, setTerminalPos, setTerminalSize);
     clampFixedWindow(pluginsPos, pluginsSize, setPluginsPos);
     clampFixedWindow(skillsPos, skillsSize, setSkillsPos);
@@ -1287,6 +1578,12 @@ export function Files({
     chatMinSize,
     browserPos,
     browserSize,
+    sheetsPos,
+    sheetsSize,
+    docsPos,
+    docsSize,
+    slidesPos,
+    slidesSize,
     terminalPos,
     terminalSize,
     pluginsPos,
@@ -1333,6 +1630,9 @@ export function Files({
       chatOpen,
       chatNavCollapsed,
       browserOpen,
+      sheetsOpen,
+      docsOpen,
+      slidesOpen,
       terminalOpen,
       pluginsOpen,
       skillsOpen,
@@ -1348,6 +1648,12 @@ export function Files({
       chatSize,
       browserPos,
       browserSize,
+      sheetsPos,
+      sheetsSize,
+      docsPos,
+      docsSize,
+      slidesPos,
+      slidesSize,
       terminalPos,
       terminalSize,
       pluginsPos,
@@ -1371,6 +1677,9 @@ export function Files({
       browserEmbeddedPreviewTitle: browserEmbeddedPreview?.title ?? null,
       browserTabs: browserTabs.map(persistBrowserTabState),
       activeBrowserTabId,
+      sheetsRecent,
+      docsRecent,
+      slidesRecent,
       terminalSessionId,
       terminalInput,
       desktopIcons,
@@ -1390,6 +1699,9 @@ export function Files({
     chatOpen,
     chatNavCollapsed,
     browserOpen,
+    sheetsOpen,
+    docsOpen,
+    slidesOpen,
     terminalOpen,
     pluginsOpen,
     skillsOpen,
@@ -1405,6 +1717,12 @@ export function Files({
     chatSize,
     browserPos,
     browserSize,
+    sheetsPos,
+    sheetsSize,
+    docsPos,
+    docsSize,
+    slidesPos,
+    slidesSize,
     terminalPos,
     terminalSize,
     pluginsPos,
@@ -1426,6 +1744,9 @@ export function Files({
     browserEmbeddedPreview,
     browserTabs,
     activeBrowserTabId,
+    sheetsRecent,
+    docsRecent,
+    slidesRecent,
     terminalSessionId,
     terminalInput,
     desktopIcons,
@@ -2602,6 +2923,10 @@ export function Files({
 
   // ── File browser logic ──────────────────────────────────────────────
 
+  useEffect(() => {
+    finderThumbnailCacheRef.current = finderThumbnails;
+  }, [finderThumbnails]);
+
   const fetchFiles = useCallback(async (path: string, options?: { silent?: boolean }) => {
     const silent = options?.silent === true;
     const requestSeq = filesFetchSeqRef.current + 1;
@@ -2638,6 +2963,68 @@ export function Files({
 
   useEffect(() => { if (finderOpen) fetchFiles(currentPath); }, [currentPath, fetchFiles, finderOpen]);
   useEffect(() => {
+    if (!finderOpen || entries.length === 0) {
+      return;
+    }
+    const candidates = entries
+      .filter((entry) => isImageWorkspaceEntry(entry) && entry.size <= MAX_FINDER_THUMBNAIL_BYTES)
+      .slice(0, MAX_FINDER_THUMBNAILS);
+    const pending = candidates.filter((entry) => {
+      const cached = finderThumbnailCacheRef.current[entry.path];
+      if (cached?.modifiedAt === entry.modified_at) {
+        return false;
+      }
+      return !finderThumbnailInflightRef.current.has(entry.path);
+    });
+    if (pending.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    pending.forEach((entry) => finderThumbnailInflightRef.current.add(entry.path));
+
+    void Promise.allSettled(
+      pending.map(async (entry) => {
+        const base64 = await invoke<string>("read_workspace_file_base64", { path: entry.path });
+        return {
+          path: entry.path,
+          modifiedAt: entry.modified_at,
+          dataUrl: workspaceImageDataUrl(entry.name, base64),
+        };
+      }),
+    )
+      .then((results) => {
+        if (cancelled) return;
+        setFinderThumbnails((current) => {
+          const next = { ...current };
+          let changed = false;
+          for (const result of results) {
+            if (result.status !== "fulfilled") {
+              continue;
+            }
+            const thumbnail = result.value;
+            const existing = next[thumbnail.path];
+            if (existing?.modifiedAt === thumbnail.modifiedAt && existing.dataUrl === thumbnail.dataUrl) {
+              continue;
+            }
+            next[thumbnail.path] = {
+              dataUrl: thumbnail.dataUrl,
+              modifiedAt: thumbnail.modifiedAt,
+            };
+            changed = true;
+          }
+          return changed ? next : current;
+        });
+      })
+      .finally(() => {
+        pending.forEach((entry) => finderThumbnailInflightRef.current.delete(entry.path));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [entries, finderOpen]);
+  useEffect(() => {
     if (!finderOpen) return;
     const refreshCurrentFolder = () => {
       if (document.hidden) return;
@@ -2664,14 +3051,57 @@ export function Files({
   function goBack() { if (historyIndex > 0) { setHistoryIndex(historyIndex - 1); setCurrentPath(history[historyIndex - 1]); setSelected(null); } }
   function goForward() { if (historyIndex < history.length - 1) { setHistoryIndex(historyIndex + 1); setCurrentPath(history[historyIndex + 1]); setSelected(null); } }
 
+  function openOfficeWindow(kind: OfficeAppKind) {
+    switch (kind) {
+      case "sheets":
+        setSheetsOpen(true);
+        focusWindow("sheets");
+        return;
+      case "docs":
+        setDocsOpen(true);
+        focusWindow("docs");
+        return;
+      case "slides":
+        setSlidesOpen(true);
+        focusWindow("slides");
+        return;
+    }
+  }
+
+  function recordOfficeRecent(kind: OfficeAppKind, entry: WorkspaceFileEntry) {
+    const nextRecent = {
+      path: entry.path,
+      name: entry.name,
+      openedAt: Date.now(),
+    };
+    switch (kind) {
+      case "sheets":
+        setSheetsRecent((current) => pushOfficeRecentEntry(current, nextRecent));
+        return;
+      case "docs":
+        setDocsRecent((current) => pushOfficeRecentEntry(current, nextRecent));
+        return;
+      case "slides":
+        setSlidesRecent((current) => pushOfficeRecentEntry(current, nextRecent));
+        return;
+    }
+  }
+
+  function openOfficeAppHomeInChat() {
+    createNewChatSession();
+  }
+
+  function openRecentOfficePath(path: string) {
+    void openWorkspacePathInBrowser(path);
+  }
+
   function handleEntryClick(entry: WorkspaceFileEntry, e: React.MouseEvent) { e.stopPropagation(); setSelected(entry.path); }
   function handleEntryDoubleClick(entry: WorkspaceFileEntry) {
     if (entry.is_directory) {
       navigateTo(entry.path);
       return;
     }
-    const ext = entry.name.split(".").pop()?.toLowerCase() || "";
-    if (HTML_EXTS.has(ext)) {
+    if (workspaceFileCanOpenInBrowser(entry.path)) {
       void openWorkspaceFileInBrowser(entry);
       return;
     }
@@ -2679,44 +3109,96 @@ export function Files({
   }
   function handleContextMenuEntry(entry: WorkspaceFileEntry, e: React.MouseEvent) { e.preventDefault(); e.stopPropagation(); setSelected(entry.path); setContextMenu({ x: e.clientX, y: e.clientY, entry }); }
 
+  async function openWorkspaceFileInOfficeApp(entry: WorkspaceFileEntry) {
+    const officeKind = officeAppKindForPath(entry.path);
+    if (!officeKind) return false;
+    try {
+      setError(null);
+      await ensureOnlyOfficeReady();
+    } catch (e) {
+      setError(`Failed to start ONLYOFFICE: ${e instanceof Error ? e.message : String(e)}`);
+      return true;
+    }
+
+    const nextSession: OfficeAppSession = {
+      path: entry.path,
+      name: entry.name,
+      url: workspaceBrowserUrl(entry.path),
+      launchToken: Date.now(),
+    };
+
+    switch (officeKind) {
+      case "sheets":
+        setSheetsSession(nextSession);
+        recordOfficeRecent("sheets", entry);
+        openOfficeWindow("sheets");
+        break;
+      case "docs":
+        setDocsSession(nextSession);
+        recordOfficeRecent("docs", entry);
+        openOfficeWindow("docs");
+        break;
+      case "slides":
+        setSlidesSession(nextSession);
+        recordOfficeRecent("slides", entry);
+        openOfficeWindow("slides");
+        break;
+    }
+    return true;
+  }
+
   async function openWorkspaceFileInBrowser(entry: WorkspaceFileEntry) {
     if (entry.is_directory) return;
-    const ext = entry.name.split(".").pop()?.toLowerCase() || "";
-    if (!HTML_EXTS.has(ext)) return;
+    if (!workspaceFileCanOpenInBrowser(entry.path)) return;
+    if (workspaceFileUsesOnlyOffice(entry.path) && await openWorkspaceFileInOfficeApp(entry)) {
+      return;
+    }
     const targetUrl = workspaceBrowserUrl(entry.path);
     if (!browserOpen) {
       setBrowserOpen(true);
     }
     focusWindow("browser");
     if (isTrustedLocalPreviewUrl(targetUrl)) {
+      const reloadingCurrentPreview = browserEmbeddedPreview?.url === targetUrl;
       setBrowserEmbeddedPreview({
         url: targetUrl,
         title: entry.name,
       });
       setBrowserUrlInput(presentBrowserUrl(targetUrl));
       setBrowserLoadError(null);
+      if (reloadingCurrentPreview) {
+        await reloadEmbeddedPreview().catch(() => {});
+      }
       return;
     }
     await navigateBrowser(targetUrl);
   }
 
   function showWorkspacePathInDesktop(path: string, looksLikeFile: boolean) {
-    if (!path) {
+    const normalizedPath = normalizeDesktopWorkspacePath(path);
+    if (normalizedPath === null) {
+      return;
+    }
+    if (!normalizedPath) {
       openFolder("");
       return;
     }
     if (looksLikeFile) {
-      openFolder(workspacePathParent(path));
-      setSelected(path);
+      openFolder(workspacePathParent(normalizedPath));
+      setSelected(normalizedPath);
       return;
     }
-    openFolder(path);
+    openFolder(normalizedPath);
   }
 
   async function previewWorkspacePath(path: string) {
+    const normalizedPath = normalizeDesktopWorkspacePath(path);
+    if (normalizedPath === null || !normalizedPath) {
+      return;
+    }
     await handleView({
-      name: workspacePathName(path),
-      path,
+      name: workspacePathName(normalizedPath),
+      path: normalizedPath,
       is_directory: false,
       size: 0,
       modified_at: 0,
@@ -2724,9 +3206,13 @@ export function Files({
   }
 
   async function openWorkspacePathInBrowser(path: string) {
+    const normalizedPath = normalizeDesktopWorkspacePath(path);
+    if (normalizedPath === null || !normalizedPath) {
+      return;
+    }
     await openWorkspaceFileInBrowser({
-      name: workspacePathName(path),
-      path,
+      name: workspacePathName(normalizedPath),
+      path: normalizedPath,
       is_directory: false,
       size: 0,
       modified_at: 0,
@@ -2793,6 +3279,22 @@ export function Files({
     void applyDesktopHandoff(consumeDesktopHandoff());
   }, []);
 
+  useEffect(() => {
+    const onDesktopHandoff = (event: Event) => {
+      const fallback =
+        event instanceof CustomEvent
+          ? (event.detail as DesktopHandoff | null | undefined) ?? null
+          : null;
+      const handoff = consumeDesktopHandoff() ?? fallback;
+      if (!handoff) return;
+      void applyDesktopHandoff(handoff);
+    };
+    window.addEventListener(DESKTOP_HANDOFF_EVENT, onDesktopHandoff);
+    return () => {
+      window.removeEventListener(DESKTOP_HANDOFF_EVENT, onDesktopHandoff);
+    };
+  }, []);
+
   function openBrowserWindow(targetUrl = browserCurrentUrl) {
     if (!browserOpen) {
       setBrowserOpen(true);
@@ -2824,13 +3326,7 @@ export function Files({
     try {
       if (IMAGE_EXTS.has(ext)) {
         const base64 = await invoke<string>("read_workspace_file_base64", { path: entry.path });
-        const mime =
-          ext === "svg"
-            ? "image/svg+xml"
-            : ext === "jpg" || ext === "jpeg"
-              ? "image/jpeg"
-              : `image/${ext}`;
-        setPreview({ kind: "image", name: entry.name, dataUrl: `data:${mime};base64,${base64}` });
+        setPreview({ kind: "image", name: entry.name, dataUrl: workspaceImageDataUrl(entry.name, base64) });
         return;
       }
       if (BINARY_EXTS.has(ext)) {
@@ -2846,7 +3342,11 @@ export function Files({
 
   async function handleDelete(entry: WorkspaceFileEntry) {
     if (!confirm(`Move "${entry.name}" to Trash?`)) return;
-    try { await invoke("delete_workspace_file", { path: entry.path }); setSelected(null); fetchFiles(currentPath); }
+    try {
+      await invoke("delete_workspace_file", { path: entry.path });
+      setSelected(null);
+      fetchFiles(currentPath);
+    }
     catch (e) { setError(`Delete failed: ${e instanceof Error ? e.message : String(e)}`); }
   }
 
@@ -3018,6 +3518,15 @@ export function Files({
     if (chatOpen) {
       frames.push({ z: windowZ.chat ?? DEFAULT_WINDOW_Z.chat, rect: { x: chatPos.x, y: chatPos.y, w: chatSize.w, h: chatSize.h } });
     }
+    if (sheetsOpen) {
+      frames.push({ z: windowZ.sheets ?? DEFAULT_WINDOW_Z.sheets, rect: { x: sheetsPos.x, y: sheetsPos.y, w: sheetsSize.w, h: sheetsSize.h } });
+    }
+    if (docsOpen) {
+      frames.push({ z: windowZ.docs ?? DEFAULT_WINDOW_Z.docs, rect: { x: docsPos.x, y: docsPos.y, w: docsSize.w, h: docsSize.h } });
+    }
+    if (slidesOpen) {
+      frames.push({ z: windowZ.slides ?? DEFAULT_WINDOW_Z.slides, rect: { x: slidesPos.x, y: slidesPos.y, w: slidesSize.w, h: slidesSize.h } });
+    }
     if (terminalOpen) {
       frames.push({ z: windowZ.terminal ?? DEFAULT_WINDOW_Z.terminal, rect: { x: terminalPos.x, y: terminalPos.y, w: terminalSize.w, h: terminalSize.h } });
     }
@@ -3064,6 +3573,21 @@ export function Files({
     chatPos.y,
     chatSize.w,
     chatSize.h,
+    sheetsOpen,
+    sheetsPos.x,
+    sheetsPos.y,
+    sheetsSize.w,
+    sheetsSize.h,
+    docsOpen,
+    docsPos.x,
+    docsPos.y,
+    docsSize.w,
+    docsSize.h,
+    slidesOpen,
+    slidesPos.x,
+    slidesPos.y,
+    slidesSize.w,
+    slidesSize.h,
     terminalOpen,
     terminalPos.x,
     terminalPos.y,
@@ -3115,6 +3639,9 @@ export function Files({
     desktopBounds.height,
     windowZ.finder,
     windowZ.chat,
+    windowZ.sheets,
+    windowZ.docs,
+    windowZ.slides,
     windowZ.terminal,
     windowZ.plugins,
     windowZ.skills,
@@ -3418,10 +3945,19 @@ export function Files({
                     {entries.map((entry) => {
                       const Icon = getFileIcon(entry.name, entry.is_directory);
                       const iconColor = getFileColor(entry.name, entry.is_directory);
+                      const thumbnail = isImageWorkspaceEntry(entry) ? finderThumbnails[entry.path]?.dataUrl : null;
                       const isSel = selected === entry.path;
                       return (
                         <div key={entry.path} className="flex flex-col items-center p-2 rounded-lg cursor-default" style={{ background: isSel ? "rgba(59,130,246,0.2)" : "transparent" }} onClick={(e) => handleEntryClick(entry, e)} onDoubleClick={() => handleEntryDoubleClick(entry)} onContextMenu={(e) => handleContextMenuEntry(entry, e)}>
-                          {entry.is_directory ? <div className="w-11 h-11 flex items-center justify-center mb-1"><FolderIcon size={44} selected={isSel} /></div> : <div className="w-11 h-11 flex items-center justify-center mb-1"><Icon className="w-8 h-8" style={{ color: iconColor }} strokeWidth={1.2} /></div>}
+                          {entry.is_directory ? (
+                            <div className="w-11 h-11 flex items-center justify-center mb-1"><FolderIcon size={44} selected={isSel} /></div>
+                          ) : thumbnail ? (
+                            <div className="w-11 h-11 mb-1 overflow-hidden" style={{ background: "rgba(255,255,255,0.06)", boxShadow: isSel ? "0 0 0 1px rgba(147,197,253,0.42)" : "inset 0 0 0 1px rgba(255,255,255,0.08)" }}>
+                              <img src={thumbnail} alt={entry.name} className="h-full w-full object-cover" loading="lazy" />
+                            </div>
+                          ) : (
+                            <div className="w-11 h-11 flex items-center justify-center mb-1"><Icon className="w-8 h-8" style={{ color: iconColor }} strokeWidth={1.2} /></div>
+                          )}
                           <span className="text-[10px] text-center leading-tight w-full px-0.5" style={{ color: isSel ? "#fff" : "#ccc", fontWeight: isSel ? 500 : 400, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", wordBreak: "break-all" }}>{entry.name}</span>
                         </div>
                       );
@@ -3433,11 +3969,18 @@ export function Files({
                     {entries.map((entry) => {
                       const Icon = getFileIcon(entry.name, entry.is_directory);
                       const iconColor = getFileColor(entry.name, entry.is_directory);
+                      const thumbnail = isImageWorkspaceEntry(entry) ? finderThumbnails[entry.path]?.dataUrl : null;
                       const isSel = selected === entry.path;
                       return (
                         <div key={entry.path} className="flex items-center gap-3 px-4 py-1.5 cursor-default" style={{ background: isSel ? "rgba(59,130,246,0.15)" : "transparent", borderBottom: "1px solid #2a2a2a" }} onClick={(e) => handleEntryClick(entry, e)} onDoubleClick={() => handleEntryDoubleClick(entry)} onContextMenu={(e) => handleContextMenuEntry(entry, e)}>
-                          <Icon className="w-4 h-4 flex-shrink-0" style={{ color: iconColor }} />
-                          <span className="flex-1 text-xs truncate" style={{ color: isSel ? "#fff" : "#ccc", fontWeight: isSel ? 500 : 400 }}>{entry.name}</span>
+                          {thumbnail ? (
+                            <div className="h-4 w-4 flex-shrink-0 overflow-hidden" style={{ background: "rgba(255,255,255,0.06)" }}>
+                              <img src={thumbnail} alt={entry.name} className="h-full w-full object-cover" loading="lazy" />
+                            </div>
+                          ) : (
+                            <Icon className="w-4 h-4 flex-shrink-0" style={{ color: iconColor }} />
+                          )}
+                          <span className="flex-1 min-w-0 text-xs truncate" style={{ color: isSel ? "#fff" : "#ccc", fontWeight: isSel ? 500 : 400 }}>{entry.name}</span>
                           <span className="w-28 text-right text-[11px]" style={{ color: "#666" }}>{formatDate(entry.modified_at)}</span>
                           <span className="w-20 text-right text-[11px]" style={{ color: "#666" }}>{entry.is_directory ? "\u2014" : formatSize(entry.size)}</span>
                         </div>
@@ -3469,8 +4012,8 @@ export function Files({
           {contextMenu && contextMenu.entry && (
             <div className="fixed py-1 rounded-lg min-w-[160px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, zIndex: DESKTOP_CONTEXT_MENU_Z + 1, background: "rgba(30,30,30,0.95)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }} onClick={(e) => e.stopPropagation()}>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleEntryDoubleClick(contextMenu.entry!); setContextMenu(null); }}><Folder className="w-3.5 h-3.5" style={{ color: "#888" }} />Open</button>
-              {!contextMenu.entry.is_directory && HTML_EXTS.has(contextMenu.entry.name.split(".").pop()?.toLowerCase() || "") && (
-                <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void openWorkspaceFileInBrowser(contextMenu.entry!); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" style={{ color: "#888" }} />Open in Browser</button>
+              {!contextMenu.entry.is_directory && workspaceFileCanOpenInBrowser(contextMenu.entry.path) && (
+                <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void openWorkspaceFileInBrowser(contextMenu.entry!); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" style={{ color: "#888" }} />{workspaceOpenLabel(contextMenu.entry.path)}</button>
               )}
               {!contextMenu.entry.is_directory && <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleView(contextMenu.entry!); setContextMenu(null); }}><Eye className="w-3.5 h-3.5" style={{ color: "#888" }} />Quick Look</button>}
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void copyDesktopPath(contextMenu.entry!.path); setContextMenu(null); }}><FileText className="w-3.5 h-3.5" style={{ color: "#888" }} />Copy Path</button>
@@ -4119,6 +4662,150 @@ export function Files({
             </AppWindow>
           )}
 
+          {sheetsOpen && (
+            <AppWindow
+              title="Sheets"
+              icon={LayoutGrid}
+              position={sheetsPos}
+              size={sheetsSize}
+              zIndex={windowZ.sheets ?? DEFAULT_WINDOW_Z.sheets}
+              glass={false}
+              onClose={() => { setSheetsOpen(false); setSheetsSession(null); }}
+              onFocus={() => focusWindow("sheets")}
+              onDragStart={(e) =>
+                startWindowDrag(e, sheetsDragRef, sheetsPos, sheetsSize, setSheetsPos, "sheets")
+              }
+              onResizeStart={(direction, e) =>
+                startWindowResize(
+                  e,
+                  direction,
+                  sheetsResizeRef,
+                  sheetsPos,
+                  sheetsSize,
+                  setSheetsPos,
+                  setSheetsSize,
+                  "sheets",
+                  { w: 720, h: 480 },
+                )
+              }
+            >
+              <div className="h-full bg-white">
+                {sheetsSession ? (
+                  <iframe
+                    key={`${sheetsSession.path}:${sheetsSession.launchToken}`}
+                    src={officeAppLaunchUrl(sheetsSession)}
+                    title={sheetsSession.name}
+                    className="block h-full w-full border-0 bg-white"
+                    allow="clipboard-read; clipboard-write; fullscreen"
+                  />
+                ) : (
+                  <OfficeHomePanel
+                    kind="sheets"
+                    recent={sheetsRecent}
+                    onOpenRecent={openRecentOfficePath}
+                    onOpenChat={openOfficeAppHomeInChat}
+                  />
+                )}
+              </div>
+            </AppWindow>
+          )}
+
+          {docsOpen && (
+            <AppWindow
+              title="Docs"
+              icon={FileText}
+              position={docsPos}
+              size={docsSize}
+              zIndex={windowZ.docs ?? DEFAULT_WINDOW_Z.docs}
+              glass={false}
+              onClose={() => { setDocsOpen(false); setDocsSession(null); }}
+              onFocus={() => focusWindow("docs")}
+              onDragStart={(e) =>
+                startWindowDrag(e, docsDragRef, docsPos, docsSize, setDocsPos, "docs")
+              }
+              onResizeStart={(direction, e) =>
+                startWindowResize(
+                  e,
+                  direction,
+                  docsResizeRef,
+                  docsPos,
+                  docsSize,
+                  setDocsPos,
+                  setDocsSize,
+                  "docs",
+                  { w: 720, h: 480 },
+                )
+              }
+            >
+              <div className="h-full bg-white">
+                {docsSession ? (
+                  <iframe
+                    key={`${docsSession.path}:${docsSession.launchToken}`}
+                    src={officeAppLaunchUrl(docsSession)}
+                    title={docsSession.name}
+                    className="block h-full w-full border-0 bg-white"
+                    allow="clipboard-read; clipboard-write; fullscreen"
+                  />
+                ) : (
+                  <OfficeHomePanel
+                    kind="docs"
+                    recent={docsRecent}
+                    onOpenRecent={openRecentOfficePath}
+                    onOpenChat={openOfficeAppHomeInChat}
+                  />
+                )}
+              </div>
+            </AppWindow>
+          )}
+
+          {slidesOpen && (
+            <AppWindow
+              title="Slides"
+              icon={Image}
+              position={slidesPos}
+              size={slidesSize}
+              zIndex={windowZ.slides ?? DEFAULT_WINDOW_Z.slides}
+              glass={false}
+              onClose={() => { setSlidesOpen(false); setSlidesSession(null); }}
+              onFocus={() => focusWindow("slides")}
+              onDragStart={(e) =>
+                startWindowDrag(e, slidesDragRef, slidesPos, slidesSize, setSlidesPos, "slides")
+              }
+              onResizeStart={(direction, e) =>
+                startWindowResize(
+                  e,
+                  direction,
+                  slidesResizeRef,
+                  slidesPos,
+                  slidesSize,
+                  setSlidesPos,
+                  setSlidesSize,
+                  "slides",
+                  { w: 720, h: 480 },
+                )
+              }
+            >
+              <div className="h-full bg-white">
+                {slidesSession ? (
+                  <iframe
+                    key={`${slidesSession.path}:${slidesSession.launchToken}`}
+                    src={officeAppLaunchUrl(slidesSession)}
+                    title={slidesSession.name}
+                    className="block h-full w-full border-0 bg-white"
+                    allow="clipboard-read; clipboard-write; fullscreen"
+                  />
+                ) : (
+                  <OfficeHomePanel
+                    kind="slides"
+                    recent={slidesRecent}
+                    onOpenRecent={openRecentOfficePath}
+                    onOpenChat={openOfficeAppHomeInChat}
+                  />
+                )}
+              </div>
+            </AppWindow>
+          )}
+
           {/* ── TERMINAL WINDOW ─────────────────────────────────────── */}
           {terminalOpen && (
             <AppWindow
@@ -4483,6 +5170,51 @@ export function Files({
                 style={{ background: "linear-gradient(180deg, #0ea5e9 0%, #0284c7 100%)", boxShadow: "0 3px 10px rgba(2,132,199,0.4)" }}
               >
                 <Globe className="w-6 h-6 text-white" />
+              </div>
+            </DockIconButton>
+
+            <DockIconButton
+              label="Sheets"
+              active={sheetsOpen}
+              onClick={() => {
+                openOfficeWindow("sheets");
+              }}
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #34d399 0%, #059669 100%)", boxShadow: "0 3px 10px rgba(5,150,105,0.38)" }}
+              >
+                <LayoutGrid className="w-6 h-6 text-white" />
+              </div>
+            </DockIconButton>
+
+            <DockIconButton
+              label="Docs"
+              active={docsOpen}
+              onClick={() => {
+                openOfficeWindow("docs");
+              }}
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #60a5fa 0%, #2563eb 100%)", boxShadow: "0 3px 10px rgba(37,99,235,0.38)" }}
+              >
+                <FileText className="w-6 h-6 text-white" />
+              </div>
+            </DockIconButton>
+
+            <DockIconButton
+              label="Slides"
+              active={slidesOpen}
+              onClick={() => {
+                openOfficeWindow("slides");
+              }}
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #fbbf24 0%, #f97316 100%)", boxShadow: "0 3px 10px rgba(249,115,22,0.34)" }}
+              >
+                <Image className="w-6 h-6 text-white" />
               </div>
             </DockIconButton>
 

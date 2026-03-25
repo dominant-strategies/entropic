@@ -172,6 +172,7 @@ type ChatImageGenerationResponse = {
 };
 
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
+const DESKTOP_HANDOFF_EVENT = "entropic-desktop-handoff";
 const TERMINAL_DEFAULT_CWD = "/data/workspace";
 const DEFAULT_COMPOSER_MODE: ComposerMode = "chat";
 const CHAT_WORKSPACE_PREFIXES = [
@@ -4939,17 +4940,22 @@ export function Chat({
     looksLikeFile: boolean;
     url?: string;
   }) {
+    const normalizedPath =
+      typeof link.path === "string" && link.path
+        ? normalizeChatWorkspacePath(link.path) ?? link.path
+        : link.path;
+    const payload: DesktopHandoff = {
+      path: normalizedPath,
+      url: link.url,
+      action: link.action,
+      looksLikeFile: link.looksLikeFile,
+    };
     try {
-      const payload: DesktopHandoff = {
-        path: link.path,
-        url: link.url,
-        action: link.action,
-        looksLikeFile: link.looksLikeFile,
-      };
       window.localStorage.setItem(DESKTOP_HANDOFF_STORAGE_KEY, JSON.stringify(payload));
     } catch {
       // Ignore storage failures and still navigate.
     }
+    window.dispatchEvent(new CustomEvent(DESKTOP_HANDOFF_EVENT, { detail: payload }));
     onNavigate?.("files");
   }
 

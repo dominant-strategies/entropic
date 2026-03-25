@@ -1,0 +1,1216 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Entropic Office</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0d1117;
+        --panel: #161b22;
+        --panel-2: #1f2833;
+        --border: rgba(255, 255, 255, 0.08);
+        --text: #f3f4f6;
+        --muted: #93a1b3;
+        --accent: #59a4ff;
+        --accent-soft: rgba(89, 164, 255, 0.16);
+        --danger: #ff8a8a;
+        --success: #7dd3a9;
+        --warn: #ffcf6c;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: radial-gradient(circle at top, rgba(89, 164, 255, 0.12), transparent 32%), var(--bg);
+        color: var(--text);
+        font-family: "SF Pro Display", "Segoe UI", sans-serif;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      button {
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text);
+        border-radius: 10px;
+        padding: 0.55rem 0.85rem;
+        cursor: pointer;
+      }
+
+      button.primary {
+        background: var(--accent);
+        border-color: rgba(89, 164, 255, 0.45);
+        color: white;
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+
+      input,
+      select {
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+        border-radius: 10px;
+        padding: 0.55rem 0.7rem;
+      }
+
+      .shell {
+        display: flex;
+        flex-direction: column;
+        min-height: 100%;
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 1rem 1.25rem;
+        background: rgba(13, 17, 23, 0.92);
+        border-bottom: 1px solid var(--border);
+        backdrop-filter: blur(14px);
+      }
+
+      .title-block {
+        min-width: 0;
+      }
+
+      .title-block h1 {
+        margin: 0;
+        font-size: 1rem;
+        font-weight: 650;
+      }
+
+      .title-block p {
+        margin: 0.25rem 0 0;
+        color: var(--muted);
+        font-size: 0.82rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .top-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .status {
+        font-size: 0.82rem;
+        color: var(--muted);
+      }
+
+      .status.warn {
+        color: var(--warn);
+      }
+
+      .status.error {
+        color: var(--danger);
+      }
+
+      .status.success {
+        color: var(--success);
+      }
+
+      .warning {
+        margin: 0 1.25rem;
+        padding: 0.8rem 1rem;
+        border-radius: 14px;
+        border: 1px solid rgba(255, 207, 108, 0.22);
+        background: rgba(255, 207, 108, 0.1);
+        color: #ffe39c;
+        font-size: 0.85rem;
+      }
+
+      .hidden {
+        display: none !important;
+      }
+
+      .content {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+      }
+
+      .workspace {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+      }
+
+      .spreadsheet-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 320px;
+        width: 100%;
+        min-height: 0;
+      }
+
+      .sheet-area {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        border-right: 1px solid var(--border);
+      }
+
+      .sheet-tabs {
+        display: flex;
+        gap: 0.55rem;
+        padding: 0.9rem 1.25rem 0;
+        flex-wrap: wrap;
+      }
+
+      .sheet-tab {
+        padding: 0.5rem 0.8rem;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--muted);
+      }
+
+      .sheet-tab.active {
+        background: var(--accent-soft);
+        color: white;
+        border-color: rgba(89, 164, 255, 0.35);
+      }
+
+      .formula-bar {
+        display: grid;
+        grid-template-columns: 96px minmax(0, 1fr) auto auto;
+        gap: 0.65rem;
+        padding: 0.9rem 1.25rem;
+        align-items: center;
+      }
+
+      .formula-label {
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--muted);
+        padding: 0.55rem 0.7rem;
+        text-align: center;
+      }
+
+      .grid-wrap {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        padding: 0 1.25rem 1.25rem;
+      }
+
+      .grid {
+        border-collapse: separate;
+        border-spacing: 0;
+        min-width: max-content;
+      }
+
+      .grid th,
+      .grid td {
+        border-right: 1px solid var(--border);
+        border-bottom: 1px solid var(--border);
+      }
+
+      .grid th:first-child,
+      .grid td:first-child {
+        border-left: 1px solid var(--border);
+      }
+
+      .grid tr:first-child th {
+        border-top: 1px solid var(--border);
+      }
+
+      .grid thead th {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        background: rgba(13, 17, 23, 0.96);
+        color: var(--muted);
+        font-weight: 600;
+        min-width: 120px;
+        padding: 0.55rem 0.65rem;
+        text-align: left;
+      }
+
+      .grid thead th.corner {
+        min-width: 56px;
+      }
+
+      .grid tbody th {
+        position: sticky;
+        left: 0;
+        z-index: 4;
+        min-width: 56px;
+        background: rgba(13, 17, 23, 0.96);
+        color: var(--muted);
+        padding: 0.55rem 0.65rem;
+        text-align: right;
+        font-weight: 500;
+      }
+
+      .cell {
+        min-width: 120px;
+        max-width: 280px;
+        min-height: 38px;
+        padding: 0.5rem 0.65rem;
+        background: rgba(255, 255, 255, 0.03);
+        color: var(--text);
+        font-size: 0.84rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        user-select: none;
+      }
+
+      .cell.selected {
+        background: rgba(89, 164, 255, 0.12);
+        outline: 2px solid rgba(89, 164, 255, 0.5);
+        outline-offset: -2px;
+      }
+
+      .cell.formula {
+        color: #c8e1ff;
+      }
+
+      .sheet-meta {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        padding: 0 1.25rem 1rem;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+
+      .chart-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 0.85rem;
+        min-height: 0;
+        padding: 1rem;
+      }
+
+      .panel {
+        border: 1px solid var(--border);
+        background: var(--panel);
+        border-radius: 16px;
+        padding: 0.9rem;
+      }
+
+      .panel h2 {
+        margin: 0 0 0.6rem;
+        font-size: 0.93rem;
+      }
+
+      .panel p {
+        margin: 0.35rem 0 0;
+        color: var(--muted);
+        font-size: 0.8rem;
+        line-height: 1.45;
+      }
+
+      .field-grid {
+        display: grid;
+        gap: 0.65rem;
+        grid-template-columns: 1fr 1fr;
+        margin-top: 0.8rem;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+      }
+
+      .field label {
+        font-size: 0.76rem;
+        color: var(--muted);
+      }
+
+      .chart-canvas {
+        width: 100%;
+        height: 240px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--border);
+      }
+
+      .doc-layout {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+        padding: 1rem 1.25rem 1.25rem;
+      }
+
+      .doc-card {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.025));
+        border: 1px solid var(--border);
+        border-radius: 22px;
+        padding: 1.1rem 1.2rem;
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.25);
+      }
+
+      .doc-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.8rem;
+        padding-bottom: 0.9rem;
+        border-bottom: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+
+      .doc-editor {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        padding: 1.4rem 0.25rem 0;
+        outline: none;
+      }
+
+      .doc-page {
+        width: min(820px, 100%);
+        margin: 0 auto;
+        background: white;
+        color: #111827;
+        border-radius: 16px;
+        min-height: calc(100% - 0.5rem);
+        padding: 3rem 3.25rem;
+        box-shadow: 0 18px 46px rgba(0, 0, 0, 0.2);
+      }
+
+      .doc-page p {
+        margin: 0 0 1rem;
+        line-height: 1.65;
+        min-height: 1.65em;
+      }
+
+      .empty-state {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: 1;
+        color: var(--muted);
+        text-align: center;
+        padding: 2rem;
+      }
+
+      @media (max-width: 980px) {
+        .spreadsheet-layout {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .sheet-area {
+          border-right: 0;
+          border-bottom: 1px solid var(--border);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="title-block">
+          <h1 id="fileTitle">Entropic Office</h1>
+          <p id="filePath"></p>
+        </div>
+        <div class="top-actions">
+          <span class="status" id="saveStatus">Loading…</span>
+          <button id="reloadButton">Reload</button>
+          <button class="primary" id="saveButton">Save Now</button>
+        </div>
+      </header>
+
+      <div class="warning hidden" id="warningBanner"></div>
+
+      <main class="content">
+        <div class="workspace" id="workspaceRoot">
+          <section class="spreadsheet-layout hidden" id="spreadsheetView">
+            <div class="sheet-area">
+              <div class="sheet-tabs" id="sheetTabs"></div>
+              <div class="formula-bar">
+                <div class="formula-label" id="activeCellLabel">A1</div>
+                <input id="formulaInput" placeholder="Value or =FORMULA" />
+                <button id="clearCellButton">Clear Cell</button>
+                <button id="extendGridButton">Add Space</button>
+              </div>
+              <div class="sheet-meta" id="sheetMeta"></div>
+              <div class="grid-wrap">
+                <table class="grid" id="sheetGrid"></table>
+              </div>
+            </div>
+            <aside class="chart-panel">
+              <div class="panel">
+                <h2>Chart Preview</h2>
+                <p>Charts update from the current sheet values. Existing workbook charts are preserved on disk, but this editor currently renders local previews from the sheet data.</p>
+                <div class="field-grid">
+                  <div class="field">
+                    <label for="chartType">Type</label>
+                    <select id="chartType">
+                      <option value="bar">Bar</option>
+                      <option value="line">Line</option>
+                      <option value="pie">Pie</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="chartLabelColumn">Label Column</label>
+                    <select id="chartLabelColumn"></select>
+                  </div>
+                  <div class="field">
+                    <label for="chartValueColumn">Value Column</label>
+                    <select id="chartValueColumn"></select>
+                  </div>
+                  <div class="field">
+                    <label for="chartStartRow">Start Row</label>
+                    <input id="chartStartRow" type="number" min="1" value="2" />
+                  </div>
+                  <div class="field">
+                    <label for="chartEndRow">End Row</label>
+                    <input id="chartEndRow" type="number" min="1" value="12" />
+                  </div>
+                </div>
+              </div>
+              <div class="panel">
+                <h2>Live Sync</h2>
+                <p>Changes autosave after short pauses. If the file changes from chat, Syncthing, or another editor, this view reloads automatically while it is clean and warns before overwriting when it is dirty.</p>
+              </div>
+              <canvas class="chart-canvas" id="chartCanvas" width="600" height="320"></canvas>
+            </aside>
+          </section>
+
+          <section class="doc-layout hidden" id="documentView">
+            <div class="doc-card">
+              <div class="doc-toolbar">
+                <span>DOCX Editor</span>
+                <span id="docMeta"></span>
+              </div>
+              <div class="doc-editor" id="docEditorWrap">
+                <div class="doc-page" id="docEditor" contenteditable="true" spellcheck="true"></div>
+              </div>
+            </div>
+          </section>
+
+          <div class="empty-state hidden" id="emptyState"></div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const state = {
+        mode: window.location.pathname.endsWith("/spreadsheet") ? "spreadsheet" : "document",
+        path: new URLSearchParams(window.location.search).get("path") || "",
+        document: null,
+        activeSheetIndex: 0,
+        selectedCell: { row: 1, col: 1 },
+        dirty: false,
+        saving: false,
+        saveTimer: null,
+        pollTimer: null,
+        baseEtag: "missing",
+        remotePending: false,
+        statusMessage: "Loading…",
+        statusTone: "",
+        extraRows: 18,
+        extraCols: 8,
+      };
+
+      const fileTitle = document.getElementById("fileTitle");
+      const filePath = document.getElementById("filePath");
+      const saveStatus = document.getElementById("saveStatus");
+      const warningBanner = document.getElementById("warningBanner");
+      const reloadButton = document.getElementById("reloadButton");
+      const saveButton = document.getElementById("saveButton");
+      const spreadsheetView = document.getElementById("spreadsheetView");
+      const documentView = document.getElementById("documentView");
+      const emptyState = document.getElementById("emptyState");
+      const sheetTabs = document.getElementById("sheetTabs");
+      const sheetGrid = document.getElementById("sheetGrid");
+      const sheetMeta = document.getElementById("sheetMeta");
+      const formulaInput = document.getElementById("formulaInput");
+      const activeCellLabel = document.getElementById("activeCellLabel");
+      const clearCellButton = document.getElementById("clearCellButton");
+      const extendGridButton = document.getElementById("extendGridButton");
+      const chartCanvas = document.getElementById("chartCanvas");
+      const chartType = document.getElementById("chartType");
+      const chartLabelColumn = document.getElementById("chartLabelColumn");
+      const chartValueColumn = document.getElementById("chartValueColumn");
+      const chartStartRow = document.getElementById("chartStartRow");
+      const chartEndRow = document.getElementById("chartEndRow");
+      const docEditor = document.getElementById("docEditor");
+      const docMeta = document.getElementById("docMeta");
+
+      function setStatus(message, tone = "") {
+        state.statusMessage = message;
+        state.statusTone = tone;
+        saveStatus.textContent = message;
+        saveStatus.className = tone ? `status ${tone}` : "status";
+      }
+
+      function setWarning(message) {
+        if (!message) {
+          warningBanner.classList.add("hidden");
+          warningBanner.textContent = "";
+          return;
+        }
+        warningBanner.classList.remove("hidden");
+        warningBanner.textContent = message;
+      }
+
+      function relativeLabel(path) {
+        const parts = path.split("/").filter(Boolean);
+        return parts[parts.length - 1] || path || "Untitled";
+      }
+
+      function activeApiUrl() {
+        const base = state.mode === "spreadsheet" ? "/__workspace_editor_api__/spreadsheet" : "/__workspace_editor_api__/document";
+        return `${base}?path=${encodeURIComponent(state.path)}`;
+      }
+
+      async function requestJson(url, options = {}) {
+        const response = await fetch(url, {
+          cache: "no-store",
+          headers: {
+            ...(options.body ? { "content-type": "application/json" } : {}),
+            ...(options.headers || {}),
+          },
+          ...options,
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const error = typeof payload.error === "string" ? payload.error : `Request failed with ${response.status}`;
+          const err = new Error(error);
+          err.status = response.status;
+          throw err;
+        }
+        return payload;
+      }
+
+      function ensureSheetMaps(workbook) {
+        for (const sheet of workbook.sheets || []) {
+          const cellsByRef = {};
+          for (const cell of sheet.cells || []) {
+            cellsByRef[cell.ref] = { ...cell };
+          }
+          sheet.cellsByRef = cellsByRef;
+        }
+      }
+
+      function activeSheet() {
+        if (!state.document || !state.document.sheets || state.document.sheets.length === 0) {
+          return null;
+        }
+        return state.document.sheets[Math.min(state.activeSheetIndex, state.document.sheets.length - 1)];
+      }
+
+      function cellRef(row, col) {
+        let value = col;
+        let label = "";
+        while (value > 0) {
+          const remainder = (value - 1) % 26;
+          label = String.fromCharCode(65 + remainder) + label;
+          value = Math.floor((value - 1) / 26);
+        }
+        return `${label}${row}`;
+      }
+
+      function colLabel(col) {
+        return cellRef(1, col).replace(/\d+$/, "");
+      }
+
+      function getCell(sheet, row, col) {
+        return sheet?.cellsByRef?.[cellRef(row, col)] || null;
+      }
+
+      function rawCellValue(cell) {
+        if (!cell) return "";
+        return cell.formula ? `=${cell.formula}` : cell.value || "";
+      }
+
+      function cellDisplay(sheet, cell) {
+        if (!cell) return "";
+        if (cell.formula) {
+          if (typeof cell.display === "string" && cell.display !== "") {
+            return cell.display;
+          }
+          return evaluateFormula(sheet, cell.formula) ?? `=${cell.formula}`;
+        }
+        return cell.value || "";
+      }
+
+      function numericCellValue(sheet, row, col) {
+        const cell = getCell(sheet, row, col);
+        const shown = cellDisplay(sheet, cell);
+        const parsed = Number(String(shown).trim());
+        return Number.isFinite(parsed) ? parsed : null;
+      }
+
+      function evaluateFormula(sheet, formula) {
+        if (!formula) return "";
+        const trimmed = String(formula).trim();
+        const rangeMatch = trimmed.match(/^(SUM|AVERAGE|MIN|MAX|COUNT)\(([A-Z]+\d+):([A-Z]+\d+)\)$/i);
+        if (rangeMatch) {
+          const values = valuesInRange(sheet, rangeMatch[2], rangeMatch[3]).filter((value) => typeof value === "number");
+          if (values.length === 0) return "0";
+          switch (rangeMatch[1].toUpperCase()) {
+            case "SUM":
+              return String(values.reduce((total, value) => total + value, 0));
+            case "AVERAGE":
+              return String(values.reduce((total, value) => total + value, 0) / values.length);
+            case "MIN":
+              return String(Math.min(...values));
+            case "MAX":
+              return String(Math.max(...values));
+            case "COUNT":
+              return String(values.length);
+          }
+        }
+
+        const safeExpression = trimmed.replace(/\b([A-Z]+\d+)\b/g, (match) => {
+          const coord = parseCellRef(match);
+          const value = numericCellValue(sheet, coord.row, coord.col);
+          return value === null ? "0" : String(value);
+        });
+        if (!/^[\d\s+\-*/().]+$/.test(safeExpression)) {
+          return null;
+        }
+        try {
+          const value = Function(`"use strict"; return (${safeExpression});`)();
+          return Number.isFinite(value) ? String(value) : null;
+        } catch {
+          return null;
+        }
+      }
+
+      function parseCellRef(ref) {
+        const match = String(ref).match(/^([A-Z]+)(\d+)$/);
+        if (!match) {
+          return { row: 1, col: 1 };
+        }
+        let col = 0;
+        for (const char of match[1]) {
+          col = col * 26 + (char.charCodeAt(0) - 64);
+        }
+        return { row: Number(match[2]), col };
+      }
+
+      function valuesInRange(sheet, startRef, endRef) {
+        const start = parseCellRef(startRef);
+        const end = parseCellRef(endRef);
+        const minRow = Math.min(start.row, end.row);
+        const maxRow = Math.max(start.row, end.row);
+        const minCol = Math.min(start.col, end.col);
+        const maxCol = Math.max(start.col, end.col);
+        const values = [];
+        for (let row = minRow; row <= maxRow; row += 1) {
+          for (let col = minCol; col <= maxCol; col += 1) {
+            values.push(numericCellValue(sheet, row, col));
+          }
+        }
+        return values;
+      }
+
+      function inferCellKind(value) {
+        const trimmed = String(value).trim();
+        if (!trimmed) return "string";
+        if (/^(true|false)$/i.test(trimmed)) return "boolean";
+        if (/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(trimmed)) return "number";
+        return "string";
+      }
+
+      function setDirty(dirty) {
+        state.dirty = dirty;
+        if (dirty) {
+          setStatus(state.saving ? "Saving…" : "Unsaved changes", "warn");
+        } else if (!state.remotePending) {
+          setStatus("Saved", "success");
+        }
+      }
+
+      function scheduleAutosave() {
+        if (state.saveTimer) {
+          clearTimeout(state.saveTimer);
+        }
+        state.saveTimer = window.setTimeout(() => {
+          void saveDocument();
+        }, 900);
+      }
+
+      function updateCellFromRaw(rawInput) {
+        const sheet = activeSheet();
+        if (!sheet) return;
+        const ref = cellRef(state.selectedCell.row, state.selectedCell.col);
+        const trimmed = String(rawInput ?? "");
+        if (!trimmed) {
+          delete sheet.cellsByRef[ref];
+        } else if (trimmed.startsWith("=")) {
+          const formula = trimmed.slice(1);
+          sheet.cellsByRef[ref] = {
+            ref,
+            row: state.selectedCell.row,
+            col: state.selectedCell.col,
+            formula,
+            value: "",
+            display: evaluateFormula(sheet, formula) ?? "",
+            kind: "formula",
+          };
+        } else {
+          sheet.cellsByRef[ref] = {
+            ref,
+            row: state.selectedCell.row,
+            col: state.selectedCell.col,
+            formula: null,
+            value: trimmed,
+            display: trimmed,
+            kind: inferCellKind(trimmed),
+          };
+        }
+        setDirty(true);
+        scheduleAutosave();
+        renderSpreadsheet();
+      }
+
+      function buildSpreadsheetPayload() {
+        return {
+          expectedEtag: state.baseEtag,
+          sheets: (state.document.sheets || []).map((sheet) => ({
+            name: sheet.name,
+            cells: Object.values(sheet.cellsByRef || {}).map((cell) => ({
+              ref: cell.ref,
+              row: cell.row,
+              col: cell.col,
+              formula: cell.formula || undefined,
+              value: cell.value || "",
+              display: cellDisplay(sheet, cell),
+              kind: cell.kind || inferCellKind(cell.value || ""),
+            })),
+          })),
+        };
+      }
+
+      function buildDocumentPayload() {
+        return {
+          expectedEtag: state.baseEtag,
+          paragraphs: readParagraphs(),
+        };
+      }
+
+      async function saveDocument() {
+        if (state.saving || !state.document) return;
+        if (state.saveTimer) {
+          clearTimeout(state.saveTimer);
+          state.saveTimer = null;
+        }
+        state.saving = true;
+        setStatus("Saving…");
+        let saved = false;
+        try {
+          const payload = state.mode === "spreadsheet" ? buildSpreadsheetPayload() : buildDocumentPayload();
+          const result = await requestJson(activeApiUrl(), {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+          applyLoadedDocument(result);
+          state.remotePending = false;
+          setWarning(state.document.warning || "");
+          setStatus("Saved", "success");
+          saved = true;
+        } catch (error) {
+          if (error && error.status === 409) {
+            state.remotePending = true;
+            setWarning(error.message);
+            setStatus("Remote changes available", "warn");
+          } else {
+            setWarning(error.message || String(error));
+            setStatus("Save failed", "error");
+          }
+        } finally {
+          state.saving = false;
+          if (saved && state.dirty && !state.remotePending) {
+            setDirty(false);
+          }
+        }
+      }
+
+      async function loadDocument(force = false) {
+        try {
+          const result = await requestJson(activeApiUrl());
+          if (!force && state.document && state.dirty && result.etag !== state.baseEtag) {
+            state.remotePending = true;
+            setWarning("This file changed in chat, Syncthing, or another editor. Save or reload before you overwrite it.");
+            setStatus("Remote changes available", "warn");
+            return;
+          }
+          applyLoadedDocument(result);
+          state.remotePending = false;
+          setWarning(result.warning || "");
+          setStatus("Saved", "success");
+        } catch (error) {
+          setWarning(error.message || String(error));
+          setStatus("Load failed", "error");
+          spreadsheetView.classList.add("hidden");
+          documentView.classList.add("hidden");
+          emptyState.classList.remove("hidden");
+          emptyState.textContent = error.message || String(error);
+        }
+      }
+
+      function applyLoadedDocument(result) {
+        state.document = result;
+        state.baseEtag = result.etag || "missing";
+        state.dirty = false;
+        fileTitle.textContent = relativeLabel(state.path);
+        filePath.textContent = state.path ? `/${state.path}` : "";
+        ensureSheetMaps(result);
+        if (state.mode === "spreadsheet") {
+          spreadsheetView.classList.remove("hidden");
+          documentView.classList.add("hidden");
+          emptyState.classList.add("hidden");
+          state.activeSheetIndex = Math.min(state.activeSheetIndex, Math.max((result.sheets || []).length - 1, 0));
+          renderSpreadsheet();
+        } else {
+          spreadsheetView.classList.add("hidden");
+          documentView.classList.remove("hidden");
+          emptyState.classList.add("hidden");
+          renderDocument();
+        }
+      }
+
+      function renderSpreadsheet() {
+        const sheet = activeSheet();
+        if (!sheet) {
+          emptyState.classList.remove("hidden");
+          emptyState.textContent = "No sheets are available in this workbook.";
+          return;
+        }
+        emptyState.classList.add("hidden");
+        sheetTabs.innerHTML = "";
+        state.document.sheets.forEach((candidate, index) => {
+          const button = document.createElement("button");
+          button.className = `sheet-tab${index === state.activeSheetIndex ? " active" : ""}`;
+          button.textContent = candidate.name;
+          button.addEventListener("click", () => {
+            state.activeSheetIndex = index;
+            state.selectedCell = { row: 1, col: 1 };
+            renderSpreadsheet();
+          });
+          sheetTabs.appendChild(button);
+        });
+
+        activeCellLabel.textContent = cellRef(state.selectedCell.row, state.selectedCell.col);
+        formulaInput.value = rawCellValue(getCell(sheet, state.selectedCell.row, state.selectedCell.col));
+
+        const maxRow = Math.max(sheet.rowCount + state.extraRows, 20);
+        const maxCol = Math.max(sheet.colCount + state.extraCols, 8);
+        sheetMeta.textContent = `${sheet.name} · ${Object.keys(sheet.cellsByRef || {}).length} populated cells · live autosave enabled`;
+
+        const headerRow = document.createElement("tr");
+        const corner = document.createElement("th");
+        corner.className = "corner";
+        headerRow.appendChild(corner);
+        for (let col = 1; col <= maxCol; col += 1) {
+          const th = document.createElement("th");
+          th.textContent = colLabel(col);
+          headerRow.appendChild(th);
+        }
+
+        const thead = document.createElement("thead");
+        thead.appendChild(headerRow);
+        const tbody = document.createElement("tbody");
+
+        for (let row = 1; row <= maxRow; row += 1) {
+          const tr = document.createElement("tr");
+          const rowHeader = document.createElement("th");
+          rowHeader.textContent = String(row);
+          tr.appendChild(rowHeader);
+          for (let col = 1; col <= maxCol; col += 1) {
+            const td = document.createElement("td");
+            const cell = getCell(sheet, row, col);
+            const cellDiv = document.createElement("div");
+            const ref = cellRef(row, col);
+            cellDiv.className = `cell${row === state.selectedCell.row && col === state.selectedCell.col ? " selected" : ""}${cell?.formula ? " formula" : ""}`;
+            cellDiv.textContent = cellDisplay(sheet, cell);
+            cellDiv.title = ref;
+            cellDiv.addEventListener("click", () => {
+              state.selectedCell = { row, col };
+              renderSpreadsheet();
+            });
+            cellDiv.addEventListener("dblclick", () => {
+              const nextValue = window.prompt(`Edit ${ref}`, rawCellValue(cell));
+              if (nextValue === null) return;
+              state.selectedCell = { row, col };
+              updateCellFromRaw(nextValue);
+            });
+            td.appendChild(cellDiv);
+            tr.appendChild(td);
+          }
+          tbody.appendChild(tr);
+        }
+
+        sheetGrid.innerHTML = "";
+        sheetGrid.appendChild(thead);
+        sheetGrid.appendChild(tbody);
+
+        populateChartControls(sheet, maxRow, maxCol);
+        drawChart();
+      }
+
+      function populateChartControls(sheet, maxRow, maxCol) {
+        const previousLabel = chartLabelColumn.value;
+        const previousValue = chartValueColumn.value;
+        chartLabelColumn.innerHTML = "";
+        chartValueColumn.innerHTML = "";
+        for (let col = 1; col <= maxCol; col += 1) {
+          const optionLabel = document.createElement("option");
+          optionLabel.value = String(col);
+          optionLabel.textContent = `${colLabel(col)}${col <= sheet.colCount ? "" : " (new)"}`;
+          chartLabelColumn.appendChild(optionLabel);
+
+          const optionValue = document.createElement("option");
+          optionValue.value = String(col);
+          optionValue.textContent = `${colLabel(col)}${col <= sheet.colCount ? "" : " (new)"}`;
+          chartValueColumn.appendChild(optionValue);
+        }
+        chartLabelColumn.value = previousLabel || "1";
+        chartValueColumn.value = previousValue || String(Math.min(2, maxCol));
+        chartEndRow.max = String(maxRow);
+        if (Number(chartEndRow.value) < Number(chartStartRow.value)) {
+          chartEndRow.value = chartStartRow.value;
+        }
+      }
+
+      function chartDataset() {
+        const sheet = activeSheet();
+        if (!sheet) return { labels: [], values: [] };
+        const labelCol = Number(chartLabelColumn.value || 1);
+        const valueCol = Number(chartValueColumn.value || 2);
+        const startRow = Math.max(1, Number(chartStartRow.value || 2));
+        const endRow = Math.max(startRow, Number(chartEndRow.value || startRow));
+        const labels = [];
+        const values = [];
+        for (let row = startRow; row <= endRow; row += 1) {
+          const labelCell = getCell(sheet, row, labelCol);
+          const label = cellDisplay(sheet, labelCell);
+          const numeric = numericCellValue(sheet, row, valueCol);
+          if (!label && numeric === null) continue;
+          labels.push(label || `Row ${row}`);
+          values.push(numeric ?? 0);
+        }
+        return { labels, values };
+      }
+
+      function drawChart() {
+        const context = chartCanvas.getContext("2d");
+        if (!context) return;
+        const width = chartCanvas.width;
+        const height = chartCanvas.height;
+        context.clearRect(0, 0, width, height);
+        context.fillStyle = "#0f1720";
+        context.fillRect(0, 0, width, height);
+
+        const { labels, values } = chartDataset();
+        if (!labels.length) {
+          context.fillStyle = "#93a1b3";
+          context.font = "16px sans-serif";
+          context.fillText("Pick data columns with labels and numeric values.", 24, 42);
+          return;
+        }
+
+        const type = chartType.value;
+        const palette = ["#59a4ff", "#7dd3a9", "#fbbf24", "#fb7185", "#a78bfa", "#38bdf8"];
+
+        if (type === "pie") {
+          const total = values.reduce((sum, value) => sum + Math.max(0, value), 0) || 1;
+          let angle = -Math.PI / 2;
+          values.forEach((value, index) => {
+            const slice = (Math.max(0, value) / total) * Math.PI * 2;
+            context.beginPath();
+            context.moveTo(width / 2, height / 2);
+            context.arc(width / 2, height / 2, Math.min(width, height) * 0.32, angle, angle + slice);
+            context.closePath();
+            context.fillStyle = palette[index % palette.length];
+            context.fill();
+            angle += slice;
+          });
+        } else {
+          const chartLeft = 48;
+          const chartTop = 28;
+          const chartHeight = height - 76;
+          const chartWidth = width - 84;
+          const maxValue = Math.max(...values.map((value) => Math.max(0, value)), 1);
+          context.strokeStyle = "rgba(255,255,255,0.12)";
+          context.lineWidth = 1;
+          for (let step = 0; step <= 4; step += 1) {
+            const y = chartTop + (chartHeight / 4) * step;
+            context.beginPath();
+            context.moveTo(chartLeft, y);
+            context.lineTo(chartLeft + chartWidth, y);
+            context.stroke();
+          }
+
+          if (type === "bar") {
+            const barWidth = chartWidth / values.length;
+            values.forEach((value, index) => {
+              const barHeight = (Math.max(0, value) / maxValue) * chartHeight;
+              const x = chartLeft + index * barWidth + 8;
+              const y = chartTop + chartHeight - barHeight;
+              context.fillStyle = palette[index % palette.length];
+              context.fillRect(x, y, Math.max(barWidth - 16, 12), barHeight);
+            });
+          } else {
+            context.beginPath();
+            values.forEach((value, index) => {
+              const x = chartLeft + (chartWidth * index) / Math.max(values.length - 1, 1);
+              const y = chartTop + chartHeight - (Math.max(0, value) / maxValue) * chartHeight;
+              if (index === 0) {
+                context.moveTo(x, y);
+              } else {
+                context.lineTo(x, y);
+              }
+            });
+            context.strokeStyle = palette[0];
+            context.lineWidth = 3;
+            context.stroke();
+            values.forEach((value, index) => {
+              const x = chartLeft + (chartWidth * index) / Math.max(values.length - 1, 1);
+              const y = chartTop + chartHeight - (Math.max(0, value) / maxValue) * chartHeight;
+              context.fillStyle = palette[index % palette.length];
+              context.beginPath();
+              context.arc(x, y, 5, 0, Math.PI * 2);
+              context.fill();
+            });
+          }
+        }
+
+        context.fillStyle = "#dbe6f5";
+        context.font = "12px sans-serif";
+        labels.slice(0, 8).forEach((label, index) => {
+          context.fillText(`${label}: ${values[index]}`, 22, height - 18 - (labels.slice(0, 8).length - index - 1) * 16);
+        });
+      }
+
+      function renderDocument() {
+        docMeta.textContent = `${state.document.paragraphs.length} paragraphs · autosave enabled`;
+        const paragraphs = state.document.paragraphs.length > 0 ? state.document.paragraphs : [""];
+        docEditor.innerHTML = paragraphs
+          .map((paragraph) => `<p>${escapeHtml(paragraph) || "<br>"}</p>`)
+          .join("");
+      }
+
+      function readParagraphs() {
+        const values = [];
+        for (const node of docEditor.children) {
+          const text = node.innerText.replace(/\u00a0/g, " ").replace(/\r/g, "").trimEnd();
+          if (text || values.length > 0) {
+            values.push(text);
+          }
+        }
+        return values;
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;");
+      }
+
+      reloadButton.addEventListener("click", () => {
+        state.remotePending = false;
+        setWarning("");
+        void loadDocument(true);
+      });
+
+      saveButton.addEventListener("click", () => {
+        void saveDocument();
+      });
+
+      formulaInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          updateCellFromRaw(formulaInput.value);
+          state.selectedCell = { row: state.selectedCell.row + 1, col: state.selectedCell.col };
+          renderSpreadsheet();
+        }
+      });
+
+      formulaInput.addEventListener("change", () => {
+        updateCellFromRaw(formulaInput.value);
+      });
+
+      clearCellButton.addEventListener("click", () => {
+        updateCellFromRaw("");
+      });
+
+      extendGridButton.addEventListener("click", () => {
+        state.extraRows += 20;
+        state.extraCols += 4;
+        renderSpreadsheet();
+      });
+
+      [chartType, chartLabelColumn, chartValueColumn, chartStartRow, chartEndRow].forEach((element) => {
+        element.addEventListener("input", drawChart);
+      });
+
+      docEditor.addEventListener("input", () => {
+        setDirty(true);
+        scheduleAutosave();
+      });
+
+      function startPolling() {
+        if (state.pollTimer) {
+          clearInterval(state.pollTimer);
+        }
+        state.pollTimer = window.setInterval(() => {
+          if (state.saving) return;
+          void loadDocument(false);
+        }, 1600);
+      }
+
+      window.addEventListener("beforeunload", (event) => {
+        if (state.dirty) {
+          event.preventDefault();
+          event.returnValue = "";
+        }
+      });
+
+      if (!state.path) {
+        emptyState.classList.remove("hidden");
+        emptyState.textContent = "Open a workspace .xlsx, .csv, or .docx file to edit it here.";
+        setStatus("No file selected", "warn");
+      } else {
+        fileTitle.textContent = relativeLabel(state.path);
+        filePath.textContent = `/${state.path}`;
+        void loadDocument(true);
+        startPolling();
+      }
+    </script>
+  </body>
+</html>
