@@ -2086,7 +2086,6 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       const result = await invoke<GatewayMutationResult>("apply_gateway_mutation", {
         request: {
           model: newModel,
-          reason: "dashboard_model_change",
         },
       });
 
@@ -2189,7 +2188,6 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         const result = await invoke<GatewayMutationResult>("apply_gateway_mutation", {
           request: {
             imageModel: value,
-            reason: "dashboard_image_model_change",
           },
         });
         setGatewayLifecycleMode(lifecycleModeFromPlan(result.plan));

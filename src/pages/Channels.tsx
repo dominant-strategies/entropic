@@ -306,7 +306,6 @@ export function Channels() {
             telegramReplyToMode: params.replyToMode,
             telegramLinkPreview: params.linkPreview,
           },
-          reason: "channels_auto_configure_telegram",
         },
       });
       console.log("[Channels] Auto-configuration succeeded");
@@ -332,7 +331,6 @@ export function Channels() {
             telegramReplyToMode,
             telegramLinkPreview,
           },
-          reason: "channels_disconnect_telegram",
         },
       });
       setTelegramEnabled(false);
@@ -405,8 +403,6 @@ export function Channels() {
             telegramReplyToMode,
             telegramLinkPreview,
           },
-          reason:
-            target === "token" ? "channels_save_telegram_token" : "channels_save_telegram_settings",
         },
       });
       console.log("[Channels] apply_gateway_mutation succeeded");
@@ -471,7 +467,6 @@ export function Channels() {
             telegramReplyToMode,
             telegramLinkPreview,
           },
-          reason: "channels_apply_telegram_config",
         },
       });
       setRestartPending(false);

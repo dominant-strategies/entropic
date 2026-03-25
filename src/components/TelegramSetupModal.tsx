@@ -139,7 +139,6 @@ export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) 
             whatsappEnabled: state.whatsapp_enabled ?? false,
             whatsappAllowFrom: state.whatsapp_allow_from ?? "",
           },
-          reason: "telegram_modal_save_token",
         },
       });
 
@@ -150,15 +149,15 @@ export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) 
       if (gatewayRunning) {
         setStatusMsg(
           result.wsReconnectExpected
-            ? `Bot token saved${botHandle}. Gateway is reloading Telegram configuration...`
-            : `Bot token saved${botHandle}.`,
+            ? `Bot token saved${botHandle}. Gateway is reloading Telegram configuration. Send /start to your bot and paste the pairing code below.`
+            : `Bot token saved${botHandle}. Send /start to your bot and paste the pairing code below.`,
         );
       } else {
-        setStatusMsg(`Bot token saved${botHandle}. Starting gateway...`);
+        setStatusMsg(
+          `Bot token saved${botHandle}. Starting gateway. Send /start to your bot and paste the pairing code below.`,
+        );
         window.dispatchEvent(new CustomEvent("entropic-start-gateway"));
       }
-
-      setStatusMsg(`Bot token saved${botHandle}. Send /start to your bot and paste the pairing code below.`);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       setErrorMsg(`Failed to save bot token: ${detail}`);

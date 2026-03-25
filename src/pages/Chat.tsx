@@ -1684,7 +1684,6 @@ export function Chat({
         await invoke<GatewayMutationResult>("apply_gateway_mutation", {
           request: {
             model: selectedModel,
-            reason: "chat_provider_oauth_recovery",
             forceRestart: true,
           },
         });
@@ -1724,7 +1723,6 @@ export function Chat({
       await invoke<GatewayMutationResult>("apply_gateway_mutation", {
         request: {
           model: selectedModel,
-          reason: "chat_provider_auth_refresh",
           forceRestart: true,
         },
       });

@@ -3931,7 +3931,6 @@ pub struct GatewayMutationRequest {
     pub model: Option<String>,
     pub image_model: Option<String>,
     pub channels: Option<GatewayChannelsMutation>,
-    pub reason: Option<String>,
     pub force_restart: Option<bool>,
 }
 
