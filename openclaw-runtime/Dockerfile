@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
+    pandoc \
     python3 \
     python3-pip \
     python3-venv \
@@ -51,6 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     chown -R node:node /data /home/node/.openclaw /home/node/.bun /home/node/.cache
 
 RUN python3 -m pip install --no-cache-dir --break-system-packages \
+    'docling>=2.64,<3' \
     openpyxl==3.1.5 \
     python-pptx==1.0.2
 
