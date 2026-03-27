@@ -4,6 +4,17 @@ from typing import Any, Dict, Generator, Optional
 
 from engine import InferenceEngine
 
+LOCAL_TOOL_USE_SYSTEM_GUIDANCE = (
+    "Tool-use rules for local chat: "
+    "If a tool is needed, call it directly without narrating your plan. "
+    "Never say you will search, check, look up, or use a tool later. "
+    "Either emit the tool call immediately or answer directly from an existing tool result. "
+    "If web_search is unavailable, use browser or web_fetch when they are present instead of refusing just because search is missing. "
+    "After tool results arrive, answer the user directly in plain language. "
+    "Do not mention tool names, do not say phrases like 'the tool returned', "
+    "and do not expose hidden reasoning."
+)
+
 
 class LlamaCppEngine(InferenceEngine):
     name = "llama-cpp"
@@ -16,12 +27,12 @@ class LlamaCppEngine(InferenceEngine):
 
     def _normalized_runtime_config(self) -> Dict[str, Any]:
         n_gpu_layers = self.runtime_config.get("nGpuLayers", -1)
-        n_ctx = self.runtime_config.get("nCtx", 8192)
+        n_ctx = self.runtime_config.get("nCtx", 32768)
         n_batch = self.runtime_config.get("nBatch", 512)
         n_threads = self.runtime_config.get("nThreads")
         return {
             "nGpuLayers": int(n_gpu_layers) if n_gpu_layers is not None else -1,
-            "nCtx": max(512, int(n_ctx) if n_ctx is not None else 8192),
+            "nCtx": max(512, int(n_ctx) if n_ctx is not None else 32768),
             "nBatch": max(32, int(n_batch) if n_batch is not None else 512),
             "nThreads": max(1, int(n_threads)) if n_threads not in (None, "", 0, "0") else None,
             "flashAttn": bool(self.runtime_config.get("flashAttn", True)),
@@ -227,6 +238,12 @@ class LlamaCppEngine(InferenceEngine):
                 text = str(content)
             normalized_messages.append({"role": role, "content": text})
             input_chars += len(text)
+
+        if tools:
+            normalized_messages = [
+                {"role": "system", "content": LOCAL_TOOL_USE_SYSTEM_GUIDANCE},
+                *normalized_messages,
+            ]
 
         started_at = time.perf_counter()
         request: Dict[str, Any] = {

@@ -93,7 +93,7 @@ export function parseRunSlashCommand(raw: string): string | null {
 
 export function extractJsonBlocks(text: string): Array<{ jsonText: string; start: number; end: number }> {
   const blocks: Array<{ jsonText: string; start: number; end: number }> = [];
-  const codeFence = /```json\\s*([\\s\\S]*?)```/gi;
+  const codeFence = /```json\s*([\s\S]*?)```/gi;
   let match: RegExpExecArray | null = null;
   const fencedRanges: Array<{ start: number; end: number }> = [];
   while ((match = codeFence.exec(text))) {

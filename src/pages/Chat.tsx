@@ -16,6 +16,7 @@ import {
   Terminal,
   Bot,
   User,
+  Bug,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
@@ -1305,6 +1306,8 @@ export function Chat({
     firstDeltaAt?: number;
     finalAt?: number;
     toolSeenAt?: number;
+    toolPayloadSeenAt?: number;
+    toolUsageLogged?: boolean;
   }>>({});
   const sessionModelRef = useRef<Record<string, string | null>>({});
   const runRevertModelRef = useRef<Record<string, string | null>>({});
@@ -1357,6 +1360,8 @@ export function Chat({
   const activeRunSessionRef = useRef<string | null>(null);
   const activeRunTimeoutRef = useRef<number | null>(null);
   const activeRunSettleTimerRef = useRef<number | null>(null);
+  const autoSettledRunIdsRef = useRef<Set<string>>(new Set());
+  const supersededRunIdsRef = useRef<Set<string>>(new Set());
   const runSessionKeyRef = useRef<Record<string, string>>({});
   const runOptimizationTraceRef = useRef<Record<string, string>>({});
   const runHistoryRecoveryRef = useRef<Record<string, boolean>>({});
@@ -2479,6 +2484,17 @@ export function Chat({
     return true;
   }
 
+  function appendToolUsageTraceSummary(runId: string, optimizationTraceId?: string) {
+    if (!optimizationTraceId) return;
+    const timings = runTimingsRef.current[runId];
+    if (!timings || timings.toolUsageLogged) return;
+    const toolCallUsage = timings.toolPayloadSeenAt ? "seen" : "none_seen";
+    const toolUsage = timings.toolSeenAt ? "seen" : "none_seen";
+    appendOptimizationTraceLine(optimizationTraceId, `trace tool_call=${toolCallUsage}`);
+    appendOptimizationTraceLine(optimizationTraceId, `trace tool_result=${toolUsage}`);
+    timings.toolUsageLogged = true;
+  }
+
   function scheduleActiveRunSettle(runId: string) {
     if (!runId || activeRunIdRef.current !== runId) return;
     if (activeRunSettleTimerRef.current) {
@@ -2501,6 +2517,7 @@ export function Chat({
       if (!visibleAssistant) {
         return;
       }
+      autoSettledRunIdsRef.current.add(runId);
       setIsLoading(false);
       setThinkingStatus(null);
       addDiag(`auto-settled response after quiet period runId=${runId}`);
@@ -2510,6 +2527,7 @@ export function Chat({
           optimizationTraceId,
           `trace auto_settled_after_quiet_period=${ACTIVE_RUN_SETTLE_IDLE_MS}ms`,
         );
+        appendToolUsageTraceSummary(runId, optimizationTraceId);
         appendOptimizationTracePreview(
           optimizationTraceId,
           "trace assistantPreview",
@@ -3395,6 +3413,7 @@ export function Chat({
               optimizationTraceId,
               `trace recovered final response from history attempt=${attempt + 1}`,
             );
+            appendToolUsageTraceSummary(runId, optimizationTraceId);
             appendOptimizationTracePreview(optimizationTraceId, "trace assistantPreview", text);
             completeRunOptimizationTrace(runId, "completed");
           }
@@ -3448,6 +3467,15 @@ export function Chat({
       : null;
 
     const eventRunId = typeof event?.runId === "string" ? event.runId.trim() : "";
+    if (eventRunId && supersededRunIdsRef.current.has(eventRunId)) {
+      if (event.state === "final" || event.state === "error" || event.state === "aborted") {
+        supersededRunIdsRef.current.delete(eventRunId);
+        autoSettledRunIdsRef.current.delete(eventRunId);
+        delete runSessionKeyRef.current[eventRunId];
+      }
+      addDiag(`ignored late event for superseded auto-settled runId=${eventRunId} state=${String(event?.state || "unknown")}`);
+      return;
+    }
     if (eventRunId) {
       lastEventByRunIdRef.current[eventRunId] = Date.now();
       if (activeRunIdRef.current === eventRunId) {
@@ -3508,6 +3536,7 @@ export function Chat({
         normalized?.assistantPayload &&
         (normalized.assistantPayload.events.length > 0 || normalized.assistantPayload.errors.length > 0)
       );
+      const hadToolPayload = Boolean(normalized?.assistantPayload?.hadToolPayload);
       if (text || hasRenderableAssistantPayload) {
         setThinkingStatus(null);
         setLastGatewayError(null);
@@ -3588,6 +3617,21 @@ export function Chat({
             }
           }
         }
+        if (hadToolPayload && eventRunId) {
+          const timings = runTimingsRef.current[eventRunId];
+          if (timings && !timings.toolPayloadSeenAt) {
+            timings.toolPayloadSeenAt = Date.now();
+            addDiag(
+              `timing tool_payload runId=${eventRunId} t=${timings.toolPayloadSeenAt - timings.startedAt}ms`,
+            );
+            if (optimizationTraceId) {
+              appendOptimizationTraceLine(
+                optimizationTraceId,
+                `trace timing tool_call=${timings.toolPayloadSeenAt - timings.startedAt}ms`,
+              );
+            }
+          }
+        }
         // Throttled persist during streaming: save every 5s so partial responses
         // survive app crashes or network drops mid-stream.
         if (event.state === "delta" && !streamPersistTimerRef.current) {
@@ -3621,6 +3665,8 @@ export function Chat({
         }
       }
       if (event.state === "final" && eventRunId) {
+        autoSettledRunIdsRef.current.delete(eventRunId);
+        supersededRunIdsRef.current.delete(eventRunId);
         const timings = runTimingsRef.current[eventRunId];
         if (timings && !timings.finalAt) {
           timings.finalAt = Date.now();
@@ -3633,6 +3679,7 @@ export function Chat({
           }
         }
         if (optimizationTraceId && (text || hasRenderableAssistantPayload)) {
+          appendToolUsageTraceSummary(eventRunId, optimizationTraceId);
           appendOptimizationTracePreview(optimizationTraceId, "trace assistantPreview", text);
           completeRunOptimizationTrace(eventRunId, "completed");
         }
@@ -4394,7 +4441,6 @@ export function Chat({
         model: localModelConfig?.modelName || chosenModel || "unknown",
         lines: traceLines,
       });
-      setOptimizationTraceArmed(false);
     }
     const runId = await liveClient.sendMessage(
       entry.sessionKey,
@@ -4462,9 +4508,6 @@ export function Chat({
             ],
           })
         : null;
-    if (optimizationTraceId) {
-      setOptimizationTraceArmed(false);
-    }
     try {
       const response = await invoke<DirectLocalChatDebugResponse>("debug_local_model_chat", {
         messages: history,
@@ -4863,6 +4906,15 @@ export function Chat({
           }))
         : undefined,
     };
+    if (autoSettledRunIdsRef.current.size > 0) {
+      for (const runId of autoSettledRunIdsRef.current) {
+        supersededRunIdsRef.current.add(runId);
+      }
+      addDiag(
+        `superseding auto-settled run(s) on new send: ${Array.from(autoSettledRunIdsRef.current).join(", ")}`,
+      );
+      autoSettledRunIdsRef.current.clear();
+    }
     visibleMessagesSessionRef.current = sendSession;
     setMessages(prev => [...prev, userMessage]);
 
@@ -5935,9 +5987,11 @@ export function Chat({
     );
     if (payload.hadToolPayload && message.id) {
       const timings = runTimingsRef.current[message.id];
-      if (timings && !timings.toolSeenAt) {
-        timings.toolSeenAt = Date.now();
-        addDiag(`timing tool_payload runId=${message.id} t=${timings.toolSeenAt - timings.startedAt}ms`);
+      if (timings && !timings.toolPayloadSeenAt) {
+        timings.toolPayloadSeenAt = Date.now();
+        addDiag(
+          `timing tool_payload runId=${message.id} t=${timings.toolPayloadSeenAt - timings.startedAt}ms`,
+        );
       }
     }
     if (!payload.events.length && !payload.errors.length) {
@@ -6764,55 +6818,33 @@ export function Chat({
           </div>
           {localModelsMode && activeComposerMode === "chat" ? (
             <div className="mt-2 space-y-1">
-              {localChatDebugModeActive ? (
-                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] px-3 py-2 text-[11px] text-[var(--text-secondary)]">
-                  <div>
-                    Debug mode is on. Messages{" "}
-                    {directLocalDebugBypassActive ? (
-                      <>
-                        bypass OpenClaw and go straight to{" "}
-                        <span className="font-mono text-[var(--text-primary)]">
-                          {localModelConfig?.modelName || "the configured local model"}
-                        </span>
-                        .
-                      </>
-                    ) : (
-                      <>
-                        still go through OpenClaw before reaching{" "}
-                        <span className="font-mono text-[var(--text-primary)]">
-                          {localModelConfig?.modelName || "the configured local model"}
-                        </span>
-                        .
-                      </>
-                    )}
+              <div className="flex flex-wrap items-center gap-2">
+                {localChatDebugModeActive ? (
+                  <div className="inline-flex min-w-0 max-w-full items-center gap-2 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] px-2.5 py-1 text-[11px] text-[var(--text-secondary)]">
+                    <Bug className="h-3.5 w-3.5 shrink-0 text-[var(--system-blue)]" />
+                    <span className="min-w-0 truncate">
+                      {directLocalDebugBypassActive ? (
+                        <>
+                          Debug direct to{" "}
+                          <span className="font-mono text-[var(--text-primary)]">
+                            {localModelConfig?.modelName || "the configured local model"}
+                          </span>
+                          .
+                        </>
+                      ) : (
+                        <>
+                          Debug via OpenClaw to{" "}
+                          <span className="font-mono text-[var(--text-primary)]">
+                            {localModelConfig?.modelName || "the configured local model"}
+                          </span>
+                          {effectiveLocalModePerformanceSettings.capturePromptPreview
+                            ? " with prompt previews."
+                            : "."}
+                        </>
+                      )}
+                    </span>
                   </div>
-                  {directLocalDebugBypassActive ? (
-                    <>
-                      <div className="mt-1">
-                        Direct debug reuses this chat session&apos;s recent user/assistant history
-                        even after model switches. Start a new chat for a clean prompt.
-                      </div>
-                      <div className="mt-1 text-[var(--text-tertiary)]">
-                        Current payload: {activeDirectLocalDebugHistory.length} messages,{" "}
-                        {activeDirectLocalDebugHistoryChars} chars.
-                      </div>
-                      {activeDirectLocalDebugPreview.length ? (
-                        <div className="mt-2 space-y-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-primary)]/60 px-2 py-2 font-mono text-[10px] text-[var(--text-tertiary)]">
-                          {activeDirectLocalDebugPreview.map((line) => (
-                            <div key={line}>{line}</div>
-                          ))}
-                        </div>
-                      ) : null}
-                    </>
-                  ) : (
-                    <div className="mt-1 text-[var(--text-tertiary)]">
-                      Use prompt preview capture or an optimization trace to inspect the OpenClaw
-                      context added on top of this chat session.
-                    </div>
-                  )}
-                </div>
-              ) : null}
-              <div className="flex items-center gap-2">
+                ) : null}
                 <button
                   type="button"
                   onClick={() => setOptimizationTraceArmed((prev) => !prev)}
@@ -6829,12 +6861,23 @@ export function Chat({
                   Exports from Settings → Diagnostics after the next local chat send.
                 </span>
               </div>
-              {localChatDebugModeActive &&
-              !directLocalDebugBypassActive &&
-              effectiveLocalModePerformanceSettings.capturePromptPreview ? (
+              {localChatDebugModeActive && directLocalDebugBypassActive ? (
                 <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] px-3 py-2 text-[11px] text-[var(--text-secondary)]">
-                  Prompt preview capture is on. Truncated system/prompt previews will be written to
-                  Diagnostics for normal local chat turns.
+                  <div>
+                    Direct debug reuses this chat session&apos;s recent user/assistant history
+                    even after model switches. Start a new chat for a clean prompt.
+                  </div>
+                  <div className="mt-1 text-[var(--text-tertiary)]">
+                    Current payload: {activeDirectLocalDebugHistory.length} messages,{" "}
+                    {activeDirectLocalDebugHistoryChars} chars.
+                  </div>
+                  {activeDirectLocalDebugPreview.length ? (
+                    <div className="mt-2 space-y-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-primary)]/60 px-2 py-2 font-mono text-[10px] text-[var(--text-tertiary)]">
+                      {activeDirectLocalDebugPreview.map((line) => (
+                        <div key={line}>{line}</div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>

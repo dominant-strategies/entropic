@@ -146,7 +146,7 @@ MODEL_CATALOG: List[Dict[str, Any]] = [
         "backend": "llama-cpp",
         "params": "4B",
         "size_gb": 2.84,
-        "context": 8192,
+        "context": 32768,
         "description": "Edge-sized hybrid Mamba-Transformer model served through the managed llama.cpp backend.",
         "thinking": False,
     },

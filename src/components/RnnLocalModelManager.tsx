@@ -92,6 +92,11 @@ type RnnRuntimeStatus = {
     albatrossSourceBundled?: boolean;
     currentProcessCudaAllocatedMiB?: number;
     currentProcessCudaReservedMiB?: number;
+    processGpuMemoryMiB?: number;
+    gpuMemoryTotalMiB?: number;
+    gpuMemoryUtilizationPercent?: number;
+    gpuMemoryName?: string | null;
+    gpuMemorySource?: string | null;
     preferredDevice?: string | null;
     supportedBackends?: string[];
     backendAvailability?: Record<string, boolean>;
@@ -136,6 +141,18 @@ type LlamaCppRuntimeConfig = {
   useMlock: boolean;
 };
 
+type RuntimeMemorySample = {
+  ts: number;
+  model: string;
+  backend: string | null;
+  source: string;
+  usedMiB: number;
+  totalMiB?: number | null;
+};
+
+const MANAGED_RUNTIME_MEMORY_HISTORY_KEY = "entropic.managed-runtime.memory-history";
+const MAX_MANAGED_RUNTIME_MEMORY_SAMPLES = 90;
+
 function formatSize(sizeGb?: number): string | null {
   if (typeof sizeGb !== "number" || Number.isNaN(sizeGb) || sizeGb <= 0) {
     return null;
@@ -151,6 +168,67 @@ function formatBytes(bytes?: number | null): string | null {
   if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   return `${bytes} B`;
+}
+
+function formatMemory(valueMiB?: number | null): string | null {
+  if (typeof valueMiB !== "number" || !Number.isFinite(valueMiB) || valueMiB < 0) {
+    return null;
+  }
+  if (valueMiB >= 1024) {
+    const valueGiB = valueMiB / 1024;
+    return `${valueGiB.toFixed(valueGiB >= 10 ? 0 : 1)} GiB`;
+  }
+  return `${valueMiB.toFixed(0)} MiB`;
+}
+
+function canUseWindowStorage(): boolean {
+  return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
+}
+
+function normalizeRuntimeMemorySample(value: unknown): RuntimeMemorySample | null {
+  if (!value || typeof value !== "object") return null;
+  const item = value as Record<string, unknown>;
+  const ts = typeof item.ts === "number" ? item.ts : 0;
+  const model = typeof item.model === "string" ? item.model : "";
+  const backend =
+    typeof item.backend === "string" && item.backend.trim().length > 0 ? item.backend : null;
+  const source = typeof item.source === "string" ? item.source : "";
+  const usedMiB = typeof item.usedMiB === "number" ? item.usedMiB : NaN;
+  const totalMiB =
+    typeof item.totalMiB === "number" && Number.isFinite(item.totalMiB) ? item.totalMiB : null;
+  if (!ts || !model || !source || !Number.isFinite(usedMiB) || usedMiB < 0) {
+    return null;
+  }
+  return { ts, model, backend, source, usedMiB, totalMiB };
+}
+
+function readManagedRuntimeMemoryHistory(): RuntimeMemorySample[] {
+  if (!canUseWindowStorage()) return [];
+  try {
+    const raw = window.localStorage.getItem(MANAGED_RUNTIME_MEMORY_HISTORY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map(normalizeRuntimeMemorySample)
+      .filter((sample): sample is RuntimeMemorySample => Boolean(sample))
+      .sort((left, right) => left.ts - right.ts)
+      .slice(-MAX_MANAGED_RUNTIME_MEMORY_SAMPLES);
+  } catch {
+    return [];
+  }
+}
+
+function writeManagedRuntimeMemoryHistory(samples: RuntimeMemorySample[]) {
+  if (!canUseWindowStorage()) return;
+  try {
+    window.localStorage.setItem(
+      MANAGED_RUNTIME_MEMORY_HISTORY_KEY,
+      JSON.stringify(samples.slice(-MAX_MANAGED_RUNTIME_MEMORY_SAMPLES)),
+    );
+  } catch {
+    // Ignore localStorage write errors.
+  }
 }
 
 function trimApiKey(value: string): string | null {
@@ -279,7 +357,7 @@ function normalizeLlamaCppRuntimeConfig(
 ): LlamaCppRuntimeConfig {
   return {
     nGpuLayers: typeof value?.nGpuLayers === "number" ? value.nGpuLayers : -1,
-    nCtx: typeof value?.nCtx === "number" && value.nCtx > 0 ? value.nCtx : 8192,
+    nCtx: typeof value?.nCtx === "number" && value.nCtx > 0 ? value.nCtx : 32768,
     nBatch: typeof value?.nBatch === "number" && value.nBatch > 0 ? value.nBatch : 512,
     nThreads:
       typeof value?.nThreads === "number" && value.nThreads > 0 ? value.nThreads : null,
@@ -297,6 +375,9 @@ export function RnnLocalModelManager({
 }: Props) {
   const [snapshot, setSnapshot] = useState<RnnCatalogSnapshot | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<RnnRuntimeStatus | null>(null);
+  const [memoryHistory, setMemoryHistory] = useState<RuntimeMemorySample[]>(
+    () => readManagedRuntimeMemoryHistory(),
+  );
   const [vllmDraft, setVllmDraft] = useState<VllmRuntimeConfig>(
     normalizeVllmRuntimeConfig(),
   );
@@ -308,6 +389,26 @@ export function RnnLocalModelManager({
   const [message, setMessage] = useState<string | null>(null);
   const requestRef = useRef(0);
   const lastDownloadStatusRef = useRef<string | null>(null);
+
+  async function refreshRuntimeStatus(opts?: { quiet?: boolean }): Promise<RnnRuntimeStatus | null> {
+    try {
+      const nextStatus = await invoke<RnnRuntimeStatus>("get_rnn_runtime_status");
+      setRuntimeStatus(nextStatus);
+      if (nextStatus.loadedModel && nextStatus.loadedModel !== config.modelName) {
+        onChange({
+          ...config,
+          enabled: true,
+          modelName: nextStatus.loadedModel,
+        });
+      }
+      return nextStatus;
+    } catch (nextError: any) {
+      if (!opts?.quiet) {
+        setError(String(nextError));
+      }
+      return null;
+    }
+  }
 
   async function refreshCatalog(opts?: { quiet?: boolean }): Promise<RnnCatalogSnapshot | null> {
     const requestId = requestRef.current + 1;
@@ -350,6 +451,16 @@ export function RnnLocalModelManager({
     }
     void refreshCatalog();
   }, [config.serviceType]);
+
+  useEffect(() => {
+    if (config.serviceType !== "rnn-local") {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      void refreshRuntimeStatus({ quiet: true });
+    }, 4000);
+    return () => window.clearInterval(interval);
+  }, [config.serviceType, config.modelName]);
 
   useEffect(() => {
     setVllmDraft(normalizeVllmRuntimeConfig(runtimeStatus?.runtimeConfig?.vllm));
@@ -601,6 +712,44 @@ export function RnnLocalModelManager({
     runtimeStatus?.capabilities?.currentProcessCudaAllocatedMiB ?? 0;
   const currentCudaReservedMiB =
     runtimeStatus?.capabilities?.currentProcessCudaReservedMiB ?? 0;
+  const processGpuMemoryMiB =
+    typeof runtimeStatus?.capabilities?.processGpuMemoryMiB === "number"
+      ? runtimeStatus.capabilities.processGpuMemoryMiB
+      : null;
+  const gpuMemoryTotalMiB =
+    typeof runtimeStatus?.capabilities?.gpuMemoryTotalMiB === "number"
+      ? runtimeStatus.capabilities.gpuMemoryTotalMiB
+      : null;
+  const gpuMemoryUtilizationPercent =
+    typeof runtimeStatus?.capabilities?.gpuMemoryUtilizationPercent === "number"
+      ? runtimeStatus.capabilities.gpuMemoryUtilizationPercent
+      : null;
+  const gpuMemorySource = runtimeStatus?.capabilities?.gpuMemorySource || null;
+  const gpuMemoryName = runtimeStatus?.capabilities?.gpuMemoryName || null;
+  const effectiveGpuProcessMemoryMiB =
+    processGpuMemoryMiB ??
+    (preferredDevice === "cuda"
+      ? currentCudaReservedMiB > 0
+        ? currentCudaReservedMiB
+        : currentCudaAllocatedMiB > 0
+          ? currentCudaAllocatedMiB
+          : null
+      : null);
+  const effectiveGpuMemorySource =
+    gpuMemorySource ||
+    (preferredDevice === "cuda" &&
+    (currentCudaReservedMiB > 0 || currentCudaAllocatedMiB > 0)
+      ? "torch"
+      : null);
+  const activeMemoryModelKey =
+    runtimeStatus?.loadedModel ||
+    snapshot?.loadedModel ||
+    loadedLocalEntry?.name ||
+    loadedCatalogEntry?.name ||
+    config.modelName ||
+    "";
+  const activeMemoryBackendKey =
+    runtimeStatus?.activeBackend || loadedLocalEntry?.backend || loadedCatalogEntry?.backend || null;
   const persistedVllmConfig = normalizeVllmRuntimeConfig(runtimeStatus?.runtimeConfig?.vllm);
   const vllmConfigDirty =
     JSON.stringify(vllmDraft) !== JSON.stringify(persistedVllmConfig);
@@ -609,6 +758,56 @@ export function RnnLocalModelManager({
   );
   const llamaCppConfigDirty =
     JSON.stringify(llamaCppDraft) !== JSON.stringify(persistedLlamaCppConfig);
+  const activeModelMemoryHistory = memoryHistory
+    .filter((sample) => sample.model === activeMemoryModelKey)
+    .slice(-20);
+  const memoryHistoryPeakMiB = activeModelMemoryHistory.reduce(
+    (max, sample) => Math.max(max, sample.usedMiB),
+    effectiveGpuProcessMemoryMiB ?? 0,
+  );
+  const memoryHistoryLatest = activeModelMemoryHistory[activeModelMemoryHistory.length - 1] || null;
+  const memoryChartCeilingMiB = Math.max(
+    gpuMemoryTotalMiB ?? 0,
+    memoryHistoryPeakMiB,
+    effectiveGpuProcessMemoryMiB ?? 0,
+    1,
+  );
+
+  useEffect(() => {
+    if (!activeMemoryModelKey || !effectiveGpuProcessMemoryMiB || !effectiveGpuMemorySource) {
+      return;
+    }
+    const nextSample: RuntimeMemorySample = {
+      ts: Date.now(),
+      model: activeMemoryModelKey,
+      backend: activeMemoryBackendKey,
+      source: effectiveGpuMemorySource,
+      usedMiB: effectiveGpuProcessMemoryMiB,
+      totalMiB: gpuMemoryTotalMiB,
+    };
+    setMemoryHistory((current) => {
+      const last = current[current.length - 1];
+      if (
+        last &&
+        last.model === nextSample.model &&
+        last.backend === nextSample.backend &&
+        last.source === nextSample.source &&
+        Math.abs(last.usedMiB - nextSample.usedMiB) < 8 &&
+        nextSample.ts - last.ts < 3500
+      ) {
+        return current;
+      }
+      const next = [...current, nextSample].slice(-MAX_MANAGED_RUNTIME_MEMORY_SAMPLES);
+      writeManagedRuntimeMemoryHistory(next);
+      return next;
+    });
+  }, [
+    activeMemoryBackendKey,
+    activeMemoryModelKey,
+    effectiveGpuMemorySource,
+    effectiveGpuProcessMemoryMiB,
+    gpuMemoryTotalMiB,
+  ]);
 
   return (
     <div className="space-y-4">
@@ -989,9 +1188,9 @@ export function RnnLocalModelManager({
           <span className={badgeClassName}>No model loaded</span>
         ) : null}
         {runtimeStatus?.pid ? <span className={badgeClassName}>PID {runtimeStatus.pid}</span> : null}
-        {preferredDevice === "cuda" && currentCudaReservedMiB > 0 ? (
+        {preferredDevice === "cuda" && effectiveGpuProcessMemoryMiB ? (
           <span className={badgeClassName}>
-            VRAM: {currentCudaReservedMiB.toFixed(0)} MiB reserved
+            VRAM: {formatMemory(effectiveGpuProcessMemoryMiB)}
           </span>
         ) : null}
       </div>
@@ -1085,14 +1284,141 @@ export function RnnLocalModelManager({
           <div>
             Process GPU memory:{" "}
             <span className="font-medium text-[var(--text-primary)]">
-              {currentCudaAllocatedMiB.toFixed(0)} MiB allocated
-              {currentCudaReservedMiB > currentCudaAllocatedMiB
-                ? ` • ${currentCudaReservedMiB.toFixed(0)} MiB reserved`
+              {effectiveGpuProcessMemoryMiB
+                ? formatMemory(effectiveGpuProcessMemoryMiB)
+                : "not observed yet"}
+              {effectiveGpuMemorySource ? ` • ${effectiveGpuMemorySource}` : ""}
+              {!processGpuMemoryMiB && currentCudaReservedMiB > currentCudaAllocatedMiB
+                ? ` • ${formatMemory(currentCudaReservedMiB)} reserved`
                 : ""}
             </span>
           </div>
         ) : null}
       </div>
+
+      {preferredDevice === "cuda" ? (
+        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]/40 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium text-[var(--text-primary)]">Runtime Memory</div>
+              <div className="mt-1 text-xs text-[var(--text-secondary)]">
+                Live GPU memory for the managed runtime. GGUF models use host GPU process telemetry,
+                while torch-based backends fall back to torch memory stats.
+              </div>
+            </div>
+            {effectiveGpuMemorySource ? (
+              <span className={badgeClassName}>Source: {effectiveGpuMemorySource}</span>
+            ) : null}
+          </div>
+          <div className="mt-3 grid gap-2 md:grid-cols-4">
+            <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-3 py-2">
+              <div className="text-[11px] uppercase tracking-[0.12em] text-[var(--text-tertiary)]">
+                Current
+              </div>
+              <div className="mt-1 text-sm font-medium text-[var(--text-primary)]">
+                {formatMemory(effectiveGpuProcessMemoryMiB) || "Waiting for sample"}
+              </div>
+            </div>
+            <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-3 py-2">
+              <div className="text-[11px] uppercase tracking-[0.12em] text-[var(--text-tertiary)]">
+                Peak
+              </div>
+              <div className="mt-1 text-sm font-medium text-[var(--text-primary)]">
+                {formatMemory(memoryHistoryPeakMiB) || "No history"}
+              </div>
+            </div>
+            <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-3 py-2">
+              <div className="text-[11px] uppercase tracking-[0.12em] text-[var(--text-tertiary)]">
+                GPU Total
+              </div>
+              <div className="mt-1 text-sm font-medium text-[var(--text-primary)]">
+                {formatMemory(gpuMemoryTotalMiB) || gpuMemoryName || "Unavailable"}
+              </div>
+              {gpuMemoryUtilizationPercent !== null ? (
+                <div className="mt-1 text-xs text-[var(--text-secondary)]">
+                  {gpuMemoryUtilizationPercent.toFixed(1)}% of observed GPU memory
+                </div>
+              ) : gpuMemoryName ? (
+                <div className="mt-1 text-xs text-[var(--text-secondary)]">{gpuMemoryName}</div>
+              ) : null}
+            </div>
+            <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-3 py-2">
+              <div className="text-[11px] uppercase tracking-[0.12em] text-[var(--text-tertiary)]">
+                Runtime Config
+              </div>
+              <div className="mt-1 text-sm font-medium text-[var(--text-primary)]">
+                {activeMemoryBackendKey === "llama-cpp"
+                  ? `${llamaCppDraft.nCtx.toLocaleString()} ctx • ${llamaCppDraft.nBatch} batch`
+                  : loadedModelBackend || "Managed runtime"}
+              </div>
+              {activeMemoryBackendKey === "llama-cpp" ? (
+                <div className="mt-1 text-xs text-[var(--text-secondary)]">
+                  GPU layers: {llamaCppDraft.nGpuLayers}
+                </div>
+              ) : null}
+            </div>
+          </div>
+          <div className="mt-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-3 py-2">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-xs font-medium text-[var(--text-primary)]">
+                Recent samples
+              </div>
+              <div className="text-[11px] text-[var(--text-secondary)]">
+                Stored locally while you debug this model in Settings
+              </div>
+            </div>
+            {activeModelMemoryHistory.length ? (
+              <>
+                <div className="mt-3 flex h-14 items-end gap-1">
+                  {activeModelMemoryHistory.map((sample) => {
+                    const height = Math.max(
+                      8,
+                      Math.round((sample.usedMiB / memoryChartCeilingMiB) * 100),
+                    );
+                    return (
+                      <div
+                        key={`${sample.ts}-${sample.usedMiB}`}
+                        className="min-w-0 flex-1 rounded-sm bg-emerald-500/60 transition-opacity hover:opacity-100"
+                        style={{ height: `${Math.min(100, height)}%` }}
+                        title={`${new Date(sample.ts).toLocaleTimeString()} • ${formatMemory(sample.usedMiB)}`}
+                      />
+                    );
+                  })}
+                </div>
+                <div className="mt-3 grid gap-1 text-xs text-[var(--text-secondary)] md:grid-cols-2">
+                  {activeModelMemoryHistory
+                    .slice(-6)
+                    .reverse()
+                    .map((sample) => (
+                      <div
+                        key={`sample-${sample.ts}-${sample.usedMiB}`}
+                        className="flex items-center justify-between gap-3"
+                      >
+                        <span>{new Date(sample.ts).toLocaleTimeString()}</span>
+                        <span className="font-medium text-[var(--text-primary)]">
+                          {formatMemory(sample.usedMiB)}
+                        </span>
+                      </div>
+                    ))}
+                </div>
+                {memoryHistoryLatest ? (
+                  <div className="mt-2 text-[11px] text-[var(--text-secondary)]">
+                    Last sample at {new Date(memoryHistoryLatest.ts).toLocaleTimeString()} for{" "}
+                    <span className="font-medium text-[var(--text-primary)]">
+                      {loadedModelLabel}
+                    </span>
+                    .
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="mt-2 text-xs text-[var(--text-secondary)]">
+                No GPU memory samples yet. Load a model and keep this panel open while you chat.
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       {vllmStatusKnown && !vllmInstalled ? (
         <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]/40 p-3 text-xs text-[var(--text-secondary)]">

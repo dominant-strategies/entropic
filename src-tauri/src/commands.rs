@@ -11458,6 +11458,106 @@ fn resolve_rnn_runtime_nvcc_path() -> Option<String> {
     None
 }
 
+fn split_csv_fields(line: &str) -> Vec<String> {
+    line.split(',')
+        .map(|part| part.trim().trim_matches('"').to_string())
+        .collect()
+}
+
+fn run_nvidia_smi(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("nvidia-smi")
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to execute nvidia-smi: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("nvidia-smi failed: {}", stderr.trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn rnn_runtime_gpu_memory_payload(pid: u32) -> Option<serde_json::Value> {
+    let apps_output = run_nvidia_smi(&[
+        "--query-compute-apps=gpu_uuid,pid,used_gpu_memory",
+        "--format=csv,noheader,nounits",
+    ])
+    .ok()?;
+
+    let mut usage_by_gpu_uuid: HashMap<String, u64> = HashMap::new();
+    for line in apps_output.lines() {
+        let fields = split_csv_fields(line);
+        if fields.len() < 3 {
+            continue;
+        }
+        let gpu_uuid = fields[0].trim();
+        let row_pid = match fields[1].trim().parse::<u32>() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let used_mib = match fields[2].trim().parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if row_pid != pid || gpu_uuid.is_empty() {
+            continue;
+        }
+        *usage_by_gpu_uuid.entry(gpu_uuid.to_string()).or_insert(0) += used_mib;
+    }
+
+    if usage_by_gpu_uuid.is_empty() {
+        return None;
+    }
+
+    let gpus_output = run_nvidia_smi(&[
+        "--query-gpu=gpu_uuid,name,memory.total",
+        "--format=csv,noheader,nounits",
+    ])
+    .ok();
+
+    let mut total_mib = 0_u64;
+    let mut total_found = false;
+    let mut gpu_names: Vec<String> = Vec::new();
+    if let Some(gpus_output) = gpus_output {
+        for line in gpus_output.lines() {
+            let fields = split_csv_fields(line);
+            if fields.len() < 3 {
+                continue;
+            }
+            let gpu_uuid = fields[0].trim();
+            if !usage_by_gpu_uuid.contains_key(gpu_uuid) {
+                continue;
+            }
+            if let Ok(parsed_total) = fields[2].trim().parse::<u64>() {
+                total_mib += parsed_total;
+                total_found = true;
+            }
+            let gpu_name = fields[1].trim();
+            if !gpu_name.is_empty() && !gpu_names.iter().any(|value| value == gpu_name) {
+                gpu_names.push(gpu_name.to_string());
+            }
+        }
+    }
+
+    let process_gpu_memory_mib = usage_by_gpu_uuid.values().copied().sum::<u64>();
+    let gpu_memory_total_mib = total_found.then_some(total_mib);
+    let gpu_memory_utilization_percent = gpu_memory_total_mib
+        .filter(|value| *value > 0)
+        .map(|value| ((process_gpu_memory_mib as f64 / value as f64) * 1000.0).round() / 10.0);
+    let gpu_memory_name = if gpu_names.is_empty() {
+        None
+    } else {
+        Some(gpu_names.join(", "))
+    };
+
+    Some(serde_json::json!({
+        "processGpuMemoryMiB": process_gpu_memory_mib,
+        "gpuMemoryTotalMiB": gpu_memory_total_mib,
+        "gpuMemoryUtilizationPercent": gpu_memory_utilization_percent,
+        "gpuMemoryName": gpu_memory_name,
+        "gpuMemorySource": "nvidia-smi",
+    }))
+}
+
 fn read_rnn_runtime_pid(paths: &RnnRuntimePaths) -> Option<u32> {
     let raw = fs::read_to_string(&paths.pid_file).ok()?;
     raw.trim().parse::<u32>().ok()
@@ -11626,6 +11726,20 @@ fn build_rnn_runtime_status(
         pid = listener_pids_for_port(RNN_RUNTIME_PORT).into_iter().next();
     }
 
+    let mut capabilities = health.and_then(|value| value.get("capabilities")).cloned();
+    if let Some(current_pid) = pid {
+        if let Some(gpu_payload) = rnn_runtime_gpu_memory_payload(current_pid) {
+            match (capabilities.as_mut(), gpu_payload) {
+                (Some(serde_json::Value::Object(capabilities_map)), serde_json::Value::Object(extra)) => {
+                    capabilities_map.extend(extra);
+                }
+                (_, payload) => {
+                    capabilities = Some(payload);
+                }
+            }
+        }
+    }
+
     Ok(RnnRuntimeStatusPayload {
         running: health.is_some(),
         base_url: RNN_RUNTIME_BASE_URL.to_string(),
@@ -11659,7 +11773,7 @@ fn build_rnn_runtime_status(
         active_model_info: health
             .and_then(|value| value.get("activeModelInfo"))
             .cloned(),
-        capabilities: health.and_then(|value| value.get("capabilities")).cloned(),
+        capabilities,
         runtime_config: health.and_then(|value| value.get("runtimeConfig")).cloned(),
         python_command: resolve_rnn_runtime_python(&paths).ok().map(|spec| {
             format!("{} {}", spec.program, spec.args.join(" "))

@@ -34,6 +34,11 @@ FUNCTION_BLOCK_RE = re.compile(
 PARAMETER_RE = re.compile(
     r"<parameter=([^>\n]+)>\s*(.*?)\s*</parameter>", re.IGNORECASE | re.DOTALL
 )
+BRACKET_TOOL_CALL_RE = re.compile(r"\[\[([A-Za-z0-9_:-]+)\]\]\s*", re.IGNORECASE)
+BARE_TOOL_CALL_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_:-]+)\s+", re.MULTILINE)
+FENCED_JSON_RE = re.compile(r"```json\s*([\s\S]*?)```", re.IGNORECASE)
+LEGACY_LLAMA_CPP_N_CTX = 8192
+DEFAULT_LLAMA_CPP_N_CTX = 32768
 
 
 def log_runtime(message: str) -> None:
@@ -166,37 +171,160 @@ def _coerce_tool_argument_value(raw: str) -> Any:
         return value
 
 
+def _build_tool_call(function_name: str, arguments: Any, suffix: str) -> Dict[str, Any]:
+    if not isinstance(arguments, dict):
+        arguments = {"input": arguments}
+    return {
+        "id": f"call_{uuid4().hex[:12]}_{suffix}",
+        "type": "function",
+        "function": {
+            "name": function_name,
+            "arguments": json.dumps(arguments, separators=(",", ":")),
+        },
+    }
+
+
+def _extract_json_tool_call(parsed: Any) -> Optional[tuple[str, Any]]:
+    if not isinstance(parsed, dict):
+        return None
+    function_name = str(parsed.get("tool") or parsed.get("name") or parsed.get("action") or "").strip()
+    if not function_name:
+        return None
+    arguments = (
+        parsed.get("parameters")
+        or parsed.get("arguments")
+        or parsed.get("args")
+    )
+    if arguments is None:
+        arguments = {
+            key: value
+            for key, value in parsed.items()
+            if key not in {"tool", "name", "action", "parameters", "arguments", "args"}
+        }
+    if function_name == "exec" and isinstance(arguments, dict):
+        command = arguments.get("command")
+        if isinstance(command, str) and "command" in arguments and "cmd" not in arguments:
+            arguments = {**arguments, "cmd": command}
+    return function_name, arguments
+
+
 def parse_llama_cpp_tool_calls(text: str) -> List[Dict[str, Any]]:
-    if not text or "<tool_call>" not in text.lower():
+    parsed_calls: List[Dict[str, Any]] = []
+    if text and "<tool_call>" in text.lower():
+        for index, tool_match in enumerate(TOOL_CALL_BLOCK_RE.finditer(text)):
+            block = tool_match.group(1) or ""
+            function_match = FUNCTION_BLOCK_RE.search(block)
+            if not function_match:
+                continue
+            function_name = (function_match.group(1) or "").strip()
+            function_body = function_match.group(2) or ""
+            if not function_name:
+                continue
+            arguments: Dict[str, Any] = {}
+            for param_match in PARAMETER_RE.finditer(function_body):
+                param_name = (param_match.group(1) or "").strip()
+                param_value = param_match.group(2) or ""
+                if not param_name:
+                    continue
+                arguments[param_name] = _coerce_tool_argument_value(param_value)
+            parsed_calls.append(_build_tool_call(function_name, arguments, str(index)))
+
+    if parsed_calls:
+        return parsed_calls
+
+    if text and "```json" in text.lower():
+        fenced_index = 0
+        for fence_match in FENCED_JSON_RE.finditer(text):
+            json_text = (fence_match.group(1) or "").strip()
+            if not json_text:
+                continue
+            try:
+                parsed = json.loads(json_text)
+            except Exception:
+                continue
+            tool_call = _extract_json_tool_call(parsed)
+            if tool_call is None:
+                continue
+            function_name, arguments = tool_call
+            parsed_calls.append(_build_tool_call(function_name, arguments, f"f{fenced_index}"))
+            fenced_index += 1
+
+    if parsed_calls:
+        return parsed_calls
+
+    if text and text.lstrip().startswith("{"):
+        decoder = json.JSONDecoder()
+        stripped = text.lstrip()
+        try:
+            parsed_value, consumed = decoder.raw_decode(stripped)
+        except Exception:
+            parsed_value, consumed = None, 0
+        if consumed > 0 and not stripped[consumed:].strip():
+            tool_call = _extract_json_tool_call(parsed_value)
+            if tool_call is not None:
+                function_name, arguments = tool_call
+                return [_build_tool_call(function_name, arguments, "j0")]
+
+    if not text or "[[" not in text:
         return []
 
-    parsed_calls: List[Dict[str, Any]] = []
-    for index, tool_match in enumerate(TOOL_CALL_BLOCK_RE.finditer(text)):
-        block = tool_match.group(1) or ""
-        function_match = FUNCTION_BLOCK_RE.search(block)
-        if not function_match:
+    decoder = json.JSONDecoder()
+    search_index = 0
+    bracket_index = 0
+    while True:
+        match = BRACKET_TOOL_CALL_RE.search(text, search_index)
+        if not match:
+            break
+        function_name = (match.group(1) or "").strip()
+        if not function_name:
+            search_index = match.end()
             continue
-        function_name = (function_match.group(1) or "").strip()
-        function_body = function_match.group(2) or ""
+        remainder = text[match.end() :]
+        leading_ws = len(remainder) - len(remainder.lstrip())
+        remainder = remainder.lstrip()
+        arguments: Any = {}
+        consumed = 0
+        if remainder:
+            try:
+                parsed_value, consumed = decoder.raw_decode(remainder)
+                arguments = parsed_value
+            except Exception:
+                arguments = {}
+                consumed = 0
+        parsed_calls.append(_build_tool_call(function_name, arguments, f"b{bracket_index}"))
+        bracket_index += 1
+        if consumed > 0:
+            search_index = match.end() + leading_ws + consumed
+        else:
+            search_index = match.end()
+    if parsed_calls:
+        return parsed_calls
+
+    if not text or "{" not in text:
+        return []
+
+    decoder = json.JSONDecoder()
+    bare_index = 0
+    for match in BARE_TOOL_CALL_RE.finditer(text):
+        function_name = (match.group(1) or "").strip()
         if not function_name:
             continue
-        arguments: Dict[str, Any] = {}
-        for param_match in PARAMETER_RE.finditer(function_body):
-            param_name = (param_match.group(1) or "").strip()
-            param_value = param_match.group(2) or ""
-            if not param_name:
-                continue
-            arguments[param_name] = _coerce_tool_argument_value(param_value)
+        remainder = text[match.end() :]
+        leading_ws = len(remainder) - len(remainder.lstrip())
+        remainder = remainder.lstrip()
+        if not remainder.startswith("{"):
+            continue
+        try:
+            parsed_value, consumed = decoder.raw_decode(remainder)
+        except Exception:
+            continue
+        trailing = remainder[consumed:].strip()
+        if trailing:
+            continue
         parsed_calls.append(
-            {
-                "id": f"call_{uuid4().hex[:12]}_{index}",
-                "type": "function",
-                "function": {
-                    "name": function_name,
-                    "arguments": json.dumps(arguments, separators=(",", ":")),
-                },
-            }
+            _build_tool_call(function_name, parsed_value, f"p{bare_index}")
         )
+        bare_index += 1
     return parsed_calls
 
 
@@ -204,8 +332,97 @@ def strip_llama_cpp_tool_markup(text: str) -> str:
     if not text:
         return text
     cleaned = TOOL_CALL_BLOCK_RE.sub("", text)
+    cleaned = FENCED_JSON_RE.sub(
+        lambda match: ""
+        if parse_llama_cpp_tool_calls(match.group(0))
+        else match.group(0),
+        cleaned,
+    )
+    decoder = json.JSONDecoder()
+    while True:
+        match = BRACKET_TOOL_CALL_RE.search(cleaned)
+        if not match:
+            break
+        remainder = cleaned[match.end() :]
+        leading_ws = len(remainder) - len(remainder.lstrip())
+        remainder = remainder.lstrip()
+        consumed = 0
+        if remainder:
+            try:
+                _, consumed = decoder.raw_decode(remainder)
+            except Exception:
+                consumed = 0
+        end_index = match.end() + leading_ws + consumed
+        cleaned = (cleaned[: match.start()] + cleaned[end_index:]).strip()
+    while True:
+        match = BARE_TOOL_CALL_RE.search(cleaned)
+        if not match:
+            break
+        remainder = cleaned[match.end() :]
+        leading_ws = len(remainder) - len(remainder.lstrip())
+        remainder = remainder.lstrip()
+        if not remainder.startswith("{"):
+            break
+        consumed = 0
+        try:
+            _, consumed = decoder.raw_decode(remainder)
+        except Exception:
+            consumed = 0
+        if consumed <= 0:
+            break
+        trailing = remainder[consumed:].strip()
+        if trailing:
+            break
+        end_index = match.end() + leading_ws + consumed
+        cleaned = (cleaned[: match.start()] + cleaned[end_index:]).strip()
     cleaned = re.sub(r"</?think>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"```json\s*```", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip()
+
+
+TOOL_NARRATION_MARKERS = (
+    "tool returned",
+    "tool result",
+    "i can provide this answer",
+    "i can provide this",
+    "i'll search",
+    "i will search",
+    "let me check",
+    "i'll check",
+    "i will check",
+    "i'll respond",
+    "i will respond",
+    "the content is external, untrusted",
+    "the user is asking",
+    "i need to ",
+    "i should ",
+    "let me ",
+)
+
+
+def sanitize_llama_cpp_tool_answer(text: str) -> str:
+    cleaned = re.sub(r"\[\[\s*reply_to_current\s*\]\]", "", (text or ""), flags=re.IGNORECASE)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return cleaned
+
+    paragraphs = [paragraph.strip() for paragraph in re.split(r"\n{2,}", cleaned) if paragraph.strip()]
+    if len(paragraphs) >= 2:
+        lead = " ".join(paragraphs[:-1]).lower()
+        if any(marker in lead for marker in TOOL_NARRATION_MARKERS):
+            return paragraphs[-1]
+
+    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+    while len(sentences) > 1:
+        head = sentences[0].strip().lower()
+        if not head:
+            sentences = sentences[1:]
+            continue
+        if any(marker in head for marker in TOOL_NARRATION_MARKERS):
+            sentences = sentences[1:]
+            continue
+        break
+    return " ".join(sentence.strip() for sentence in sentences if sentence.strip()).strip()
 
 
 def _as_bool(value: Any, default: bool) -> bool:
@@ -262,7 +479,7 @@ def default_runtime_config() -> Dict[str, Any]:
         },
         "llamaCpp": {
             "nGpuLayers": -1,
-            "nCtx": 8192,
+            "nCtx": DEFAULT_LLAMA_CPP_N_CTX,
             "nBatch": 512,
             "nThreads": None,
             "flashAttn": True,
@@ -294,7 +511,7 @@ def normalize_runtime_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]
     }
     base["llamaCpp"] = {
         "nGpuLayers": _as_int(llama_cpp.get("nGpuLayers"), -1),
-        "nCtx": _as_int(llama_cpp.get("nCtx"), 8192, 512),
+        "nCtx": _as_int(llama_cpp.get("nCtx"), DEFAULT_LLAMA_CPP_N_CTX, 512),
         "nBatch": _as_int(llama_cpp.get("nBatch"), 512, 32),
         "nThreads": _as_optional_int(llama_cpp.get("nThreads")),
         "flashAttn": _as_bool(llama_cpp.get("flashAttn"), True),
@@ -389,7 +606,29 @@ class RuntimeManager:
                 raise RuntimeError(
                     "The llama.cpp backend is not installed in the managed local runtime yet."
                 ) from error
-            return LlamaCppEngine(self.runtime_config.get("llamaCpp"))
+            llama_cpp_config = dict(self.runtime_config.get("llamaCpp") or {})
+            configured_n_ctx = _as_int(
+                llama_cpp_config.get("nCtx"), DEFAULT_LLAMA_CPP_N_CTX, 512
+            )
+            model_context = _as_int(
+                local_entry.get("context"), DEFAULT_LLAMA_CPP_N_CTX, 512
+            )
+            if configured_n_ctx <= LEGACY_LLAMA_CPP_N_CTX and model_context > configured_n_ctx:
+                llama_cpp_config["nCtx"] = model_context
+                current_llama_cpp = (
+                    dict(self.runtime_config.get("llamaCpp") or {})
+                    if isinstance(self.runtime_config.get("llamaCpp"), dict)
+                    else {}
+                )
+                current_llama_cpp["nCtx"] = model_context
+                self.runtime_config["llamaCpp"] = current_llama_cpp
+                try:
+                    self._save_runtime_config(self.runtime_config)
+                except Exception:
+                    pass
+            else:
+                llama_cpp_config["nCtx"] = configured_n_ctx
+            return LlamaCppEngine(llama_cpp_config)
         if backend == "rwkv":
             self.manager.ensure_rwkv_tokenizer()
             from rwkv_engine import RWKVEngine
@@ -860,7 +1099,8 @@ def make_handler(runtime: RuntimeManager):
                 f"messages={len(messages)} inputChars={input_chars} "
                 f"promptChars={prompt_info['promptChars']} backend={prompt_info['backend'] or '-'} "
                 f"architecture={prompt_info['architecture'] or '-'} thinking={int(bool(prompt_info['thinking']))} "
-                f"temperature={temperature:.2f} top_p={top_p:.2f} maxTokens={max_tokens}"
+                f"temperature={temperature:.2f} top_p={top_p:.2f} maxTokens={max_tokens} "
+                f"tools={len(tools) if tools else 0} toolChoice={json.dumps(tool_choice) if tool_choice is not None else 'null'}"
             )
 
             use_llama_cpp_tool_bridge = bool(tools) and prompt_info.get("backend") == "llama-cpp"
@@ -893,6 +1133,8 @@ def make_handler(runtime: RuntimeManager):
                     raw_content = str(raw_content or "")
                 parsed_tool_calls = parse_llama_cpp_tool_calls(raw_content)
                 cleaned_content = strip_llama_cpp_tool_markup(raw_content)
+                if tools and not parsed_tool_calls:
+                    cleaned_content = sanitize_llama_cpp_tool_answer(cleaned_content)
                 finish_reason = "tool_calls" if parsed_tool_calls else "stop"
                 completion_id = f"chatcmpl-{uuid4().hex}"
                 created = int(time.time())
@@ -905,6 +1147,11 @@ def make_handler(runtime: RuntimeManager):
                     stats_summary += f" generatedTokens={generated_tokens}"
                 if isinstance(tokens_per_second, (int, float)) and tokens_per_second > 0:
                     stats_summary += f" tokensPerSecond={tokens_per_second:.2f}"
+                tool_call_names = [
+                    tool_call.get("function", {}).get("name", "")
+                    for tool_call in parsed_tool_calls
+                    if isinstance(tool_call, dict)
+                ]
                 log_runtime(
                     f"chat first_token request={request_id} model={model_name} "
                     f"stream={int(stream)} firstTokenMs={elapsed_ms}"
@@ -912,7 +1159,9 @@ def make_handler(runtime: RuntimeManager):
                 log_runtime(
                     f"chat done request={request_id} model={model_name} stream={int(stream)} "
                     f"elapsedMs={elapsed_ms} chunks={1 if (parsed_tool_calls or cleaned_content) else 0} "
-                    f"outputChars={len(cleaned_content)}{stats_summary} "
+                    f"outputChars={len(cleaned_content)} finishReason={finish_reason} "
+                    f"toolBridgeToolCalls={len(parsed_tool_calls)} "
+                    f"toolBridgeToolNames={json.dumps(tool_call_names)}{stats_summary} "
                     f"preview={json.dumps(summarize_log_preview(cleaned_content or raw_content))}"
                 )
 
