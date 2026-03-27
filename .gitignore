@@ -21,7 +21,9 @@ src-tauri/resources/share/placeholders/*
 !src-tauri/resources/share/placeholders/README.txt
 !src-tauri/resources/share/rnn-runtime/
 src-tauri/resources/share/rnn-runtime/__pycache__/
+src-tauri/resources/share/rnn-runtime/albatross_reference/__pycache__/
 !src-tauri/resources/share/rnn-runtime/*.py
+openclaw-runtime/__pycache__/
 
 # Environment
 .env
