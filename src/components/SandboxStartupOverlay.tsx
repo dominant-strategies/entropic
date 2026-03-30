@@ -1,6 +1,6 @@
 import { CheckCircle2, Loader2 } from "lucide-react";
 
-export type GatewayStartupStage = "idle" | "credits" | "token" | "launch" | "health";
+export type GatewayStartupStage = "idle" | "credits" | "token" | "launch" | "health" | "connect";
 
 type StartupAction = {
   label: string;
@@ -75,7 +75,9 @@ export function SandboxStartupOverlay({
         <div className="mt-6 pt-4 border-t border-[var(--border-subtle)]">
           <div className="flex items-center justify-between text-[10px] text-[var(--text-tertiary)] uppercase tracking-widest font-semibold mb-3">
             System Status
-            {stage === "health" ? (
+            {stage === "connect" ? (
+              <span className="text-green-500">Finalizing</span>
+            ) : stage === "health" ? (
               <span className="text-green-500">Ready</span>
             ) : (
               <span className="animate-pulse">Initializing...</span>
@@ -97,7 +99,7 @@ export function SandboxStartupOverlay({
             <div className="flex items-center gap-2.5 text-[11px] text-[var(--text-secondary)]">
               {stage === "launch" ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-500" />
-              ) : stage === "health" ? (
+              ) : stage === "health" || stage === "connect" ? (
                 <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
               ) : (
                 <div className="w-3.5 h-3.5 rounded-full border border-[var(--border-subtle)]" />
@@ -109,11 +111,23 @@ export function SandboxStartupOverlay({
             <div className="flex items-center gap-2.5 text-[11px] text-[var(--text-secondary)]">
               {stage === "health" ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-500" />
+              ) : stage === "connect" ? (
+                <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
               ) : (
                 <div className="w-3.5 h-3.5 rounded-full border border-[var(--border-subtle)]" />
               )}
               <span className={stage === "health" ? "font-medium text-[var(--text-primary)]" : ""}>
                 Verifying sandbox health
+              </span>
+            </div>
+            <div className="flex items-center gap-2.5 text-[11px] text-[var(--text-secondary)]">
+              {stage === "connect" ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-500" />
+              ) : (
+                <div className="w-3.5 h-3.5 rounded-full border border-[var(--border-subtle)]" />
+              )}
+              <span className={stage === "connect" ? "font-medium text-[var(--text-primary)]" : ""}>
+                Connecting to your assistant
               </span>
             </div>
           </div>

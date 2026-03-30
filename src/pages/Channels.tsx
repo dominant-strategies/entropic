@@ -119,6 +119,14 @@ type SavedChannelsState = {
   telegram_link_preview?: boolean;
 };
 
+type GatewayMutationPlan = "noop" | "config_reload" | "container_restart" | "container_recreate";
+
+type GatewayMutationResult = {
+  plan: GatewayMutationPlan;
+  applied: boolean;
+  wsReconnectExpected: boolean;
+};
+
 export function Channels() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [telegramEnabled, setTelegramEnabled] = useState(false);
@@ -286,26 +294,19 @@ export function Channels() {
   }) {
     try {
       console.log("[Channels] Auto-configuring Telegram...");
-      await invoke("set_channels_config", {
-        discordEnabled: false,
-        discordToken: "",
-        telegramEnabled: params.enabled,
-        telegramToken: params.token,
-        telegramDmPolicy: params.dmPolicy,
-        telegramGroupPolicy: params.groupPolicy,
-        telegramConfigWrites: params.configWrites,
-        telegramRequireMention: params.requireMention,
-        telegramReplyToMode: params.replyToMode,
-        telegramLinkPreview: params.linkPreview,
-        slackEnabled: false,
-        slackBotToken: "",
-        slackAppToken: "",
-        googlechatEnabled: false,
-        googlechatServiceAccount: "",
-        googlechatAudienceType: "app-url",
-        googlechatAudience: "",
-        whatsappEnabled: false,
-        whatsappAllowFrom: "",
+      await invoke<GatewayMutationResult>("apply_gateway_mutation", {
+        request: {
+          channels: {
+            telegramEnabled: params.enabled,
+            telegramToken: params.token,
+            telegramDmPolicy: params.dmPolicy,
+            telegramGroupPolicy: params.groupPolicy,
+            telegramConfigWrites: params.configWrites,
+            telegramRequireMention: params.requireMention,
+            telegramReplyToMode: params.replyToMode,
+            telegramLinkPreview: params.linkPreview,
+          },
+        },
       });
       console.log("[Channels] Auto-configuration succeeded");
     } catch (err) {
@@ -317,43 +318,33 @@ export function Channels() {
     setSavingSetup(true);
     setSaveMessage(null);
     setSaveError(null);
-    // Snapshot before the config write — set_channels_config triggers a brief
-    // SIGUSR1 reload that makes the post-save health check transiently return false.
-    const wasRunning = gatewayRunning;
     try {
-      await invoke("set_channels_config", {
-        discordEnabled: false,
-        discordToken: "",
-        telegramEnabled: false,
-        telegramToken: "",
-        telegramDmPolicy,
-        telegramGroupPolicy,
-        telegramConfigWrites,
-        telegramRequireMention,
-        telegramReplyToMode,
-        telegramLinkPreview,
-        slackEnabled: false,
-        slackBotToken: "",
-        slackAppToken: "",
-        googlechatEnabled: false,
-        googlechatServiceAccount: "",
-        googlechatAudienceType: "app-url",
-        googlechatAudience: "",
-        whatsappEnabled: false,
-        whatsappAllowFrom: "",
+      const result = await invoke<GatewayMutationResult>("apply_gateway_mutation", {
+        request: {
+          channels: {
+            telegramEnabled: false,
+            telegramToken: "",
+            telegramDmPolicy,
+            telegramGroupPolicy,
+            telegramConfigWrites,
+            telegramRequireMention,
+            telegramReplyToMode,
+            telegramLinkPreview,
+          },
+        },
       });
       setTelegramEnabled(false);
       setTelegramToken("");
       setTelegramTokenSaved(false);
       setTelegramConnected(false);
-      setSaveMessage("Telegram disconnected.");
+      setRestartPending(false);
       const running = await refreshGatewayRunningStatus();
-      if (wasRunning || running) {
-        try {
-          await invoke("restart_gateway_in_place");
-        } catch {
-          setRestartPending(true);
-        }
+      if (result.wsReconnectExpected) {
+        setSaveMessage(
+          running ? "Telegram disconnected." : "Telegram disconnect is still applying.",
+        );
+      } else {
+        setSaveMessage("Telegram disconnected.");
       }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -399,34 +390,22 @@ export function Channels() {
         setTelegramEnabled(true);
       }
 
-      // Snapshot gateway running state BEFORE the config write, which triggers a
-      // brief SIGUSR1 internal reload that can make the health check return false
-      // mid-restart — causing us to incorrectly treat a running gateway as stopped.
-      const wasRunning = gatewayRunning;
-
-      console.log("[Channels] Invoking set_channels_config...");
-      await invoke("set_channels_config", {
-        discordEnabled: false,
-        discordToken: "",
-        telegramEnabled: effectiveEnabled,
-        telegramToken,
-        telegramDmPolicy,
-        telegramGroupPolicy,
-        telegramConfigWrites,
-        telegramRequireMention,
-        telegramReplyToMode,
-        telegramLinkPreview,
-        slackEnabled: false,
-        slackBotToken: "",
-        slackAppToken: "",
-        googlechatEnabled: false,
-        googlechatServiceAccount: "",
-        googlechatAudienceType: "app-url",
-        googlechatAudience: "",
-        whatsappEnabled: false,
-        whatsappAllowFrom: "",
+      console.log("[Channels] Invoking apply_gateway_mutation...");
+      const result = await invoke<GatewayMutationResult>("apply_gateway_mutation", {
+        request: {
+          channels: {
+            telegramEnabled: effectiveEnabled,
+            telegramToken,
+            telegramDmPolicy,
+            telegramGroupPolicy,
+            telegramConfigWrites,
+            telegramRequireMention,
+            telegramReplyToMode,
+            telegramLinkPreview,
+          },
+        },
       });
-      console.log("[Channels] set_channels_config succeeded");
+      console.log("[Channels] apply_gateway_mutation succeeded");
       setTelegramTokenSaved(Boolean(telegramToken.trim()));
       const [connected, running] = await Promise.all([
         refreshTelegramConnectedStatus(),
@@ -434,46 +413,26 @@ export function Channels() {
       ]);
       setTelegramConnected(Boolean(connected));
       setGatewayRunning(Boolean(running));
-      // Use the pre-save snapshot for restart decisions: the post-save health check
-      // can transiently return false during the SIGUSR1 config reload.
-      const effectiveRunning = wasRunning || running;
+      const effectiveRunning = gatewayRunning || running;
 
-      // Auto-restart gateway after saving token to apply changes immediately
       if (target === "token" && effectiveRunning) {
         const botHandle = validationResult?.username?.trim() ? ` @${validationResult.username.trim()}` : "";
-        setSaveMessage(`Bot token saved${botHandle}. Restarting gateway...`);
-
-        try {
-          console.log("[Channels] Auto-restarting gateway to apply Telegram configuration...");
-          await invoke("restart_gateway_in_place");
-
-          const newRunning = await waitForGatewayRunningStatus();
-          const newConnected = await refreshTelegramConnectedStatus();
-          setTelegramConnected(Boolean(newConnected));
-          setGatewayRunning(Boolean(newRunning));
-
-          setSaveMessage(
-            newRunning
-              ? `Gateway restarted. Message your bot on Telegram and send /start to receive a pairing code.`
-              : `Gateway restart in progress. Message your bot on Telegram and send /start to receive a pairing code.`
-          );
-        } catch (restartErr) {
-          const detail = restartErr instanceof Error ? restartErr.message : String(restartErr);
-          console.error("[Channels] Gateway restart failed:", detail);
-          setSaveMessage(`Bot token saved${botHandle}. Gateway restart failed: ${detail}`);
-          setRestartPending(true);
-        }
+        setRestartPending(false);
+        setSaveMessage(
+          result.wsReconnectExpected
+            ? `Bot token saved${botHandle}. Message your bot on Telegram and send /start to receive a pairing code.`
+            : `Bot token saved${botHandle}.`,
+        );
       } else if (target === "token" && !effectiveRunning) {
         const botHandle = validationResult?.username?.trim() ? ` @${validationResult.username.trim()}` : "";
         setSaveMessage(`Bot token saved${botHandle}. Starting gateway...`);
         // Gateway is not running — ask Dashboard to start it
         window.dispatchEvent(new CustomEvent("entropic-start-gateway"));
       } else {
-        // Settings update (not initial token save)
-        setRestartPending(Boolean(effectiveRunning));
+        setRestartPending(false);
         setSaveMessage(
           effectiveRunning
-            ? "Telegram settings saved. Restart gateway to apply changes."
+            ? "Telegram settings saved."
             : "Telegram settings saved. Changes will apply on next gateway start."
         );
       }
@@ -496,7 +455,20 @@ export function Channels() {
     setSaveError(null);
     setSaveMessage(null);
     try {
-      await invoke("restart_gateway_in_place");
+      const result = await invoke<GatewayMutationResult>("apply_gateway_mutation", {
+        request: {
+          channels: {
+            telegramEnabled,
+            telegramToken,
+            telegramDmPolicy,
+            telegramGroupPolicy,
+            telegramConfigWrites,
+            telegramRequireMention,
+            telegramReplyToMode,
+            telegramLinkPreview,
+          },
+        },
+      });
       setRestartPending(false);
       const [connected, running] = await Promise.all([
         refreshTelegramConnectedStatus(),
@@ -505,9 +477,9 @@ export function Channels() {
       setTelegramConnected(Boolean(connected));
       setGatewayRunning(Boolean(running));
       setSaveMessage(
-        running
-          ? "Gateway restarted. Telegram configuration is now active."
-          : "Gateway restart requested. It may take a few seconds to become healthy."
+        result.wsReconnectExpected
+          ? "Telegram configuration reapplied."
+          : "Telegram configuration is saved and will apply on next gateway start."
       );
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);

@@ -147,6 +147,10 @@ import {
   normalizeGatewayMessage,
 } from "../lib/chatMessageUtils";
 
+type GatewayMutationResult = {
+  plan: "noop" | "config_reload" | "container_restart" | "container_recreate";
+};
+
 export type { ChatSession };
 export type ChatSessionActionRequest =
   | { id: string; type: "delete"; key: string }
@@ -1295,6 +1299,8 @@ export function Chat({
   gatewayRunning,
   gatewayStarting,
   gatewayRetryIn,
+  gatewayLifecycleLabel,
+  onGatewayConnectionReady,
   onStartGateway,
   onRecoverProxyAuth,
   connectionMode,
@@ -1319,6 +1325,8 @@ export function Chat({
   gatewayRunning: boolean;
   gatewayStarting: boolean;
   gatewayRetryIn: number | null;
+  gatewayLifecycleLabel?: string | null;
+  onGatewayConnectionReady?: () => void;
   onStartGateway?: () => void;
   onRecoverProxyAuth?: () => Promise<boolean> | boolean;
   connectionMode: ConnectionMode;
@@ -1373,6 +1381,7 @@ export function Chat({
   const [isLoading, setIsLoading] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [showConnectingScreen, setShowConnectingScreen] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -1477,7 +1486,9 @@ export function Chat({
   const avatarUploadDataUrlByFileNameRef = useRef<Map<string, string>>(new Map());
   const wasVisibleRef = useRef(isVisible !== false);
   const outboxReplayInFlightRef = useRef(false);
+  const outboxDispatchInFlightRef = useRef<Set<string>>(new Set());
   const outboxWakeTimerRef = useRef<number | null>(null);
+  const connectingScreenTimerRef = useRef<number | null>(null);
   const [outboxWakeTick, setOutboxWakeTick] = useState(0);
   const activeComposerMode = currentSession
     ? composerModeBySession[currentSession] || DEFAULT_COMPOSER_MODE
@@ -2004,7 +2015,12 @@ export function Chat({
 
       if (gatewayRunning) {
         addDiag(`provider oauth refresh succeeded; restarting gateway for ${provider}`);
-        await invoke("restart_gateway", { model: selectedModel });
+        await invoke<GatewayMutationResult>("apply_gateway_mutation", {
+          request: {
+            model: selectedModel,
+            forceRestart: true,
+          },
+        });
       } else {
         addDiag(`provider oauth refresh succeeded; starting gateway for ${provider}`);
         await invoke("start_gateway", { model: selectedModel });
@@ -2042,7 +2058,12 @@ export function Chat({
     }
 
     if (gatewayRunning) {
-      await invoke("restart_gateway", { model: selectedModel });
+      await invoke<GatewayMutationResult>("apply_gateway_mutation", {
+        request: {
+          model: selectedModel,
+          forceRestart: true,
+        },
+      });
     } else {
       await invoke("start_gateway", { model: selectedModel });
     }
@@ -2983,8 +3004,39 @@ export function Chat({
     }
   }, [isConnecting]);
 
+  const shouldHoldConnectingScreen =
+    !showOutOfCreditsModal &&
+    Boolean(connectedProvider || proxyEnabled) &&
+    (gatewayStarting || isConnecting || connectInFlightRef.current || (gatewayRunning && !connected));
+
   useEffect(() => {
-    if (gatewayRunning || gatewayStarting || isConnecting) {
+    if (connectingScreenTimerRef.current !== null) {
+      window.clearTimeout(connectingScreenTimerRef.current);
+      connectingScreenTimerRef.current = null;
+    }
+
+    if (shouldHoldConnectingScreen) {
+      setShowConnectingScreen(true);
+      setError(null);
+      return;
+    }
+
+    const delay = connected ? 180 : 1200;
+    connectingScreenTimerRef.current = window.setTimeout(() => {
+      setShowConnectingScreen(false);
+      connectingScreenTimerRef.current = null;
+    }, delay);
+
+    return () => {
+      if (connectingScreenTimerRef.current !== null) {
+        window.clearTimeout(connectingScreenTimerRef.current);
+        connectingScreenTimerRef.current = null;
+      }
+    };
+  }, [shouldHoldConnectingScreen, connected]);
+
+  useEffect(() => {
+    if (gatewayRunning || gatewayStarting || showConnectingScreen) {
       setShowGatewayOfflineCta(false);
       return;
     }
@@ -2992,7 +3044,7 @@ export function Chat({
       setShowGatewayOfflineCta(true);
     }, 3500);
     return () => window.clearTimeout(id);
-  }, [gatewayRunning, gatewayStarting, isConnecting]);
+  }, [gatewayRunning, gatewayStarting, showConnectingScreen]);
 
   useEffect(() => {
     if (!connected) return;
@@ -3032,7 +3084,10 @@ export function Chat({
       return;
     }
     const now = Date.now();
-    const nextEntry = outboxEntries.find((entry) => entry.nextAttemptAt <= now);
+    const nextEntry = outboxEntries.find(
+      (entry) =>
+        entry.nextAttemptAt <= now && !outboxDispatchInFlightRef.current.has(entry.id),
+    );
     if (!nextEntry) {
       scheduleOutboxWake(outboxEntries);
       return;
@@ -3083,6 +3138,7 @@ export function Chat({
         setIsConnecting(false);
         setError(null);
         setLastGatewayError(null);
+        onGatewayConnectionReady?.();
         loadSessions();
         void maybeSyncIntegrationsOnConnect();
         addDiag("gateway connected");
@@ -5202,6 +5258,7 @@ export function Chat({
       return;
     }
 
+    outboxDispatchInFlightRef.current.add(pendingSend.id);
     await refreshTrialCredits();
     setIsLoading(true);
     setThinkingStatus("Thinking");
@@ -5253,6 +5310,8 @@ export function Chat({
           setDraftsBySession((prev) => ({ ...prev, [sendSession]: failedDraftRestore }));
         }
       }
+    } finally {
+      outboxDispatchInFlightRef.current.delete(pendingSend.id);
     }
   }
 
@@ -6211,11 +6270,18 @@ export function Chat({
   }
 
   // Simplified render helpers for different states
-  const renderConnecting = (message = "Connecting to your assistant...") => (
+  const renderConnecting = (message?: string) => (
     <div className="h-full flex items-center justify-center">
       <div className="text-center p-8 glass-card">
         <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3 text-[var(--text-accent)]" />
-        <p className="text-[var(--text-secondary)]">{message}</p>
+        <p className="text-[var(--text-secondary)]">
+          {message ?? (gatewayLifecycleLabel || "Connecting to your assistant...")}
+        </p>
+        {!message && (
+          <p className="mt-2 text-sm text-[var(--text-tertiary)]">
+            Chat will open as soon as the sandbox is ready.
+          </p>
+        )}
       </div>
     </div>
   );
@@ -6754,6 +6820,7 @@ export function Chat({
     }
   }, [activeComposerMode, dragActive]);
 
+  if (showConnectingScreen) return renderConnecting();
   if (localTrialLoading) return renderConnecting("Checking managed provider access...");
   if (!connectedProvider && !proxyEnabled && !localModelReady) return renderNoProvider();
   const autoStartExpected = proxyEnabled && !gatewayRunning;
@@ -6792,11 +6859,12 @@ export function Chat({
 
       {showGatewayWarmupBanner && (
         <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-500">
-          {gatewayRetryIn
-            ? `Gateway reconnecting — retrying in ${gatewayRetryIn}s.`
-            : gatewayStarting || autoStartExpected
-              ? "Gateway starting…"
-              : "Preparing sandbox…"}
+          {gatewayLifecycleLabel ||
+            (gatewayRetryIn
+              ? `Gateway reconnecting — retrying in ${gatewayRetryIn}s.`
+              : gatewayStarting || autoStartExpected
+                ? "Gateway starting…"
+                : "Preparing sandbox…")}
         </div>
       )}
 

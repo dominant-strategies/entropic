@@ -3857,6 +3857,7 @@ export function Files({
                       gatewayRunning={gatewayRunning}
                       gatewayStarting={Boolean(gatewayRetryIn) || (isTogglingGateway && !gatewayRunning)}
                       gatewayRetryIn={gatewayRetryIn ?? null}
+                      gatewayLifecycleLabel={null}
                       onStartGateway={onGatewayToggle}
                       onRecoverProxyAuth={onRecoverProxyAuth}
                       connectionMode={connectionMode}

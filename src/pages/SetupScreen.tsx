@@ -4,8 +4,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-shell";
 import { Loader2, CheckCircle2, XCircle, AlertTriangle, Copy } from "lucide-react";
 import entropicLogo from "../assets/entropic-logo.png";
-import quaiHeaderWhite from "../assets/quai-header-white.png";
-import quaiLogo from "../assets/quai-logo.svg";
+import quaiWordmarkDark from "../assets/quai-header-white.png";
+import quaiWordmarkLight from "../assets/quai-logo.svg";
 import { entropicSitePath, hostedFeaturesEnabled } from "../lib/buildProfile";
 
 export type SetupProgress = {
@@ -204,6 +204,7 @@ export function SetupScreen({ onComplete, preview }: Props) {
   const [tosAccepted, setTosAccepted] = useState(false);
   const [isDarkTheme, setIsDarkTheme] = useState(() => detectDarkTheme());
   const isPreview = Boolean(preview);
+  const quaiWordmark = isDarkTheme ? quaiWordmarkDark : quaiWordmarkLight;
 
   const activeProgress = useMemo(() => {
     if (!preview) {
@@ -362,9 +363,9 @@ export function SetupScreen({ onComplete, preview }: Props) {
       {!activeProgress?.error && (
         <div className="mb-12 text-center mt-auto">
           <img
-            src={isDarkTheme ? quaiHeaderWhite : entropicLogo}
-            alt={isDarkTheme ? "Quai Network" : "Entropic"}
-            className={isDarkTheme ? "mx-auto mb-6 h-auto w-full max-w-[260px]" : "mx-auto mb-6 h-20 w-20"}
+            src={entropicLogo}
+            alt="Entropic"
+            className="mx-auto mb-6 h-20 w-20"
           />
           <h1 className="text-3xl font-semibold text-[var(--text-primary)] mb-2">
             Welcome to Entropic
@@ -566,7 +567,7 @@ export function SetupScreen({ onComplete, preview }: Props) {
         <p className="text-[var(--text-tertiary)] text-sm">Powered by OpenClaw</p>
         <a href="https://qu.ai" target="_blank" rel="noopener noreferrer">
           <img
-            src={quaiLogo}
+            src={quaiWordmark}
             alt="Quai Network"
             className="h-5 w-auto"
           />

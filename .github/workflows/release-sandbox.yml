@@ -112,6 +112,7 @@ jobs:
 
       - name: Build Tauri app
         env:
+          ENTROPIC_BUILD_PROFILE: managed
           VITE_ENTROPIC_BUILD_PROFILE: managed
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}

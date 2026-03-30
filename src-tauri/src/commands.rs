@@ -3634,6 +3634,206 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
     result
 }
 
+fn build_gateway_device_signature(
+    app: &AppHandle,
+    payload: &str,
+) -> Result<(String, StoredGatewayDeviceIdentity), String> {
+    let identity = load_or_create_gateway_device_identity(app)?;
+    let private_key_bytes = URL_SAFE_NO_PAD
+        .decode(identity.private_key.as_bytes())
+        .map_err(|e| format!("Failed to decode gateway device private key: {}", e))?;
+    let signing_key = SigningKey::from_bytes(
+        &private_key_bytes
+            .try_into()
+            .map_err(|_| "Invalid gateway device private key length".to_string())?,
+    );
+    let signature = signing_key.sign(payload.as_bytes());
+    Ok((URL_SAFE_NO_PAD.encode(signature.to_bytes()), identity))
+}
+
+fn approve_gateway_device_pairing_inner(request_id: &str) -> Result<(), String> {
+    let trimmed = request_id.trim();
+    if trimmed.is_empty() {
+        return Err("Pairing request id is required".to_string());
+    }
+
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "Gateway container is not running. Start the sandbox first.".to_string())?;
+
+    let output = docker_command()
+        .args([
+            "exec",
+            container,
+            "node",
+            "/app/dist/index.js",
+            "devices",
+            "approve",
+            trimmed,
+            "--json",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to approve gateway device pairing: {}", e))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    Err(if detail.is_empty() {
+        "Failed to approve gateway device pairing".to_string()
+    } else {
+        format!("Failed to approve gateway device pairing: {}", detail)
+    })
+}
+
+async fn check_gateway_ws_operator_ready(
+    app: &AppHandle,
+    ws_url: &str,
+    token: &str,
+) -> Result<bool, String> {
+    let uri: http::Uri = ws_url.parse().map_err(|e| format!("Invalid URL: {}", e))?;
+    let host = uri.host().unwrap_or("localhost").to_string();
+    let request = http::Request::builder()
+        .uri(uri)
+        .header("Host", host)
+        .header("Origin", "http://localhost")
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
+        .body(())
+        .map_err(|e| format!("Failed to build request: {}", e))?;
+
+    let connect = timeout(Duration::from_millis(3000), connect_async(request))
+        .await
+        .map_err(|_| "WebSocket connect timeout".to_string())?;
+    let (mut ws, _) = connect.map_err(|e| format!("WebSocket connect failed: {}", e))?;
+
+    let result = timeout(Duration::from_millis(6000), async {
+        let mut sent_connect = false;
+        loop {
+            let msg = ws
+                .next()
+                .await
+                .ok_or_else(|| "gateway closed before response".to_string())?
+                .map_err(|e| format!("WebSocket error: {}", e))?;
+            if let Message::Text(text) = msg {
+                let frame: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| format!("Bad frame: {}", e))?;
+                let frame_type = frame.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if frame_type == "event" {
+                    let event = frame.get("event").and_then(|v| v.as_str()).unwrap_or("");
+                    if event == "connect.challenge" && !sent_connect {
+                        sent_connect = true;
+                        let nonce = frame
+                            .get("payload")
+                            .and_then(|v| v.get("nonce"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let client_id = "openclaw-control-ui";
+                        let client_mode = "ui";
+                        let role = "operator";
+                        let scopes = [
+                            "operator.admin",
+                            "operator.read",
+                            "operator.write",
+                            "operator.approvals",
+                            "operator.pairing",
+                        ];
+                        let signed_at_ms = current_millis();
+                        let payload = format!(
+                            "v2|{}|{}|{}|{}|{}|{}|{}|{}",
+                            load_or_create_gateway_device_identity(app)?.device_id,
+                            client_id,
+                            client_mode,
+                            role,
+                            scopes.join(","),
+                            signed_at_ms,
+                            token,
+                            nonce
+                        );
+                        let (signature, identity) = build_gateway_device_signature(app, &payload)?;
+                        let connect = serde_json::json!({
+                            "type": "req",
+                            "id": "1",
+                            "method": "connect",
+                            "params": {
+                                "minProtocol": 3,
+                                "maxProtocol": 3,
+                                "client": {
+                                    "id": client_id,
+                                    "displayName": "Entropic Desktop",
+                                    "version": "0.1.0",
+                                    "platform": "desktop",
+                                    "mode": client_mode
+                                },
+                                "role": role,
+                                "scopes": scopes,
+                                "auth": { "token": token },
+                                "device": {
+                                    "id": identity.device_id,
+                                    "publicKey": identity.public_key,
+                                    "signature": signature,
+                                    "signedAt": signed_at_ms,
+                                    "nonce": nonce
+                                },
+                                "caps": [],
+                                "locale": "en-US",
+                                "userAgent": "Entropic Desktop"
+                            }
+                        });
+                        ws.send(Message::Text(connect.to_string()))
+                            .await
+                            .map_err(|e| format!("WebSocket send failed: {}", e))?;
+                    }
+                } else if frame_type == "res" {
+                    let id = frame.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let ok = frame.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if id == "1" {
+                        if ok {
+                            return Ok(true);
+                        }
+                        let error = frame.get("error").cloned().unwrap_or_default();
+                        let message = error
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("gateway connect rejected")
+                            .to_string();
+                        let code = error
+                            .get("code")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let request_id = error
+                            .get("details")
+                            .and_then(|v| v.get("requestId"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if code == "NOT_PAIRED" && !request_id.is_empty() {
+                            approve_gateway_device_pairing_inner(&request_id)?;
+                            return Err("device pairing approval pending".to_string());
+                        }
+                        return Err(message);
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| "gateway operator readiness timeout".to_string())?;
+
+    let _ = ws.close(None).await;
+    result
+}
+
 async fn check_gateway_http_health() -> Result<bool, String> {
     let base = if std::path::Path::new("/.dockerenv").exists() {
         format!("http://{}:18789", OPENCLAW_CONTAINER)
@@ -3810,6 +4010,76 @@ pub struct SavedChannelsState {
     pub googlechat_audience: String,
     pub whatsapp_enabled: bool,
     pub whatsapp_allow_from: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GatewayChannelsMutation {
+    pub discord_enabled: Option<bool>,
+    pub discord_token: Option<String>,
+    pub telegram_enabled: Option<bool>,
+    pub telegram_token: Option<String>,
+    pub telegram_dm_policy: Option<String>,
+    pub telegram_group_policy: Option<String>,
+    pub telegram_config_writes: Option<bool>,
+    pub telegram_require_mention: Option<bool>,
+    pub telegram_reply_to_mode: Option<String>,
+    pub telegram_link_preview: Option<bool>,
+    pub slack_enabled: Option<bool>,
+    pub slack_bot_token: Option<String>,
+    pub slack_app_token: Option<String>,
+    pub googlechat_enabled: Option<bool>,
+    pub googlechat_service_account: Option<String>,
+    pub googlechat_audience_type: Option<String>,
+    pub googlechat_audience: Option<String>,
+    pub whatsapp_enabled: Option<bool>,
+    pub whatsapp_allow_from: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GatewayMutationRequest {
+    pub model: Option<String>,
+    pub image_model: Option<String>,
+    pub channels: Option<GatewayChannelsMutation>,
+    pub force_restart: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayMutationPlan {
+    Noop,
+    ConfigReload,
+    ContainerRestart,
+    ContainerRecreate,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayMutationTimings {
+    pub config_write_ms: u128,
+    pub reload_wait_ms: u128,
+    pub health_wait_ms: u128,
+    pub reconcile_ms: u128,
+    pub restart_ms: u128,
+    pub recreate_ms: u128,
+    pub total_ms: u128,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayMutationResult {
+    pub plan: GatewayMutationPlan,
+    pub applied: bool,
+    pub reason: String,
+    pub container_id_before: Option<String>,
+    pub container_id_after: Option<String>,
+    pub gateway_launch_mode: String,
+    pub gateway_health_status: String,
+    pub effective_model: Option<String>,
+    pub effective_image_model: Option<String>,
+    pub ws_reconnect_expected: bool,
+    pub timings: GatewayMutationTimings,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -4194,6 +4464,160 @@ fn clear_applied_agent_settings_fingerprint() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     *cache = None;
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct DesiredGatewaySelection {
+    config_model: Option<String>,
+    alias_model: Option<String>,
+    config_image_model: Option<String>,
+    alias_image_model: Option<String>,
+    thinking_level: String,
+}
+
+#[derive(Debug, Clone)]
+struct GatewayLifecycleSnapshot {
+    running: bool,
+    launch_mode: String,
+    health_status: String,
+    container_id: Option<String>,
+    effective_model: Option<String>,
+    effective_image_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GatewayStartupSummary {
+    runtime_ready_ms: u128,
+    runtime_image_ready_ms: u128,
+    container_launch_ms: u128,
+    post_launch_config_ms: u128,
+    health_wait_ms: u128,
+    reconcile_ms: u128,
+    total_ms: u128,
+}
+
+fn config_string_at_path(cfg: &serde_json::Value, pointer: &str) -> Option<String> {
+    cfg.pointer(pointer)
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn model_provider_id(model: &str) -> Option<String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let base = trimmed.split(':').next().unwrap_or(trimmed).trim();
+    let base = base.strip_prefix("openrouter/").unwrap_or(base);
+    let provider = base.split('/').next().unwrap_or("").trim();
+    if provider.is_empty() {
+        None
+    } else {
+        Some(provider.to_string())
+    }
+}
+
+fn thinking_level_from_model_ref(model: &str) -> String {
+    let trimmed = model.trim();
+    let model_params = trimmed.split(':').nth(1).unwrap_or("").trim();
+    if model_params == "thinking" {
+        "high".to_string()
+    } else if let Some(level) = model_params.strip_prefix("reasoning=") {
+        let level = level.trim();
+        if level.is_empty() {
+            "off".to_string()
+        } else {
+            level.to_string()
+        }
+    } else {
+        "off".to_string()
+    }
+}
+
+fn desired_gateway_selection(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<DesiredGatewaySelection, String> {
+    let proxy_mode = read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1");
+    let desktop = load_desktop_settings_snapshot(app);
+    let api_keys = state.api_keys.lock().map_err(|e| e.to_string())?.clone();
+    let active_provider = state
+        .active_provider
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+
+    let selected_model = desktop
+        .selected_model
+        .or_else(|| read_container_env("OPENCLAW_MODEL"))
+        .unwrap_or_default();
+    let selected_image_model = desktop
+        .image_model
+        .or_else(|| read_container_env("OPENCLAW_IMAGE_MODEL"))
+        .unwrap_or_default();
+
+    if proxy_mode {
+        let alias_model = normalize_proxy_gateway_model(&selected_model);
+        let alias_image_model = if selected_image_model.trim().is_empty() {
+            None
+        } else {
+            Some(normalize_proxy_gateway_model(&selected_image_model))
+        };
+        return Ok(DesiredGatewaySelection {
+            config_model: Some(normalize_proxy_runtime_model_ref(&alias_model)),
+            alias_model: Some(alias_model),
+            config_image_model: alias_image_model
+                .as_deref()
+                .map(normalize_proxy_runtime_model_ref),
+            alias_image_model,
+            thinking_level: thinking_level_from_model_ref(&selected_model),
+        });
+    }
+
+    let normalized_local = normalize_local_gateway_model(
+        Some(selected_model.as_str()),
+        active_provider.as_deref(),
+        &api_keys,
+    );
+    let config_model = normalized_local
+        .split(':')
+        .next()
+        .unwrap_or(normalized_local.as_str())
+        .to_string();
+    let config_image_model = selected_image_model
+        .split(':')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    Ok(DesiredGatewaySelection {
+        config_model: Some(config_model.clone()),
+        alias_model: Some(config_model),
+        config_image_model: config_image_model.clone(),
+        alias_image_model: config_image_model,
+        thinking_level: thinking_level_from_model_ref(&normalized_local),
+    })
+}
+
+fn gateway_lifecycle_snapshot() -> GatewayLifecycleSnapshot {
+    let running = gateway_container_exists(true);
+    let health_status = if running {
+        container_health_status().unwrap_or_else(|| "unknown".to_string())
+    } else {
+        "stopped".to_string()
+    };
+    let mut cfg = read_openclaw_config();
+    normalize_openclaw_config(&mut cfg);
+    GatewayLifecycleSnapshot {
+        running,
+        launch_mode: current_gateway_launch_mode(),
+        health_status,
+        container_id: container_instance_id(),
+        effective_model: config_string_at_path(&cfg, "/agents/defaults/model/primary"),
+        effective_image_model: config_string_at_path(&cfg, "/agents/defaults/imageModel/primary"),
+    }
 }
 
 fn gateway_health_error_suggests_control_ui_auth(error: &str) -> bool {
@@ -6405,7 +6829,7 @@ fn build_tools_markdown(capabilities: &[CapabilityState]) -> String {
     body
 }
 
-fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
+fn write_openclaw_config_if_changed(value: &serde_json::Value) -> Result<bool, String> {
     let mut normalized = value.clone();
     normalize_openclaw_config(&mut normalized);
     let payload = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
@@ -6414,7 +6838,8 @@ fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
     // gateway's config file watcher and causing unnecessary SIGUSR1 restarts.
     if let Some(existing) = read_container_file(&config_path) {
         if existing.trim() == payload.trim() {
-            return write_container_file(OPENCLAW_PERSISTED_CONFIG_PATH, &payload);
+            write_container_file(OPENCLAW_PERSISTED_CONFIG_PATH, &payload)?;
+            return Ok(false);
         }
     }
     write_container_files_batch(&[
@@ -6428,7 +6853,13 @@ fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
             content: &payload,
             only_if_missing: false,
         },
-    ])
+    ])?;
+    Ok(true)
+}
+
+fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
+    let _ = write_openclaw_config_if_changed(value)?;
+    Ok(())
 }
 
 /// Send SIGUSR1 to the gateway process to force a config reload.
@@ -6447,7 +6878,6 @@ async fn wait_for_gateway_after_config_reload(app: &AppHandle, context: &str, at
             "[Entropic] {}: waiting for gateway health after config reload...",
             context
         );
-        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
         match wait_for_gateway_health_strict(&token, attempts).await {
             Ok(()) => eprintln!("[Entropic] {}: gateway healthy", context),
             Err(e) => eprintln!(
@@ -6456,6 +6886,449 @@ async fn wait_for_gateway_after_config_reload(app: &AppHandle, context: &str, at
             ),
         }
     }
+}
+
+fn apply_channels_mutation_to_settings(
+    settings: &mut StoredAgentSettings,
+    mutation: &GatewayChannelsMutation,
+) {
+    if let Some(value) = mutation.discord_enabled {
+        settings.discord_enabled = value;
+    }
+    if let Some(value) = mutation.discord_token.as_deref() {
+        settings.discord_token = value.trim().to_string();
+    }
+    if let Some(value) = mutation.telegram_enabled {
+        settings.telegram_enabled = value;
+    }
+    if let Some(value) = mutation.telegram_token.as_deref() {
+        settings.telegram_token = value.trim().to_string();
+    }
+    if let Some(value) = mutation.telegram_dm_policy.as_deref() {
+        settings.telegram_dm_policy = match value.trim() {
+            "allowlist" => "allowlist".to_string(),
+            "open" => "open".to_string(),
+            "disabled" => "disabled".to_string(),
+            _ => "pairing".to_string(),
+        };
+    }
+    if let Some(value) = mutation.telegram_group_policy.as_deref() {
+        settings.telegram_group_policy = match value.trim() {
+            "open" => "open".to_string(),
+            "disabled" => "disabled".to_string(),
+            _ => "allowlist".to_string(),
+        };
+    }
+    if let Some(value) = mutation.telegram_config_writes {
+        settings.telegram_config_writes = value;
+    }
+    if let Some(value) = mutation.telegram_require_mention {
+        settings.telegram_require_mention = value;
+    }
+    if let Some(value) = mutation.telegram_reply_to_mode.as_deref() {
+        settings.telegram_reply_to_mode = match value.trim() {
+            "first" => "first".to_string(),
+            "all" => "all".to_string(),
+            _ => "off".to_string(),
+        };
+    }
+    if let Some(value) = mutation.telegram_link_preview {
+        settings.telegram_link_preview = value;
+    }
+    if let Some(value) = mutation.slack_enabled {
+        settings.slack_enabled = value;
+    }
+    if let Some(value) = mutation.slack_bot_token.as_deref() {
+        settings.slack_bot_token = value.trim().to_string();
+    }
+    if let Some(value) = mutation.slack_app_token.as_deref() {
+        settings.slack_app_token = value.trim().to_string();
+    }
+    if let Some(value) = mutation.googlechat_enabled {
+        settings.googlechat_enabled = value;
+    }
+    if let Some(value) = mutation.googlechat_service_account.as_deref() {
+        settings.googlechat_service_account = value.trim().to_string();
+    }
+    if let Some(value) = mutation.googlechat_audience_type.as_deref() {
+        settings.googlechat_audience_type = match value.trim() {
+            "project-number" => "project-number".to_string(),
+            _ => "app-url".to_string(),
+        };
+    }
+    if let Some(value) = mutation.googlechat_audience.as_deref() {
+        settings.googlechat_audience = value.trim().to_string();
+    }
+    if let Some(value) = mutation.whatsapp_enabled {
+        settings.whatsapp_enabled = value;
+    }
+    if let Some(value) = mutation.whatsapp_allow_from.as_deref() {
+        settings.whatsapp_allow_from = value.trim().to_string();
+    }
+}
+
+fn persist_channels_mutation(
+    app: &AppHandle,
+    mutation: &GatewayChannelsMutation,
+) -> Result<StoredAgentSettings, String> {
+    let mut settings = load_agent_settings(app);
+    apply_channels_mutation_to_settings(&mut settings, mutation);
+    save_agent_settings(app, settings.clone())?;
+    Ok(settings)
+}
+
+fn clear_telegram_pairing_credentials() {
+    let container = if named_gateway_container_exists(OPENCLAW_CONTAINER, true) {
+        Some(OPENCLAW_CONTAINER)
+    } else if named_gateway_container_exists(LEGACY_OPENCLAW_CONTAINER, true) {
+        Some(LEGACY_OPENCLAW_CONTAINER)
+    } else {
+        None
+    };
+    if let Some(container) = container {
+        let clear_script = r#"
+const fs = require('fs');
+const path = require('path');
+const dir = '/data/credentials';
+try {
+  for (const entry of fs.readdirSync(dir)) {
+    if (/^telegram(?:-[^/]+)?-allowFrom\.json$/.test(entry)) {
+      try { fs.unlinkSync(path.join(dir, entry)); } catch {}
+    }
+  }
+} catch {}
+try {
+  fs.unlinkSync(path.join(dir, 'telegram-pairing.json'));
+} catch {}
+try {
+  fs.unlinkSync(path.join(dir, 'telegram-default-pairing.json'));
+} catch {}
+for (const entry of (() => {
+  try { return fs.readdirSync(dir); } catch { return []; }
+})()) {
+  if (/^telegram(?:-[^/]+)?-pairing\.json$/.test(entry)) {
+    try { fs.unlinkSync(path.join(dir, entry)); } catch {}
+  }
+}
+process.stdout.write('ok');
+"#;
+        let args = ["exec", container, "node", "-e", clear_script];
+        match docker_exec_output(&args) {
+            Ok(_) => {
+                eprintln!("[Entropic] Cleared Telegram allowFrom credential files after disconnect")
+            }
+            Err(e) => eprintln!(
+                "[Entropic] Failed to clear Telegram allowFrom files (non-fatal): {}",
+                e
+            ),
+        }
+    }
+}
+
+fn desired_auth_profiles_payload(
+    app: &AppHandle,
+    desired_selection: &DesiredGatewaySelection,
+) -> serde_json::Value {
+    let mut stored = load_auth(app);
+    sync_oauth_tokens_from_container(app, &mut stored);
+    if let (Some("1"), Some(key)) = (
+        read_container_env("ENTROPIC_PROXY_MODE").as_deref(),
+        read_container_env("OPENROUTER_API_KEY"),
+    ) {
+        build_proxy_auth_profiles(
+            &key,
+            desired_selection.alias_model.as_deref(),
+            desired_selection.alias_image_model.as_deref(),
+        )
+    } else {
+        build_oauth_auth_profiles(&stored)
+    }
+}
+
+fn gateway_post_start_reconcile_reasons(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<Vec<String>, String> {
+    let desired_selection = desired_gateway_selection(app, state)?;
+    let settings = load_agent_settings(app);
+    let mut cfg = read_openclaw_config();
+    normalize_openclaw_config(&mut cfg);
+    let mut reasons = Vec::new();
+
+    let current_model = config_string_at_path(&cfg, "/agents/defaults/model/primary");
+    if current_model != desired_selection.config_model {
+        reasons.push("model default mismatch".to_string());
+    }
+
+    let current_image_model = config_string_at_path(&cfg, "/agents/defaults/imageModel/primary");
+    if current_image_model != desired_selection.config_image_model {
+        reasons.push("image model default mismatch".to_string());
+    }
+
+    let current_thinking = config_string_at_path(&cfg, "/agents/defaults/thinkingDefault")
+        .unwrap_or_else(|| "off".to_string());
+    if current_thinking != desired_selection.thinking_level {
+        reasons.push("thinking default mismatch".to_string());
+    }
+
+    let current_heartbeat = config_string_at_path(&cfg, "/agents/defaults/heartbeat/every");
+    if current_heartbeat.as_deref() != Some(settings.heartbeat_every.as_str()) {
+        reasons.push("heartbeat config mismatch".to_string());
+    }
+
+    let current_telegram_enabled = cfg
+        .pointer("/channels/telegram/enabled")
+        .and_then(|value| value.as_bool());
+    if current_telegram_enabled != Some(settings.telegram_enabled) {
+        reasons.push("telegram enabled mismatch".to_string());
+    }
+
+    let current_telegram_token =
+        config_string_at_path(&cfg, "/channels/telegram/botToken").unwrap_or_default();
+    if current_telegram_token != settings.telegram_token {
+        reasons.push("telegram token mismatch".to_string());
+    }
+
+    if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
+        let current_base_url = config_string_at_path(&cfg, "/models/providers/openrouter/baseUrl");
+        let expected_base_url = read_container_env("ENTROPIC_PROXY_BASE_URL");
+        if current_base_url != expected_base_url {
+            reasons.push("proxy base URL mismatch".to_string());
+        }
+    }
+
+    let current_auth_profiles =
+        read_container_file("/home/node/.openclaw/agents/main/agent/auth-profiles.json")
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    if current_auth_profiles != Some(desired_auth_profiles_payload(app, &desired_selection)) {
+        reasons.push("auth profiles mismatch".to_string());
+    }
+
+    Ok(reasons)
+}
+
+async fn reconcile_gateway_after_start_if_needed(
+    app: &AppHandle,
+    state: &AppState,
+    context: &str,
+) -> Result<(), String> {
+    let reasons = gateway_post_start_reconcile_reasons(app, state)?;
+    if reasons.is_empty() {
+        println!(
+            "[Entropic] {}: startup reconcile skipped; gateway config already matches persisted state",
+            context
+        );
+        return Ok(());
+    }
+
+    println!(
+        "[Entropic] {}: startup reconcile needed ({})",
+        context,
+        reasons.join(", ")
+    );
+    clear_applied_agent_settings_fingerprint()?;
+    apply_agent_settings(app, state)?;
+    signal_gateway_config_reload();
+    wait_for_gateway_after_config_reload(app, context, 20).await;
+    Ok(())
+}
+
+fn classify_gateway_mutation(
+    before: &GatewayLifecycleSnapshot,
+    request: &GatewayMutationRequest,
+) -> (GatewayMutationPlan, String) {
+    if !before.running {
+        return (
+            GatewayMutationPlan::Noop,
+            "gateway not running; persisted changes will apply on next start".to_string(),
+        );
+    }
+
+    if request.force_restart.unwrap_or(false) {
+        let plan = if before.launch_mode == "proxy" {
+            GatewayMutationPlan::ContainerRecreate
+        } else {
+            GatewayMutationPlan::ContainerRestart
+        };
+        return (plan, "explicit restart requested".to_string());
+    }
+
+    if let Some(model) = request.model.as_deref() {
+        if before.launch_mode == "local" {
+            let current_provider = before
+                .effective_model
+                .as_deref()
+                .and_then(model_provider_id)
+                .or_else(|| {
+                    read_container_env("OPENCLAW_MODEL")
+                        .as_deref()
+                        .and_then(model_provider_id)
+                });
+            let requested_provider = model_provider_id(model);
+            if current_provider.is_some()
+                && requested_provider.is_some()
+                && current_provider != requested_provider
+            {
+                return (
+                    GatewayMutationPlan::ContainerRestart,
+                    format!(
+                        "model provider changed from {} to {}",
+                        current_provider.unwrap_or_default(),
+                        requested_provider.unwrap_or_default()
+                    ),
+                );
+            }
+        }
+
+        return (
+            GatewayMutationPlan::ConfigReload,
+            "model change is reloadable".to_string(),
+        );
+    }
+
+    if request.image_model.is_some() {
+        return (
+            GatewayMutationPlan::ConfigReload,
+            "image model change is reloadable".to_string(),
+        );
+    }
+
+    if request.channels.is_some() {
+        return (
+            GatewayMutationPlan::ConfigReload,
+            "channel settings change is reloadable".to_string(),
+        );
+    }
+
+    (
+        GatewayMutationPlan::Noop,
+        "no mutable fields requested".to_string(),
+    )
+}
+
+async fn apply_gateway_mutation_inner(
+    app: &AppHandle,
+    state: &AppState,
+    request: GatewayMutationRequest,
+) -> Result<GatewayMutationResult, String> {
+    let started = Instant::now();
+    let _guard = gateway_start_lock().lock().await;
+    let before = gateway_lifecycle_snapshot();
+    let (plan, reason) = classify_gateway_mutation(&before, &request);
+    let mut timings = GatewayMutationTimings::default();
+    let mut applied = false;
+
+    let maybe_updated_settings = if let Some(channels) = request.channels.as_ref() {
+        Some(persist_channels_mutation(app, channels)?)
+    } else {
+        None
+    };
+    if request.channels.is_some() {
+        applied = true;
+    }
+
+    match plan {
+        GatewayMutationPlan::Noop => {
+            applied = applied || request.model.is_some() || request.image_model.is_some();
+        }
+        GatewayMutationPlan::ConfigReload => {
+            if let Some(settings) = maybe_updated_settings.as_ref() {
+                if !settings.telegram_enabled && settings.telegram_token.trim().is_empty() {
+                    clear_telegram_pairing_credentials();
+                }
+            }
+            let _ = app.emit("gateway-restarting", ());
+            let config_started = Instant::now();
+            apply_agent_settings(app, state)?;
+            timings.config_write_ms = config_started.elapsed().as_millis();
+
+            let reload_started = Instant::now();
+            wait_for_gateway_after_config_reload(app, "apply_gateway_mutation", 12).await;
+            timings.reload_wait_ms = reload_started.elapsed().as_millis();
+            timings.health_wait_ms = timings.reload_wait_ms;
+            applied = true;
+        }
+        GatewayMutationPlan::ContainerRestart => {
+            let restart_started = Instant::now();
+            let restart_model = request
+                .model
+                .clone()
+                .or_else(|| load_desktop_settings_snapshot(app).selected_model);
+            let summary = restart_gateway_inner(app, state, restart_model).await?;
+            timings.restart_ms = restart_started.elapsed().as_millis();
+            timings.health_wait_ms = summary.health_wait_ms;
+            timings.reconcile_ms = summary.reconcile_ms;
+            applied = true;
+        }
+        GatewayMutationPlan::ContainerRecreate => {
+            let recreate_started = Instant::now();
+            let proxy_token = read_container_env("OPENROUTER_API_KEY")
+                .ok_or_else(|| "Missing proxy gateway token for container recreate".to_string())?;
+            let proxy_url = read_container_env("ENTROPIC_WEB_BASE_URL")
+                .or_else(|| read_container_env("ENTROPIC_PROXY_BASE_URL"))
+                .ok_or_else(|| "Missing proxy base URL for container recreate".to_string())?;
+            let desktop = load_desktop_settings_snapshot(app);
+            let model = request
+                .model
+                .clone()
+                .or(desktop.selected_model)
+                .unwrap_or_else(|| DEFAULT_PROXY_GATEWAY_MODEL.to_string());
+            let image_model = request.image_model.clone().or(desktop.image_model);
+            let summary = start_gateway_with_proxy_inner(
+                app,
+                state,
+                proxy_token,
+                proxy_url,
+                model,
+                image_model,
+            )
+            .await?;
+            timings.recreate_ms = recreate_started.elapsed().as_millis();
+            timings.health_wait_ms = summary.health_wait_ms;
+            timings.reconcile_ms = summary.reconcile_ms;
+            applied = true;
+        }
+    }
+
+    let after = gateway_lifecycle_snapshot();
+    timings.total_ms = started.elapsed().as_millis();
+    println!(
+        "[Entropic] apply_gateway_mutation: plan={:?} reason={} before_container={:?} after_container={:?} config_write={}ms reload_wait={}ms health_wait={}ms reconcile={}ms restart={}ms recreate={}ms total={}ms",
+        plan,
+        reason,
+        before.container_id,
+        after.container_id,
+        timings.config_write_ms,
+        timings.reload_wait_ms,
+        timings.health_wait_ms,
+        timings.reconcile_ms,
+        timings.restart_ms,
+        timings.recreate_ms,
+        timings.total_ms
+    );
+
+    Ok(GatewayMutationResult {
+        plan,
+        applied,
+        reason,
+        container_id_before: before.container_id,
+        container_id_after: after.container_id,
+        gateway_launch_mode: after.launch_mode,
+        gateway_health_status: after.health_status,
+        effective_model: after.effective_model,
+        effective_image_model: after.effective_image_model,
+        ws_reconnect_expected: before.running && plan != GatewayMutationPlan::Noop,
+        timings,
+    })
+}
+
+#[tauri::command]
+pub async fn apply_gateway_mutation(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: GatewayMutationRequest,
+) -> Result<GatewayMutationResult, String> {
+    apply_gateway_mutation_inner(&app, &state, request).await
 }
 
 fn set_openclaw_config_value(cfg: &mut serde_json::Value, path: &[&str], value: serde_json::Value) {
@@ -7080,8 +7953,240 @@ fn current_millis() -> u128 {
         .as_millis()
 }
 
+fn sync_oauth_tokens_from_container(app: &AppHandle, stored: &mut StoredAuth) {
+    let container_profiles: Option<serde_json::Value> =
+        read_container_file("/home/node/.openclaw/agents/main/agent/auth-profiles.json")
+            .and_then(|raw| serde_json::from_str(&raw).ok());
+
+    let Some(container) = container_profiles else {
+        return;
+    };
+
+    if let Some(container_cred) = container.pointer("/profiles/anthropic:entropic") {
+        let container_refresh = container_cred
+            .get("refresh")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let container_access = container_cred
+            .get("access")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let container_expires_ms = container_cred
+            .get("expires")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if let Some(meta) = stored.oauth_metadata.get("anthropic") {
+            if !container_refresh.is_empty()
+                && container_refresh != meta.refresh_token
+                && container_expires_ms > meta.expires_at
+            {
+                println!(
+                    "[Entropic] Syncing refreshed Anthropic tokens from container (container expiry {} > stored {})",
+                    container_expires_ms, meta.expires_at
+                );
+                stored.oauth_metadata.insert(
+                    "anthropic".to_string(),
+                    OAuthKeyMeta {
+                        refresh_token: container_refresh.to_string(),
+                        expires_at: container_expires_ms,
+                        source: meta.source.clone(),
+                    },
+                );
+                if !container_access.is_empty() {
+                    stored
+                        .keys
+                        .insert("anthropic".to_string(), container_access.to_string());
+                }
+                let _ = save_auth(app, stored);
+            }
+        }
+    }
+
+    if let Some(container_cred) = container.pointer("/profiles/openai-codex:entropic") {
+        let container_refresh = container_cred
+            .get("refresh")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let container_access = container_cred
+            .get("access")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let container_expires_ms = container_cred
+            .get("expires")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if let Some(meta) = stored.oauth_metadata.get("openai") {
+            if !container_refresh.is_empty()
+                && container_refresh != meta.refresh_token
+                && container_expires_ms > meta.expires_at
+            {
+                println!(
+                    "[Entropic] Syncing refreshed OpenAI Codex tokens from container (container expiry {} > stored {})",
+                    container_expires_ms, meta.expires_at
+                );
+                stored.oauth_metadata.insert(
+                    "openai".to_string(),
+                    OAuthKeyMeta {
+                        refresh_token: container_refresh.to_string(),
+                        expires_at: container_expires_ms,
+                        source: meta.source.clone(),
+                    },
+                );
+                if !container_access.is_empty() {
+                    stored
+                        .keys
+                        .insert("openai".to_string(), container_access.to_string());
+                }
+                let _ = save_auth(app, stored);
+            }
+        }
+    }
+}
+
+fn build_oauth_auth_profiles(stored: &StoredAuth) -> serde_json::Value {
+    let mut profiles = serde_json::Map::new();
+
+    let anthropic_meta = stored.oauth_metadata.get("anthropic");
+    let anthropic_key = stored.keys.get("anthropic");
+    if let (Some(meta), Some(access_token)) = (anthropic_meta, anthropic_key) {
+        if meta.source == "claude_code" && !access_token.is_empty() {
+            println!(
+                "[Entropic] Writing Anthropic OAuth credentials to auth-profiles.json (token len={})",
+                access_token.len()
+            );
+            profiles.insert(
+                "anthropic:entropic".to_string(),
+                serde_json::json!({
+                    "type": "oauth",
+                    "provider": "anthropic",
+                    "access": access_token,
+                    "refresh": meta.refresh_token,
+                    "expires": meta.expires_at
+                }),
+            );
+        }
+    }
+
+    let openai_meta = stored.oauth_metadata.get("openai");
+    let openai_key = stored.keys.get("openai");
+    if let (Some(meta), Some(access_token)) = (openai_meta, openai_key) {
+        if meta.source == "openai_codex" && !access_token.is_empty() {
+            println!(
+                "[Entropic] Writing OpenAI Codex OAuth credentials to auth-profiles.json (token len={})",
+                access_token.len()
+            );
+            profiles.insert(
+                "openai-codex:entropic".to_string(),
+                serde_json::json!({
+                    "type": "oauth",
+                    "provider": "openai-codex",
+                    "access": access_token,
+                    "refresh": meta.refresh_token,
+                    "expires": meta.expires_at
+                }),
+            );
+        }
+    }
+
+    serde_json::json!({
+        "version": 1,
+        "profiles": serde_json::Value::Object(profiles)
+    })
+}
+
+fn build_proxy_auth_profiles(
+    key: &str,
+    alias_model: Option<&str>,
+    alias_image_model: Option<&str>,
+) -> serde_json::Value {
+    let mut profiles = serde_json::Map::new();
+    profiles.insert(
+        "openrouter:default".to_string(),
+        serde_json::json!({
+            "type": "api_key",
+            "provider": "openrouter",
+            "key": key
+        }),
+    );
+
+    let mut provider_aliases = vec!["openrouter"];
+    if let Some(model_id) = alias_model {
+        provider_aliases.extend(proxy_auth_profile_providers_for_model(model_id));
+    }
+    if let Some(image_model_id) = alias_image_model {
+        provider_aliases.extend(proxy_auth_profile_providers_for_model(image_model_id));
+    }
+    provider_aliases.sort_unstable();
+    provider_aliases.dedup();
+
+    for provider in provider_aliases {
+        let profile_id = format!("{}:default", provider);
+        if profiles.contains_key(&profile_id) {
+            continue;
+        }
+        profiles.insert(
+            profile_id,
+            serde_json::json!({
+                "type": "api_key",
+                "provider": provider,
+                "key": key
+            }),
+        );
+    }
+
+    serde_json::json!({
+        "version": 1,
+        "profiles": serde_json::Value::Object(profiles)
+    })
+}
+
+fn write_gateway_auth_profiles_if_changed(
+    app: &AppHandle,
+    alias_model: Option<&str>,
+    alias_image_model: Option<&str>,
+) -> Result<bool, String> {
+    let mut stored = load_auth(app);
+    sync_oauth_tokens_from_container(app, &mut stored);
+
+    let payload_value = if let (Some("1"), Some(key)) = (
+        read_container_env("ENTROPIC_PROXY_MODE").as_deref(),
+        read_container_env("OPENROUTER_API_KEY"),
+    ) {
+        println!(
+            "[Entropic] Writing OpenRouter proxy credentials to auth-profiles.json (key len={})",
+            key.len()
+        );
+        build_proxy_auth_profiles(&key, alias_model, alias_image_model)
+    } else {
+        build_oauth_auth_profiles(&stored)
+    };
+
+    let payload = serde_json::to_string_pretty(&payload_value).map_err(|e| e.to_string())?;
+    let auth_profiles_path = "/home/node/.openclaw/agents/main/agent/auth-profiles.json";
+    if let Some(existing) = read_container_file(auth_profiles_path) {
+        if serde_json::from_str::<serde_json::Value>(&existing).ok() == Some(payload_value.clone())
+        {
+            return Ok(false);
+        }
+    }
+    if let Err(e) = write_container_file(auth_profiles_path, &payload) {
+        println!("[Entropic] Failed to write auth-profiles.json: {}", e);
+    }
+    Ok(true)
+}
+
+fn write_gateway_auth_profiles(
+    app: &AppHandle,
+    alias_model: Option<&str>,
+    alias_image_model: Option<&str>,
+) -> Result<(), String> {
+    let _ = write_gateway_auth_profiles_if_changed(app, alias_model, alias_image_model)?;
+    Ok(())
+}
+
 fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let settings = load_agent_settings(app);
+    let desired_selection = desired_gateway_selection(app, state)?;
     let installed_skill_paths = collect_workspace_skill_paths().unwrap_or_default();
     let installed_workspace_skill_ids: Vec<String> = installed_skill_paths
         .iter()
@@ -7093,8 +8198,10 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
         .collect();
     let proxy_mode = read_container_env("ENTROPIC_PROXY_MODE").is_some();
     let base_url = read_container_env("ENTROPIC_PROXY_BASE_URL");
-    let model = read_container_env("OPENCLAW_MODEL");
-    let image_model = read_container_env("OPENCLAW_IMAGE_MODEL");
+    let model = desired_selection.config_model.clone();
+    let alias_model = desired_selection.alias_model.clone();
+    let image_model = desired_selection.config_image_model.clone();
+    let alias_image_model = desired_selection.alias_image_model.clone();
     let web_base_url = read_container_env("ENTROPIC_WEB_BASE_URL");
     let container_id = container_instance_id();
     let openai_key_for_lancedb = {
@@ -7148,7 +8255,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
     let identity_path = workspace_file("IDENTITY.md");
     let memory_path = workspace_file("MEMORY.md");
     let soul_path = workspace_file("SOUL.md");
-    let thinking_level_env = read_container_env("ENTROPIC_THINKING_LEVEL");
+    let thinking_level_env = Some(desired_selection.thinking_level.clone());
     let fingerprint_payload = serde_json::json!({
         "container_id": container_id,
         "proxy_mode": proxy_mode,
@@ -7761,8 +8868,8 @@ Use it for durable decisions, preferences, and facts that should persist across 
             .and_then(|a| a.get("defaults"))
             .and_then(|d| d.get("model"))
     );
+    write_gateway_auth_profiles(app, alias_model.as_deref(), alias_image_model.as_deref())?;
     write_openclaw_config(&cfg)?;
-
     // Write OpenAI Codex OAuth credentials to auth-profiles.json if available
     // (env vars don't work for Codex OAuth — OpenClaw needs auth-profiles.json)
     // OpenClaw reads auth-profiles.json from: $STATE_DIR/agents/main/agent/auth-profiles.json
@@ -8006,7 +9113,6 @@ Use it for durable decisions, preferences, and facts that should persist across 
             write_main_agent_auth_profiles(&payload);
         }
     }
-
     {
         let mut cache = applied_agent_settings_fingerprint()
             .lock()
@@ -9799,13 +10905,13 @@ pub async fn get_auth_state(state: State<'_, AppState>) -> Result<AuthState, Str
     })
 }
 
-#[tauri::command]
-pub async fn start_gateway(
-    app: AppHandle,
-    state: State<'_, AppState>,
+async fn start_gateway_inner(
+    app: &AppHandle,
+    state: &AppState,
     model: Option<String>,
-) -> Result<(), String> {
+) -> Result<GatewayStartupSummary, String> {
     let startup_started = Instant::now();
+    let mut summary = GatewayStartupSummary::default();
     let _start_guard = gateway_start_lock().lock().await;
     // Get API keys from state
     let api_keys = state.api_keys.lock().map_err(|e| e.to_string())?.clone();
@@ -9814,8 +10920,8 @@ pub async fn start_gateway(
         .lock()
         .map_err(|e| e.to_string())?
         .clone();
-    let settings = load_agent_settings(&app);
-    let desktop_settings = load_desktop_settings_snapshot(&app);
+    let settings = load_agent_settings(app);
+    let desktop_settings = load_desktop_settings_snapshot(app);
     let gateway_bind = "127.0.0.1:19789:18789";
     let mut memory_slot = if !settings.memory_enabled {
         "none"
@@ -9829,7 +10935,7 @@ pub async fn start_gateway(
     }
 
     // Ensure runtime is running on macOS (Colima or Docker Desktop)
-    let runtime = get_runtime(&app);
+    let runtime = get_runtime(app);
     let mut status = runtime.check_status();
     if !status.docker_ready {
         if matches!(Platform::detect(), Platform::Windows) && windows_use_managed_wsl_docker() {
@@ -9874,8 +10980,9 @@ pub async fn start_gateway(
         "[Entropic] Startup timing: runtime_ready={}ms",
         startup_started.elapsed().as_millis()
     );
+    summary.runtime_ready_ms = startup_started.elapsed().as_millis();
 
-    let gateway_token = expected_gateway_token(&app)?;
+    let gateway_token = expected_gateway_token(app)?;
 
     let is_local_model = model.as_deref().map_or(false, |m| m.starts_with("local/"));
     let has_any_local_api_key = is_local_model
@@ -10045,9 +11152,12 @@ pub async fn start_gateway(
             && image_matches_latest
             && local_config_matches
         {
-            apply_agent_settings(&app, &state)?;
+            apply_agent_settings(app, state)?;
             match wait_for_gateway_health_strict(&gateway_token, 6).await {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    summary.total_ms = startup_started.elapsed().as_millis();
+                    return Ok(summary);
+                }
                 Err(err) => {
                     println!(
                         "[Entropic] Matching gateway container failed health check; recreating: {}",
@@ -10088,6 +11198,7 @@ pub async fn start_gateway(
         "[Entropic] Startup timing: runtime_image_ready={}ms",
         image_started.elapsed().as_millis()
     );
+    summary.runtime_image_ready_ms = image_started.elapsed().as_millis();
 
     // Resolve thinking level from model suffix for openclaw.json thinkingDefault
     let thinking_level = if thinking_enabled {
@@ -10312,37 +11423,42 @@ pub async fn start_gateway(
         "[Entropic] Startup timing: container_launch={}ms",
         container_launch_started.elapsed().as_millis()
     );
+    summary.container_launch_ms = container_launch_started.elapsed().as_millis();
 
     // Apply persisted settings to the fresh container
     let settings_started = Instant::now();
-    apply_agent_settings(&app, &state)?;
+    apply_agent_settings(app, state)?;
     println!(
         "[Entropic] Startup timing: post_launch_config={}ms",
         settings_started.elapsed().as_millis()
     );
+    summary.post_launch_config_ms = settings_started.elapsed().as_millis();
 
     let health_started = Instant::now();
-    recover_gateway_health(&gateway_token, &docker_args, "Gateway", &app, &state).await?;
-    // Re-apply settings AFTER health check passes.
-    // OpenClaw's initialization may overwrite files we wrote earlier (e.g., auth-profiles.json
-    // and config fields like thinkingDefault). Re-applying now ensures our settings stick.
-    clear_applied_agent_settings_fingerprint()?;
-    apply_agent_settings(&app, &state)?;
-    // The first apply_agent_settings (before health check) may have written the
-    // config before the gateway's file watcher was active.  The dedup in
-    // write_openclaw_config means the second call above likely skipped writing
-    // (same content).  Send SIGUSR1 to guarantee the gateway re-reads the
-    // on-disk config so plugins like Telegram initialise correctly.
-    signal_gateway_config_reload();
-    wait_for_gateway_after_config_reload(&app, "start_gateway", 20).await;
-    println!("[Entropic] Startup timing: post_health_config applied");
+    recover_gateway_health(&gateway_token, &docker_args, "Gateway", app, state).await?;
+    summary.health_wait_ms = health_started.elapsed().as_millis();
+    let reconcile_started = Instant::now();
+    reconcile_gateway_after_start_if_needed(app, state, "start_gateway").await?;
+    summary.reconcile_ms = reconcile_started.elapsed().as_millis();
+    println!("[Entropic] Startup timing: post_health_reconcile complete");
     println!(
-        "[Entropic] Startup timing: health={}ms total={}ms",
-        health_started.elapsed().as_millis(),
+        "[Entropic] Startup timing: health={}ms reconcile={}ms total={}ms",
+        summary.health_wait_ms,
+        summary.reconcile_ms,
         startup_started.elapsed().as_millis()
     );
+    summary.total_ms = startup_started.elapsed().as_millis();
 
-    Ok(())
+    Ok(summary)
+}
+
+#[tauri::command]
+pub async fn start_gateway(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model: Option<String>,
+) -> Result<(), String> {
+    start_gateway_inner(&app, &state, model).await.map(|_| ())
 }
 
 #[tauri::command]
@@ -10368,16 +11484,16 @@ pub async fn stop_gateway() -> Result<(), String> {
 }
 
 /// Start gateway using the Entropic proxy (for users without their own API keys)
-#[tauri::command]
-pub async fn start_gateway_with_proxy(
-    app: AppHandle,
-    state: State<'_, AppState>,
+async fn start_gateway_with_proxy_inner(
+    app: &AppHandle,
+    state: &AppState,
     gateway_token: String,
     proxy_url: String,
     model: String,
     image_model: Option<String>,
-) -> Result<(), String> {
+) -> Result<GatewayStartupSummary, String> {
     let startup_started = Instant::now();
+    let mut summary = GatewayStartupSummary::default();
     let _start_guard = gateway_start_lock().lock().await;
     cleanup_legacy_gateway_artifacts();
     let gateway_bind = "127.0.0.1:19789:18789";
@@ -10399,7 +11515,7 @@ pub async fn start_gateway_with_proxy(
         );
     }
     // Ensure runtime (Colima) is running on macOS
-    let runtime = get_runtime(&app);
+    let runtime = get_runtime(app);
     let mut status = runtime.check_status();
     if !status.docker_ready {
         if matches!(Platform::detect(), Platform::Windows) && windows_use_managed_wsl_docker() {
@@ -10438,7 +11554,8 @@ pub async fn start_gateway_with_proxy(
         "[Entropic] Startup timing (proxy): runtime_ready={}ms",
         startup_started.elapsed().as_millis()
     );
-    let local_gateway_token = expected_gateway_token(&app)?;
+    summary.runtime_ready_ms = startup_started.elapsed().as_millis();
+    let local_gateway_token = expected_gateway_token(app)?;
     let build_proxy_docker_args = || -> Result<(Vec<String>, GatewayEnvFile), String> {
         let mut env_entries: Vec<(&str, &str)> = vec![
             ("OPENCLAW_GATEWAY_TOKEN", local_gateway_token.as_str()),
@@ -10599,27 +11716,31 @@ pub async fn start_gateway_with_proxy(
         {
             println!("[Entropic] Proxy container already running with matching config. Reusing.");
             let reuse_prepare_started = Instant::now();
-            apply_agent_settings(&app, &state)?;
+            apply_agent_settings(app, state)?;
             println!(
                 "[Entropic] Startup timing (proxy): reused_container_prepare={}ms",
                 reuse_prepare_started.elapsed().as_millis()
             );
+            summary.post_launch_config_ms = reuse_prepare_started.elapsed().as_millis();
             let health_started = Instant::now();
             let (reuse_docker_args, _reuse_env_file) = build_proxy_docker_args()?;
             recover_gateway_health(
                 &local_gateway_token,
                 &reuse_docker_args,
                 "Proxy gateway",
-                &app,
-                &state,
+                app,
+                state,
             )
             .await?;
+            summary.health_wait_ms = health_started.elapsed().as_millis();
             println!(
-                "[Entropic] Startup timing (proxy): health={}ms total={}ms",
-                health_started.elapsed().as_millis(),
+                "[Entropic] Startup timing (proxy): health={}ms reconcile={}ms total={}ms",
+                summary.health_wait_ms,
+                summary.reconcile_ms,
                 startup_started.elapsed().as_millis()
             );
-            return Ok(());
+            summary.total_ms = startup_started.elapsed().as_millis();
+            return Ok(summary);
         }
 
         if !token_matches {
@@ -10657,6 +11778,7 @@ pub async fn start_gateway_with_proxy(
         "[Entropic] Startup timing (proxy): runtime_image_ready={}ms",
         image_started.elapsed().as_millis()
     );
+    summary.runtime_image_ready_ms = image_started.elapsed().as_millis();
     let (docker_args, _proxy_env_file) = build_proxy_docker_args()?;
 
     // Create and start container
@@ -10724,39 +11846,54 @@ pub async fn start_gateway_with_proxy(
         "[Entropic] Startup timing (proxy): container_launch={}ms",
         container_launch_started.elapsed().as_millis()
     );
+    summary.container_launch_ms = container_launch_started.elapsed().as_millis();
 
     // Apply persisted settings
     let settings_started = Instant::now();
-    apply_agent_settings(&app, &state)?;
+    apply_agent_settings(app, state)?;
     println!(
         "[Entropic] Startup timing (proxy): post_launch_config={}ms",
         settings_started.elapsed().as_millis()
     );
+    summary.post_launch_config_ms = settings_started.elapsed().as_millis();
 
     let health_started = Instant::now();
     recover_gateway_health(
         &local_gateway_token,
         &docker_args,
         "Proxy gateway",
-        &app,
-        &state,
+        app,
+        state,
     )
     .await?;
-    // Re-apply settings AFTER health check passes.
-    // OpenClaw initialization can overwrite files written during startup
-    // (including openclaw.json provider baseUrl), so apply again once healthy.
-    clear_applied_agent_settings_fingerprint()?;
-    apply_agent_settings(&app, &state)?;
-    signal_gateway_config_reload();
-    wait_for_gateway_after_config_reload(&app, "start_gateway_with_proxy", 20).await;
-    println!("[Entropic] Startup timing (proxy): post_health_config applied");
+    summary.health_wait_ms = health_started.elapsed().as_millis();
+    let reconcile_started = Instant::now();
+    reconcile_gateway_after_start_if_needed(app, state, "start_gateway_with_proxy").await?;
+    summary.reconcile_ms = reconcile_started.elapsed().as_millis();
+    println!("[Entropic] Startup timing (proxy): post_health_reconcile complete");
     println!(
-        "[Entropic] Startup timing (proxy): health={}ms total={}ms",
-        health_started.elapsed().as_millis(),
+        "[Entropic] Startup timing (proxy): health={}ms reconcile={}ms total={}ms",
+        summary.health_wait_ms,
+        summary.reconcile_ms,
         startup_started.elapsed().as_millis()
     );
+    summary.total_ms = startup_started.elapsed().as_millis();
 
-    Ok(())
+    Ok(summary)
+}
+
+#[tauri::command]
+pub async fn start_gateway_with_proxy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    gateway_token: String,
+    proxy_url: String,
+    model: String,
+    image_model: Option<String>,
+) -> Result<(), String> {
+    start_gateway_with_proxy_inner(&app, &state, gateway_token, proxy_url, model, image_model)
+        .await
+        .map(|_| ())
 }
 
 /// Hot-swap the model in openclaw.json without restarting the container.
@@ -10874,12 +12011,11 @@ pub fn update_gateway_model(app: AppHandle, model: String) -> Result<(), String>
     write_openclaw_config(&cfg)
 }
 
-#[tauri::command]
-pub async fn restart_gateway(
-    app: AppHandle,
-    state: State<'_, AppState>,
+async fn restart_gateway_inner(
+    app: &AppHandle,
+    state: &AppState,
     model: Option<String>,
-) -> Result<(), String> {
+) -> Result<GatewayStartupSummary, String> {
     // Stop and remove existing container (to pick up new env vars)
     for name in [OPENCLAW_CONTAINER, LEGACY_OPENCLAW_CONTAINER] {
         let _ = docker_command().args(["stop", name]).output();
@@ -10887,7 +12023,16 @@ pub async fn restart_gateway(
     }
 
     // Start with current API keys
-    start_gateway(app, state, model).await
+    start_gateway_inner(app, state, model).await
+}
+
+#[tauri::command]
+pub async fn restart_gateway(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model: Option<String>,
+) -> Result<(), String> {
+    restart_gateway_inner(&app, &state, model).await.map(|_| ())
 }
 
 #[tauri::command]
@@ -10904,13 +12049,13 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
     println!("[Entropic] Checking gateway health via WS at: {}", ws_url);
     let mut last_error: Option<String> = None;
     for attempt in 1..=2 {
-        match check_gateway_ws_health(&ws_url, &token).await {
+        match check_gateway_ws_operator_ready(&app, &ws_url, &token).await {
             Ok(true) => {
-                println!("[Entropic] Gateway health check passed");
+                println!("[Entropic] Gateway operator readiness check passed");
                 return Ok(true);
             }
             Ok(false) => {
-                last_error = Some("health rpc rejected".to_string());
+                last_error = Some("operator connect rejected".to_string());
             }
             Err(e) => {
                 last_error = Some(e);
@@ -10932,12 +12077,12 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
         if health_status == "starting" {
             if matches!(check_gateway_http_health().await, Ok(true)) {
                 println!(
-                    "[Entropic] HTTP /healthz is ready while WS handshake is still finishing; reporting gateway as starting.",
+                    "[Entropic] HTTP /healthz is ready while operator handshake is still finishing; reporting gateway as starting.",
                 );
-                return Ok(true);
+                return Ok(false);
             }
             println!(
-                "[Entropic] Gateway WS probe failed while container health is starting; reporting not running until WS recovers.",
+                "[Entropic] Gateway operator probe failed while container health is starting; reporting not running until operator auth recovers.",
             );
         }
     }
@@ -16840,40 +17985,7 @@ pub async fn embedded_preview_forward(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn approve_gateway_device_pairing(request_id: String) -> Result<(), String> {
-    let trimmed = request_id.trim();
-    if trimmed.is_empty() {
-        return Err("Pairing request id is required".to_string());
-    }
-
-    let container = running_gateway_container_name()
-        .ok_or_else(|| "Gateway container is not running. Start the sandbox first.".to_string())?;
-
-    let output = docker_command()
-        .args([
-            "exec",
-            container,
-            "node",
-            "/app/dist/index.js",
-            "devices",
-            "approve",
-            trimmed,
-            "--json",
-        ])
-        .output()
-        .map_err(|e| format!("Failed to approve gateway device pairing: {}", e))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if !stderr.is_empty() { stderr } else { stdout };
-    Err(if detail.is_empty() {
-        "Failed to approve gateway device pairing".to_string()
-    } else {
-        format!("Failed to approve gateway device pairing: {}", detail)
-    })
+    approve_gateway_device_pairing_inner(&request_id)
 }
 
 // =============================================================================
