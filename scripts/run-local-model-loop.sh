@@ -7,12 +7,22 @@ ROOT="${HOME}/.local/share/ai.openclaw.entropic.dev/rnn-runtime"
 STATE_DIR="${ROOT}/state"
 BRIDGE_DIR="${ROOT}/bridge"
 MODELS_DIR="${ROOT}/models"
+ADMIN_TOKEN_FILE="${STATE_DIR}/admin-token"
 SOCKET_PATH="${BRIDGE_DIR}/runtime.sock"
 PYTHON_BIN="${ROOT}/venv/bin/python"
 SERVER_SCRIPT="${PROJECT_ROOT}/src-tauri/resources/share/rnn-runtime/server.py"
 LOG_PATH="/tmp/entropic-local-model-loop-runtime.log"
 
 mkdir -p "${STATE_DIR}" "${BRIDGE_DIR}" "${MODELS_DIR}"
+
+if [[ -s "${ADMIN_TOKEN_FILE}" ]]; then
+  ADMIN_TOKEN="$(tr -d '\r\n' < "${ADMIN_TOKEN_FILE}")"
+else
+  ADMIN_TOKEN="$("${PYTHON_BIN}" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+  umask 077
+  printf '%s\n' "${ADMIN_TOKEN}" > "${ADMIN_TOKEN_FILE}"
+  chmod 600 "${ADMIN_TOKEN_FILE}"
+fi
 
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]]; then
@@ -28,6 +38,7 @@ rm -f "${SOCKET_PATH}"
 
 env \
   ENTROPIC_CAPTURE_TOOL_BRIDGE=1 \
+  ENTROPIC_RNN_RUNTIME_ADMIN_TOKEN="${ADMIN_TOKEN}" \
   PYTHONUNBUFFERED=1 \
   TORCH_EXTENSIONS_DIR="${STATE_DIR}/torch_extensions" \
   HF_HOME="${STATE_DIR}/huggingface" \

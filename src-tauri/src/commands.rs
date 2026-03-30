@@ -84,6 +84,8 @@ const RNN_RUNTIME_BASE_URL: &str = "http://127.0.0.1:11445/v1";
 const RNN_RUNTIME_ROOT_URL: &str = "http://127.0.0.1:11445";
 const RNN_RUNTIME_HEALTH_URL: &str = "http://127.0.0.1:11445/healthz";
 const RNN_RUNTIME_SOCKET_FILE_NAME: &str = "runtime.sock";
+const RNN_RUNTIME_ADMIN_TOKEN_FILE_NAME: &str = "admin-token";
+const RNN_RUNTIME_ADMIN_TOKEN_ENV: &str = "ENTROPIC_RNN_RUNTIME_ADMIN_TOKEN";
 const RNN_RUNTIME_CONTAINER_SOCKET_DIR: &str = "/data/managed-runtime-bridge";
 const RNN_RUNTIME_CONTAINER_SOCKET_PATH: &str = "/data/managed-runtime-bridge/runtime.sock";
 const RNN_RUNTIME_CONTAINER_PROXY_URL: &str = "http://127.0.0.1:11445/v1";
@@ -4503,7 +4505,7 @@ fn state_file(path: &str) -> String {
 
 fn container_dir_exists(path: &str) -> Result<bool, String> {
     Ok(docker_command()
-        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", path])
+        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", "--", path])
         .output()
         .map_err(|e| format!("Failed to inspect container path: {}", e))?
         .status
@@ -6355,17 +6357,7 @@ fn read_container_env(key: &str) -> Option<String> {
 }
 
 fn container_path_exists(path: &str) -> bool {
-    docker_command()
-        .args([
-            "exec",
-            OPENCLAW_CONTAINER,
-            "sh",
-            "-c",
-            &format!("test -d \"{}\"", path),
-        ])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    container_dir_exists(path).unwrap_or(false)
 }
 
 fn container_plugin_exists(plugin_id: &str) -> bool {
@@ -11000,6 +10992,7 @@ struct RnnRuntimePaths {
     root: PathBuf,
     models_dir: PathBuf,
     state_dir: PathBuf,
+    admin_token_file: PathBuf,
     bridge_dir: PathBuf,
     socket_path: PathBuf,
     venv_dir: PathBuf,
@@ -11044,6 +11037,7 @@ fn rnn_runtime_paths(app: &AppHandle) -> Result<RnnRuntimePaths, String> {
     Ok(RnnRuntimePaths {
         models_dir: root.join("models"),
         state_dir: root.join("state"),
+        admin_token_file: root.join("state").join(RNN_RUNTIME_ADMIN_TOKEN_FILE_NAME),
         bridge_dir: root.join("bridge"),
         socket_path: root.join("bridge").join(RNN_RUNTIME_SOCKET_FILE_NAME),
         venv_dir: root.join("venv"),
@@ -11064,6 +11058,36 @@ fn ensure_rnn_runtime_dirs(paths: &RnnRuntimePaths) -> Result<(), String> {
     fs::create_dir_all(&paths.bridge_dir)
         .map_err(|e| format!("Failed to create RNN bridge directory: {}", e))?;
     Ok(())
+}
+
+fn write_rnn_runtime_admin_token(paths: &RnnRuntimePaths, token: &str) -> Result<(), String> {
+    fs::write(&paths.admin_token_file, format!("{}\n", token))
+        .map_err(|e| format!("Failed to write managed runtime admin token: {}", e))?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&paths.admin_token_file, fs::Permissions::from_mode(0o600))
+            .map_err(|e| {
+                format!(
+                    "Failed to secure managed runtime admin token file permissions: {}",
+                    e
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn ensure_rnn_runtime_admin_token(paths: &RnnRuntimePaths) -> Result<String, String> {
+    ensure_rnn_runtime_dirs(paths)?;
+    if let Ok(existing) = fs::read_to_string(&paths.admin_token_file) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    let token = generate_gateway_token();
+    write_rnn_runtime_admin_token(paths, &token)?;
+    Ok(token)
 }
 
 fn clear_rnn_runtime_socket(paths: &RnnRuntimePaths) {
@@ -11645,6 +11669,7 @@ fn stop_rnn_runtime_pid(pid: u32) -> Result<(), String> {
 }
 
 async fn rnn_runtime_json_request(
+    app: &AppHandle,
     method: reqwest::Method,
     path: &str,
     body: Option<serde_json::Value>,
@@ -11656,6 +11681,11 @@ async fn rnn_runtime_json_request(
         .map_err(|e| format!("Failed to create RNN runtime client: {}", e))?;
 
     let mut request = client.request(method, format!("{}{}", RNN_RUNTIME_ROOT_URL, path));
+    if path.starts_with("/api/rnn/") {
+        let paths = rnn_runtime_paths(app)?;
+        let admin_token = ensure_rnn_runtime_admin_token(&paths)?;
+        request = request.bearer_auth(admin_token);
+    }
     if let Some(body) = body {
         request = request.json(&body);
     }
@@ -11818,6 +11848,7 @@ async fn ensure_rnn_runtime_ready(app: &AppHandle) -> Result<RnnRuntimeStatusPay
     }
 
     let python = ensure_rnn_runtime_python_env(app, &paths)?;
+    let admin_token = ensure_rnn_runtime_admin_token(&paths)?;
     let script_path = resolve_rnn_runtime_server_script(app)?;
     let stdout = fs::OpenOptions::new()
         .create(true)
@@ -11860,7 +11891,8 @@ async fn ensure_rnn_runtime_ready(app: &AppHandle) -> Result<RnnRuntimeStatusPay
         .env(
             "TRANSFORMERS_CACHE",
             paths.state_dir.join("huggingface").display().to_string(),
-        );
+        )
+        .env(RNN_RUNTIME_ADMIN_TOKEN_ENV, &admin_token);
     if let Some(parent) = script_path.parent() {
         cmd.current_dir(parent);
     }
@@ -11906,7 +11938,7 @@ pub async fn get_rnn_runtime_status(app: AppHandle) -> Result<RnnRuntimeStatusPa
 #[tauri::command]
 pub async fn get_rnn_catalog(app: AppHandle) -> Result<serde_json::Value, String> {
     ensure_rnn_runtime_ready(&app).await?;
-    rnn_runtime_json_request(reqwest::Method::GET, "/api/rnn/catalog", None, 30).await
+    rnn_runtime_json_request(&app, reqwest::Method::GET, "/api/rnn/catalog", None, 30).await
 }
 
 #[tauri::command]
@@ -11922,6 +11954,7 @@ pub async fn download_rnn_model(
     ensure_rnn_runtime_ready(&app).await?;
     normalize_rnn_action_result(
         rnn_runtime_json_request(
+            &app,
             reqwest::Method::POST,
             "/api/rnn/models/download",
             Some(serde_json::json!({
@@ -11946,6 +11979,7 @@ pub async fn load_rnn_model(
     ensure_rnn_runtime_ready(&app).await?;
     normalize_rnn_action_result(
         rnn_runtime_json_request(
+            &app,
             reqwest::Method::POST,
             "/api/rnn/models/load",
             Some(serde_json::json!({ "modelName": trimmed_model_name })),
@@ -11960,6 +11994,7 @@ pub async fn unload_rnn_model(app: AppHandle) -> Result<serde_json::Value, Strin
     ensure_rnn_runtime_ready(&app).await?;
     normalize_rnn_action_result(
         rnn_runtime_json_request(
+            &app,
             reqwest::Method::POST,
             "/api/rnn/models/unload",
             Some(serde_json::json!({})),
@@ -11981,6 +12016,7 @@ pub async fn delete_rnn_model(
     ensure_rnn_runtime_ready(&app).await?;
     normalize_rnn_action_result(
         rnn_runtime_json_request(
+            &app,
             reqwest::Method::POST,
             "/api/rnn/models/delete",
             Some(serde_json::json!({ "modelName": trimmed_model_name })),
@@ -11998,6 +12034,7 @@ pub async fn warm_rnn_model(
     ensure_rnn_runtime_ready(&app).await?;
     normalize_rnn_action_result(
         rnn_runtime_json_request(
+            &app,
             reqwest::Method::POST,
             "/api/rnn/models/warm",
             Some(serde_json::json!({
@@ -12055,6 +12092,7 @@ pub async fn update_rnn_runtime_config(
     };
     normalize_rnn_action_result(
         rnn_runtime_json_request(
+            &app,
             reqwest::Method::POST,
             "/api/rnn/runtime/config",
             Some(serde_json::json!({ "runtimeConfig": runtime_config })),
@@ -12495,11 +12533,15 @@ fn extract_rnn_catalog_context_window(
         .map(normalize_local_model_context_window)
 }
 
-async fn query_rnn_runtime_context_window(model_name: &str) -> Result<Option<usize>, String> {
+async fn query_rnn_runtime_context_window(
+    app: &AppHandle,
+    model_name: &str,
+) -> Result<Option<usize>, String> {
     if model_name.trim().is_empty() {
         return Ok(None);
     }
-    let payload = rnn_runtime_json_request(reqwest::Method::GET, "/api/rnn/catalog", None, 30).await?;
+    let payload =
+        rnn_runtime_json_request(app, reqwest::Method::GET, "/api/rnn/catalog", None, 30).await?;
     Ok(extract_rnn_catalog_context_window(&payload, model_name)
         .or_else(|| parse_context_window_from_model_name(model_name)))
 }
@@ -12525,7 +12567,7 @@ async fn resolve_local_model_context_window(
             }
         }
     } else if local_model_config.service_type == LocalModelServiceType::RnnLocal {
-        match query_rnn_runtime_context_window(&local_model_config.model_name).await {
+        match query_rnn_runtime_context_window(_app, &local_model_config.model_name).await {
             Ok(Some(context_window)) => return context_window,
             Ok(None) => {}
             Err(err) => {

@@ -1,5 +1,6 @@
 import argparse
 import gc
+import hmac
 import json
 import os
 import re
@@ -2341,6 +2342,7 @@ class RuntimeManager:
             "yes",
             "on",
         }
+        self.admin_token = (os.environ.get("ENTROPIC_RNN_RUNTIME_ADMIN_TOKEN") or "").strip() or None
         self.manager = ModelManager(str(self.models_dir))
         self.lock = threading.RLock()
         self.active_engine = None
@@ -2905,6 +2907,50 @@ def make_handler(runtime: RuntimeManager):
                 return {}
             return json.loads(raw.decode("utf-8"))
 
+        def _request_path(self) -> str:
+            return self.path.split("?", 1)[0]
+
+        def _is_admin_api_request(self) -> bool:
+            return self._request_path().startswith("/api/rnn/")
+
+        def _require_admin_auth(self) -> bool:
+            if not self._is_admin_api_request():
+                return True
+            expected_token = runtime.admin_token
+            if not expected_token:
+                self._json_response(
+                    503,
+                    {
+                        "error": {
+                            "message": "Managed runtime admin API is unavailable because no admin token is configured."
+                        }
+                    },
+                )
+                return False
+            auth_header = self.headers.get("Authorization") or ""
+            if not auth_header.startswith("Bearer "):
+                self._json_response(
+                    401,
+                    {
+                        "error": {
+                            "message": "Missing bearer token for managed runtime admin API."
+                        }
+                    },
+                )
+                return False
+            provided_token = auth_header[len("Bearer ") :].strip()
+            if not hmac.compare_digest(provided_token, expected_token):
+                self._json_response(
+                    401,
+                    {
+                        "error": {
+                            "message": "Invalid bearer token for managed runtime admin API."
+                        }
+                    },
+                )
+                return False
+            return True
+
         def _handle_chat_completions(self) -> None:
             body = self._read_json_body()
             model_name = str(body.get("model") or "").strip()
@@ -3417,10 +3463,11 @@ def make_handler(runtime: RuntimeManager):
                     pass
 
         def do_GET(self) -> None:
-            if self.path == "/healthz":
+            request_path = self._request_path()
+            if request_path == "/healthz":
                 self._json_response(200, runtime.health())
                 return
-            if self.path == "/v1/models":
+            if request_path == "/v1/models":
                 snapshot = runtime.catalog_snapshot()
                 self._json_response(
                     200,
@@ -3437,46 +3484,51 @@ def make_handler(runtime: RuntimeManager):
                     },
                 )
                 return
-            if self.path == "/api/rnn/catalog":
+            if request_path.startswith("/api/rnn/") and not self._require_admin_auth():
+                return
+            if request_path == "/api/rnn/catalog":
                 self._json_response(200, runtime.catalog_snapshot())
                 return
-            if self.path == "/api/rnn/runtime/config":
+            if request_path == "/api/rnn/runtime/config":
                 self._json_response(200, {"runtimeConfig": runtime.runtime_config})
                 return
             self._json_response(404, {"error": {"message": "Not found"}})
 
         def do_POST(self) -> None:
-            if self.path == "/v1/chat/completions":
+            request_path = self._request_path()
+            if request_path == "/v1/chat/completions":
                 self._handle_chat_completions()
+                return
+            if request_path.startswith("/api/rnn/") and not self._require_admin_auth():
                 return
 
             body = self._read_json_body()
             token = str(body.get("hfToken") or "").strip() or None
             try:
-                if self.path == "/api/rnn/models/download":
+                if request_path == "/api/rnn/models/download":
                     self._json_response(
                         200,
                         runtime.download_model(str(body.get("catalogId") or "").strip(), token),
                     )
                     return
-                if self.path == "/api/rnn/models/load":
+                if request_path == "/api/rnn/models/load":
                     self._json_response(
                         200, runtime.load_model(str(body.get("modelName") or "").strip())
                     )
                     return
-                if self.path == "/api/rnn/models/unload":
+                if request_path == "/api/rnn/models/unload":
                     self._json_response(200, runtime.unload_model())
                     return
-                if self.path == "/api/rnn/models/delete":
+                if request_path == "/api/rnn/models/delete":
                     self._json_response(
                         200, runtime.delete_model(str(body.get("modelName") or "").strip())
                     )
                     return
-                if self.path == "/api/rnn/models/warm":
+                if request_path == "/api/rnn/models/warm":
                     model_name = str(body.get("modelName") or "").strip() or None
                     self._json_response(200, runtime.warm_model(model_name))
                     return
-                if self.path == "/api/rnn/runtime/config":
+                if request_path == "/api/rnn/runtime/config":
                     updates = body.get("runtimeConfig")
                     if updates is None:
                         updates = body

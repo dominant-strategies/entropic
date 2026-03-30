@@ -93,7 +93,7 @@ class RWKV_x070(MyModule):
         args.head_size = 64
         self.eval()
         
-        self.z = torch.load(args.MODEL_NAME + '.pth', map_location='cpu', mmap=True)
+        self.z = torch.load(args.MODEL_NAME + '.pth', map_location='cpu', mmap=True, weights_only=True)
         z = self.z
         self.n_head, self.head_size = z['blocks.0.att.r_k'].shape
         args.n_embd = self.n_head * self.head_size

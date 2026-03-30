@@ -1,9 +1,52 @@
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Dict, Generator
 
 from engine import InferenceEngine
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _hf_remote_code_allowed(model_path: str) -> bool:
+    if _env_flag("ENTROPIC_HF_TRUST_REMOTE_CODE"):
+        return True
+
+    allowlist = {
+        entry.strip().lower()
+        for entry in os.environ.get("ENTROPIC_HF_TRUST_REMOTE_CODE_ALLOWLIST", "").split(",")
+        if entry.strip()
+    }
+    if not allowlist:
+        return False
+
+    resolved = Path(model_path).expanduser().resolve()
+    candidates = {
+        model_path.strip().lower(),
+        os.path.basename(model_path.rstrip(os.sep)).lower(),
+        str(resolved).lower(),
+        resolved.name.lower(),
+    }
+    return any(candidate in allowlist for candidate in candidates)
+
+
+def _remote_code_error(model_name: str) -> RuntimeError:
+    return RuntimeError(
+        "Managed Hugging Face remote code is disabled by default for security. "
+        f"Model '{model_name}' requires trust_remote_code. "
+        "To trust only this model, set "
+        f"ENTROPIC_HF_TRUST_REMOTE_CODE_ALLOWLIST={model_name}. "
+        "To trust all Hugging Face models for this session, set "
+        "ENTROPIC_HF_TRUST_REMOTE_CODE=1 and restart the managed runtime."
+    )
+
+
+def _looks_like_remote_code_requirement(error: Exception) -> bool:
+    message = str(error).lower()
+    return "trust_remote_code" in message or "requires you to execute the configuration file" in message
 
 
 class HFEngine(InferenceEngine):
@@ -28,17 +71,27 @@ class HFEngine(InferenceEngine):
         self._streamer_class = TextIteratorStreamer
         self._torch = torch
         self._device = self.detect_device()
+        allow_remote_code = _hf_remote_code_allowed(model_path)
+        model_name = os.path.basename(model_path.rstrip(os.sep))
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.float32,
-            trust_remote_code=True,
-        ).to(self._device)
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_path,
+                trust_remote_code=allow_remote_code,
+            )
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.float32,
+                trust_remote_code=allow_remote_code,
+            ).to(self._device)
+        except Exception as error:
+            if not allow_remote_code and _looks_like_remote_code_requirement(error):
+                raise _remote_code_error(model_name) from error
+            raise
         self.model.eval()
 
         self.model_path = model_path
-        self.model_name = os.path.basename(model_path.rstrip(os.sep))
+        self.model_name = model_name
         self.is_loaded = True
         self.model_info = {
             "device": self._device,

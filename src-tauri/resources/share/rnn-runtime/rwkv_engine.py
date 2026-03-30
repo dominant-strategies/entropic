@@ -275,7 +275,7 @@ class RWKVEngine(InferenceEngine):
         dtype = torch.float16
         started_at = time.time()
 
-        weights = torch.load(model_path, map_location="cpu", weights_only=False)
+        weights = torch.load(model_path, map_location="cpu", weights_only=True)
         self.version = self._detect_version(list(weights.keys()))
         self.n_embd = weights["blocks.0.ln1.weight"].shape[0]
         self.n_layer, size_name = RWKV_CONFIGS.get(
