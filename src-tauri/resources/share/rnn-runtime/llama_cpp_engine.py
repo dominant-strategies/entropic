@@ -1,5 +1,7 @@
 import os
+import re
 import time
+from urllib.parse import quote_plus
 from typing import Any, Dict, Generator, Optional
 
 from engine import InferenceEngine
@@ -10,10 +12,88 @@ LOCAL_TOOL_USE_SYSTEM_GUIDANCE = (
     "Never say you will search, check, look up, or use a tool later. "
     "Either emit the tool call immediately or answer directly from an existing tool result. "
     "If web_search is unavailable, use browser or web_fetch when they are present instead of refusing just because search is missing. "
+    "Do not use configuration-changing or environment-changing tools for ordinary user requests. "
+    "Do not call exec, gateway, or setup/config commands unless the user explicitly asked you to configure, install, debug, repair, or change the system. "
+    "For requests like weather, news, prices, websites, and current information, prefer information-gathering tools over configuration or repair commands. "
+    "For weather, news, prices, schedules, and other live information, never answer from memory when tools are available. "
+    "For those requests, emit a real tool call first and return no prose before the tool call. "
+    "Prefer web_search first, then web_fetch or browser. "
+    "If web_search fails or is unavailable, immediately try web_fetch or browser in the same conversation instead of asking the user to configure search first. "
+    "For simple public weather lookups with web_fetch, prefer lightweight endpoints like wttr.in with a direct city query instead of JavaScript-heavy weather pages. "
+    "Do not use exec for public web lookups if web_search, web_fetch, or browser are available. "
     "After tool results arrive, answer the user directly in plain language. "
+    "If a tool result already contains the requested live information, answer from that result directly. "
+    "Do not second-guess the observation date or speculate about mock data unless the user explicitly asks about timestamps or data quality. "
     "Do not mention tool names, do not say phrases like 'the tool returned', "
     "and do not expose hidden reasoning."
 )
+LIVE_INFO_REQUEST_RE = re.compile(
+    r"\b(weather|forecast|temperature|rain|snow|news|headline|stock|price|market|score|scores|schedule|current|currently|latest|today|tonight|right now)\b",
+    re.IGNORECASE,
+)
+MEMORY_REQUEST_RE = re.compile(r"\bmemory\b", re.IGNORECASE)
+
+
+def _latest_user_message_text(messages: list) -> str:
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip().lower()
+        if role != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if content is None:
+            return ""
+        return str(content).strip()
+    return ""
+
+
+def _latest_tool_message_text(messages: list) -> str:
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip().lower()
+        if role != "tool":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if content is None:
+            return ""
+        return str(content).strip()
+    return ""
+
+
+def _extract_available_tool_names(tools: Optional[list]) -> set[str]:
+    names: set[str] = set()
+    if not tools:
+        return names
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = str(function.get("name") or "").strip().lower()
+        if name:
+            names.add(name)
+    return names
+
+
+def _derive_weather_location_query(text: str) -> str:
+    normalized = (text or "").strip()
+    if not normalized:
+        return ""
+    match = re.search(r"\bweather\b(?:[^a-z0-9]+(?:in|for))?\s+(.+)$", normalized, re.IGNORECASE)
+    if not match:
+        match = re.search(r"\b(?:in|for)\s+(.+)$", normalized, re.IGNORECASE)
+    if not match:
+        return ""
+    location = match.group(1).strip().strip("?.!,/ ")
+    location = re.sub(r"^(the|a)\s+", "", location, flags=re.IGNORECASE)
+    return quote_plus(location) if location else ""
 
 
 class LlamaCppEngine(InferenceEngine):
@@ -240,8 +320,50 @@ class LlamaCppEngine(InferenceEngine):
             input_chars += len(text)
 
         if tools:
+            live_info_guidance = None
+            memory_guidance = None
+            latest_user_text = _latest_user_message_text(normalized_messages)
+            latest_tool_text = _latest_tool_message_text(normalized_messages)
+            available_tool_names = _extract_available_tool_names(tools)
+            if latest_user_text and LIVE_INFO_REQUEST_RE.search(latest_user_text):
+                live_info_guidance = (
+                    "Latest user request needs live external information. "
+                    "You must call an information-gathering tool before answering. "
+                    "Do not answer from memory. "
+                    "Do not narrate your plan. "
+                    "If the first tool fails, immediately try another information-gathering tool when one is available. "
+                    "Only explain the failure if no suitable fallback tool is available."
+                )
+            if latest_user_text and MEMORY_REQUEST_RE.search(latest_user_text):
+                memory_guidance = (
+                    "Latest user request is about MEMORY. "
+                    "Use memory_search first when you need to find relevant notes. "
+                    "Only use memory_get if you specifically need to fetch a snippet or read a returned entry. "
+                    "After a successful MEMORY result, answer directly from that result instead of calling memory_search again."
+                )
+            fallback_guidance = None
+            if (
+                latest_tool_text
+                and "missing_brave_api_key" in latest_tool_text.lower()
+                and available_tool_names.intersection({"web_fetch", "browser"})
+            ):
+                fallback_guidance = (
+                    "The previous tool attempt failed because web_search is unavailable "
+                    "(missing_brave_api_key). Do not call web_search again in this conversation. "
+                    "Use web_fetch or browser now. Do not answer from memory."
+                )
+                if "weather" in (latest_user_text or "").lower() and "web_fetch" in available_tool_names:
+                    location_query = _derive_weather_location_query(latest_user_text)
+                    if location_query:
+                        fallback_guidance += (
+                            f" For this weather request, prefer a direct web_fetch call to "
+                            f"https://wttr.in/{location_query}?format=j1."
+                        )
             normalized_messages = [
                 {"role": "system", "content": LOCAL_TOOL_USE_SYSTEM_GUIDANCE},
+                *([{"role": "system", "content": live_info_guidance}] if live_info_guidance else []),
+                *([{"role": "system", "content": memory_guidance}] if memory_guidance else []),
+                *([{"role": "system", "content": fallback_guidance}] if fallback_guidance else []),
                 *normalized_messages,
             ]
 

@@ -491,6 +491,10 @@ export function sanitizeAssistantDisplayContent(raw: string): string {
   let text = stripConversationMetadata(raw);
   text = stripExternalUntrustedSections(text);
   text = stripOpenClawStatusLines(text);
+  text = text.replace(/<\/?tool_call>\s*/gi, "");
+  text = text.replace(/<\/?function(?:=[^>]+)?>\s*/gi, "");
+  text = text.replace(/<\/?parameter(?:=[^>]+)?>\s*/gi, "");
+  text = text.replace(/^\s*(?:assistant|user|system|tool)\s*:?\s*$/gim, "");
 
   try {
     const direct = JSON.parse(text);
@@ -524,7 +528,11 @@ export function sanitizeAssistantDisplayContent(raw: string): string {
   text = stripInlineClawdbotMetadata(text);
 
   text = sanitizeAuthStoreDetails(text);
-  return text.replace(/\n{3,}/g, "\n\n").trim();
+  text = text.replace(/\n{3,}/g, "\n\n").trim();
+  if (/^(?:assistant|user|system|tool)$/i.test(text)) {
+    return "";
+  }
+  return text;
 }
 
 export function buildAssistantPayload(raw: string) {

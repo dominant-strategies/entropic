@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "packs": [
+    {
+      "id": "safe_core",
+      "description": "Safe local-tool coverage across workspace, memory, web fetch, browser, and session inspection.",
+      "categories": ["workspace", "memory", "web", "browser_canvas", "device_session"],
+      "tools": [
+        "read",
+        "edit",
+        "write",
+        "exec",
+        "process",
+        "memory_search",
+        "memory_get",
+        "web_fetch",
+        "browser",
+        "canvas",
+        "nodes",
+        "agents_list",
+        "sessions_list",
+        "sessions_history",
+        "subagents",
+        "session_status"
+      ],
+      "families": ["direct", "polite", "tool_hint"]
+    },
+    {
+      "id": "knowledge_safe",
+      "description": "Knowledge and current-info coverage for animals, clothing, news, politics, space research, and gardening without credentialed search.",
+      "tools": ["web_fetch", "browser", "memory_search", "memory_get"],
+      "cases": [
+        "fetch_animals",
+        "fetch_clothing",
+        "fetch_news_site",
+        "fetch_politics",
+        "fetch_space_research",
+        "fetch_gardening",
+        "browser_animals",
+        "browser_news_site",
+        "browser_clothing",
+        "browser_politics",
+        "browser_space_research",
+        "browser_gardening",
+        "memory_animals",
+        "memory_clothing",
+        "memory_politics",
+        "memory_space",
+        "memory_gardening",
+        "memory_get_space",
+        "memory_get_gardening"
+      ],
+      "families": ["direct", "polite", "tool_hint", "followup"]
+    },
+    {
+      "id": "web_current_info",
+      "description": "Current-info oriented browser and fetch cases that should generalize across weather, news, politics, and research.",
+      "tools": ["web_fetch", "browser"],
+      "cases": [
+        "fetch_news_site",
+        "fetch_politics",
+        "fetch_space_research",
+        "fetch_gardening",
+        "browser_news_site",
+        "browser_politics",
+        "browser_space_research",
+        "browser_gardening"
+      ],
+      "families": ["direct", "polite", "followup"]
+    },
+    {
+      "id": "memory_domains",
+      "description": "Memory-only domain fuzzing for animals, clothing, politics, space, and gardening.",
+      "tools": ["memory_search", "memory_get"],
+      "cases": [
+        "memory_animals",
+        "memory_clothing",
+        "memory_politics",
+        "memory_space",
+        "memory_gardening",
+        "memory_get_space",
+        "memory_get_gardening"
+      ],
+      "families": ["direct", "polite", "tool_hint"]
+    },
+    {
+      "id": "workspace_safe",
+      "description": "Safe workspace and process tooling without external credentials.",
+      "categories": ["workspace"],
+      "families": ["direct", "polite", "tool_hint"]
+    }
+  ]
+}

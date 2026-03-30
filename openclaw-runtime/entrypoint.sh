@@ -5,7 +5,7 @@ set -e
 # Keys stay in memory (tmpfs), never written to host disk
 
 json_escape() {
-    node -e 'const v = process.argv[1] ?? ""; process.stdout.write(JSON.stringify(v).slice(1,-1));' "$1"
+    node -e 'const v = process.argv[1] ?? ""; process.stdout.write(JSON.stringify(v).slice(1,-1));' -- "$1"
 }
 
 resolve_entropic_skill_path() {
@@ -362,6 +362,11 @@ if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
     \"auth\": { \"token\": \"${OPENCLAW_GATEWAY_TOKEN_ESC}\" }"
 fi
 
+CONTROL_UI_DISABLE_DEVICE_AUTH_JSON="false"
+if [ "${ENTROPIC_GATEWAY_DISABLE_DEVICE_AUTH:-0}" = "1" ]; then
+    CONTROL_UI_DISABLE_DEVICE_AUTH_JSON="true"
+fi
+
 if [ -n "${OPENCLAW_MODEL:-}" ]; then
     OPENCLAW_MODEL_ESC="$(json_escape "${OPENCLAW_MODEL}")"
     IMAGE_MODEL_BLOCK=""
@@ -490,7 +495,7 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
       "http://127.0.0.1:5174"
       ],
       "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": false
+      "dangerouslyDisableDeviceAuth": ${CONTROL_UI_DISABLE_DEVICE_AUTH_JSON}
     }${GATEWAY_AUTH_BLOCK}
   },
   "plugins": {
@@ -521,8 +526,9 @@ const pruneLegacyControlUiFallback = (value) => {
   if (!gateway || typeof gateway !== 'object' || Array.isArray(gateway)) return;
   const controlUi = gateway.controlUi;
   if (!controlUi || typeof controlUi !== 'object' || Array.isArray(controlUi)) return;
+  const disableDeviceAuth = process.env.ENTROPIC_GATEWAY_DISABLE_DEVICE_AUTH === '1';
   delete controlUi.dangerouslyAllowHostHeaderOriginFallback;
-  controlUi.dangerouslyDisableDeviceAuth = false;
+  controlUi.dangerouslyDisableDeviceAuth = disableDeviceAuth;
 };
 
 const stripBundledPluginOverrides = (value) => {

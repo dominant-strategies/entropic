@@ -1,0 +1,776 @@
+{
+  "version": 1,
+  "fixtureRootTemplate": "{{FIXTURE_ROOT}}",
+  "fuzzFamilies": {
+    "direct": "Use the base scenario exactly as written.",
+    "polite": "Prefix the final user turn with a polite request.",
+    "terse": "Shorten the final user turn and remove extra context.",
+    "noisy": "Add punctuation noise, casing variation, or line breaks to the final user turn.",
+    "tool_hint": "Append a hint that the assistant should use the appropriate tool instead of answering from memory.",
+    "followup": "Add a short follow-up turn asking for the result or a summary."
+  },
+  "tools": [
+    {
+      "tool": "read",
+      "category": "workspace",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["read"],
+      "fuzzFamilies": ["direct", "polite", "noisy"],
+      "messages": [
+        "Read AGENTS.md and tell me the first sentence."
+      ]
+    },
+    {
+      "tool": "edit",
+      "category": "workspace",
+      "risk": "fixture",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["write", "edit"],
+      "fuzzFamilies": ["direct", "polite", "tool_hint"],
+      "messages": [
+        "Write the text 'ALPHA marker' to local-harness/edit-target.txt, then edit that file so ALPHA becomes BETA, and tell me the final contents."
+      ]
+    },
+    {
+      "tool": "write",
+      "category": "workspace",
+      "risk": "fixture",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["write"],
+      "fuzzFamilies": ["direct", "polite", "tool_hint"],
+      "messages": [
+        "Write a short haiku about local models to local-harness/write-output.txt and confirm the file path."
+      ]
+    },
+    {
+      "tool": "exec",
+      "category": "workspace",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["exec"],
+      "fuzzFamilies": ["direct", "polite", "terse"],
+      "messages": [
+        "Use exec to run `pwd` and `ls /data/.openclaw/workspace`, then summarize the results."
+      ]
+    },
+    {
+      "tool": "process",
+      "category": "workspace",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["exec", "process"],
+      "fuzzFamilies": ["direct", "polite", "tool_hint"],
+      "messages": [
+        "Use exec to start `sleep 2` in the background, then use process to check its status and tell me when it exits."
+      ]
+    },
+    {
+      "tool": "browser",
+      "category": "browser_canvas",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["browser"],
+      "fuzzFamilies": ["direct", "polite", "followup"],
+      "cases": [
+        {
+          "id": "browser_example",
+          "description": "Simple browser sanity check.",
+          "messages": [
+            "Open https://example.com in the browser and tell me the page title."
+          ]
+        },
+        {
+          "id": "browser_animals",
+          "description": "Animal lookup via browser.",
+          "messages": [
+            "Open https://en.wikipedia.org/wiki/Axolotl in the browser and tell me the page title and one sentence about the animal."
+          ]
+        },
+        {
+          "id": "browser_news_site",
+          "description": "News site homepage via browser.",
+          "messages": [
+            "Open https://apnews.com/ in the browser and tell me the page title and one visible headline."
+          ]
+        },
+        {
+          "id": "browser_clothing",
+          "description": "Clothing guide via browser.",
+          "messages": [
+            "Open https://www.rei.com/learn/expert-advice/layering-basics.html in the browser and tell me the page title plus one layering takeaway."
+          ]
+        },
+        {
+          "id": "browser_politics",
+          "description": "Politics-oriented page via browser.",
+          "messages": [
+            "Open https://www.bbc.com/news/politics in the browser and tell me the page title and one visible headline."
+          ]
+        },
+        {
+          "id": "browser_space_research",
+          "description": "Space research page via browser.",
+          "messages": [
+            "Open https://science.nasa.gov/astrophysics/ in the browser and tell me the page title plus one visible research topic."
+          ]
+        },
+        {
+          "id": "browser_gardening",
+          "description": "Gardening guide via browser.",
+          "messages": [
+            "Open https://extension.umn.edu/planting-and-growing-guides in the browser and tell me the page title plus one gardening topic you see."
+          ]
+        }
+      ]
+    },
+    {
+      "tool": "canvas",
+      "category": "browser_canvas",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["canvas"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Check whether any canvases are available and report what you find."
+      ]
+    },
+    {
+      "tool": "nodes",
+      "category": "device_session",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["nodes"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Check whether any paired nodes are connected and report what you find."
+      ]
+    },
+    {
+      "tool": "cron",
+      "category": "device_session",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["cron"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Create a reminder job two minutes from now with the text 'local tool harness test', then tell me the job id."
+      ],
+      "preconditions": ["Gateway cron support enabled"]
+    },
+    {
+      "tool": "message",
+      "category": "device_session",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["message"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "If messaging channels are available, send a short test message that says 'local tool harness ping' and tell me where it was sent."
+      ],
+      "preconditions": ["At least one writable message channel"]
+    },
+    {
+      "tool": "tts",
+      "category": "device_session",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["tts"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Use text to speech to say 'local tool harness test' and tell me whether playback started."
+      ]
+    },
+    {
+      "tool": "gateway",
+      "category": "device_session",
+      "risk": "admin",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["gateway"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Use the gateway tool to inspect the config schema root or show gateway status, then summarize it."
+      ]
+    },
+    {
+      "tool": "agents_list",
+      "category": "device_session",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["agents_list"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "List the subagent-capable OpenClaw agent ids available to this session."
+      ]
+    },
+    {
+      "tool": "sessions_list",
+      "category": "device_session",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["sessions_list"],
+      "fuzzFamilies": ["direct", "polite", "followup"],
+      "messages": [
+        "List recent sessions and tell me how many are available."
+      ]
+    },
+    {
+      "tool": "sessions_history",
+      "category": "device_session",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["sessions_list", "sessions_history"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Use sessions_list to find one recent session, then fetch a short history for that session and summarize the last exchange."
+      ]
+    },
+    {
+      "tool": "sessions_send",
+      "category": "device_session",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["sessions_list", "sessions_send"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Use sessions_list to find a recent session other than this one, then send it a short ping saying 'local harness ping'."
+      ],
+      "preconditions": ["At least one writable target session"]
+    },
+    {
+      "tool": "sessions_yield",
+      "category": "device_session",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["sessions_yield"],
+      "fuzzFamilies": ["direct"],
+      "messages": [
+        "Use sessions_yield to end the current turn after telling me you are yielding."
+      ]
+    },
+    {
+      "tool": "sessions_spawn",
+      "category": "device_session",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["sessions_spawn"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Spawn an isolated subagent session that says hello and report the new session id."
+      ],
+      "preconditions": ["Session spawning enabled in the gateway"]
+    },
+    {
+      "tool": "subagents",
+      "category": "device_session",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["subagents"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "List any currently running subagents for this session and summarize their state."
+      ]
+    },
+    {
+      "tool": "session_status",
+      "category": "device_session",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["session_status"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Show the current session status card and summarize the key fields."
+      ]
+    },
+    {
+      "tool": "web_search",
+      "category": "web",
+      "risk": "credentialed",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["web_search"],
+      "fuzzFamilies": ["direct", "polite", "tool_hint", "followup"],
+      "cases": [
+        {
+          "id": "search_weather",
+          "description": "Current weather lookup.",
+          "messages": [
+            "Search the web for the current weather in Austin, Texas, and summarize the first useful result."
+          ]
+        },
+        {
+          "id": "search_animals",
+          "description": "Animal information lookup.",
+          "messages": [
+            "Search the web for a reliable source about axolotls and summarize one notable fact."
+          ]
+        },
+        {
+          "id": "search_clothing",
+          "description": "Clothing advice lookup.",
+          "messages": [
+            "Search the web for advice about layering clothes for cold weather and summarize one useful recommendation."
+          ]
+        },
+        {
+          "id": "search_news_site",
+          "description": "News site lookup.",
+          "messages": [
+            "Search the web for the AP News homepage and summarize one current headline."
+          ]
+        },
+        {
+          "id": "search_politics",
+          "description": "Politics news lookup.",
+          "messages": [
+            "Search the web for a current U.S. politics headline from a major news outlet and summarize it."
+          ]
+        },
+        {
+          "id": "search_space_research",
+          "description": "Space research lookup.",
+          "messages": [
+            "Search the web for a current NASA or ESA space research update and summarize one key point."
+          ]
+        },
+        {
+          "id": "search_gardening",
+          "description": "Gardening advice lookup.",
+          "messages": [
+            "Search the web for spring vegetable gardening advice and summarize one practical tip."
+          ]
+        }
+      ],
+      "preconditions": ["Brave Search API key or another configured web search backend"]
+    },
+    {
+      "tool": "web_fetch",
+      "category": "web",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["web_fetch"],
+      "fuzzFamilies": ["direct", "polite", "tool_hint"],
+      "cases": [
+        {
+          "id": "fetch_example",
+          "description": "Simple web_fetch sanity check.",
+          "messages": [
+            "Fetch https://example.com with web_fetch and tell me the page title."
+          ]
+        },
+        {
+          "id": "fetch_news_site",
+          "description": "News homepage fetch.",
+          "messages": [
+            "Fetch https://apnews.com/ with web_fetch and summarize the page title plus one visible headline."
+          ]
+        },
+        {
+          "id": "fetch_clothing",
+          "description": "Clothing-related fetch.",
+          "messages": [
+            "Fetch https://www.rei.com/learn/expert-advice/layering-basics.html with web_fetch and summarize the page title plus one clothing-layering takeaway."
+          ]
+        },
+        {
+          "id": "fetch_space_research",
+          "description": "Space research fetch.",
+          "messages": [
+            "Fetch https://science.nasa.gov/astrophysics/ with web_fetch and summarize the page title plus one sentence about the research area."
+          ]
+        },
+        {
+          "id": "fetch_gardening",
+          "description": "Gardening guide fetch.",
+          "messages": [
+            "Fetch https://extension.umn.edu/planting-and-growing-guides with web_fetch and summarize the page title plus one gardening topic you find."
+          ]
+        },
+        {
+          "id": "fetch_animals",
+          "description": "Animal-related fetch.",
+          "messages": [
+            "Fetch https://en.wikipedia.org/wiki/Axolotl with web_fetch and summarize the page title plus one sentence about the animal."
+          ]
+        },
+        {
+          "id": "fetch_politics",
+          "description": "Politics-related fetch.",
+          "messages": [
+            "Fetch https://www.congress.gov/ with web_fetch and summarize the page title plus one politics-related section you see."
+          ]
+        }
+      ]
+    },
+    {
+      "tool": "gmail_search",
+      "category": "google_mail",
+      "risk": "credentialed",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["gmail_search"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Search Gmail for unread messages from the last 7 days and summarize the first result."
+      ],
+      "preconditions": ["Authenticated Gmail connector"]
+    },
+    {
+      "tool": "gmail_get",
+      "category": "google_mail",
+      "risk": "credentialed",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["gmail_search", "gmail_get"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Find one recent Gmail message and then fetch it by id, summarizing the sender and subject."
+      ],
+      "preconditions": ["Authenticated Gmail connector"]
+    },
+    {
+      "tool": "gmail_send",
+      "category": "google_mail",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["gmail_send"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Send a short test email to my own address with subject 'Local Harness Test' and body 'This is a local tool harness test.'"
+      ],
+      "preconditions": ["Authenticated Gmail connector", "Known safe recipient address"]
+    },
+    {
+      "tool": "gmail_draft",
+      "category": "google_mail",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["gmail_draft"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Create a Gmail draft to my own address with subject 'Local Harness Draft' and body 'Draft created by the local tool harness.'"
+      ],
+      "preconditions": ["Authenticated Gmail connector", "Known safe recipient address"]
+    },
+    {
+      "tool": "calendar_list",
+      "category": "google_calendar",
+      "risk": "credentialed",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["calendar_list"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "List my upcoming Google Calendar events for the next 7 days and summarize the first two."
+      ],
+      "preconditions": ["Authenticated Google Calendar connector"]
+    },
+    {
+      "tool": "calendar_create",
+      "category": "google_calendar",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["calendar_create"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Create a calendar event tomorrow at 3 PM titled 'Local Harness Test Event' lasting 15 minutes and report the event id."
+      ],
+      "preconditions": ["Authenticated Google Calendar connector"]
+    },
+    {
+      "tool": "drive_list",
+      "category": "google_drive",
+      "risk": "credentialed",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["drive_list"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "List the most recent files in Google Drive and summarize the first five."
+      ],
+      "preconditions": ["Authenticated Google Drive connector"]
+    },
+    {
+      "tool": "drive_search",
+      "category": "google_drive",
+      "risk": "credentialed",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["drive_search"],
+      "fuzzFamilies": ["direct", "polite", "tool_hint"],
+      "messages": [
+        "Search Google Drive for files related to 'test' and summarize the first result."
+      ],
+      "preconditions": ["Authenticated Google Drive connector"]
+    },
+    {
+      "tool": "drive_download",
+      "category": "google_drive",
+      "risk": "credentialed",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["drive_search", "drive_download"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Find a small text file in Google Drive, download it, and summarize the first few lines."
+      ],
+      "preconditions": ["Authenticated Google Drive connector", "At least one downloadable text file"]
+    },
+    {
+      "tool": "drive_upload",
+      "category": "google_drive",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["write", "drive_upload"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Write a short file to local-harness/upload-source.txt, then upload it to Google Drive and report the new file id."
+      ],
+      "preconditions": ["Authenticated Google Drive connector"]
+    },
+    {
+      "tool": "drive_share",
+      "category": "google_drive",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["drive_search", "drive_share"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Find a safe test file in Google Drive and share it with a safe recipient email, then report the permission result."
+      ],
+      "preconditions": ["Authenticated Google Drive connector", "Known safe recipient address"]
+    },
+    {
+      "tool": "drive_create_folder",
+      "category": "google_drive",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["drive_create_folder"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Create a Google Drive folder named 'Local Harness Test Folder' and report the folder id."
+      ],
+      "preconditions": ["Authenticated Google Drive connector"]
+    },
+    {
+      "tool": "sheets_read",
+      "category": "google_sheets",
+      "risk": "credentialed",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["sheets_read"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Read a small Google Sheets spreadsheet and summarize the first worksheet and its first few rows."
+      ],
+      "preconditions": ["Authenticated Google Sheets connector", "Known test spreadsheet"]
+    },
+    {
+      "tool": "sheets_write",
+      "category": "google_sheets",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["sheets_write"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Write a short test value into a known Google Sheets test spreadsheet and confirm the written range."
+      ],
+      "preconditions": ["Authenticated Google Sheets connector", "Known writable test spreadsheet"]
+    },
+    {
+      "tool": "sheets_create",
+      "category": "google_sheets",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["sheets_create"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Create a new Google Sheets spreadsheet named 'Local Harness Test Sheet' and report the spreadsheet id."
+      ],
+      "preconditions": ["Authenticated Google Sheets connector"]
+    },
+    {
+      "tool": "sheets_append",
+      "category": "google_sheets",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["sheets_append"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Append one row of test data to a known Google Sheets test spreadsheet and confirm the appended range."
+      ],
+      "preconditions": ["Authenticated Google Sheets connector", "Known writable test spreadsheet"]
+    },
+    {
+      "tool": "docs_read",
+      "category": "google_docs",
+      "risk": "credentialed",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["docs_read"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Read a Google Doc and summarize its opening paragraph."
+      ],
+      "preconditions": ["Authenticated Google Docs connector", "Known test document"]
+    },
+    {
+      "tool": "docs_edit",
+      "category": "google_docs",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["docs_edit"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Insert the text 'Local harness test edit.' into a known Google Doc and confirm the edit."
+      ],
+      "preconditions": ["Authenticated Google Docs connector", "Known writable test document"]
+    },
+    {
+      "tool": "docs_create",
+      "category": "google_docs",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["docs_create"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Create a new Google Doc titled 'Local Harness Test Doc' with a one-sentence body and report the document id."
+      ],
+      "preconditions": ["Authenticated Google Docs connector"]
+    },
+    {
+      "tool": "contacts_list",
+      "category": "google_contacts",
+      "risk": "credentialed",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["contacts_list"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "List a few contacts from Google Contacts and summarize the first three."
+      ],
+      "preconditions": ["Authenticated Google Contacts connector"]
+    },
+    {
+      "tool": "contacts_search",
+      "category": "google_contacts",
+      "risk": "credentialed",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["contacts_search"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Search Google Contacts for my own name or email and summarize the best match."
+      ],
+      "preconditions": ["Authenticated Google Contacts connector"]
+    },
+    {
+      "tool": "tasks_list",
+      "category": "google_tasks",
+      "risk": "credentialed",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["tasks_list"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "List the current Google Tasks items and summarize the first few."
+      ],
+      "preconditions": ["Authenticated Google Tasks connector"]
+    },
+    {
+      "tool": "tasks_create",
+      "category": "google_tasks",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["tasks_create"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Create a Google Task titled 'Local Harness Test Task' due tomorrow and report the task id."
+      ],
+      "preconditions": ["Authenticated Google Tasks connector"]
+    },
+    {
+      "tool": "tasks_update",
+      "category": "google_tasks",
+      "risk": "side_effect",
+      "defaultEnabled": false,
+      "acceptedToolNames": ["tasks_list", "tasks_update"],
+      "fuzzFamilies": ["direct", "polite"],
+      "messages": [
+        "Find a known test task in Google Tasks and mark it complete, then confirm the update."
+      ],
+      "preconditions": ["Authenticated Google Tasks connector", "Known writable test task"]
+    },
+    {
+      "tool": "memory_search",
+      "category": "memory",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["memory_search"],
+      "fuzzFamilies": ["direct", "polite", "tool_hint"],
+      "cases": [
+        {
+          "id": "memory_local_models",
+          "description": "Search memory for local-model notes.",
+          "messages": [
+            "Search MEMORY for notes about local model testing and summarize what you find."
+          ]
+        },
+        {
+          "id": "memory_animals",
+          "description": "Search memory for an animals topic.",
+          "messages": [
+            "Search MEMORY for anything about axolotls, salamanders, or animal research and summarize the result, even if nothing matches."
+          ]
+        },
+        {
+          "id": "memory_clothing",
+          "description": "Search memory for clothing topic.",
+          "messages": [
+            "Search MEMORY for anything about clothing, layering, or apparel advice and summarize the result, even if nothing matches."
+          ]
+        },
+        {
+          "id": "memory_politics",
+          "description": "Search memory for politics topic.",
+          "messages": [
+            "Search MEMORY for anything about politics, elections, or policy notes and summarize the result, even if nothing matches."
+          ]
+        },
+        {
+          "id": "memory_space",
+          "description": "Search memory for space research topic.",
+          "messages": [
+            "Search MEMORY for anything about NASA, astronomy, or space research and summarize the result, even if nothing matches."
+          ]
+        },
+        {
+          "id": "memory_gardening",
+          "description": "Search memory for gardening topic.",
+          "messages": [
+            "Search MEMORY for anything about gardening, plants, or soil care and summarize the result, even if nothing matches."
+          ]
+        }
+      ]
+    },
+    {
+      "tool": "memory_get",
+      "category": "memory",
+      "risk": "safe",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["memory_search", "memory_get"],
+      "fuzzFamilies": ["direct", "polite"],
+      "cases": [
+        {
+          "id": "memory_get_local_models",
+          "description": "Search then fetch a local-model memory.",
+          "messages": [
+            "Find a relevant MEMORY entry about local model testing, read a safe snippet from it, and summarize the snippet."
+          ]
+        },
+        {
+          "id": "memory_get_space",
+          "description": "Search then fetch a space-related memory if available.",
+          "messages": [
+            "Find a MEMORY entry about space, astronomy, or NASA if one exists, read a safe snippet from it, and summarize the snippet. If nothing matches, say so."
+          ]
+        },
+        {
+          "id": "memory_get_gardening",
+          "description": "Search then fetch a gardening-related memory if available.",
+          "messages": [
+            "Find a MEMORY entry about gardening or plants if one exists, read a safe snippet from it, and summarize the snippet. If nothing matches, say so."
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,137 @@
+{
+  "profiles": [
+    {
+      "id": "managed-nemotron3-nano-4b",
+      "description": "Managed Local Runtime via Entropic using NVIDIA Nemotron 3 Nano 4B.",
+      "connectionMode": "local-models",
+      "harnessMode": "live",
+      "selectedModel": "local/NVIDIA-Nemotron3-Nano-4B-Q4_K_M",
+      "localModelConfig": {
+        "enabled": true,
+        "serviceType": "rnn-local",
+        "apiMode": "openai-completions",
+        "baseUrl": "http://localhost:11445/v1",
+        "apiKey": "local-placeholder",
+        "modelName": "NVIDIA-Nemotron3-Nano-4B-Q4_K_M",
+        "allowNonLocal": false
+      }
+    },
+    {
+      "id": "managed-rwkv-world-2.9b",
+      "description": "Managed Local Runtime via Entropic using RWKV World 2.9B.",
+      "connectionMode": "local-models",
+      "harnessMode": "live",
+      "selectedModel": "local/RWKV-x070-World-2.9B-v3-20250211-ctx4096",
+      "localModelConfig": {
+        "enabled": true,
+        "serviceType": "rnn-local",
+        "apiMode": "openai-completions",
+        "baseUrl": "http://localhost:11445/v1",
+        "apiKey": "local-placeholder",
+        "modelName": "RWKV-x070-World-2.9B-v3-20250211-ctx4096",
+        "allowNonLocal": false
+      }
+    },
+    {
+      "id": "managed-rwkv-g1e-13.3b",
+      "description": "Managed Local Runtime via Entropic using RWKV7 G1e 13.3B GGUF.",
+      "connectionMode": "local-models",
+      "harnessMode": "live",
+      "selectedModel": "local/rwkv7-g1e-13.3b-Q4_K_M-better_quantization-20260319",
+      "localModelConfig": {
+        "enabled": true,
+        "serviceType": "rnn-local",
+        "apiMode": "openai-completions",
+        "baseUrl": "http://localhost:11445/v1",
+        "apiKey": "local-placeholder",
+        "modelName": "rwkv7-g1e-13.3b-Q4_K_M-better_quantization-20260319",
+        "allowNonLocal": false
+      }
+    },
+    {
+      "id": "local-models-openai-compatible-template",
+      "description": "Template for Local Models mode against a standalone OpenAI-compatible local endpoint.",
+      "template": true,
+      "connectionMode": "local-models",
+      "harnessMode": "plain",
+      "selectedModel": "local/REPLACE_ME",
+      "localModelConfig": {
+        "enabled": true,
+        "serviceType": "openai-compatible",
+        "apiMode": "openai-completions",
+        "baseUrl": "http://localhost:1234/v1",
+        "apiKey": "local-placeholder",
+        "modelName": "REPLACE_ME",
+        "allowNonLocal": false
+      }
+    },
+    {
+      "id": "byok-openai-compatible-template",
+      "description": "Template for BYOK mode against an OpenAI-compatible provider or local server.",
+      "template": true,
+      "connectionMode": "byok",
+      "harnessMode": "plain",
+      "selectedModel": "local/REPLACE_ME",
+      "localModelConfig": {
+        "enabled": true,
+        "serviceType": "openai-compatible",
+        "apiMode": "openai-completions",
+        "baseUrl": "http://localhost:1234/v1",
+        "apiKey": "local-placeholder",
+        "modelName": "REPLACE_ME",
+        "allowNonLocal": true
+      }
+    },
+    {
+      "id": "local-models-ollama-template",
+      "description": "Template for Local Models mode against Ollama.",
+      "template": true,
+      "connectionMode": "local-models",
+      "harnessMode": "plain",
+      "selectedModel": "local/REPLACE_ME",
+      "localModelConfig": {
+        "enabled": true,
+        "serviceType": "ollama",
+        "apiMode": "ollama",
+        "baseUrl": "http://localhost:11434",
+        "apiKey": "local-placeholder",
+        "modelName": "REPLACE_ME",
+        "allowNonLocal": false
+      }
+    },
+    {
+      "id": "local-models-lmstudio-template",
+      "description": "Template for Local Models mode against LM Studio.",
+      "template": true,
+      "connectionMode": "local-models",
+      "harnessMode": "plain",
+      "selectedModel": "local/REPLACE_ME",
+      "localModelConfig": {
+        "enabled": true,
+        "serviceType": "lmstudio",
+        "apiMode": "openai-responses",
+        "baseUrl": "http://localhost:1234/v1",
+        "apiKey": "local-placeholder",
+        "modelName": "REPLACE_ME",
+        "allowNonLocal": false
+      }
+    },
+    {
+      "id": "local-models-vllm-template",
+      "description": "Template for Local Models mode against a standalone vLLM server.",
+      "template": true,
+      "connectionMode": "local-models",
+      "harnessMode": "plain",
+      "selectedModel": "local/REPLACE_ME",
+      "localModelConfig": {
+        "enabled": true,
+        "serviceType": "vllm",
+        "apiMode": "openai-completions",
+        "baseUrl": "http://localhost:8000/v1",
+        "apiKey": "local-placeholder",
+        "modelName": "REPLACE_ME",
+        "allowNonLocal": false
+      }
+    }
+  ]
+}

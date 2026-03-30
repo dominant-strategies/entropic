@@ -228,6 +228,7 @@ export class GatewayClient {
   private url: string;
   private token: string;
   private authenticated = false;
+  private legacyChatSendOptionsUnsupported = false;
   private requestId = 0;
   private pendingRequests = new Map<
     string,
@@ -704,10 +705,10 @@ export class GatewayClient {
     if (options?.disableTools === true) {
       params.disableTools = true;
     }
-    if (options?.bootstrapContextMode) {
+    if (!this.legacyChatSendOptionsUnsupported && options?.bootstrapContextMode) {
       params.bootstrapContextMode = options.bootstrapContextMode;
     }
-    if (options?.debugPromptCapture === true) {
+    if (!this.legacyChatSendOptionsUnsupported && options?.debugPromptCapture === true) {
       params.debugPromptCapture = true;
     }
 
@@ -723,14 +724,16 @@ export class GatewayClient {
         ) &&
         isUnsupportedChatSendOptionsError(error)
       ) {
+        this.legacyChatSendOptionsUnsupported = true;
         this.log(
-          "chat.send runtime rejected local chat tuning/debug params; retrying without disableTools/bootstrapContextMode/debugPromptCapture",
+          "chat.send runtime rejected bootstrapContextMode/debugPromptCapture; caching legacy compatibility mode and retrying without those params",
         );
         const fallbackResult = await this.rpc<{ runId: string }>("chat.send", {
           sessionKey,
           message,
           attachments,
           idempotencyKey: idempotency,
+          ...(options?.disableTools === true ? { disableTools: true } : {}),
         });
         return fallbackResult.runId;
       }
