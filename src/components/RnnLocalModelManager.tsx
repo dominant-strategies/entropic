@@ -151,8 +151,151 @@ type RuntimeMemorySample = {
   totalMiB?: number | null;
 };
 
+type RecommendationSlot = "overall" | "tools" | "low-vram";
+
+type RecommendationProfile = {
+  toolScore: number;
+  speedScore: number;
+  lowVramScore: number;
+  overallBonus?: number;
+  strengths: string[];
+  bestFor?: string;
+  caution?: string;
+};
+
+type HardwareFit = {
+  label: string;
+  tone: "good" | "warn" | "bad" | "neutral";
+  estimatedVramGb: number | null;
+  availableVramGb: number | null;
+};
+
+type RecommendedModel = {
+  slot: RecommendationSlot;
+  entry: RnnCatalogEntry;
+  score: number;
+  fit: HardwareFit;
+  profile: RecommendationProfile;
+  backendReady: boolean;
+};
+
 const MANAGED_RUNTIME_MEMORY_HISTORY_KEY = "entropic.managed-runtime.memory-history";
 const MAX_MANAGED_RUNTIME_MEMORY_SAMPLES = 90;
+const RECOMMENDATION_LABELS: Record<RecommendationSlot, string> = {
+  overall: "Best Overall",
+  tools: "Best For Tools",
+  "low-vram": "Best Low-VRAM",
+};
+const RECOMMENDATION_PROFILES: Record<string, RecommendationProfile> = {
+  "qwen3-8b-q4-k-m": {
+    toolScore: 9.6,
+    speedScore: 7.1,
+    lowVramScore: 5.4,
+    overallBonus: 1.5,
+    strengths: ["tools", "coding", "chat"],
+    bestFor: "Balanced local default on 8-12 GB GPUs.",
+  },
+  "qwen3-4b-q4-k-m": {
+    toolScore: 9.0,
+    speedScore: 8.4,
+    lowVramScore: 8.8,
+    overallBonus: 0.9,
+    strengths: ["tools", "multilingual", "small GPU"],
+    bestFor: "Strong compact default for 4-8 GB VRAM.",
+  },
+  "phi4-mini-instruct-q4-k-m": {
+    toolScore: 9.1,
+    speedScore: 8.0,
+    lowVramScore: 8.7,
+    overallBonus: 1.0,
+    strengths: ["tools", "reasoning", "coding"],
+    bestFor: "Great compact tool and reasoning option.",
+  },
+  "llama32-3b-instruct-q4-k-m": {
+    toolScore: 7.5,
+    speedScore: 9.0,
+    lowVramScore: 9.5,
+    overallBonus: 0.2,
+    strengths: ["safe default", "fast chat", "4 GB class"],
+    bestFor: "Smallest broadly useful starter model in the list.",
+  },
+  "nemotron3-nano-4b-q4-k-m": {
+    toolScore: 7.8,
+    speedScore: 8.3,
+    lowVramScore: 8.9,
+    overallBonus: 0.4,
+    strengths: ["current info", "edge", "small GPU"],
+    bestFor: "Compact current-info and browser-heavy workflows.",
+    caution: "Needs stronger prompt control than Qwen or Phi.",
+  },
+  "rwkv7-world-2.9b": {
+    toolScore: 5.4,
+    speedScore: 8.3,
+    lowVramScore: 7.6,
+    overallBonus: 0.1,
+    strengths: ["RWKV", "multilingual", "steady decode"],
+    bestFor: "Lean recurrent model for constrained VRAM.",
+    caution: "Less reliable for tools than the best small transformers.",
+  },
+  "rwkv7-g1-2.9b": {
+    toolScore: 5.1,
+    speedScore: 7.8,
+    lowVramScore: 7.2,
+    strengths: ["RWKV", "thinking", "local runtime"],
+    bestFor: "Reasoning-oriented RWKV option when you want Albatross.",
+  },
+  "rwkv6-world-1.6b": {
+    toolScore: 3.9,
+    speedScore: 7.2,
+    lowVramScore: 6.4,
+    strengths: ["legacy RWKV", "small footprint", "baseline"],
+    bestFor: "Legacy RWKV baseline if you specifically want Finch compatibility.",
+    caution: "Fits small GPUs, but RWKV-7 is a better default and Finch is not a first recommendation for tools.",
+  },
+  "rwkv7-g1e-7.2b-q4-k-m-gguf": {
+    toolScore: 5.2,
+    speedScore: 6.7,
+    lowVramScore: 6.3,
+    strengths: ["RWKV", "GGUF", "experiments"],
+    bestFor: "Larger GGUF RWKV experiment on 8-12 GB GPUs.",
+  },
+  "rwkv7-g1e-13.3b-q4-k-m": {
+    toolScore: 4.7,
+    speedScore: 5.4,
+    lowVramScore: 3.5,
+    strengths: ["RWKV", "large context experiments"],
+    bestFor: "Large local RWKV experiment when 12 GB VRAM is available.",
+    caution: "Tight fit on 12 GB cards and not a first recommendation.",
+  },
+  "mamba-1.4b": {
+    toolScore: 4.6,
+    speedScore: 7.0,
+    lowVramScore: 6.8,
+    strengths: ["SSM", "research", "vLLM"],
+    caution: "Interesting, but not a first-choice tool model.",
+  },
+  "mamba-2.8b": {
+    toolScore: 4.8,
+    speedScore: 6.3,
+    lowVramScore: 5.1,
+    strengths: ["SSM", "research", "vLLM"],
+    caution: "Research-oriented relative to Qwen/Phi.",
+  },
+  "xlstm-7b": {
+    toolScore: 3.6,
+    speedScore: 4.5,
+    lowVramScore: 2.6,
+    strengths: ["xLSTM", "research"],
+    caution: "Experimental compared with the stronger local defaults.",
+  },
+  "stripedhyena-nous-7b": {
+    toolScore: 4.2,
+    speedScore: 5.2,
+    lowVramScore: 2.9,
+    strengths: ["hyena", "research"],
+    caution: "Research-oriented relative to the main shortlist.",
+  },
+};
 
 function formatSize(sizeGb?: number): string | null {
   if (typeof sizeGb !== "number" || Number.isNaN(sizeGb) || sizeGb <= 0) {
@@ -271,6 +414,13 @@ function formatProvider(value?: string | null): string | null {
   const normalized = owner.toLowerCase();
   if (normalized === "blinkdl") return "BlinkDL";
   if (normalized === "nvidia") return "NVIDIA";
+  if (normalized === "qwen") return "Qwen";
+  if (normalized === "microsoft") return "Microsoft";
+  if (normalized === "gpustack") return "GPUStack";
+  if (normalized === "triangle104") return "Triangle104";
+  if (normalized === "google") return "Google";
+  if (normalized === "meta-llama") return "Meta";
+  if (normalized === "deepseek-ai") return "DeepSeek";
   if (normalized === "state-spaces") return "state-spaces";
   if (normalized === "shoumenchougou") return "shoumenchougou";
   return owner;
@@ -281,6 +431,10 @@ function catalogFamily(entry: Pick<RnnCatalogEntry, "name" | "display_name" | "a
   const architecture = (entry.architecture || "").trim().toLowerCase();
   if (haystack.includes("goose")) return "Goose";
   if (haystack.includes("nemotron")) return "Nemotron";
+  if (haystack.includes("qwen")) return "Qwen";
+  if (haystack.includes("phi")) return "Phi";
+  if (haystack.includes("llama")) return "Llama";
+  if (haystack.includes("gemma")) return "Gemma";
   if (haystack.includes("finch")) return "Finch";
   if (haystack.includes("mamba") || architecture === "mamba") return "Mamba";
   if (haystack.includes("xlstm") || architecture === "xlstm") return "xLSTM";
@@ -296,6 +450,10 @@ function catalogSeries(entry: Pick<RnnCatalogEntry, "name" | "display_name" | "a
   if (haystack.includes("gooseone")) return "GooseOne";
   if (haystack.includes("goose world")) return "Goose World";
   if (haystack.includes("nemotron 3")) return "Nemotron 3";
+  if (haystack.includes("qwen3")) return "Qwen3";
+  if (haystack.includes("phi-4")) return "Phi-4";
+  if (haystack.includes("llama 3.2")) return "Llama 3.2";
+  if (haystack.includes("gemma 3")) return "Gemma 3";
   if (haystack.includes("finch")) return "Finch";
   if (haystack.includes("mamba") || architecture === "mamba") return "Mamba";
   if (haystack.includes("xlstm") || architecture === "xlstm") return "xLSTM";
@@ -317,6 +475,206 @@ function catalogCategory(entry: Pick<RnnCatalogEntry, "architecture" | "name">):
 
 function catalogMode(entry: Pick<RnnCatalogEntry, "thinking">): string {
   return entry.thinking ? "Thinking" : "Standard";
+}
+
+function formatCatalogName(entry: Pick<RnnCatalogEntry, "display_name" | "name">): string {
+  return entry.display_name || entry.name;
+}
+
+function estimateRuntimeFootprintGb(entry: Pick<RnnCatalogEntry, "backend" | "size_gb" | "context">): number | null {
+  const sizeGb = typeof entry.size_gb === "number" && entry.size_gb > 0 ? entry.size_gb : null;
+  if (!sizeGb) return null;
+  const backend = (entry.backend || "").trim().toLowerCase();
+  const context = typeof entry.context === "number" && entry.context > 0 ? entry.context : 8192;
+  const contextOverheadGb =
+    context >= 65536 ? 2.2 : context >= 32768 ? 1.4 : context >= 8192 ? 0.8 : 0.5;
+  if (backend === "llama-cpp") return Number((sizeGb * 1.22 + contextOverheadGb).toFixed(2));
+  if (backend === "albatross") return Number((sizeGb * 1.08 + 0.35).toFixed(2));
+  if (backend === "vllm") return Number((sizeGb * 1.55 + 1.75).toFixed(2));
+  if (backend === "huggingface") return Number((sizeGb * 1.45 + 1.5).toFixed(2));
+  return Number((sizeGb * 1.3 + 0.75).toFixed(2));
+}
+
+function defaultRecommendationProfile(entry: RnnCatalogEntry): RecommendationProfile {
+  const family = catalogFamily(entry);
+  const backend = (entry.backend || "").trim().toLowerCase();
+  const architecture = (entry.architecture || "").trim().toLowerCase();
+  let toolScore = 5.2;
+  let speedScore = 5.8;
+  let lowVramScore = 5.2;
+  const strengths = [catalogCategory(entry)];
+  let caution: string | undefined;
+
+  if (backend === "llama-cpp") {
+    toolScore += 1.2;
+    speedScore += 0.8;
+    lowVramScore += 1.4;
+  }
+  if (backend === "albatross" || architecture === "rwkv") {
+    speedScore += 1.5;
+    lowVramScore += 1.3;
+    toolScore -= 0.8;
+    strengths.push("steady decode");
+  }
+  if (entry.thinking) {
+    speedScore -= 0.4;
+    strengths.push("thinking");
+  }
+  if (family === "Mamba" || family === "xLSTM" || family === "Hyena") {
+    toolScore -= 1.0;
+    caution = "Research-oriented relative to the stronger local defaults.";
+  }
+  return {
+    toolScore,
+    speedScore,
+    lowVramScore,
+    strengths,
+    caution,
+  };
+}
+
+function recommendationProfileForEntry(entry: RnnCatalogEntry): RecommendationProfile {
+  const fallback = defaultRecommendationProfile(entry);
+  const curated = RECOMMENDATION_PROFILES[entry.id];
+  if (!curated) return fallback;
+  return {
+    ...fallback,
+    ...curated,
+    strengths: curated.strengths.length ? curated.strengths : fallback.strengths,
+  };
+}
+
+function backendReadyForEntry(
+  entry: Pick<RnnCatalogEntry, "backend">,
+  runtimeStatus: RnnRuntimeStatus | null,
+): boolean {
+  const backend = (entry.backend || "").trim().toLowerCase();
+  if (!backend || !runtimeStatus?.capabilities) return true;
+  if (backend === "albatross") {
+    const explicit = runtimeStatus.capabilities.backendAvailability?.albatross;
+    if (typeof explicit === "boolean") return explicit;
+    return runtimeStatus.capabilities.albatrossSourceBundled === true;
+  }
+  const availability = runtimeStatus.capabilities.backendAvailability?.[backend];
+  return availability !== false;
+}
+
+function hardwareFitForEntry(
+  entry: Pick<RnnCatalogEntry, "backend" | "size_gb" | "context">,
+  gpuMemoryTotalMiB?: number | null,
+  preferredDevice?: string | null,
+): HardwareFit {
+  const estimatedVramGb = estimateRuntimeFootprintGb(entry);
+  const availableVramGb =
+    typeof gpuMemoryTotalMiB === "number" && gpuMemoryTotalMiB > 0 ? gpuMemoryTotalMiB / 1024 : null;
+  if (preferredDevice !== "cuda" || !availableVramGb || !estimatedVramGb) {
+    return {
+      label: estimatedVramGb ? `Est. ${estimatedVramGb.toFixed(1)} GB` : "Hardware unknown",
+      tone: "neutral",
+      estimatedVramGb,
+      availableVramGb,
+    };
+  }
+  if (estimatedVramGb <= availableVramGb * 0.72) {
+    return {
+      label: "Fits comfortably",
+      tone: "good",
+      estimatedVramGb,
+      availableVramGb,
+    };
+  }
+  if (estimatedVramGb <= availableVramGb * 0.96) {
+    return {
+      label: "Tight fit",
+      tone: "warn",
+      estimatedVramGb,
+      availableVramGb,
+    };
+  }
+  return {
+    label: "Not recommended",
+    tone: "bad",
+    estimatedVramGb,
+    availableVramGb,
+  };
+}
+
+function recommendationScore(
+  entry: RnnCatalogEntry,
+  slot: RecommendationSlot,
+  runtimeStatus: RnnRuntimeStatus | null,
+  gpuMemoryTotalMiB?: number | null,
+  preferredDevice?: string | null,
+): number {
+  const profile = recommendationProfileForEntry(entry);
+  const fit = hardwareFitForEntry(entry, gpuMemoryTotalMiB, preferredDevice);
+  const backendReady = backendReadyForEntry(entry, runtimeStatus);
+  const fitScore = fit.tone === "good" ? 3 : fit.tone === "warn" ? 1 : fit.tone === "bad" ? -6 : 0;
+  const backendScore = backendReady ? 1.5 : -2.5;
+  const sizeScore =
+    typeof entry.size_gb === "number" && entry.size_gb > 0 ? Math.max(0, 6 - entry.size_gb) * 0.15 : 0;
+  if (slot === "overall") {
+    return (
+      profile.toolScore * 1.45 +
+      profile.speedScore * 1.1 +
+      fitScore * 1.7 +
+      backendScore +
+      sizeScore +
+      (profile.overallBonus || 0)
+    );
+  }
+  if (slot === "tools") {
+    return (
+      profile.toolScore * 2 +
+      profile.speedScore * 0.65 +
+      fitScore * 1.4 +
+      backendScore +
+      (profile.overallBonus || 0) * 0.4
+    );
+  }
+  return (
+    profile.lowVramScore * 2.05 +
+    profile.speedScore * 0.7 +
+    fitScore * 1.5 +
+    backendScore +
+    sizeScore * 2
+  );
+}
+
+function buildRecommendedModels(
+  entries: RnnCatalogEntry[],
+  runtimeStatus: RnnRuntimeStatus | null,
+  gpuMemoryTotalMiB?: number | null,
+  preferredDevice?: string | null,
+): RecommendedModel[] {
+  const slots: RecommendationSlot[] = ["overall", "tools", "low-vram"];
+  const usedIds = new Set<string>();
+  const recommendations: RecommendedModel[] = [];
+  for (const slot of slots) {
+    const ranked = [...entries]
+      .map((entry) => ({
+        slot,
+        entry,
+        score: recommendationScore(entry, slot, runtimeStatus, gpuMemoryTotalMiB, preferredDevice),
+        fit: hardwareFitForEntry(entry, gpuMemoryTotalMiB, preferredDevice),
+        profile: recommendationProfileForEntry(entry),
+        backendReady: backendReadyForEntry(entry, runtimeStatus),
+      }))
+      .filter((item) => !usedIds.has(item.entry.id))
+      .sort((left, right) => {
+        if (right.score !== left.score) return right.score - left.score;
+        const leftSize = typeof left.entry.size_gb === "number" ? left.entry.size_gb : Number.POSITIVE_INFINITY;
+        const rightSize =
+          typeof right.entry.size_gb === "number" ? right.entry.size_gb : Number.POSITIVE_INFINITY;
+        if (leftSize !== rightSize) return leftSize - rightSize;
+        return formatCatalogName(left.entry).localeCompare(formatCatalogName(right.entry));
+      });
+    const selected = ranked[0];
+    if (!selected) continue;
+    usedIds.add(selected.entry.id);
+    recommendations.push(selected);
+  }
+  return recommendations;
 }
 
 function readModelInfoNumber(
@@ -759,6 +1117,54 @@ export function RnnLocalModelManager({
   );
   const llamaCppConfigDirty =
     JSON.stringify(llamaCppDraft) !== JSON.stringify(persistedLlamaCppConfig);
+  const recommendedModels = buildRecommendedModels(
+    catalogEntries,
+    runtimeStatus,
+    gpuMemoryTotalMiB,
+    preferredDevice,
+  );
+  const recommendedModelLabels = new Map(
+    recommendedModels.map((item) => [item.entry.id, RECOMMENDATION_LABELS[item.slot]]),
+  );
+  const rankedCatalogEntries = [...catalogEntries].sort((left, right) => {
+    const leftRecommendedIndex = recommendedModels.findIndex((item) => item.entry.id === left.id);
+    const rightRecommendedIndex = recommendedModels.findIndex((item) => item.entry.id === right.id);
+    if (leftRecommendedIndex !== rightRecommendedIndex) {
+      if (leftRecommendedIndex === -1) return 1;
+      if (rightRecommendedIndex === -1) return -1;
+      return leftRecommendedIndex - rightRecommendedIndex;
+    }
+    const leftFit = hardwareFitForEntry(left, gpuMemoryTotalMiB, preferredDevice);
+    const rightFit = hardwareFitForEntry(right, gpuMemoryTotalMiB, preferredDevice);
+    const toneRank = { good: 0, warn: 1, neutral: 2, bad: 3 } as const;
+    if (toneRank[leftFit.tone] !== toneRank[rightFit.tone]) {
+      return toneRank[leftFit.tone] - toneRank[rightFit.tone];
+    }
+    const leftScore = recommendationScore(
+      left,
+      "overall",
+      runtimeStatus,
+      gpuMemoryTotalMiB,
+      preferredDevice,
+    );
+    const rightScore = recommendationScore(
+      right,
+      "overall",
+      runtimeStatus,
+      gpuMemoryTotalMiB,
+      preferredDevice,
+    );
+    if (rightScore !== leftScore) return rightScore - leftScore;
+    return formatCatalogName(left).localeCompare(formatCatalogName(right));
+  });
+  const hardwareSummary =
+    preferredDevice === "cuda" && gpuMemoryTotalMiB
+      ? `${formatMemory(gpuMemoryTotalMiB)} ${gpuMemoryName ? `· ${gpuMemoryName}` : "GPU"}`
+      : preferredDevice === "mps"
+        ? "Apple GPU"
+        : preferredDevice === "cpu"
+          ? "CPU only"
+          : deviceBadge;
   const activeModelMemoryHistory = memoryHistory
     .filter((sample) => sample.model === activeMemoryModelKey)
     .slice(-20);
@@ -879,52 +1285,47 @@ export function RnnLocalModelManager({
       </div>
 
       <div className="space-y-1 pt-3 border-t border-[var(--border-subtle)]">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center justify-between gap-2">
           <div className="text-[13px] font-semibold text-[var(--text-primary)]">
             Available Models
           </div>
-          <div className="text-xs text-[var(--text-secondary)]">
-            {catalogEntries.length} model{catalogEntries.length === 1 ? "" : "s"}
+          <div className="text-[11px] text-[var(--text-tertiary)]">
+            {catalogEntries.length}
           </div>
         </div>
         {catalogEntries.length ? (
           <div className="rounded-xl border border-[var(--border-subtle)] divide-y divide-[var(--border-subtle)] overflow-hidden">
-            {catalogEntries.map((entry) => {
+            {rankedCatalogEntries.map((entry) => {
               const localEntry = localByCatalogId.get(entry.id);
-              const targetName = localEntry?.name || entry.id;
-              const isBusy = busyAction?.kind !== "refresh" && busyAction?.target === targetName;
               const activeDownload =
                 snapshot?.downloadState?.catalogId === entry.id ? snapshot.downloadState : null;
               const isDownloading = activeDownload?.status === "downloading";
-              const isLoaded =
-                snapshot?.loadedModel === localEntry?.name || entry.loaded === true || localEntry?.loaded === true;
               const progressLabel = isDownloading
-                ? [
-                    formatBytes(activeDownload.downloadedBytes),
-                    activeDownload.totalBytes ? `of ${formatBytes(activeDownload.totalBytes)}` : null,
-                    typeof activeDownload.progressPercent === "number"
-                      ? `${activeDownload.progressPercent.toFixed(activeDownload.progressPercent >= 10 ? 0 : 1)}%`
-                      : null,
-                  ].filter(Boolean).join(" · ")
+                ? typeof activeDownload?.progressPercent === "number"
+                  ? `${activeDownload.progressPercent.toFixed(0)}%`
+                  : null
                 : null;
               return (
                 <details key={entry.id} className="group">
-                  <summary className="flex items-center justify-between gap-3 px-3 py-2 cursor-pointer list-none">
+                  <summary className="flex items-center justify-between gap-2 px-3 py-2 cursor-pointer list-none">
                     <div className="flex items-center gap-2 min-w-0">
                       <ChevronDown className="w-3 h-3 text-[var(--text-tertiary)] transition-transform group-open:rotate-180 flex-shrink-0" />
-                      <span className="text-sm font-medium text-[var(--text-primary)] truncate">
+                      <span className="text-[13px] font-medium text-[var(--text-primary)] truncate">
                         {entry.display_name || entry.name}
                       </span>
+                      {formatSize(entry.size_gb) && (
+                        <span className="text-[11px] text-[var(--text-tertiary)] flex-shrink-0">
+                          {formatSize(entry.size_gb)}
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.preventDefault()}>
                       {localEntry ? (
-                        <span className="inline-flex items-center rounded-full bg-[var(--system-blue)]/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--system-blue)]">
-                          Downloaded
-                        </span>
+                        <span className="text-[11px] font-medium text-[var(--system-blue)]">Downloaded</span>
                       ) : isDownloading ? (
-                        <span className="flex items-center gap-1.5 text-xs text-[var(--system-blue)]">
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          {progressLabel || "Downloading"}
+                        <span className="flex items-center gap-1.5 text-[11px] text-[var(--system-blue)]">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          {progressLabel || "..."}
                         </span>
                       ) : (
                         <button type="button" onClick={(e) => { e.stopPropagation(); void startDownload(entry.id, entry.display_name || entry.name); }} disabled={busyAction !== null || snapshot?.downloadState?.status === "downloading"} className={buttonClassName}>
@@ -934,29 +1335,24 @@ export function RnnLocalModelManager({
                       )}
                     </div>
                   </summary>
-                  <div className="px-3 pb-3 pt-1 border-t border-[var(--border-subtle)] bg-[var(--bg-secondary)]/50">
-                    <div className="text-xs text-[var(--text-secondary)] space-y-1 mb-2">
-                      <div>
-                        {[
-                          catalogCategory(entry),
-                          formatBackend(entry.backend),
-                          formatArchitecture(entry.architecture),
-                          formatSize(entry.size_gb),
-                          entry.params,
-                          entry.thinking ? "Thinking" : null,
-                          entry.hf_repo ? formatProvider(entry.hf_repo) : null,
-                        ].filter(Boolean).join(" · ")}
-                      </div>
-                      {entry.description ? <div>{entry.description}</div> : null}
+                  <div className="px-3 pb-2.5 pt-1 pl-8 border-t border-[var(--border-subtle)] bg-[var(--bg-secondary)]/50">
+                    <div className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
+                      {[
+                        formatBackend(entry.backend),
+                        formatArchitecture(entry.architecture),
+                        entry.params,
+                        entry.hf_repo ? formatProvider(entry.hf_repo) : null,
+                      ].filter(Boolean).join(" · ")}
                     </div>
+                    {entry.description && (
+                      <div className="mt-1 text-[11px] text-[var(--text-tertiary)] leading-relaxed">{entry.description}</div>
+                    )}
                     {isDownloading && (
-                      <div className="space-y-1">
-                        <div className="h-1.5 overflow-hidden rounded-full bg-[var(--border-subtle)]">
-                          <div
-                            className="h-full rounded-full bg-[var(--system-blue)] transition-all"
-                            style={{ width: typeof activeDownload?.progressPercent === "number" ? `${Math.max(4, Math.min(100, activeDownload.progressPercent))}%` : "20%" }}
-                          />
-                        </div>
+                      <div className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--border-subtle)]">
+                        <div
+                          className="h-full rounded-full bg-[var(--system-blue)] transition-all"
+                          style={{ width: typeof activeDownload?.progressPercent === "number" ? `${Math.max(4, Math.min(100, activeDownload.progressPercent))}%` : "20%" }}
+                        />
                       </div>
                     )}
                   </div>
@@ -965,7 +1361,7 @@ export function RnnLocalModelManager({
             })}
           </div>
         ) : (
-          <div className="rounded-xl border border-dashed border-[var(--border-subtle)] p-3 text-xs text-[var(--text-secondary)]">
+          <div className="py-2 text-xs text-[var(--text-secondary)]">
             No models available yet. Try refreshing.
           </div>
         )}
