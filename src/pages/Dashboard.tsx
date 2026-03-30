@@ -763,6 +763,19 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         if (savedImage) setImageModel(savedImage);
         setImageGenerationModel(nextImageGenerationModel);
 
+        const shouldPersistNormalizedMode =
+          rawConnectionMode !== nextConnectionMode ||
+          storedUseLocal !== (nextConnectionMode !== "managed");
+        if (shouldPersistNormalizedMode) {
+          try {
+            await store.set("connectionMode", nextConnectionMode);
+            await store.set("useLocalKeys", nextConnectionMode !== "managed");
+            await store.save();
+          } catch (persistError) {
+            console.error("[Entropic] Failed to persist normalized connection mode:", persistError);
+          }
+        }
+
         let shouldSave = false;
         if (lmc && JSON.stringify(normalizedLocalModelConfig) !== JSON.stringify(lmc)) {
           await store.set("localModelConfig", normalizedLocalModelConfig);
@@ -1146,16 +1159,20 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }
 
   async function handleConnectionModeChange(nextMode: ConnectionMode) {
+    const resolvedNextMode = normalizeConnectionMode(
+      nextMode,
+      defaultUseLocalKeys ? "byok" : "managed",
+    );
     autoStartAttemptedRef.current = false;
     clearGatewayRetry();
     setIsTogglingGateway(true);
-    setConnectionMode(nextMode);
+    setConnectionMode(resolvedNextMode);
     setStartupError(null);
     setGatewayStartupStage("idle");
     setShowGatewayStartup(false);
 
     const nextLocalModelConfig =
-      nextMode === "local-models"
+      resolvedNextMode === "local-models"
         ? { ...localModelConfig, enabled: true }
         : localModelConfig;
     if (nextLocalModelConfig !== localModelConfig) {
@@ -1164,15 +1181,15 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
     const nextModel = remapModelForConnectionMode(
       selectedModel,
-      nextMode,
+      resolvedNextMode,
       nextLocalModelConfig,
     );
     const nextImageGenerationModel =
-      nextMode === "local-models"
+      resolvedNextMode === "local-models"
         ? imageGenerationModel
         : remapImageGenerationModelForMode(
             imageGenerationModel,
-            nextMode === "byok",
+            resolvedNextMode === "byok",
             nextModel,
           );
 
@@ -1185,11 +1202,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
     try {
       const store = await TauriStore.load("entropic-settings.json");
-      await store.set("connectionMode", nextMode);
-      await store.set("useLocalKeys", nextMode !== "managed");
+      await store.set("connectionMode", resolvedNextMode);
+      await store.set("useLocalKeys", resolvedNextMode !== "managed");
       await store.set("selectedModel", nextModel);
       await store.set("imageGenerationModel", nextImageGenerationModel);
-      if (nextMode === "local-models" && !localModelConfig.enabled) {
+      if (resolvedNextMode === "local-models" && !localModelConfig.enabled) {
         await store.set("localModelConfig", nextLocalModelConfig);
       }
       await store.save();
@@ -2499,6 +2516,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         onConnectionModeChange={handleConnectionModeChange}
         localModelConfig={localModelConfig}
         localModePerformanceSettings={localModePerformanceSettings}
+        managedTrialBalanceCents={localCreditBalanceCents}
         onLocalModelConfigChange={persistLocalModelConfig}
         selectedModel={activeSelectedModel}
         onModelChange={handleModelChange}

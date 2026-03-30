@@ -15,6 +15,7 @@ import {
 import { useAuth } from "../contexts/AuthContext";
 import { ConnectionModeSelector } from "../components/ConnectionModeSelector";
 import { LocalAiServiceForm } from "../components/LocalAiServiceForm";
+import { RnnLocalModelManager } from "../components/RnnLocalModelManager";
 import {
   LOCAL_IMAGE_GENERATION_MODELS,
   ModelSelector,
@@ -197,7 +198,7 @@ function SettingsToggleRow({
   disabled?: boolean;
 }) {
   return (
-    <label className={clsx("p-4 flex items-center justify-between gap-4", disabled && "opacity-60")}>
+    <label className={clsx("p-4 flex items-center justify-between gap-4 group/toggle", disabled && "opacity-50")}>
       <div className="min-w-0">
         <div className="text-[14px] font-medium text-[var(--text-primary)]">{label}</div>
         <div className="text-[12px] text-[var(--text-secondary)]">{description}</div>
@@ -206,18 +207,20 @@ function SettingsToggleRow({
         type="button"
         role="switch"
         aria-checked={checked}
+        aria-label={label}
         disabled={disabled}
         onClick={() => onChange(!checked)}
         className={clsx(
-          "relative inline-flex h-6 w-11 items-center rounded-full transition-colors",
-          checked ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-5)]",
-          disabled && "cursor-not-allowed",
+          "relative inline-flex h-[22px] w-[40px] flex-shrink-0 items-center rounded-full transition-colors duration-200 ease-out",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--system-blue)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-card)]",
+          checked ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-5)] group-hover/toggle:bg-[var(--system-gray-4)]",
+          disabled && "cursor-not-allowed !bg-[var(--system-gray-5)]",
         )}
       >
         <span
           className={clsx(
-            "inline-block h-5 w-5 transform rounded-full bg-white transition-transform",
-            checked ? "translate-x-5" : "translate-x-0.5",
+            "pointer-events-none inline-block h-[16px] w-[16px] rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.2),0_0_1px_rgba(0,0,0,0.1)] transition-transform duration-200 ease-out",
+            checked ? "translate-x-[21px]" : "translate-x-[3px]",
           )}
         />
       </button>
@@ -255,6 +258,49 @@ function scheduleDeferredSettingsWork(work: () => void, delayMs = 0) {
     }
   };
 }
+
+type SettingsSection =
+  | "profile"
+  | "appearance"
+  | "gateway"
+  | "diagnostics"
+  | "data"
+  | "models"
+  | "managed-provider"
+  | "byok"
+  | "local-models"
+  | "entropic-local-runtime";
+
+const SETTINGS_SIDEBAR_CATEGORIES: Array<{
+  label: string;
+  items: Array<{ id: SettingsSection; label: string; icon: any }>;
+}> = [
+  {
+    label: "Profile",
+    items: [
+      { id: "profile", label: "Profile", icon: User },
+      { id: "appearance", label: "Appearance", icon: Palette },
+    ],
+  },
+  {
+    label: "System",
+    items: [
+      { id: "gateway", label: "Gateway & Runtime", icon: Shield },
+      { id: "diagnostics", label: "Diagnostics", icon: ScrollText },
+      { id: "data", label: "Data Management", icon: Trash2 },
+    ],
+  },
+  {
+    label: "AI Connection",
+    items: [
+      { id: "models", label: "Model Summary", icon: Sparkles },
+      { id: "managed-provider", label: "Managed Provider", icon: Shield },
+      { id: "byok", label: "Bring Your Own Keys", icon: Key },
+      { id: "entropic-local-runtime", label: "Entropic Local Runtime", icon: Cpu },
+      { id: "local-models", label: "Local Models", icon: Cpu },
+    ],
+  },
+];
 
 export function Settings({
   gatewayRunning,
@@ -297,6 +343,9 @@ export function Settings({
   const [runtimeCpu, setRuntimeCpu] = useState(initialRuntimeCpu);
   const [runtimeMemoryGb, setRuntimeMemoryGb] = useState(initialRuntimeMemoryGb);
   const [runtimeDiskGb, setRuntimeDiskGb] = useState(initialRuntimeDiskGb);
+  const [activeSection, setActiveSection] = useState<SettingsSection>("profile");
+  const contentRef = useRef<HTMLDivElement>(null);
+
   const [runtimeResourceBaseline, setRuntimeResourceBaseline] = useState({
     cpu: initialRuntimeCpu,
     memoryGb: initialRuntimeMemoryGb,
@@ -489,6 +538,10 @@ export function Settings({
   }, []);
 
   useEffect(() => () => clearPendingIdentityPersist(), []);
+
+  useEffect(() => {
+    contentRef.current?.scrollTo({ top: 0 });
+  }, [activeSection]);
 
   // Load initial state
   useEffect(() => {
@@ -1132,11 +1185,122 @@ export function Settings({
     }
   }
 
+  function renderLocalPerformanceToggles() {
+    return (
+      <SettingsGroup title="Performance">
+        <SettingsToggleRow
+          label="Disable tools in local chat"
+          description="Shrink prompt size by removing tool schemas from normal chat turns."
+          checked={localModePerformanceSettings.disableTools}
+          onChange={(checked) => {
+            void onLocalModePerformanceSettingsChange({ disableTools: checked });
+          }}
+        />
+        <SettingsToggleRow
+          label="Lightweight bootstrap"
+          description="Smaller bootstrap prompt for local chat turns."
+          checked={localModePerformanceSettings.lightweightBootstrap}
+          onChange={(checked) => {
+            void onLocalModePerformanceSettingsChange({
+              lightweightBootstrap: checked,
+            });
+          }}
+        />
+        <SettingsToggleRow
+          label="Lighter sandbox defaults"
+          description="Use lighter recall settings for local-model sandbox runs."
+          checked={localModePerformanceSettings.lightRuntimeDefaults}
+          onChange={(checked) => {
+            void onLocalModePerformanceSettingsChange({
+              lightRuntimeDefaults: checked,
+            });
+          }}
+        />
+        <SettingsToggleRow
+          label="Debug mode"
+          description="Enable diagnostics and debug routing for local chats."
+          checked={localModePerformanceSettings.debugMode}
+          onChange={(checked) => {
+            void onLocalModePerformanceSettingsChange({
+              debugMode: checked,
+            });
+          }}
+        />
+        {localModePerformanceSettings.debugMode && (
+          <>
+            <SettingsToggleRow
+              label="Bypass OpenClaw"
+              description="Call the local endpoint directly, reusing only recent history."
+              checked={localModePerformanceSettings.debugDirectBypass}
+              onChange={(checked) => {
+                void onLocalModePerformanceSettingsChange({
+                  debugDirectBypass: checked,
+                });
+              }}
+            />
+            {!localModePerformanceSettings.debugDirectBypass && (
+              <SettingsToggleRow
+                label="Capture prompt previews"
+                description="Record truncated prompts in diagnostics for inspection."
+                checked={localModePerformanceSettings.capturePromptPreview}
+                onChange={(checked) => {
+                  void onLocalModePerformanceSettingsChange({
+                    capturePromptPreview: checked,
+                  });
+                }}
+              />
+            )}
+          </>
+        )}
+      </SettingsGroup>
+    );
+  }
+
   return (
-    <div className="max-w-3xl mx-auto py-8 px-4">
-      <div className="mb-8 px-1">
-        <h1 className="text-2xl font-bold">Settings</h1>
-      </div>
+    <>
+    <div className="flex h-full">
+      {/* Settings Sidebar */}
+      <nav className="w-[220px] flex-shrink-0 bg-[var(--bg-card)] border-r border-[var(--border-subtle)] overflow-y-auto py-6 px-3">
+        <h1 className="text-lg font-bold text-[var(--text-primary)] px-3 mb-5">Settings</h1>
+        {SETTINGS_SIDEBAR_CATEGORIES.map((category) => (
+          <div key={category.label} className="mb-4">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] px-3 mb-1">
+              {category.label}
+            </div>
+            {category.items.map((item) => {
+              const Icon = item.icon;
+              const isActive = activeSection === item.id;
+              const isActiveConnection =
+                (item.id === "managed-provider" && managedMode) ||
+                (item.id === "byok" && byokMode) ||
+                (item.id === "local-models" && localModelsMode && localModelConfig.serviceType !== "rnn-local") ||
+                (item.id === "entropic-local-runtime" && localModelsMode && localModelConfig.serviceType === "rnn-local");
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => setActiveSection(item.id)}
+                  className={clsx(
+                    "w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-[13px] font-medium transition-colors mb-0.5",
+                    isActive
+                      ? "bg-[var(--border-subtle)] text-[var(--text-primary)]"
+                      : "text-[var(--text-secondary)] hover:bg-[var(--border-subtle)]/50 hover:text-[var(--text-primary)]"
+                  )}
+                >
+                  <Icon className={clsx("w-4 h-4 flex-shrink-0", isActive && "text-[var(--system-blue)]")} />
+                  <span className="truncate">{item.label}</span>
+                  {isActiveConnection && (
+                    <span className="ml-auto flex-shrink-0 w-2 h-2 rounded-full bg-[var(--system-blue)]" title="Active" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        ))}
+      </nav>
+
+      {/* Content Area */}
+      <div ref={contentRef} className="flex-1 overflow-y-auto">
+        <div className="max-w-3xl py-8 px-8">
 
       {gatewayConfigInvalid && (
         <div className="mb-6 rounded-xl border border-amber-500/20 bg-amber-500/10 p-4">
@@ -1176,6 +1340,7 @@ export function Settings({
         </div>
       )}
 
+      {activeSection === "profile" && (
       <SettingsGroup title="Profile">
         <div className="p-4 flex items-start gap-6">
           <div className="relative group cursor-pointer flex-shrink-0">
@@ -1308,7 +1473,9 @@ export function Settings({
           </div>
         )}
       </SettingsGroup>
+      )}
 
+      {activeSection === "appearance" && (
       <SettingsGroup title="Appearance">
         <SettingsRow
           label="Theme"
@@ -1363,107 +1530,88 @@ export function Settings({
           </div>
         </SettingsRow>
       </SettingsGroup>
+      )}
 
-      <div className="relative">
-        <SettingsGroup title="Intelligence">
-          {localModelsMode ? (
-            <SettingsRow
-              label="Primary Model"
-              icon={Cpu}
-              description={
-                localModel
-                  ? `${localModel.name}`
-                  : "Select Local Models below to choose the model exposed by your local service."
-              }
-            >
-              <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)]">
-                {localModel ? localModel.id : "Configure Local Models below"}
-              </div>
-            </SettingsRow>
-          ) : (
-            <SettingsRow label="Primary Model" icon={Cpu}>
-              <div className="w-80">
-                <ModelSelector
-                  selectedModel={selectedModel}
-                  onModelChange={onModelChange}
-                  useLocalKeys={byokMode}
-                  connectedProviders={byokMode ? connectedProviders : undefined}
-                  localModel={null}
-                />
-              </div>
-            </SettingsRow>
-          )}
+      {activeSection === "models" && (
+        <SettingsGroup title="Model Summary">
+          <SettingsRow
+            label="Connection Mode"
+            icon={Shield}
+            description={
+              managedMode
+                ? "Managed Provider"
+                : byokMode
+                  ? "Bring Your Own Keys"
+                  : localModelsMode
+                    ? localModelConfig.serviceType === "rnn-local"
+                      ? "Entropic Local Runtime"
+                      : "Local Models"
+                    : "Unknown"
+            }
+          >
+            <span className="px-2.5 py-1 rounded-md text-xs font-semibold bg-[var(--system-blue)]/10 text-[var(--system-blue)]">
+              Active
+            </span>
+          </SettingsRow>
+          <SettingsRow
+            label="Primary Model"
+            icon={Cpu}
+            description={
+              localModelsMode
+                ? localModel
+                  ? localModel.name
+                  : "Not configured — select a model in the active connection section"
+                : selectedModel || "Not selected"
+            }
+          />
           {managedMode && (
             <>
-              <SettingsRow label="Coding Model" icon={Cpu}>
-                <div className="w-80">
-                  <ModelSelector selectedModel={codeModel} onModelChange={onCodeModelChange} />
-                </div>
-              </SettingsRow>
-              <SettingsRow label="Vision Model" icon={Image}>
-                <div className="w-80">
-                  <ModelSelector selectedModel={imageModel} onModelChange={onImageModelChange} />
-                </div>
-              </SettingsRow>
-              <SettingsRow
-                label="Image Generation Model"
-                icon={Sparkles}
-                description="Used for Image mode in Chat and generated images."
-              >
-                <div className="w-80">
-                  <ModelSelector
-                    selectedModel={imageGenerationModel}
-                    onModelChange={onImageGenerationModelChange}
-                    models={PROXY_IMAGE_GENERATION_MODELS}
-                  />
-                </div>
-              </SettingsRow>
+              <SettingsRow label="Coding Model" icon={Cpu} description={codeModel || "Not selected"} />
+              <SettingsRow label="Vision Model" icon={Image} description={imageModel || "Not selected"} />
+              <SettingsRow label="Image Generation" icon={Sparkles} description={imageGenerationModel || "Not selected"} />
             </>
           )}
-          {byokMode && !authMetaLoading && localImageGenerationProviders.length > 0 && (
+          {byokMode && (
             <>
               <SettingsRow
-                label="Image Generation Model"
-                icon={Sparkles}
-                description="Used for Image mode in Chat and generated images."
-              >
-                <div className="w-80">
-                  <ModelSelector
-                    selectedModel={imageGenerationModel}
-                    onModelChange={onImageGenerationModelChange}
-                    models={LOCAL_IMAGE_GENERATION_MODELS}
-                    connectedProviders={localImageGenerationProviders}
-                  />
-                </div>
-              </SettingsRow>
-              <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
-                Local image generation supports OpenAI and Google keys. Anthropic local keys accept
-                image input, but do not generate image output.
-              </div>
+                label="Connected Providers"
+                icon={Key}
+                description={connectedProviders.length > 0 ? connectedProviders.join(", ") : "No providers connected"}
+              />
+              {!authMetaLoading && localImageGenerationProviders.length > 0 && (
+                <SettingsRow label="Image Generation" icon={Sparkles} description={imageGenerationModel || "Not selected"} />
+              )}
             </>
           )}
-          {byokMode && !authMetaLoading && localImageGenerationProviders.length === 0 && (
-            <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
-              Connect an OpenAI or Google API key to use local image generation. Anthropic local
-              keys accept image input, but do not generate image output.
-            </div>
+          {localModelsMode && localModelConfig.serviceType !== "rnn-local" && (
+            <SettingsRow
+              label="Service"
+              icon={Cpu}
+              description={
+                localModelConfig.serviceType === "ollama"
+                  ? "Ollama"
+                  : localModelConfig.serviceType === "lmstudio"
+                    ? "LM Studio"
+                    : localModelConfig.serviceType === "vllm"
+                      ? "vLLM"
+                      : "OpenAI-Compatible"
+              }
+            />
           )}
-          {localModelsMode && (
-            <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
-              Local Models mode uses the model served by your local AI service below. Cloud image
-              generation settings stay under Bring Your Own Keys or Managed Provider.
-            </div>
-          )}
+          <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
+            Configure models and connection details in the active connection section below.
+          </div>
         </SettingsGroup>
-      </div>
+      )}
 
-      <SettingsGroup title="System">
+      {activeSection === "gateway" && (
+      <SettingsGroup title="Gateway & Runtime">
         <SettingsRow label="Gateway Status" icon={Shield} description={gatewayRunning ? "Running on localhost:19789" : "Secure sandbox stopped"}>
           <button
             type="button"
             onClick={onGatewayToggle}
             disabled={isTogglingGateway}
-            className="inline-flex items-center gap-1.5 rounded-md bg-[#1A1A2E] px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
           >
             {isTogglingGateway ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1502,7 +1650,7 @@ export function Settings({
                   type="button"
                   onClick={() => void handleRuntimeResourceSave(gatewayRunning)}
                   disabled={runtimeResourceSaving || !runtimeResourcesDirty}
-                  className="px-3 py-1 text-xs font-semibold rounded-md bg-[#1A1A2E] text-white hover:opacity-80 disabled:opacity-50"
+                  className="px-3 py-1 text-xs font-medium rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50 transition-colors"
                 >
                   {runtimeResourceSaving
                     ? gatewayRunning
@@ -1553,7 +1701,7 @@ export function Settings({
               type="button"
               onClick={refreshGatewayConfigHealth}
               disabled={gatewayConfigLoading || gatewayConfigActionLoading}
-              className="px-3 py-1.5 text-xs font-medium rounded-md border border-[var(--border-subtle)] bg-[var(--bg-card)] hover:bg-[var(--system-gray-6)] disabled:opacity-50"
+              className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50 transition-colors"
             >
               {gatewayConfigLoading ? "Checking..." : "Check"}
             </button>
@@ -1561,7 +1709,7 @@ export function Settings({
               type="button"
               onClick={healGatewayConfig}
               disabled={gatewayConfigLoading || gatewayConfigActionLoading}
-              className="px-3 py-1.5 text-xs font-semibold rounded-md bg-[#1A1A2E] text-white hover:opacity-80 disabled:opacity-50"
+              className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50 transition-colors"
             >
               {gatewayConfigActionLoading ? "Healing..." : "Heal"}
             </button>
@@ -1574,122 +1722,144 @@ export function Settings({
           <div className="px-4 pb-4 pt-2 text-xs text-green-500">{gatewayConfigNotice}</div>
         )}
       </SettingsGroup>
-
-      <SettingsGroup title="AI Connection">
-        <div className="p-4 space-y-4">
-          <ConnectionModeSelector
-            value={connectionMode}
-            onChange={(value) => {
-              void onConnectionModeChange(value);
-            }}
-          />
-          {(() => {
-            const connectionModeDescription = managedMode
-              ? isAuthConfigured
-                ? proxyEnabled
-                  ? `Managed Provider is active via ${getProxyUrl()}.`
-                  : "Managed Provider uses your Entropic account and trial or paid credits."
-                : "Managed Provider is unavailable in this build because hosted auth is not configured."
-              : byokMode
-                ? "Bring Your Own Keys uses provider OAuth or API keys stored locally on this machine."
-                : "";
-            return connectionModeDescription ? (
-              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-4 py-3 text-sm text-[var(--text-secondary)]">
-                {connectionModeDescription}
-              </div>
-            ) : null;
-          })()}
-        </div>
-      </SettingsGroup>
-
-      {localModelsMode && (
-        <>
-          <SettingsGroup title="Local Models">
-            <div className="p-4">
-              <LocalAiServiceForm
-                config={{ ...localModelConfig, enabled: true }}
-                onChange={(config) => {
-                  return onLocalModelConfigChange({ ...config, enabled: true });
-                }}
-                onManagedModelActivated={onManagedLocalRuntimeModelActivated}
-              />
-            </div>
-          </SettingsGroup>
-
-          <SettingsGroup title="Local Performance">
-            <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
-              Tune prompt size and sandbox behavior. Chat toggles apply immediately.
-              Sandbox defaults take effect the next time the sandbox starts.
-            </div>
-            <SettingsToggleRow
-              label="Disable tools in local chat"
-              description="Keeps coding/file tool schemas out of normal local chat turns to shrink prompt size."
-              checked={localModePerformanceSettings.disableTools}
-              onChange={(checked) => {
-                void onLocalModePerformanceSettingsChange({ disableTools: checked });
-              }}
-            />
-            <SettingsToggleRow
-              label="Use lightweight bootstrap context"
-              description="Sends a smaller bootstrap prompt for normal local chat turns."
-              checked={localModePerformanceSettings.lightweightBootstrap}
-              onChange={(checked) => {
-                void onLocalModePerformanceSettingsChange({
-                  lightweightBootstrap: checked,
-                });
-              }}
-            />
-            <SettingsToggleRow
-              label="Prefer lighter sandbox defaults"
-              description="Defaults local-model sandbox runs to lighter recall settings instead of heavier memory/context features."
-              checked={localModePerformanceSettings.lightRuntimeDefaults}
-              onChange={(checked) => {
-                void onLocalModePerformanceSettingsChange({
-                  lightRuntimeDefaults: checked,
-                });
-              }}
-            />
-            <SettingsToggleRow
-              label="Debug local chats"
-              description="Turn on local chat diagnostics and debug routing controls without changing the normal OpenClaw path by itself."
-              checked={localModePerformanceSettings.debugMode}
-              onChange={(checked) => {
-                void onLocalModePerformanceSettingsChange({
-                  debugMode: checked,
-                });
-              }}
-            />
-            <SettingsToggleRow
-              label="In debug mode, bypass OpenClaw"
-              description="Call the local model endpoint directly and reuse only recent chat history. Turn this off to debug the full OpenClaw path instead."
-              checked={localModePerformanceSettings.debugDirectBypass}
-              disabled={!localModePerformanceSettings.debugMode}
-              onChange={(checked) => {
-                void onLocalModePerformanceSettingsChange({
-                  debugDirectBypass: checked,
-                });
-              }}
-            />
-            <SettingsToggleRow
-              label="Capture OpenClaw prompt previews"
-              description="When debugging through OpenClaw, record truncated system/prompt previews in diagnostics so you can inspect what the agent actually sent."
-              checked={localModePerformanceSettings.capturePromptPreview}
-              disabled={
-                !localModePerformanceSettings.debugMode ||
-                localModePerformanceSettings.debugDirectBypass
-              }
-              onChange={(checked) => {
-                void onLocalModePerformanceSettingsChange({
-                  capturePromptPreview: checked,
-                });
-              }}
-            />
-          </SettingsGroup>
-        </>
       )}
 
-      {byokMode && (
-        <SettingsGroup title="Bring Your Own Keys">
+      {activeSection === "managed-provider" && (
+      <>
+      <SettingsGroup title="Managed Provider">
+        <SettingsToggleRow
+          label="Use Managed Provider"
+          description="Sign in with your Entropic account and use managed credits."
+          checked={managedMode}
+          onChange={() => { if (!managedMode) void onConnectionModeChange("managed"); }}
+        />
+        {managedMode && (
+          <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
+            {isAuthConfigured
+              ? proxyEnabled
+                ? `Active via ${getProxyUrl()}.`
+                : "Uses your Entropic account and trial or paid credits."
+              : "Unavailable in this build — hosted auth is not configured."}
+          </div>
+        )}
+      </SettingsGroup>
+      <div className={clsx(!managedMode && "opacity-50 pointer-events-none select-none")}>
+        <SettingsGroup title="Models">
+          <SettingsRow label="Primary Model" icon={Cpu}>
+            <div className="w-80">
+              <ModelSelector
+                selectedModel={selectedModel}
+                onModelChange={onModelChange}
+              />
+            </div>
+          </SettingsRow>
+          <SettingsRow label="Coding Model" icon={Cpu}>
+            <div className="w-80">
+              <ModelSelector selectedModel={codeModel} onModelChange={onCodeModelChange} />
+            </div>
+          </SettingsRow>
+          <SettingsRow label="Vision Model" icon={Image}>
+            <div className="w-80">
+              <ModelSelector selectedModel={imageModel} onModelChange={onImageModelChange} />
+            </div>
+          </SettingsRow>
+          <SettingsRow
+            label="Image Generation Model"
+            icon={Sparkles}
+            description="Used for Image mode in Chat and generated images."
+          >
+            <div className="w-80">
+              <ModelSelector
+                selectedModel={imageGenerationModel}
+                onModelChange={onImageGenerationModelChange}
+                models={PROXY_IMAGE_GENERATION_MODELS}
+              />
+            </div>
+          </SettingsRow>
+        </SettingsGroup>
+      </div>
+      </>
+      )}
+
+      {activeSection === "local-models" && (
+      <>
+      <SettingsGroup title="Local Models">
+        <SettingsToggleRow
+          label="Use Local Models"
+          description="Use Ollama, LM Studio, vLLM, or another local AI service."
+          checked={localModelsMode && localModelConfig.serviceType !== "rnn-local"}
+          onChange={() => {
+            if (!localModelsMode) {
+              void onConnectionModeChange("local-models");
+            }
+            if (localModelConfig.serviceType === "rnn-local") {
+              void onLocalModelConfigChange({ ...localModelConfig, serviceType: "ollama" });
+            }
+          }}
+        />
+      </SettingsGroup>
+      <div className={clsx(!(localModelsMode && localModelConfig.serviceType !== "rnn-local") && "opacity-50 pointer-events-none select-none")}>
+        <div className="mb-8">
+          <LocalAiServiceForm
+            config={{
+              ...localModelConfig,
+              enabled: true,
+              serviceType: localModelConfig.serviceType === "rnn-local" ? "ollama" : localModelConfig.serviceType,
+            }}
+            onChange={(config) => {
+              return onLocalModelConfigChange({ ...config, enabled: true });
+            }}
+            onManagedModelActivated={onManagedLocalRuntimeModelActivated}
+            excludeServiceTypes={["rnn-local"]}
+          />
+        </div>
+        {renderLocalPerformanceToggles()}
+      </div>
+      </>
+      )}
+
+      {activeSection === "entropic-local-runtime" && (
+      <>
+      <SettingsGroup title="Entropic Local Runtime">
+        <SettingsToggleRow
+          label="Use Entropic Local Runtime"
+          description="Entropic manages your local model runtime and cache. Supports RWKV, transformer, and GGUF formats."
+          checked={localModelsMode && localModelConfig.serviceType === "rnn-local"}
+          onChange={async () => {
+            if (!localModelsMode) {
+              await onConnectionModeChange("local-models");
+            }
+            if (localModelConfig.serviceType !== "rnn-local") {
+              await onLocalModelConfigChange({ ...localModelConfig, enabled: true, serviceType: "rnn-local" });
+            }
+          }}
+        />
+      </SettingsGroup>
+      <div className={clsx(!(localModelsMode && localModelConfig.serviceType === "rnn-local") && "opacity-50 pointer-events-none select-none")}>
+        <div className="mb-8">
+          <RnnLocalModelManager
+            config={{ ...localModelConfig, enabled: true, serviceType: "rnn-local" }}
+            onChange={(config) => onLocalModelConfigChange({ ...config, enabled: true, serviceType: "rnn-local" })}
+            onModelActivated={onManagedLocalRuntimeModelActivated}
+          />
+        </div>
+        {renderLocalPerformanceToggles()}
+      </div>
+      </>
+      )}
+
+      {activeSection === "byok" && (
+      <>
+      <SettingsGroup title="Bring Your Own Keys">
+        <SettingsToggleRow
+          label="Use Bring Your Own Keys"
+          description="Use your own provider API keys stored locally on this machine."
+          checked={byokMode}
+          onChange={() => { if (!byokMode) void onConnectionModeChange("byok"); }}
+        />
+      </SettingsGroup>
+      <div className={clsx(!byokMode && "opacity-50 pointer-events-none select-none")}>
+        <SettingsGroup title="Provider Keys">
             {/* ── Anthropic ── */}
             <div className="px-4 pt-3 pb-1">
               <span className="text-[11px] font-medium uppercase tracking-wider text-[var(--text-tertiary)]">Anthropic</span>
@@ -1972,8 +2142,52 @@ export function Settings({
               </div>
             )}
         </SettingsGroup>
+        <SettingsGroup title="Models">
+          <SettingsRow label="Primary Model" icon={Cpu}>
+            <div className="w-80">
+              <ModelSelector
+                selectedModel={selectedModel}
+                onModelChange={onModelChange}
+                useLocalKeys={true}
+                connectedProviders={connectedProviders}
+                localModel={null}
+              />
+            </div>
+          </SettingsRow>
+          {!authMetaLoading && localImageGenerationProviders.length > 0 && (
+            <>
+              <SettingsRow
+                label="Image Generation Model"
+                icon={Sparkles}
+                description="Used for Image mode in Chat and generated images."
+              >
+                <div className="w-80">
+                  <ModelSelector
+                    selectedModel={imageGenerationModel}
+                    onModelChange={onImageGenerationModelChange}
+                    models={LOCAL_IMAGE_GENERATION_MODELS}
+                    connectedProviders={localImageGenerationProviders}
+                  />
+                </div>
+              </SettingsRow>
+              <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
+                Local image generation supports OpenAI and Google keys. Anthropic local keys accept
+                image input, but do not generate image output.
+              </div>
+            </>
+          )}
+          {!authMetaLoading && localImageGenerationProviders.length === 0 && (
+            <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
+              Connect an OpenAI or Google API key to use local image generation. Anthropic local
+              keys accept image input, but do not generate image output.
+            </div>
+          )}
+        </SettingsGroup>
+      </div>
+      </>
       )}
 
+      {activeSection === "diagnostics" && (
       <SettingsGroup title="Diagnostics">
         <div>
           <button
@@ -2208,267 +2422,212 @@ export function Settings({
           )}
         </div>
       </SettingsGroup>
+      )}
 
-      <SettingsGroup title="Data Management">
-        <div className="p-4 space-y-4">
-          <div className="flex items-start gap-3">
-            <div className="w-7 h-7 rounded-md bg-blue-500/10 text-blue-500 flex items-center justify-center flex-shrink-0">
-              <Cpu className="w-4 h-4" />
-            </div>
-            <div className="flex-1">
-              <div className="text-[14px] font-medium text-[var(--text-primary)] mb-1">Fetch Latest OpenClaw Runtime</div>
-              <div className="text-[12px] text-[var(--text-secondary)] mb-3">
-                Refresh the runtime manifest and cache the newest OpenClaw runtime tar for faster startup and updates.
-              </div>
-              {(runtimeVersionInfo?.runtime_download_asset_name || runtimeVersionInfo?.runtime_download_size_bytes != null) && (
-                <div className="text-[11px] text-[var(--text-tertiary)] mb-3">
-                  Selected asset: {runtimeVersionInfo?.runtime_download_asset_name ?? "unknown"}
-                  {runtimeVersionInfo?.runtime_download_size_bytes != null
-                    ? ` · ${formatBytes(runtimeVersionInfo.runtime_download_size_bytes)}`
-                    : ""}
-                </div>
-              )}
-              <button
-                onClick={async () => {
-                  setRuntimeFetchLoading(true);
-                  try {
-                    const result = await invoke<RuntimeFetchResult>("fetch_latest_openclaw_runtime");
-                    invoke<RuntimeVersionInfo>("get_runtime_version_info").then(setRuntimeVersionInfo).catch(() => {});
-                    const shortCommit = result.runtime_openclaw_commit
-                      ? ` (${result.runtime_openclaw_commit.slice(0, 7)})`
-                      : "";
-                    alert(
-                      "Runtime cache updated.\n\n" +
-                        `Version: ${result.runtime_version}${shortCommit}\n` +
-                        (result.runtime_download_asset_name
-                          ? `Asset: ${result.runtime_download_asset_name}\n`
-                          : "") +
-                        (typeof result.runtime_download_size_bytes === "number"
-                          ? `Download: ${formatBytes(result.runtime_download_size_bytes)}\n`
-                          : "") +
-                        `SHA256: ${result.runtime_sha256}\n` +
-                        `Path: ${result.cache_path}`
-                    );
-                  } catch (err) {
-                    alert("Failed to fetch latest runtime: " + (err instanceof Error ? err.message : String(err)));
-                  } finally {
-                    setRuntimeFetchLoading(false);
-                  }
-                }}
-                disabled={runtimeFetchLoading}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                {runtimeFetchLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                {runtimeFetchLoading ? "Fetching..." : "Fetch Latest Runtime"}
-              </button>
-            </div>
+      {activeSection === "data" && (
+      <>
+      <SettingsGroup title="Runtime">
+        <SettingsRow
+          label="Fetch Latest Runtime"
+          icon={Download}
+          description={
+            runtimeVersionInfo?.runtime_download_asset_name
+              ? `${runtimeVersionInfo.runtime_download_asset_name}${runtimeVersionInfo.runtime_download_size_bytes != null ? ` · ${formatBytes(runtimeVersionInfo.runtime_download_size_bytes)}` : ""}`
+              : "Cache the newest OpenClaw runtime for faster startup"
+          }
+        >
+          <button
+            onClick={async () => {
+              setRuntimeFetchLoading(true);
+              try {
+                const result = await invoke<RuntimeFetchResult>("fetch_latest_openclaw_runtime");
+                invoke<RuntimeVersionInfo>("get_runtime_version_info").then(setRuntimeVersionInfo).catch(() => {});
+                const shortCommit = result.runtime_openclaw_commit
+                  ? ` (${result.runtime_openclaw_commit.slice(0, 7)})`
+                  : "";
+                alert(
+                  "Runtime cache updated.\n\n" +
+                    `Version: ${result.runtime_version}${shortCommit}\n` +
+                    (result.runtime_download_asset_name
+                      ? `Asset: ${result.runtime_download_asset_name}\n`
+                      : "") +
+                    (typeof result.runtime_download_size_bytes === "number"
+                      ? `Download: ${formatBytes(result.runtime_download_size_bytes)}\n`
+                      : "") +
+                    `SHA256: ${result.runtime_sha256}\n` +
+                    `Path: ${result.cache_path}`
+                );
+              } catch (err) {
+                alert("Failed to fetch latest runtime: " + (err instanceof Error ? err.message : String(err)));
+              } finally {
+                setRuntimeFetchLoading(false);
+              }
+            }}
+            disabled={runtimeFetchLoading}
+            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+          >
+            {runtimeFetchLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            {runtimeFetchLoading ? "Fetching..." : "Fetch"}
+          </button>
+        </SettingsRow>
+      </SettingsGroup>
+
+      <SettingsGroup title="Import">
+        <SettingsRow
+          label="Import Legacy Data"
+          icon={Download}
+          description="Import auth, profile, and settings from a previous install."
+        >
+          <div className="flex items-center gap-2">
+            <button
+              onClick={async () => {
+                setLegacyMigrationLoading(true);
+                try {
+                  const result = await invoke<string>("migrate_legacy_nova_data");
+                  alert("Legacy migration complete.\n\n" + result);
+                } catch (err) {
+                  alert("Legacy migration failed: " + (err instanceof Error ? err.message : String(err)));
+                } finally {
+                  setLegacyMigrationLoading(false);
+                }
+              }}
+              disabled={legacyMigrationLoading}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+            >
+              {legacyMigrationLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+              {legacyMigrationLoading ? "Importing..." : "Import"}
+            </button>
           </div>
+        </SettingsRow>
+        <SettingsRow
+          label="Import + Runtime Reset"
+          icon={RotateCcw}
+          description="Import data and reset runtime VMs to fix drift."
+        >
+          <button
+            onClick={async () => {
+              const confirmed = await ask(
+                "Import data from previous install, then fully reset runtime VMs/containers/volumes to fix isolated runtime drift? Runtime workspace data may be removed, but imported auth/settings are kept.",
+                {
+                  title: "Import + Runtime Reset",
+                  kind: "warning",
+                  okLabel: "Import and Reset",
+                  cancelLabel: "Cancel",
+                }
+              );
+              if (!confirmed) return;
+              setLegacyUpgradeLoading(true);
+              try {
+                const result = await invoke<string>("migrate_legacy_nova_install", {
+                  cleanupRuntime: true,
+                });
+                alert("Legacy upgrade migration completed.\n\n" + result);
+              } catch (err) {
+                alert(
+                  "Legacy upgrade migration failed: " +
+                    (err instanceof Error ? err.message : String(err))
+                );
+              } finally {
+                setLegacyUpgradeLoading(false);
+              }
+            }}
+            disabled={legacyUpgradeLoading}
+            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+          >
+            {legacyUpgradeLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+            {legacyUpgradeLoading ? "Resetting..." : "Import + Reset"}
+          </button>
+        </SettingsRow>
+      </SettingsGroup>
 
-          <div className="flex items-start gap-3">
-            <div className="w-7 h-7 rounded-md bg-amber-500/10 text-amber-500 flex items-center justify-center flex-shrink-0">
-              <AlertTriangle className="w-4 h-4" />
-            </div>
-            <div className="flex-1">
-              <div className="text-[14px] font-medium text-[var(--text-primary)] mb-1">Import Legacy Entropic Data</div>
-              <div className="text-[12px] text-[var(--text-secondary)] mb-3">
-                Imports auth/session/profile/settings files from a previous Entropic install into this app data directory.
-              </div>
-              <button
-                onClick={async () => {
-                  setLegacyMigrationLoading(true);
+      <SettingsGroup title="Danger Zone">
+        <SettingsRow
+          label="Reset Application"
+          icon={Trash2}
+          description="Remove all history, settings, runtime state, and caches."
+        >
+          <button
+            onClick={async () => {
+              const confirmed = await ask("Are you sure you want to fully reset? This removes all chat history, settings, runtime state, containers, and caches.", {
+                title: "Reset Application",
+                kind: "warning",
+                okLabel: "Reset",
+                cancelLabel: "Cancel"
+              });
+              if (!confirmed) return;
+
+              setResetLoading(true);
+              try {
+                try { await disconnectIntegration("x"); } catch (e) { console.warn("[Settings] X disconnect failed:", e); }
+                const result = await invoke<string>("cleanup_app_data", { includeVms: true });
+                try { await authSignOut(); } catch (e) { console.warn("[Settings] signOut failed:", e); }
+                for (const storeName of RESET_STORE_FILES) {
                   try {
-                    const result = await invoke<string>("migrate_legacy_nova_data");
-                    alert("Legacy migration complete.\n\n" + result);
-                  } catch (err) {
-                    alert("Legacy migration failed: " + (err instanceof Error ? err.message : String(err)));
-                  } finally {
-                    setLegacyMigrationLoading(false);
-                  }
-                }}
-                disabled={legacyMigrationLoading}
-                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                {legacyMigrationLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                {legacyMigrationLoading ? "Importing..." : "Import Entropic Data"}
-              </button>
+                    const s = await Store.load(storeName);
+                    await s.clear();
+                    await s.save();
+                  } catch (e) { console.warn(`[Settings] Failed to clear ${storeName}:`, e); }
+                }
+                resetIntegrationVaultSession();
+                resetIntegrationState();
+                alert("Cleanup completed!\n\n" + result);
+              } catch (err) {
+                alert("Cleanup failed: " + (err instanceof Error ? err.message : String(err)));
+              } finally {
+                setResetLoading(false);
+              }
+            }}
+            disabled={resetLoading || uninstallLoading}
+            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-red-500/30 text-red-500 hover:bg-red-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+          >
+            {resetLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+            {resetLoading ? "Resetting..." : "Reset"}
+          </button>
+        </SettingsRow>
+        <SettingsRow
+          label="Uninstall Entropic"
+          icon={LogOut}
+          description="Delete all data and quit. You can then remove the app."
+        >
+          <button
+            onClick={async () => {
+              const confirmed = await ask("Are you sure you want to completely uninstall Entropic?\n\nThis will delete all data including settings and quit the app. You can then remove the installed app.\n\nThis action cannot be undone.", {
+                title: "Uninstall Entropic",
+                kind: "warning",
+                okLabel: "Uninstall",
+                cancelLabel: "Cancel"
+              });
+              if (!confirmed) return;
 
-              <button
-                onClick={async () => {
-                  const confirmed = await ask(
-                    "Import data from previous install, then fully reset runtime VMs/containers/volumes to fix isolated runtime drift? Runtime workspace data may be removed, but imported auth/settings are kept.",
-                    {
-                      title: "Import + Runtime Reset",
-                      kind: "warning",
-                      okLabel: "Import and Reset",
-                      cancelLabel: "Cancel",
-                    }
-                  );
-                  if (!confirmed) return;
-                  setLegacyUpgradeLoading(true);
+              setUninstallLoading(true);
+              try {
+                try { await disconnectIntegration("x"); } catch (e) { console.warn("[Settings] X disconnect failed:", e); }
+                const result = await invoke<string>("cleanup_app_data", { includeVms: true });
+                try { await authSignOut(); } catch (e) { console.warn("[Settings] signOut failed:", e); }
+                for (const storeName of RESET_STORE_FILES) {
                   try {
-                    const result = await invoke<string>("migrate_legacy_nova_install", {
-                      cleanupRuntime: true,
-                    });
-                    alert("Legacy upgrade migration completed.\n\n" + result);
-                  } catch (err) {
-                    alert(
-                      "Legacy upgrade migration failed: " +
-                        (err instanceof Error ? err.message : String(err))
-                    );
-                  } finally {
-                    setLegacyUpgradeLoading(false);
-                  }
-                }}
-                disabled={legacyUpgradeLoading}
-                className="mt-2 px-4 py-2 bg-gray-700 hover:opacity-80 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                {legacyUpgradeLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                {legacyUpgradeLoading
-                  ? "Importing + Resetting..."
-                  : "Import + Runtime Reset"}
-              </button>
-            </div>
-          </div>
-
-          <div className="flex items-start gap-3">
-            <div className="w-7 h-7 rounded-md bg-red-500/10 text-red-500 flex items-center justify-center flex-shrink-0">
-              <Trash2 className="w-4 h-4" />
-            </div>
-            <div className="flex-1">
-              <div className="text-[14px] font-medium text-[var(--text-primary)] mb-1">Reset Application</div>
-              <div className="text-[12px] text-[var(--text-secondary)] mb-3">
-                Fully reset Entropic: removes all chat history, settings, isolated runtime state, containers, volumes, and caches.
-              </div>
-              <button
-                onClick={async () => {
-                  console.log("[Settings] Reset Application clicked");
-                  const confirmed = await ask("Are you sure you want to fully reset? This removes all chat history, settings, runtime state, containers, and caches.", {
-                    title: "Reset Application",
-                    kind: "warning",
-                    okLabel: "Reset",
-                    cancelLabel: "Cancel"
-                  });
-                  console.log("[Settings] Confirmation result:", confirmed);
-                  if (!confirmed) {
-                    console.log("[Settings] Reset cancelled by user");
-                    return;
-                  }
-
-                  setResetLoading(true);
-                  console.log("[Settings] Starting cleanup...");
-                  try {
-                    // Disconnect X/Twitter OAuth (stored server-side in Supabase, not cleared by rm -rf)
-                    try { await disconnectIntegration("x"); } catch (e) { console.warn("[Settings] X disconnect failed:", e); }
-
-                    const result = await invoke<string>("cleanup_app_data", { includeVms: true });
-                    console.log("[Settings] Cleanup succeeded:", result);
-
-                    // Sign out and clear all auth/settings stores so in-memory state is also cleared
-                    console.log("[Settings] Signing out and clearing auth...");
-                    try { await authSignOut(); } catch (e) { console.warn("[Settings] signOut failed:", e); }
-                    for (const storeName of RESET_STORE_FILES) {
-                      try {
-                        const s = await Store.load(storeName);
-                        await s.clear();
-                        await s.save();
-                      } catch (e) { console.warn(`[Settings] Failed to clear ${storeName}:`, e); }
-                    }
-                    resetIntegrationVaultSession();
-                    resetIntegrationState();
-
-                    alert("Cleanup completed!\n\n" + result);
-                  } catch (err) {
-                    console.error("[Settings] Cleanup failed:", err);
-                    alert("Cleanup failed: " + (err instanceof Error ? err.message : String(err)));
-                  } finally {
-                    setResetLoading(false);
-                    console.log("[Settings] Cleanup finished");
-                  }
-                }}
-                disabled={resetLoading || uninstallLoading}
-                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                {resetLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                {resetLoading ? "Resetting..." : "Reset Application"}
-              </button>
-            </div>
-          </div>
-
-          <div className="border-t border-[var(--border-subtle)] pt-4">
-            <div className="flex items-start gap-3">
-              <div className="w-7 h-7 rounded-md bg-[var(--bg-tertiary)] text-[var(--text-secondary)] flex items-center justify-center flex-shrink-0">
-                <LogOut className="w-4 h-4" />
-              </div>
-              <div className="flex-1">
-                <div className="text-[14px] font-medium text-[var(--text-primary)] mb-1">Uninstall Entropic</div>
-                <div className="text-[12px] text-[var(--text-secondary)] mb-3">
-                  Clean up all data and quit the app. After this, you can remove the installed app.
-                </div>
-                <div className="flex items-center gap-2 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg mb-3">
-                  <AlertTriangle className="w-4 h-4 text-blue-500 flex-shrink-0" />
-                  <p className="text-xs text-[var(--text-secondary)]">
-                    This will delete everything including your settings. Use "Reset Application" instead if you plan to reinstall.
-                  </p>
-                </div>
-                <button
-                  onClick={async () => {
-                    console.log("[Settings] Cleanup and Quit clicked");
-                    const confirmed = await ask("Are you sure you want to completely uninstall Entropic?\n\nThis will delete all data including settings and quit the app. You can then remove the installed app.\n\nThis action cannot be undone.", {
-                      title: "Uninstall Entropic",
-                      kind: "warning",
-                      okLabel: "Uninstall",
-                      cancelLabel: "Cancel"
-                    });
-                    console.log("[Settings] Confirmation result:", confirmed);
-                    if (!confirmed) {
-                      console.log("[Settings] Uninstall cancelled by user");
-                      return;
-                    }
-
-                    setUninstallLoading(true);
-                    console.log("[Settings] Starting uninstall cleanup...");
-                    try {
-                      // Disconnect X/Twitter OAuth (stored server-side in Supabase, not cleared by rm -rf)
-                      try { await disconnectIntegration("x"); } catch (e) { console.warn("[Settings] X disconnect failed:", e); }
-
-                      const result = await invoke<string>("cleanup_app_data", { includeVms: true });
-                      console.log("[Settings] Cleanup succeeded:", result);
-
-                      // Sign out of Supabase and clear all Tauri stores
-                      console.log("[Settings] Signing out and clearing auth...");
-                      try { await authSignOut(); } catch (e) { console.warn("[Settings] signOut failed:", e); }
-                      for (const storeName of RESET_STORE_FILES) {
-                        try {
-                          const s = await Store.load(storeName);
-                          await s.clear();
-                          await s.save();
-                        } catch (e) { console.warn(`[Settings] Failed to clear ${storeName}:`, e); }
-                      }
-                      resetIntegrationVaultSession();
-                      resetIntegrationState();
-
-                      alert("Uninstall cleanup completed!\n\n" + result + "\n\nThe app will now quit. You can now remove the installed app.");
-
-                      // Quit the app
-                      console.log("[Settings] Quitting app...");
-                      const { exit } = await import("@tauri-apps/plugin-process");
-                      await exit(0);
-                    } catch (err) {
-                      console.error("[Settings] Cleanup failed:", err);
-                      alert("Cleanup failed: " + (err instanceof Error ? err.message : String(err)));
-                      setUninstallLoading(false);
-                    }
-                  }}
-                  disabled={resetLoading || uninstallLoading}
-                  className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                >
-                  {uninstallLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                  {uninstallLoading ? "Uninstalling..." : "Cleanup and Quit"}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+                    const s = await Store.load(storeName);
+                    await s.clear();
+                    await s.save();
+                  } catch (e) { console.warn(`[Settings] Failed to clear ${storeName}:`, e); }
+                }
+                resetIntegrationVaultSession();
+                resetIntegrationState();
+                alert("Uninstall cleanup completed!\n\n" + result + "\n\nThe app will now quit. You can now remove the installed app.");
+                const { exit } = await import("@tauri-apps/plugin-process");
+                await exit(0);
+              } catch (err) {
+                alert("Cleanup failed: " + (err instanceof Error ? err.message : String(err)));
+                setUninstallLoading(false);
+              }
+            }}
+            disabled={resetLoading || uninstallLoading}
+            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-red-500/30 text-red-500 hover:bg-red-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+          >
+            {uninstallLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LogOut className="w-3.5 h-3.5" />}
+            {uninstallLoading ? "Uninstalling..." : "Uninstall"}
+          </button>
+        </SettingsRow>
       </SettingsGroup>
 
       <div className="px-1 pb-2 text-xs text-[var(--text-tertiary)] space-y-1">
@@ -2504,78 +2663,83 @@ export function Settings({
             : ""}
         </div>
       </div>
+      </>
+      )}
 
-      {/* Wallpaper Picker Modal */}
-      {wallpaperPickerOpen && (
+        </div>
+      </div>
+    </div>
+
+    {/* Wallpaper Picker Modal */}
+    {wallpaperPickerOpen && (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/20"
+        onClick={() => setWallpaperPickerOpen(false)}
+        onKeyDown={(e) => { if (e.key === "Escape") setWallpaperPickerOpen(false); }}
+      >
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/20"
-          onClick={() => setWallpaperPickerOpen(false)}
-          onKeyDown={(e) => { if (e.key === "Escape") setWallpaperPickerOpen(false); }}
+          className="bg-[var(--bg-card)] rounded-xl shadow-2xl p-6 w-full max-w-4xl max-h-[85vh] overflow-auto border border-[var(--border-subtle)]"
+          onClick={(e) => e.stopPropagation()}
         >
-          <div
-            className="bg-[var(--bg-card)] rounded-xl shadow-2xl p-6 w-full max-w-4xl max-h-[85vh] overflow-auto border border-[var(--border-subtle)]"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-lg font-semibold">Choose Wallpaper</h2>
-              <button onClick={() => setWallpaperPickerOpen(false)} className="btn-secondary">Done</button>
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-lg font-semibold">Choose Wallpaper</h2>
+            <button onClick={() => setWallpaperPickerOpen(false)} className="btn-secondary">Done</button>
+          </div>
+
+          <div className="space-y-8">
+            <div>
+              <h4 className="text-sm font-semibold text-[var(--text-secondary)] uppercase mb-4 tracking-wide">Scenic</h4>
+              <div className="grid grid-cols-3 sm:grid-cols-4 gap-4">
+                {WALLPAPERS.filter((wp) => wp.type === "photo").map((wp) => (
+                  <button
+                    key={wp.id}
+                    onClick={() => handleWallpaperPick(wp.id)}
+                    className={clsx(
+                      "aspect-video rounded-xl overflow-hidden transition-all hover:opacity-90 shadow-sm hover:shadow-md",
+                      wallpaperId === wp.id ? "ring-4 ring-[var(--system-blue)] ring-offset-2" : ""
+                    )}
+                  >
+                    <div
+                      className="w-full h-full bg-cover bg-center"
+                      style={{ backgroundImage: wp.thumbnail ? `url(${wp.thumbnail})` : wp.css }}
+                    />
+                  </button>
+                ))}
+              </div>
             </div>
 
-            <div className="space-y-8">
-              <div>
-                <h4 className="text-sm font-semibold text-[var(--text-secondary)] uppercase mb-4 tracking-wide">Scenic</h4>
-                <div className="grid grid-cols-3 sm:grid-cols-4 gap-4">
-                  {WALLPAPERS.filter((wp) => wp.type === "photo").map((wp) => (
-                    <button
-                      key={wp.id}
-                      onClick={() => handleWallpaperPick(wp.id)}
-                      className={clsx(
-                        "aspect-video rounded-xl overflow-hidden transition-all hover:opacity-90 shadow-sm hover:shadow-md",
-                        wallpaperId === wp.id ? "ring-4 ring-[var(--system-blue)] ring-offset-2" : ""
-                      )}
-                    >
-                      <div 
-                        className="w-full h-full bg-cover bg-center"
-                        style={{ backgroundImage: wp.thumbnail ? `url(${wp.thumbnail})` : wp.css }}
-                      />
-                    </button>
-                  ))}
-                </div>
+            <div>
+              <h4 className="text-sm font-semibold text-[var(--text-secondary)] uppercase mb-4 tracking-wide">Colors</h4>
+              <div className="grid grid-cols-6 sm:grid-cols-8 gap-4">
+                {WALLPAPERS.filter((wp) => wp.type === "gradient").map((wp) => (
+                  <button
+                    key={wp.id}
+                    onClick={() => handleWallpaperPick(wp.id)}
+                    className={clsx(
+                      "aspect-square rounded-full overflow-hidden transition-all hover:scale-105 shadow-sm",
+                      wallpaperId === wp.id ? "ring-4 ring-[var(--system-blue)] ring-offset-2" : ""
+                    )}
+                    style={{ background: wp.css }}
+                  />
+                ))}
               </div>
-              
-              <div>
-                <h4 className="text-sm font-semibold text-[var(--text-secondary)] uppercase mb-4 tracking-wide">Colors</h4>
-                <div className="grid grid-cols-6 sm:grid-cols-8 gap-4">
-                  {WALLPAPERS.filter((wp) => wp.type === "gradient").map((wp) => (
-                    <button
-                      key={wp.id}
-                      onClick={() => handleWallpaperPick(wp.id)}
-                      className={clsx(
-                        "aspect-square rounded-full overflow-hidden transition-all hover:scale-105 shadow-sm",
-                        wallpaperId === wp.id ? "ring-4 ring-[var(--system-blue)] ring-offset-2" : ""
-                      )}
-                      style={{ background: wp.css }}
-                    />
-                  ))}
-                </div>
-              </div>
+            </div>
 
-              <div>
-                <button
-                   onClick={() => wallpaperInputRef.current?.click()}
-                   className="flex items-center gap-2 text-[var(--system-blue)] hover:underline text-sm font-medium"
-                >
-                  <Plus className="w-4 h-4" />
-                  Upload Custom Image...
-                </button>
-                <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleCustomWallpaperUpload} />
-              </div>
+            <div>
+              <button
+                 onClick={() => wallpaperInputRef.current?.click()}
+                 className="flex items-center gap-2 text-[var(--system-blue)] hover:underline text-sm font-medium"
+              >
+                <Plus className="w-4 h-4" />
+                Upload Custom Image...
+              </button>
+              <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleCustomWallpaperUpload} />
             </div>
           </div>
         </div>
-      )}
-
-    </div>
+      </div>
+    )}
+    </>
   );
 }
 

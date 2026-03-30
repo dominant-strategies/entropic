@@ -478,7 +478,7 @@ export const CONNECTION_MODE_OPTIONS: Array<{
   {
     value: "local-models",
     label: "Local Models",
-    description: "Use Ollama, LM Studio, vLLM, Managed Local Runtime, or another local service.",
+    description: "Use Ollama, LM Studio, vLLM, Entropic Local Runtime, or another local service.",
   },
 ];
 
@@ -486,9 +486,14 @@ export function normalizeConnectionMode(
   mode: unknown,
   fallback: ConnectionMode = "managed",
 ): ConnectionMode {
-  return mode === "managed" || mode === "byok" || mode === "local-models"
-    ? mode
-    : fallback;
+  const normalized =
+    mode === "managed" || mode === "byok" || mode === "local-models"
+      ? mode
+      : fallback;
+  if (!hostedFeaturesEnabled && normalized === "managed") {
+    return fallback !== "managed" ? fallback : "byok";
+  }
+  return normalized;
 }
 
 export type LocalModelServiceType =
@@ -522,7 +527,7 @@ export const LOCAL_MODEL_SERVICE_OPTIONS: Array<{
   { value: "ollama", label: "Ollama" },
   { value: "lmstudio", label: "LM Studio" },
   { value: "vllm", label: "vLLM" },
-  { value: "rnn-local", label: "Managed Local Runtime" },
+  { value: "rnn-local", label: "Entropic Local Runtime" },
   { value: "openai-compatible", label: "OpenAI-Compatible" },
 ];
 
@@ -562,6 +567,19 @@ export function defaultLocalModelApiMode(serviceType: LocalModelServiceType): Lo
   }
 }
 
+function normalizeLocalModelApiMode(
+  serviceType: LocalModelServiceType,
+  apiMode: LocalModelApiMode | null | undefined,
+): LocalModelApiMode {
+  if (serviceType === "ollama") {
+    return "ollama";
+  }
+  if (!apiMode || apiMode === "ollama") {
+    return defaultLocalModelApiMode(serviceType);
+  }
+  return apiMode;
+}
+
 function inferLocalModelServiceType(baseUrl: string | null | undefined): LocalModelServiceType {
   const normalized = (baseUrl || "").trim().toLowerCase();
   if (!normalized) return "ollama";
@@ -577,11 +595,11 @@ export function normalizeLocalModelConfig(
 ): LocalModelConfig {
   const serviceType =
     config?.serviceType || inferLocalModelServiceType(config?.baseUrl);
-  const apiMode = config?.apiMode || defaultLocalModelApiMode(serviceType);
+  const apiMode = normalizeLocalModelApiMode(serviceType, config?.apiMode);
   return {
     enabled: Boolean(config?.enabled),
     serviceType,
-    apiMode: serviceType === "ollama" ? "ollama" : apiMode,
+    apiMode,
     baseUrl:
       serviceType === "rnn-local"
         ? defaultLocalModelBaseUrl(serviceType)

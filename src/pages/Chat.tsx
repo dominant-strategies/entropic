@@ -1201,6 +1201,7 @@ export function Chat({
   onConnectionModeChange,
   localModelConfig,
   localModePerformanceSettings,
+  managedTrialBalanceCents,
   onLocalModelConfigChange,
   selectedModel,
   onModelChange: _onModelChange,
@@ -1224,6 +1225,7 @@ export function Chat({
   onConnectionModeChange?: (mode: ConnectionMode) => void | Promise<void>;
   localModelConfig?: LocalModelConfig | null;
   localModePerformanceSettings?: LocalModePerformanceSettings;
+  managedTrialBalanceCents?: number | null;
   onLocalModelConfigChange?: (config: LocalModelConfig) => void | Promise<void>;
   selectedModel: string;
   onModelChange?: (model: string) => void;
@@ -1253,12 +1255,17 @@ export function Chat({
     ? LOCAL_MODEL_ACTIVE_RUN_IDLE_TIMEOUT_MS
     : ACTIVE_RUN_IDLE_TIMEOUT_MS;
   const [localCreditsCents, setLocalCreditsCents] = useState<number | null>(null);
+  const effectiveLocalCreditsCents =
+    managedTrialBalanceCents ?? localCreditsCents;
   const localTrialLoading =
-    !isAuthenticated && isAuthConfigured && managedMode && localCreditsCents === null;
+    !isAuthenticated &&
+    isAuthConfigured &&
+    managedMode &&
+    effectiveLocalCreditsCents === null;
   const proxyEnabled =
     isAuthConfigured &&
     managedMode &&
-    (isAuthenticated || (localCreditsCents ?? 0) > 0);
+    (isAuthenticated || (effectiveLocalCreditsCents ?? 0) > 0);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
   const [shellDraftsBySession, setShellDraftsBySession] = useState<Record<string, string>>({});
@@ -1299,7 +1306,6 @@ export function Chat({
   const [creditsCheckoutLoading, setCreditsCheckoutLoading] = useState(false);
   const [componentMountedAt] = useState(Date.now());
   const [showGatewayOfflineCta, setShowGatewayOfflineCta] = useState(false);
-  const [optimizationTraceArmed, setOptimizationTraceArmed] = useState(false);
   const runTimingsRef = useRef<Record<string, {
     startedAt: number;
     ackAt?: number;
@@ -4393,12 +4399,11 @@ export function Chat({
     );
     const sessionComposerMode =
       composerModeBySessionRef.current[entry.sessionKey] || DEFAULT_COMPOSER_MODE;
-    const recordOptimizationTraceForSend =
-      optimizationTraceArmed && localModelsMode && sessionComposerMode === "chat";
     const localChatDebugModeEnabled =
       localModelsMode &&
       sessionComposerMode === "chat" &&
       effectiveLocalModePerformanceSettings.debugMode;
+    const recordOptimizationTraceForSend = localChatDebugModeEnabled;
     const localChatDirectBypassEnabled =
       localChatDebugModeEnabled && effectiveLocalModePerformanceSettings.debugDirectBypass;
     const localChatSendOptions =
@@ -4497,7 +4502,7 @@ export function Chat({
       addDiag(line);
     }
     const optimizationTraceId =
-      optimizationTraceArmed && localModelsMode
+      localModelsMode && effectiveLocalModePerformanceSettings.debugMode
         ? beginOptimizationTraceForSend({
             mode: "direct-local-debug",
             sessionKey,
@@ -6064,11 +6069,11 @@ export function Chat({
   }
 
   // Simplified render helpers for different states
-  const renderConnecting = () => (
+  const renderConnecting = (message = "Connecting to your assistant...") => (
     <div className="h-full flex items-center justify-center">
       <div className="text-center p-8 glass-card">
         <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3 text-[var(--text-accent)]" />
-        <p className="text-[var(--text-secondary)]">Connecting to your assistant...</p>
+        <p className="text-[var(--text-secondary)]">{message}</p>
       </div>
     </div>
   );
@@ -6608,7 +6613,7 @@ export function Chat({
   }, [activeComposerMode, dragActive]);
 
   if (isConnecting) return renderConnecting();
-  if (localTrialLoading) return renderConnecting();
+  if (localTrialLoading) return renderConnecting("Checking managed provider access...");
   if (!connectedProvider && !proxyEnabled && !localModelReady) return renderNoProvider();
   const autoStartExpected = proxyEnabled && !gatewayRunning;
   const showGatewayWarmupBanner =
@@ -6787,6 +6792,24 @@ export function Chat({
                   </button>
                 );
               })}
+              {localChatDebugModeActive ? (
+                <div
+                  className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs text-[var(--text-secondary)]"
+                  title={
+                    directLocalDebugBypassActive
+                      ? "Debug mode is on with direct local bypass."
+                      : "Debug mode is on."
+                  }
+                >
+                  <Bug className="h-3.5 w-3.5 shrink-0 text-[var(--system-blue)]" />
+                  <span
+                    className="truncate font-mono text-[var(--text-primary)]"
+                    title={localModelConfig?.modelName || "the configured local model"}
+                  >
+                    {localModelConfig?.modelName || "local model"}
+                  </span>
+                </div>
+              ) : null}
             </div>
             {activeComposerMode === "shell" ? (
               <div className="min-w-0 max-w-full text-[11px] text-[var(--text-tertiary)]">
@@ -6816,52 +6839,8 @@ export function Chat({
               </div>
             ) : null}
           </div>
-          {localModelsMode && activeComposerMode === "chat" ? (
+          {localModelsMode && activeComposerMode === "chat" && localChatDebugModeActive && directLocalDebugBypassActive ? (
             <div className="mt-2 space-y-1">
-              <div className="flex flex-wrap items-center gap-2">
-                {localChatDebugModeActive ? (
-                  <div className="inline-flex min-w-0 max-w-full items-center gap-2 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] px-2.5 py-1 text-[11px] text-[var(--text-secondary)]">
-                    <Bug className="h-3.5 w-3.5 shrink-0 text-[var(--system-blue)]" />
-                    <span className="min-w-0 truncate">
-                      {directLocalDebugBypassActive ? (
-                        <>
-                          Debug direct to{" "}
-                          <span className="font-mono text-[var(--text-primary)]">
-                            {localModelConfig?.modelName || "the configured local model"}
-                          </span>
-                          .
-                        </>
-                      ) : (
-                        <>
-                          Debug via OpenClaw to{" "}
-                          <span className="font-mono text-[var(--text-primary)]">
-                            {localModelConfig?.modelName || "the configured local model"}
-                          </span>
-                          {effectiveLocalModePerformanceSettings.capturePromptPreview
-                            ? " with prompt previews."
-                            : "."}
-                        </>
-                      )}
-                    </span>
-                  </div>
-                ) : null}
-                <button
-                  type="button"
-                  onClick={() => setOptimizationTraceArmed((prev) => !prev)}
-                  className={clsx(
-                    "rounded-md border px-2 py-1 text-[11px]",
-                    optimizationTraceArmed
-                      ? "border-[var(--system-blue)] text-[var(--system-blue)] bg-[var(--system-blue)]/10"
-                      : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]",
-                  )}
-                >
-                  {optimizationTraceArmed ? "Optimization Trace Armed" : "Record Optimization Trace"}
-                </button>
-                <span className="text-[11px] text-[var(--text-tertiary)]">
-                  Exports from Settings → Diagnostics after the next local chat send.
-                </span>
-              </div>
-              {localChatDebugModeActive && directLocalDebugBypassActive ? (
                 <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] px-3 py-2 text-[11px] text-[var(--text-secondary)]">
                   <div>
                     Direct debug reuses this chat session&apos;s recent user/assistant history
@@ -6879,7 +6858,6 @@ export function Chat({
                     </div>
                   ) : null}
                 </div>
-              ) : null}
             </div>
           ) : null}
           <div className="flex items-end gap-2">

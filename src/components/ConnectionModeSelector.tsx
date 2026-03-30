@@ -1,8 +1,10 @@
 import clsx from "clsx";
 import {
   CONNECTION_MODE_OPTIONS,
+  isAuthConfigured,
   type ConnectionMode,
 } from "../lib/auth";
+import { hostedFeaturesEnabled } from "../lib/buildProfile";
 
 type Props = {
   value: ConnectionMode;
@@ -11,9 +13,19 @@ type Props = {
 };
 
 export function ConnectionModeSelector({ value, onChange, className }: Props) {
+  const options = CONNECTION_MODE_OPTIONS.filter(
+    (option) => option.value !== "managed" || (hostedFeaturesEnabled && isAuthConfigured),
+  );
+
   return (
-    <div className={clsx("grid gap-2 sm:grid-cols-3", className)}>
-      {CONNECTION_MODE_OPTIONS.map((option) => {
+    <div
+      className={clsx(
+        "grid gap-2",
+        options.length >= 3 ? "sm:grid-cols-3" : "sm:grid-cols-2",
+        className,
+      )}
+    >
+      {options.map((option) => {
         const active = option.value === value;
         return (
           <button

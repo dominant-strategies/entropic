@@ -203,7 +203,7 @@ export function Layout({
         onMouseDown={startDrag}
         className={clsx(
           "flex flex-col flex-shrink-0 bg-transparent pb-4 pt-2 transition-[width,padding] duration-200",
-          sidebarCollapsed ? "w-[74px] pl-1.5 pr-1" : "w-[240px] pl-3 pr-2"
+          sidebarCollapsed ? "w-[74px] pl-1.5 pr-1" : "w-[192px] pl-3 pr-2"
         )}
       >
         {sidebarCollapsed ? (

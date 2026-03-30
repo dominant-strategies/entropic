@@ -19,6 +19,7 @@ type Props = {
   config: LocalModelConfig;
   onChange: (config: LocalModelConfig) => void | Promise<void>;
   onManagedModelActivated?: (modelName: string) => void | Promise<void>;
+  excludeServiceTypes?: LocalModelServiceType[];
   className?: string;
 };
 
@@ -32,6 +33,7 @@ export function LocalAiServiceForm({
   config,
   onChange,
   onManagedModelActivated,
+  excludeServiceTypes,
   className,
 }: Props) {
   const isManagedLocalRuntime = config.serviceType === "rnn-local";
@@ -205,7 +207,9 @@ export function LocalAiServiceForm({
               }
               className={selectClassName}
             >
-              {LOCAL_MODEL_SERVICE_OPTIONS.map((option) => (
+              {LOCAL_MODEL_SERVICE_OPTIONS
+                .filter((option) => !excludeServiceTypes?.includes(option.value))
+                .map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>

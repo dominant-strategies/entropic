@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  ChevronDown,
   Cpu,
   Download,
   Flame,
@@ -811,12 +812,12 @@ export function RnnLocalModelManager({
 
   return (
     <div className="space-y-4">
-      <div className="space-y-2">
+      <div className="space-y-1">
         <div className="text-[13px] font-semibold text-[var(--text-primary)]">
           Downloaded Models
         </div>
         {snapshot?.local.length ? (
-          <div className="divide-y divide-[var(--border-subtle)]">
+          <div className="rounded-xl border border-[var(--border-subtle)] divide-y divide-[var(--border-subtle)] overflow-hidden">
             {sortedLocalEntries.map((entry) => {
               const isLoaded = snapshot.loadedModel === entry.name || entry.loaded === true;
               const isBusy =
@@ -826,131 +827,47 @@ export function RnnLocalModelManager({
                   ? catalogEntries.find((candidate) => candidate.id === entry.catalog_id)
                   : null) || null;
               return (
-                <div
-                  key={entry.name}
-                  className={clsx(
-                    "flex flex-wrap items-start justify-between gap-3 rounded-xl px-2 py-2.5",
-                    isLoaded && "border border-emerald-500/30 bg-emerald-500/8",
-                  )}
-                >
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <div
-                          className={clsx(
-                            "text-sm font-medium",
-                            isLoaded ? "text-emerald-700" : "text-[var(--text-primary)]",
-                          )}
-                        >
-                          {entry.display_name || entry.name}
-                        </div>
-                        {isLoaded ? (
-                          <span className="inline-flex items-center rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-                            Loaded
-                          </span>
-                        ) : null}
-                        {entry.thinking ? <span className={badgeClassName}>Thinking</span> : null}
-                        {sourceCatalogEntry?.hf_repo ? (
-                          <span className={badgeClassName}>
-                            {formatProvider(sourceCatalogEntry.hf_repo)}
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="mt-1 text-xs text-[var(--text-secondary)]">
+                <details key={entry.name} className="group">
+                  <summary className="flex items-center justify-between gap-2 px-3 py-2 cursor-pointer list-none">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <ChevronDown className="w-3 h-3 text-[var(--text-tertiary)] transition-transform group-open:rotate-180 flex-shrink-0" />
+                      <span className="text-sm font-medium truncate text-[var(--text-primary)]">
+                        {entry.display_name || entry.name}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.preventDefault()}>
+                      {isLoaded ? (
+                        <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-600">
+                          Active
+                        </span>
+                      ) : (
+                        <>
+                          <button type="button" onClick={(e) => { e.stopPropagation(); void runAction({ kind: "load", target: entry.name }, () => invoke("load_rnn_model", { modelName: entry.name }), `Loaded ${entry.display_name || entry.name}.`); }} disabled={busyAction !== null} className={buttonClassName}>
+                            {isBusy && busyAction?.kind === "load" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Cpu className="h-3.5 w-3.5" />}
+                            Load
+                          </button>
+                          <button type="button" onClick={(e) => { e.stopPropagation(); void runAction({ kind: "delete", target: entry.name }, () => invoke("delete_rnn_model", { modelName: entry.name }), `Deleted ${entry.display_name || entry.name}.`); }} disabled={busyAction !== null} className={clsx(buttonClassName, "text-red-500")}>
+                            {isBusy && busyAction?.kind === "delete" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </summary>
+                  <div className="px-3 pb-3 pt-1 pl-8 border-t border-[var(--border-subtle)] bg-[var(--bg-secondary)]/50">
+                    <div className="text-xs text-[var(--text-secondary)] space-y-1">
+                      <div>
                         {[
                           formatBackend(entry.backend),
                           formatArchitecture(entry.architecture),
                           formatSize(entry.size_gb),
-                        ]
-                          .filter(Boolean)
-                          .join(" • ") || entry.filename}
+                          entry.thinking ? "Thinking" : null,
+                          sourceCatalogEntry?.hf_repo ? formatProvider(sourceCatalogEntry.hf_repo) : null,
+                        ].filter(Boolean).join(" · ") || entry.filename}
                       </div>
-                      {entry.description ? (
-                        <div className="mt-1 text-xs text-[var(--text-secondary)]">
-                          {entry.description}
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void runAction(
-                            { kind: "load", target: entry.name },
-                            () => invoke("load_rnn_model", { modelName: entry.name }),
-                            `Loaded ${entry.display_name || entry.name}.`,
-                          )
-                        }
-                        disabled={busyAction !== null}
-                        className={buttonClassName}
-                      >
-                        {isBusy && busyAction?.kind === "load" ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Cpu className="h-3.5 w-3.5" />
-                        )}
-                        Load
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void runAction(
-                            { kind: "warm", target: entry.name },
-                            () => invoke("warm_rnn_model", { modelName: entry.name }),
-                            `Warmed ${entry.display_name || entry.name}.`,
-                          )
-                        }
-                        disabled={busyAction !== null}
-                        className={buttonClassName}
-                      >
-                        {isBusy && busyAction?.kind === "warm" ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Flame className="h-3.5 w-3.5" />
-                        )}
-                        Warm
-                      </button>
-                      {isLoaded ? (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            void runAction(
-                              { kind: "unload" },
-                              () => invoke("unload_rnn_model"),
-                              `Unloaded ${entry.display_name || entry.name}.`,
-                            )
-                          }
-                          disabled={busyAction !== null}
-                          className={buttonClassName}
-                        >
-                          {busyAction?.kind === "unload" ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <Square className="h-3.5 w-3.5" />
-                          )}
-                          Unload
-                        </button>
-                      ) : null}
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void runAction(
-                            { kind: "delete", target: entry.name },
-                            () => invoke("delete_rnn_model", { modelName: entry.name }),
-                            `Deleted ${entry.display_name || entry.name}.`,
-                          )
-                        }
-                        disabled={busyAction !== null}
-                        className={clsx(buttonClassName, "text-red-500")}
-                      >
-                        {isBusy && busyAction?.kind === "delete" ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Trash2 className="h-3.5 w-3.5" />
-                        )}
-                        Delete
-                      </button>
+                      {entry.description ? <div>{entry.description}</div> : null}
                     </div>
                   </div>
+                </details>
               );
             })}
           </div>
@@ -961,7 +878,7 @@ export function RnnLocalModelManager({
         )}
       </div>
 
-      <div className="space-y-2 pt-3 border-t border-[var(--border-subtle)]">
+      <div className="space-y-1 pt-3 border-t border-[var(--border-subtle)]">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="text-[13px] font-semibold text-[var(--text-primary)]">
             Available Models
@@ -970,193 +887,100 @@ export function RnnLocalModelManager({
             {catalogEntries.length} model{catalogEntries.length === 1 ? "" : "s"}
           </div>
         </div>
-        <div className="space-y-2">
-          {catalogFamilyGroups.map((group) => (
-            <details
-              key={group.family}
-              open={group.loadedCount > 0 || group.downloadedCount > 0}
-              className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]/30"
-            >
-              <summary className="cursor-pointer list-none px-3 py-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-medium text-[var(--text-primary)]">
-                      {group.family}
-                    </span>
-                    <span className={badgeClassName}>
-                      {group.series.reduce((sum, seriesGroup) => sum + seriesGroup.entries.length, 0)} model
-                      {group.series.reduce((sum, seriesGroup) => sum + seriesGroup.entries.length, 0) === 1
-                        ? ""
-                        : "s"}
-                    </span>
-                    {group.loadedCount > 0 ? (
-                      <span className={badgeClassName}>{group.loadedCount} loaded</span>
-                    ) : null}
-                    {group.downloadedCount > 0 ? (
-                      <span className={badgeClassName}>{group.downloadedCount} downloaded</span>
-                    ) : null}
-                  </div>
-                </div>
-              </summary>
-              <div className="border-t border-[var(--border-subtle)]">
-                {group.series.map((seriesGroup) => (
-                  <div key={`${group.family}-${seriesGroup.series}`}>
-                    {group.series.length > 1 && (
-                      <div className="px-3 pt-3 pb-1 text-[11px] font-medium text-[var(--text-tertiary)]">
-                        {seriesGroup.series}
-                        {seriesGroup.downloadedCount > 0 || seriesGroup.loadedCount > 0 ? (
-                          <span className="ml-2 font-normal text-[var(--text-secondary)]">
-                            {seriesGroup.loadedCount > 0 ? `${seriesGroup.loadedCount} loaded` : `${seriesGroup.downloadedCount} downloaded`}
-                          </span>
-                        ) : null}
+        {catalogEntries.length ? (
+          <div className="rounded-xl border border-[var(--border-subtle)] divide-y divide-[var(--border-subtle)] overflow-hidden">
+            {catalogEntries.map((entry) => {
+              const localEntry = localByCatalogId.get(entry.id);
+              const targetName = localEntry?.name || entry.id;
+              const isBusy = busyAction?.kind !== "refresh" && busyAction?.target === targetName;
+              const activeDownload =
+                snapshot?.downloadState?.catalogId === entry.id ? snapshot.downloadState : null;
+              const isDownloading = activeDownload?.status === "downloading";
+              const isLoaded =
+                snapshot?.loadedModel === localEntry?.name || entry.loaded === true || localEntry?.loaded === true;
+              const progressLabel = isDownloading
+                ? [
+                    formatBytes(activeDownload.downloadedBytes),
+                    activeDownload.totalBytes ? `of ${formatBytes(activeDownload.totalBytes)}` : null,
+                    typeof activeDownload.progressPercent === "number"
+                      ? `${activeDownload.progressPercent.toFixed(activeDownload.progressPercent >= 10 ? 0 : 1)}%`
+                      : null,
+                  ].filter(Boolean).join(" · ")
+                : null;
+              return (
+                <details key={entry.id} className="group">
+                  <summary className="flex items-center justify-between gap-3 px-3 py-2 cursor-pointer list-none">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <ChevronDown className="w-3 h-3 text-[var(--text-tertiary)] transition-transform group-open:rotate-180 flex-shrink-0" />
+                      <span className="text-sm font-medium text-[var(--text-primary)] truncate">
+                        {entry.display_name || entry.name}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.preventDefault()}>
+                      {localEntry ? (
+                        <span className="inline-flex items-center rounded-full bg-[var(--system-blue)]/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--system-blue)]">
+                          Downloaded
+                        </span>
+                      ) : isDownloading ? (
+                        <span className="flex items-center gap-1.5 text-xs text-[var(--system-blue)]">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          {progressLabel || "Downloading"}
+                        </span>
+                      ) : (
+                        <button type="button" onClick={(e) => { e.stopPropagation(); void startDownload(entry.id, entry.display_name || entry.name); }} disabled={busyAction !== null || snapshot?.downloadState?.status === "downloading"} className={buttonClassName}>
+                          <Download className="h-3.5 w-3.5" />
+                          Download
+                        </button>
+                      )}
+                    </div>
+                  </summary>
+                  <div className="px-3 pb-3 pt-1 border-t border-[var(--border-subtle)] bg-[var(--bg-secondary)]/50">
+                    <div className="text-xs text-[var(--text-secondary)] space-y-1 mb-2">
+                      <div>
+                        {[
+                          catalogCategory(entry),
+                          formatBackend(entry.backend),
+                          formatArchitecture(entry.architecture),
+                          formatSize(entry.size_gb),
+                          entry.params,
+                          entry.thinking ? "Thinking" : null,
+                          entry.hf_repo ? formatProvider(entry.hf_repo) : null,
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                      {entry.description ? <div>{entry.description}</div> : null}
+                    </div>
+                    {isDownloading && (
+                      <div className="space-y-1">
+                        <div className="h-1.5 overflow-hidden rounded-full bg-[var(--border-subtle)]">
+                          <div
+                            className="h-full rounded-full bg-[var(--system-blue)] transition-all"
+                            style={{ width: typeof activeDownload?.progressPercent === "number" ? `${Math.max(4, Math.min(100, activeDownload.progressPercent))}%` : "20%" }}
+                          />
+                        </div>
                       </div>
                     )}
-                    {seriesGroup.entries.map((entry) => {
-                        const localEntry = localByCatalogId.get(entry.id);
-                        const targetName = localEntry?.name || entry.id;
-                        const isBusy = busyAction?.kind !== "refresh" && busyAction?.target === targetName;
-                        const activeDownload =
-                          snapshot?.downloadState?.catalogId === entry.id ? snapshot.downloadState : null;
-                        const isDownloading = activeDownload?.status === "downloading";
-                        const isLoaded =
-                          snapshot?.loadedModel === localEntry?.name || entry.loaded === true || localEntry?.loaded === true;
-                        const progressLabel = isDownloading
-                          ? [
-                              formatBytes(activeDownload.downloadedBytes),
-                              activeDownload.totalBytes ? `of ${formatBytes(activeDownload.totalBytes)}` : null,
-                              typeof activeDownload.progressPercent === "number"
-                                ? `${activeDownload.progressPercent.toFixed(
-                                    activeDownload.progressPercent >= 10 ? 0 : 1,
-                                  )}%`
-                                : null,
-                            ]
-                              .filter(Boolean)
-                              .join(" • ")
-                          : null;
-                        return (
-                          <div
-                            key={entry.id}
-                            className="flex flex-wrap items-start justify-between gap-3 px-3 py-2.5"
-                          >
-                              <div className="min-w-0">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <div className="text-sm font-medium text-[var(--text-primary)]">
-                                    {entry.display_name || entry.name}
-                                  </div>
-                                  {entry.params ? <span className={badgeClassName}>{entry.params}</span> : null}
-                                  {entry.thinking ? <span className={badgeClassName}>Thinking</span> : null}
-                                  {entry.hf_repo ? (
-                                    <span className={badgeClassName}>
-                                      {formatProvider(entry.hf_repo)}
-                                    </span>
-                                  ) : null}
-                                  {isLoaded ? (
-                                    <span className={badgeClassName}>Loaded</span>
-                                  ) : localEntry ? (
-                                    <span className={badgeClassName}>Downloaded</span>
-                                  ) : null}
-                                </div>
-                                <div className="mt-1 text-xs text-[var(--text-secondary)]">
-                                  {[
-                                    catalogCategory(entry),
-                                    formatBackend(entry.backend),
-                                    formatArchitecture(entry.architecture),
-                                    formatSize(entry.size_gb),
-                                  ]
-                                    .filter(Boolean)
-                                    .join(" • ")}
-                                </div>
-                                {entry.description ? (
-                                  <div className="mt-1 text-xs text-[var(--text-secondary)]">
-                                    {entry.description}
-                                  </div>
-                                ) : null}
-                                {isDownloading ? (
-                                  <div className="mt-3 space-y-1">
-                                    <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--text-secondary)]">
-                                      <span>Downloading…</span>
-                                      {progressLabel ? <span>{progressLabel}</span> : null}
-                                    </div>
-                                    <div className="h-1.5 overflow-hidden rounded-full bg-[var(--border-subtle)]">
-                                      <div
-                                        className="h-full rounded-full bg-[var(--system-blue)] transition-all"
-                                        style={{
-                                          width:
-                                            typeof activeDownload?.progressPercent === "number"
-                                              ? `${Math.max(4, Math.min(100, activeDownload.progressPercent))}%`
-                                              : "20%",
-                                        }}
-                                      />
-                                    </div>
-                                  </div>
-                                ) : null}
-                              </div>
-                              <div className="flex flex-wrap items-center gap-2">
-                                {localEntry ? (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      void runAction(
-                                        { kind: "load", target: localEntry.name },
-                                        () => invoke("load_rnn_model", { modelName: localEntry.name }),
-                                        `Loaded ${localEntry.display_name || localEntry.name}.`,
-                                      )
-                                    }
-                                    disabled={busyAction !== null}
-                                    className={buttonClassName}
-                                  >
-                                    {isBusy && busyAction?.kind === "load" ? (
-                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                    ) : (
-                                      <Cpu className="h-3.5 w-3.5" />
-                                    )}
-                                    Load
-                                  </button>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      void startDownload(entry.id, entry.display_name || entry.name)
-                                    }
-                                    disabled={busyAction !== null || snapshot?.downloadState?.status === "downloading"}
-                                    className={buttonClassName}
-                                  >
-                                    {isDownloading || (isBusy && busyAction?.kind === "download") ? (
-                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                    ) : (
-                                      <Download className="h-3.5 w-3.5" />
-                                    )}
-                                    {isDownloading ? "Downloading" : "Download"}
-                                  </button>
-                                )}
-                              </div>
-                          </div>
-                        );
-                      })}
                   </div>
-                ))}
-              </div>
-            </details>
-          ))}
-          {!catalogEntries.length ? (
-            <div className="rounded-xl border border-dashed border-[var(--border-subtle)] p-3 text-xs text-[var(--text-secondary)]">
-              No models available yet. Try refreshing.
-            </div>
-          ) : null}
-        </div>
+                </details>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="rounded-xl border border-dashed border-[var(--border-subtle)] p-3 text-xs text-[var(--text-secondary)]">
+            No models available yet. Try refreshing.
+          </div>
+        )}
       </div>
 
-      <div className="flex flex-wrap items-start justify-between gap-3 pt-3 border-t border-[var(--border-subtle)]">
-        <div>
-          <div className="flex items-center gap-2 text-sm font-medium text-[var(--text-primary)]">
-            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-[var(--system-blue)]/10 text-[var(--system-blue)]">
-              <Cpu className="h-4 w-4" />
-            </span>
-            <span>Local Runtime</span>
-          </div>
-          <div className="mt-1 text-xs text-[var(--text-secondary)]">
-            Entropic manages your local model runtime and cache. Supports RWKV, transformer, and GGUF formats.
-          </div>
+      <div className="flex items-center justify-between gap-3 pt-3 border-t border-[var(--border-subtle)]">
+        <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+          <span className={clsx("inline-flex h-1.5 w-1.5 rounded-full", runtimeStatus?.running ? "bg-emerald-500" : "bg-amber-500")} />
+          <span>{runtimeStatus?.running ? "Runtime ready" : "Starting"}</span>
+          {runtimeStatus?.loadedModel ? (
+            <><span className="text-[var(--text-tertiary)]">·</span><span>{loadedModelLabel}</span></>
+          ) : null}
+          {preferredDevice === "cuda" && effectiveGpuProcessMemoryMiB ? (
+            <><span className="text-[var(--text-tertiary)]">·</span><span>VRAM {formatMemory(effectiveGpuProcessMemoryMiB)}</span></>
+          ) : null}
         </div>
         <button
           type="button"
@@ -1173,128 +997,12 @@ export function RnnLocalModelManager({
         </button>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)]">
-        <span className={badgeClassName}>
-          {runtimeStatus?.running ? "Runtime ready" : "Runtime starting"}
-        </span>
-        <span className={badgeClassName}>{accelerationBadge}</span>
-        <span className={badgeClassName}>{deviceBadge}</span>
-        {runtimeStatus?.activeBackend ? (
-          <span className={badgeClassName}>Backend: {formatBackend(runtimeStatus.activeBackend)}</span>
-        ) : null}
-        {runtimeStatus?.loadedModel ? (
-          <span className={badgeClassName}>Loaded: {loadedModelLabel}</span>
-        ) : runtimeStatus?.running ? (
-          <span className={badgeClassName}>No model loaded</span>
-        ) : null}
-        {runtimeStatus?.pid ? <span className={badgeClassName}>PID {runtimeStatus.pid}</span> : null}
-        {preferredDevice === "cuda" && effectiveGpuProcessMemoryMiB ? (
-          <span className={badgeClassName}>
-            VRAM: {formatMemory(effectiveGpuProcessMemoryMiB)}
-          </span>
-        ) : null}
-      </div>
-
-      <div className="grid gap-2 md:grid-cols-3">
-        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]/40 p-3">
-          <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--text-tertiary)]">
-            Active Model
-          </div>
-          <div className="mt-2 text-sm font-medium text-[var(--text-primary)]">
-            {loadedModelLabel}
-          </div>
-          <div className="mt-1 text-xs text-[var(--text-secondary)]">
-            {[loadedModelBackend, formatSize(loadedModelSize || undefined)]
-              .filter(Boolean)
-              .join(" • ") || "No model loaded"}
-          </div>
-          {loadedModelLoadTime ? (
-            <div className="mt-1 text-xs text-[var(--text-secondary)]">
-              Last load time: {loadedModelLoadTime.toFixed(2)}s
-            </div>
-          ) : null}
-        </div>
-        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]/40 p-3">
-          <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--text-tertiary)]">
-            Model Cache
-          </div>
-          <div className="mt-2 text-sm font-medium text-[var(--text-primary)]">
-            {downloadedCount} downloaded • {formatSize(totalLocalSizeGb) || "0 GB"}
-          </div>
-          <div className="mt-1 text-xs text-[var(--text-secondary)]">
-            {localBreakdown || "No cached models yet"}
-          </div>
-          <div className="mt-1 break-all text-xs text-[var(--text-secondary)]">
-            {runtimeStatus?.modelsDir}
-          </div>
-        </div>
-        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]/40 p-3">
-          <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--text-tertiary)]">
-            Catalog
-          </div>
-          <div className="mt-2 text-sm font-medium text-[var(--text-primary)]">
-            {catalogEntries.length} models
-          </div>
-          <div className="mt-1 text-xs text-[var(--text-secondary)]">
-            Grouped by family first, then series, so you can drill into the catalog instead of
-            scanning one flat list.
-          </div>
-          {snapshot?.downloadState?.status === "downloading" ? (
-            <div className="mt-1 text-xs text-[var(--text-secondary)]">
-              Downloading {snapshot.downloadState.modelName || "model"}…
-            </div>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="grid gap-2 text-xs text-[var(--text-secondary)] md:grid-cols-2">
-        {runtimeStatus?.pythonCommand ? (
-          <div>
-            Python:{" "}
-            <span className="font-medium text-[var(--text-primary)]">{runtimeStatus.pythonCommand}</span>
-          </div>
-        ) : null}
-        {runtimeStatus?.capabilities?.torchAvailable !== undefined ? (
-          <div>
-            Runtime stack:{" "}
-            <span className="font-medium text-[var(--text-primary)]">
-              {runtimeStatus.capabilities.torchAvailable
-                ? `torch${runtimeStatus.capabilities.torchVersion ? ` ${runtimeStatus.capabilities.torchVersion}` : ""}`
-                : "torch not detected"}
-            </span>
-          </div>
-        ) : null}
-        {runtimeStatus?.capabilities?.supportedBackends?.length ? (
-          <div>
-            Backends:{" "}
-            <span className="font-medium text-[var(--text-primary)]">
-              {runtimeStatus.capabilities.supportedBackends.map((value) => formatBackend(value) || value).join(", ")}
-            </span>
-          </div>
-        ) : null}
-        {preferredDevice === "cuda" ? (
-          <div>
-            CUDA compiler:{" "}
-            <span className="font-medium text-[var(--text-primary)]">
-              {nvccPath || "not detected"}
-            </span>
-          </div>
-        ) : null}
-        {preferredDevice === "cuda" ? (
-          <div>
-            Process GPU memory:{" "}
-            <span className="font-medium text-[var(--text-primary)]">
-              {effectiveGpuProcessMemoryMiB
-                ? formatMemory(effectiveGpuProcessMemoryMiB)
-                : "not observed yet"}
-              {effectiveGpuMemorySource ? ` • ${effectiveGpuMemorySource}` : ""}
-              {!processGpuMemoryMiB && currentCudaReservedMiB > currentCudaAllocatedMiB
-                ? ` • ${formatMemory(currentCudaReservedMiB)} reserved`
-                : ""}
-            </span>
-          </div>
-        ) : null}
-      </div>
+      <details className="pt-2 border-t border-[var(--border-subtle)]">
+        <summary className="cursor-pointer list-none flex items-center gap-2 text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors">
+          <ChevronDown className="w-3.5 h-3.5 transition-transform [details[open]>&]:rotate-180" />
+          Advanced
+        </summary>
+        <div className="mt-3 space-y-4">
 
       {preferredDevice === "cuda" ? (
         <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]/40 p-3">
@@ -1798,6 +1506,9 @@ export function RnnLocalModelManager({
           Log: <span className="font-mono">{runtimeStatus.logFile}</span>
         </div>
       ) : null}
+
+        </div>
+      </details>
 
       {message ? <div className="text-xs text-green-600">{message}</div> : null}
       {error ? <div className="text-xs text-red-500">{error}</div> : null}

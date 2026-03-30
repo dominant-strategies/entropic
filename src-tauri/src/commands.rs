@@ -12159,11 +12159,7 @@ impl LocalModelRuntimeConfig {
         if service_type == LocalModelServiceType::RnnLocal {
             base_url = RNN_RUNTIME_BASE_URL.to_string();
         }
-        let api_mode = if service_type == LocalModelServiceType::Ollama {
-            LocalModelApiMode::Ollama
-        } else {
-            api_mode.unwrap_or_else(|| default_local_model_api_mode(service_type))
-        };
+        let api_mode = normalize_local_model_api_mode(service_type, api_mode);
         let api_key = if service_type == LocalModelServiceType::RnnLocal {
             "local-placeholder".to_string()
         } else {
@@ -12207,11 +12203,7 @@ impl LocalModelRuntimeConfig {
         if service_type == LocalModelServiceType::RnnLocal {
             base_url = RNN_RUNTIME_BASE_URL.to_string();
         }
-        let api_mode = if service_type == LocalModelServiceType::Ollama {
-            LocalModelApiMode::Ollama
-        } else {
-            api_mode.unwrap_or_else(|| default_local_model_api_mode(service_type))
-        };
+        let api_mode = normalize_local_model_api_mode(service_type, api_mode);
         let api_key = if service_type == LocalModelServiceType::RnnLocal {
             "local-placeholder".to_string()
         } else {
@@ -12301,6 +12293,19 @@ fn default_local_model_api_mode(service_type: LocalModelServiceType) -> LocalMod
         LocalModelServiceType::Vllm
         | LocalModelServiceType::RnnLocal
         | LocalModelServiceType::OpenAiCompatible => LocalModelApiMode::OpenAiCompletions,
+    }
+}
+
+fn normalize_local_model_api_mode(
+    service_type: LocalModelServiceType,
+    api_mode: Option<LocalModelApiMode>,
+) -> LocalModelApiMode {
+    if service_type == LocalModelServiceType::Ollama {
+        return LocalModelApiMode::Ollama;
+    }
+    match api_mode {
+        Some(LocalModelApiMode::Ollama) | None => default_local_model_api_mode(service_type),
+        Some(mode) => mode,
     }
 }
 
