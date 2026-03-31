@@ -67,6 +67,8 @@ type RnnCatalogSnapshot = {
   } | null;
 };
 
+type RnnDownloadState = NonNullable<RnnCatalogSnapshot["downloadState"]>;
+
 type RnnRuntimeStatus = {
   running: boolean;
   baseUrl: string;
@@ -98,6 +100,9 @@ type RnnRuntimeStatus = {
     gpuMemoryUtilizationPercent?: number;
     gpuMemoryName?: string | null;
     gpuMemorySource?: string | null;
+    hostMemoryTotalBytes?: number;
+    hostMemoryAvailableBytes?: number;
+    hostMemorySource?: string | null;
     preferredDevice?: string | null;
     supportedBackends?: string[];
     backendAvailability?: Record<string, boolean>;
@@ -142,6 +147,10 @@ type LlamaCppRuntimeConfig = {
   useMlock: boolean;
 };
 
+type HardwareAssessmentEntry = Pick<RnnCatalogEntry, "backend" | "size_gb"> & {
+  context?: number | null;
+};
+
 type RuntimeMemorySample = {
   ts: number;
   model: string;
@@ -168,6 +177,10 @@ type HardwareFit = {
   tone: "good" | "warn" | "bad" | "neutral";
   estimatedVramGb: number | null;
   availableVramGb: number | null;
+  estimatedHostMemoryGb: number | null;
+  availableHostMemoryGb: number | null;
+  loadBlocked: boolean;
+  loadBlockReason: string | null;
 };
 
 type RecommendedModel = {
@@ -198,10 +211,10 @@ const RECOMMENDATION_PROFILES: Record<string, RecommendationProfile> = {
   "qwen3-4b-q4-k-m": {
     toolScore: 9.0,
     speedScore: 8.4,
-    lowVramScore: 8.8,
-    overallBonus: 0.9,
+    lowVramScore: 8.5,
+    overallBonus: 0.2,
     strengths: ["tools", "multilingual", "small GPU"],
-    bestFor: "Strong compact default for 4-8 GB VRAM.",
+    bestFor: "Compact Qwen option when you have enough RAM for the configured GGUF context.",
   },
   "phi4-mini-instruct-q4-k-m": {
     toolScore: 9.1,
@@ -220,13 +233,13 @@ const RECOMMENDATION_PROFILES: Record<string, RecommendationProfile> = {
     bestFor: "Smallest broadly useful starter model in the list.",
   },
   "nemotron3-nano-4b-q4-k-m": {
-    toolScore: 7.4,
-    speedScore: 8.3,
-    lowVramScore: 8.9,
-    overallBonus: 0.2,
-    strengths: ["current info", "edge", "small GPU"],
-    bestFor: "Compact current-info and browser-heavy workflows.",
-    caution: "Needs stronger prompt control than Qwen or Phi.",
+    toolScore: 8.2,
+    speedScore: 8.6,
+    lowVramScore: 9.0,
+    overallBonus: 1.6,
+    strengths: ["current info", "browser-heavy", "small GPU"],
+    bestFor: "Compact hybrid default for browsing, current-info, and small-laptop workflows.",
+    caution: "Still lighter on tool precision than Phi-4 Mini.",
   },
   "rwkv7-world-2.9b": {
     toolScore: 4.3,
@@ -316,6 +329,54 @@ function formatBytes(bytes?: number | null): string | null {
   return `${bytes} B`;
 }
 
+function downloadProgressPercent(state?: RnnCatalogSnapshot["downloadState"] | null): number | null {
+  if (typeof state?.progressPercent === "number" && Number.isFinite(state.progressPercent)) {
+    return Math.max(0, Math.min(100, state.progressPercent));
+  }
+  if (
+    typeof state?.downloadedBytes === "number" &&
+    Number.isFinite(state.downloadedBytes) &&
+    typeof state?.totalBytes === "number" &&
+    Number.isFinite(state.totalBytes) &&
+    state.totalBytes > 0
+  ) {
+    return Math.max(0, Math.min(100, (state.downloadedBytes / state.totalBytes) * 100));
+  }
+  return null;
+}
+
+function downloadProgressSummary(state?: RnnCatalogSnapshot["downloadState"] | null): string {
+  const percent = downloadProgressPercent(state);
+  if (percent !== null) {
+    return `${percent.toFixed(percent >= 10 ? 0 : 1)}%`;
+  }
+  const downloaded = formatBytes(state?.downloadedBytes);
+  if (downloaded) {
+    return `${downloaded} downloaded`;
+  }
+  return "Preparing";
+}
+
+function downloadProgressDetail(state?: RnnCatalogSnapshot["downloadState"] | null): string | null {
+  const downloaded = formatBytes(state?.downloadedBytes);
+  const total = formatBytes(state?.totalBytes);
+  if (downloaded && total) {
+    return `${downloaded} of ${total}`;
+  }
+  if (total) {
+    return total;
+  }
+  return null;
+}
+
+function downloadProgressBarWidth(state?: RnnCatalogSnapshot["downloadState"] | null): string {
+  const percent = downloadProgressPercent(state);
+  if (percent === null) {
+    return "18%";
+  }
+  return `${Math.max(6, Math.min(100, percent))}%`;
+}
+
 function formatMemory(valueMiB?: number | null): string | null {
   if (typeof valueMiB !== "number" || !Number.isFinite(valueMiB) || valueMiB < 0) {
     return null;
@@ -394,6 +455,28 @@ function formatBackend(value?: string | null): string | null {
   if (normalized === "albatross") return "Albatross";
   if (normalized === "llama-cpp") return "llama.cpp";
   return normalized.toUpperCase();
+}
+
+function backendInstallActionLabel(value?: string | null): string {
+  const formatted = formatBackend(value);
+  return formatted ? `Install ${formatted}` : "Install backend";
+}
+
+function backendAutoInstallsOnFirstUse(value?: string | null): boolean {
+  return (value || "").trim().toLowerCase() === "llama-cpp";
+}
+
+function backendLoadRequirementLabel(value?: string | null): string | null {
+  const formatted = formatBackend(value);
+  if (!formatted) return null;
+  if (backendAutoInstallsOnFirstUse(value)) {
+    return `${formatted} installs automatically on first use`;
+  }
+  return `Needs ${formatted} before load`;
+}
+
+function backendMissingBadgeLabel(value?: string | null): string {
+  return backendAutoInstallsOnFirstUse(value) ? "Auto-installs on first use" : "Install backend first";
 }
 
 function formatArchitecture(value?: string | null): string | null {
@@ -483,18 +566,71 @@ function formatCatalogName(entry: Pick<RnnCatalogEntry, "display_name" | "name">
   return entry.display_name || entry.name;
 }
 
-function estimateRuntimeFootprintGb(entry: Pick<RnnCatalogEntry, "backend" | "size_gb" | "context">): number | null {
+function formatContext(value?: number | null): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  return `${Math.round(value).toLocaleString()} ctx`;
+}
+
+function resolvedContextWindow(
+  entry: HardwareAssessmentEntry,
+  runtimeConfig?: RnnRuntimeStatus["runtimeConfig"] | null,
+): number {
+  const backend = (entry.backend || "").trim().toLowerCase();
+  const modelContext =
+    typeof entry.context === "number" && Number.isFinite(entry.context) && entry.context > 0
+      ? entry.context
+      : backend === "llama-cpp"
+        ? 32768
+        : 8192;
+  if (backend !== "llama-cpp") {
+    return modelContext;
+  }
+  const configuredContext = runtimeConfig?.llamaCpp?.nCtx;
+  if (typeof configuredContext === "number" && Number.isFinite(configuredContext) && configuredContext > 0) {
+    return Math.max(512, Math.min(configuredContext, modelContext));
+  }
+  return modelContext;
+}
+
+function contextOverheadGb(context: number): number {
+  if (context >= 65536) return 2.2;
+  if (context >= 32768) return 1.4;
+  if (context >= 16384) return 1.0;
+  if (context >= 8192) return 0.8;
+  return 0.5;
+}
+
+function estimateRuntimeFootprintGb(
+  entry: HardwareAssessmentEntry,
+  runtimeConfig?: RnnRuntimeStatus["runtimeConfig"] | null,
+): number | null {
   const sizeGb = typeof entry.size_gb === "number" && entry.size_gb > 0 ? entry.size_gb : null;
   if (!sizeGb) return null;
   const backend = (entry.backend || "").trim().toLowerCase();
-  const context = typeof entry.context === "number" && entry.context > 0 ? entry.context : 8192;
-  const contextOverheadGb =
-    context >= 65536 ? 2.2 : context >= 32768 ? 1.4 : context >= 8192 ? 0.8 : 0.5;
-  if (backend === "llama-cpp") return Number((sizeGb * 1.22 + contextOverheadGb).toFixed(2));
+  const context = resolvedContextWindow(entry, runtimeConfig);
+  const contextMemoryGb = contextOverheadGb(context);
+  if (backend === "llama-cpp") return Number((sizeGb * 1.22 + contextMemoryGb).toFixed(2));
   if (backend === "albatross") return Number((sizeGb * 1.08 + 0.35).toFixed(2));
   if (backend === "vllm") return Number((sizeGb * 1.55 + 1.75).toFixed(2));
   if (backend === "huggingface") return Number((sizeGb * 1.45 + 1.5).toFixed(2));
   return Number((sizeGb * 1.3 + 0.75).toFixed(2));
+}
+
+function estimateHostMemoryRequirementGb(
+  entry: HardwareAssessmentEntry,
+  preferredDevice?: string | null,
+  runtimeConfig?: RnnRuntimeStatus["runtimeConfig"] | null,
+): number | null {
+  const base = estimateRuntimeFootprintGb(entry, runtimeConfig);
+  if (!base) return null;
+  const device = (preferredDevice || "").trim().toLowerCase();
+  if (device === "cuda") {
+    return Number((base * 0.72 + 0.6).toFixed(2));
+  }
+  if (device === "mps") {
+    return Number((base * 1.4 + 0.8).toFixed(2));
+  }
+  return Number((base * 1.46 + 0.9).toFixed(2));
 }
 
 function defaultRecommendationProfile(entry: RnnCatalogEntry): RecommendationProfile {
@@ -562,42 +698,136 @@ function backendReadyForEntry(
 }
 
 function hardwareFitForEntry(
-  entry: Pick<RnnCatalogEntry, "backend" | "size_gb" | "context">,
+  entry: HardwareAssessmentEntry,
   gpuMemoryTotalMiB?: number | null,
   preferredDevice?: string | null,
+  hostMemoryTotalBytes?: number | null,
+  runtimeConfig?: RnnRuntimeStatus["runtimeConfig"] | null,
 ): HardwareFit {
-  const estimatedVramGb = estimateRuntimeFootprintGb(entry);
+  const estimatedVramGb = estimateRuntimeFootprintGb(entry, runtimeConfig);
+  const estimatedHostMemoryGb = estimateHostMemoryRequirementGb(entry, preferredDevice, runtimeConfig);
   const availableVramGb =
     typeof gpuMemoryTotalMiB === "number" && gpuMemoryTotalMiB > 0 ? gpuMemoryTotalMiB / 1024 : null;
-  if (preferredDevice !== "cuda" || !availableVramGb || !estimatedVramGb) {
+  const availableHostMemoryGb =
+    typeof hostMemoryTotalBytes === "number" && hostMemoryTotalBytes > 0
+      ? hostMemoryTotalBytes / 1024 ** 3
+      : null;
+  const backend = (entry.backend || "").trim().toLowerCase();
+  const contextLabel = backend === "llama-cpp" ? formatContext(resolvedContextWindow(entry, runtimeConfig)) : null;
+  const gpuHeadroomGb =
+    estimatedVramGb !== null && availableVramGb !== null ? availableVramGb - estimatedVramGb : null;
+  const hostHeadroomGb =
+    estimatedHostMemoryGb !== null && availableHostMemoryGb !== null
+      ? availableHostMemoryGb - estimatedHostMemoryGb
+      : null;
+
+  if (
+    preferredDevice === "cuda" &&
+    availableVramGb !== null &&
+    estimatedVramGb !== null &&
+    (estimatedVramGb > availableVramGb * 0.96 || (gpuHeadroomGb !== null && gpuHeadroomGb < 0.4))
+  ) {
     return {
-      label: estimatedVramGb ? `Est. ${estimatedVramGb.toFixed(1)} GB` : "Hardware unknown",
-      tone: "neutral",
+      label: "Unsafe on this GPU",
+      tone: "bad",
       estimatedVramGb,
       availableVramGb,
+      estimatedHostMemoryGb,
+      availableHostMemoryGb,
+      loadBlocked: true,
+      loadBlockReason: `${
+        contextLabel
+          ? `At ${contextLabel}, this model is estimated to use `
+          : "This model is estimated to use "
+      }${estimatedVramGb.toFixed(1)} GB of GPU memory, but the detected GPU reports ${availableVramGb.toFixed(1)} GB total. Reduce GGUF context or choose a smaller model.`,
     };
   }
-  if (estimatedVramGb <= availableVramGb * 0.72) {
+
+  if (
+    availableHostMemoryGb !== null &&
+    estimatedHostMemoryGb !== null &&
+    (estimatedHostMemoryGb > availableHostMemoryGb * 0.85 || (hostHeadroomGb !== null && hostHeadroomGb < 1.25))
+  ) {
     return {
-      label: "Fits comfortably",
-      tone: "good",
+      label: "Unsafe on this RAM",
+      tone: "bad",
       estimatedVramGb,
       availableVramGb,
+      estimatedHostMemoryGb,
+      availableHostMemoryGb,
+      loadBlocked: true,
+      loadBlockReason: `${
+        contextLabel
+          ? `At ${contextLabel}, this model is estimated to use `
+          : "This model is estimated to use "
+      }${estimatedHostMemoryGb.toFixed(1)} GB of system memory, but this machine reports ${availableHostMemoryGb.toFixed(1)} GB total. Lower GGUF context or choose a smaller model.`,
     };
   }
-  if (estimatedVramGb <= availableVramGb * 0.96) {
+
+  if (preferredDevice === "cuda" && availableVramGb !== null && estimatedVramGb !== null) {
+    if (estimatedVramGb <= availableVramGb * 0.72) {
+      return {
+        label: "Fits GPU memory",
+        tone: "good",
+        estimatedVramGb,
+        availableVramGb,
+        estimatedHostMemoryGb,
+        availableHostMemoryGb,
+        loadBlocked: false,
+        loadBlockReason: null,
+      };
+    }
     return {
-      label: "Tight fit",
+      label: "Tight on this GPU",
       tone: "warn",
       estimatedVramGb,
       availableVramGb,
+      estimatedHostMemoryGb,
+      availableHostMemoryGb,
+      loadBlocked: false,
+      loadBlockReason: null,
     };
   }
+
+  if (availableHostMemoryGb !== null && estimatedHostMemoryGb !== null) {
+    if (estimatedHostMemoryGb <= availableHostMemoryGb * 0.7 && (hostHeadroomGb ?? 0) >= 2) {
+      return {
+        label: "Fits system RAM",
+        tone: "good",
+        estimatedVramGb,
+        availableVramGb,
+        estimatedHostMemoryGb,
+        availableHostMemoryGb,
+        loadBlocked: false,
+        loadBlockReason: null,
+      };
+    }
+    return {
+      label: "Tight on system RAM",
+      tone: "warn",
+      estimatedVramGb,
+      availableVramGb,
+      estimatedHostMemoryGb,
+      availableHostMemoryGb,
+      loadBlocked: false,
+      loadBlockReason: null,
+    };
+  }
+
   return {
-    label: "Not recommended",
-    tone: "bad",
+    label:
+      estimatedHostMemoryGb !== null
+        ? `Est. ${estimatedHostMemoryGb.toFixed(1)} GB RAM`
+        : estimatedVramGb !== null
+          ? `Est. ${estimatedVramGb.toFixed(1)} GB`
+          : "Hardware unknown",
+    tone: "neutral",
     estimatedVramGb,
     availableVramGb,
+    estimatedHostMemoryGb,
+    availableHostMemoryGb,
+    loadBlocked: false,
+    loadBlockReason: null,
   };
 }
 
@@ -620,11 +850,20 @@ function recommendationScore(
   runtimeStatus: RnnRuntimeStatus | null,
   gpuMemoryTotalMiB?: number | null,
   preferredDevice?: string | null,
+  hostMemoryTotalBytes?: number | null,
+  runtimeConfig?: RnnRuntimeStatus["runtimeConfig"] | null,
 ): number {
   const profile = recommendationProfileForEntry(entry);
-  const fit = hardwareFitForEntry(entry, gpuMemoryTotalMiB, preferredDevice);
+  const fit = hardwareFitForEntry(
+    entry,
+    gpuMemoryTotalMiB,
+    preferredDevice,
+    hostMemoryTotalBytes,
+    runtimeConfig,
+  );
   const backendReady = backendReadyForEntry(entry, runtimeStatus);
-  const fitScore = fit.tone === "good" ? 3 : fit.tone === "warn" ? 1 : fit.tone === "bad" ? -6 : 0;
+  const fitScore =
+    fit.loadBlocked ? -8 : fit.tone === "good" ? 3 : fit.tone === "warn" ? 1 : fit.tone === "bad" ? -6 : 0;
   const backendScore = backendReady ? 1.5 : -2.5;
   const sizeScore =
     typeof entry.size_gb === "number" && entry.size_gb > 0 ? Math.max(0, 6 - entry.size_gb) * 0.15 : 0;
@@ -661,6 +900,8 @@ function buildRecommendedModels(
   runtimeStatus: RnnRuntimeStatus | null,
   gpuMemoryTotalMiB?: number | null,
   preferredDevice?: string | null,
+  hostMemoryTotalBytes?: number | null,
+  runtimeConfig?: RnnRuntimeStatus["runtimeConfig"] | null,
 ): RecommendedModel[] {
   const slots: RecommendationSlot[] = ["overall", "tools", "low-vram"];
   const usedIds = new Set<string>();
@@ -670,8 +911,22 @@ function buildRecommendedModels(
       .map((entry) => ({
         slot,
         entry,
-        score: recommendationScore(entry, slot, runtimeStatus, gpuMemoryTotalMiB, preferredDevice),
-        fit: hardwareFitForEntry(entry, gpuMemoryTotalMiB, preferredDevice),
+        score: recommendationScore(
+          entry,
+          slot,
+          runtimeStatus,
+          gpuMemoryTotalMiB,
+          preferredDevice,
+          hostMemoryTotalBytes,
+          runtimeConfig,
+        ),
+        fit: hardwareFitForEntry(
+          entry,
+          gpuMemoryTotalMiB,
+          preferredDevice,
+          hostMemoryTotalBytes,
+          runtimeConfig,
+        ),
         profile: recommendationProfileForEntry(entry),
         backendReady: backendReadyForEntry(entry, runtimeStatus),
       }))
@@ -731,7 +986,7 @@ function normalizeLlamaCppRuntimeConfig(
 ): LlamaCppRuntimeConfig {
   return {
     nGpuLayers: typeof value?.nGpuLayers === "number" ? value.nGpuLayers : -1,
-    nCtx: typeof value?.nCtx === "number" && value.nCtx > 0 ? value.nCtx : 32768,
+    nCtx: typeof value?.nCtx === "number" && value.nCtx > 0 ? value.nCtx : 8192,
     nBatch: typeof value?.nBatch === "number" && value.nBatch > 0 ? value.nBatch : 512,
     nThreads:
       typeof value?.nThreads === "number" && value.nThreads > 0 ? value.nThreads : null,
@@ -873,10 +1128,17 @@ export function RnnLocalModelManager({
     }
   }, [snapshot?.downloadState, onCatalogChange]);
 
-  async function startDownload(catalogId: string, label: string) {
+  async function startDownload(catalogId: string, label: string, backend?: string | null) {
     setBusyAction({ kind: "download", target: catalogId });
     setError(null);
-    setMessage(`Starting download for ${label}...`);
+    const shouldAutoInstallBackend =
+      backendAutoInstallsOnFirstUse(backend) &&
+      !backendReadyForEntry({ backend: backend ?? undefined }, runtimeStatus);
+    setMessage(
+      shouldAutoInstallBackend
+        ? `Installing ${formatBackend(backend) || "backend"} for ${label}, then starting download...`
+        : `Starting download for ${label}...`,
+    );
     try {
       await invoke("download_rnn_model", {
         catalogId,
@@ -890,14 +1152,70 @@ export function RnnLocalModelManager({
     }
   }
 
+  async function installBackend(backend?: string | null) {
+    const normalized = (backend || "").trim().toLowerCase();
+    if (!normalized) {
+      setMessage(null);
+      setError("This model does not declare a managed runtime backend.");
+      return;
+    }
+    await runAction(
+      { kind: "install-backend", target: normalized },
+      () => invoke("install_rnn_runtime_backend", { backend: normalized }),
+      `Installed the ${formatBackend(normalized) || normalized} backend.`,
+    );
+  }
+
+  async function loadLocalModel(
+    entry: Pick<RnnLocalEntry, "name" | "display_name" | "backend" | "catalog_id" | "size_gb">,
+  ) {
+    const sourceCatalogEntry =
+      (entry.catalog_id
+        ? catalogEntries.find((candidate) => candidate.id === entry.catalog_id)
+        : null) || null;
+    const fit = hardwareFitForEntry(
+      sourceCatalogEntry || entry,
+      gpuMemoryTotalMiB,
+      preferredDevice,
+      hostMemoryTotalBytes,
+      runtimeStatus?.runtimeConfig,
+    );
+    if (fit.loadBlocked) {
+      setMessage(null);
+      setError(fit.loadBlockReason || "This model is blocked on the current hardware.");
+      return;
+    }
+    const backendReady = backendReadyForEntry(entry, runtimeStatus);
+    const canAutoInstallBackend = backendAutoInstallsOnFirstUse(entry.backend);
+    if (!backendReady && !canAutoInstallBackend) {
+      const requirement = backendLoadRequirementLabel(entry.backend);
+      setMessage(null);
+      setError(
+        requirement
+          ? `${requirement}. Install the missing backend, then retry.`
+          : "Install the required backend before loading this model.",
+      );
+      return;
+    }
+    await runAction(
+      { kind: "load", target: entry.name },
+      () => invoke("load_rnn_model", { modelName: entry.name }),
+      `Loaded ${entry.display_name || entry.name}.`,
+      !backendReady && canAutoInstallBackend
+        ? `Installing ${formatBackend(entry.backend) || "backend"} for ${entry.display_name || entry.name}, then loading...`
+        : undefined,
+    );
+  }
+
   async function runAction(
     nextBusyAction: NonNullable<BusyAction>,
     request: () => Promise<any>,
     successMessage: string,
+    pendingMessage?: string,
   ) {
     setBusyAction(nextBusyAction);
     setError(null);
-    setMessage(null);
+    setMessage(pendingMessage || null);
     try {
       const result = await request();
       const nextSnapshot = await refreshCatalog({ quiet: true });
@@ -978,6 +1296,8 @@ export function RnnLocalModelManager({
         entry.display_name === snapshot?.loadedModel,
     ) ||
     null;
+  const activeDownloadState: RnnDownloadState | null =
+    snapshot?.downloadState?.status === "downloading" ? snapshot.downloadState : null;
   const totalLocalSizeGb = localEntries.reduce(
     (sum, entry) => sum + (typeof entry.size_gb === "number" ? entry.size_gb : 0),
     0,
@@ -1109,6 +1429,14 @@ export function RnnLocalModelManager({
       : null;
   const gpuMemorySource = runtimeStatus?.capabilities?.gpuMemorySource || null;
   const gpuMemoryName = runtimeStatus?.capabilities?.gpuMemoryName || null;
+  const hostMemoryTotalBytes =
+    typeof runtimeStatus?.capabilities?.hostMemoryTotalBytes === "number"
+      ? runtimeStatus.capabilities.hostMemoryTotalBytes
+      : null;
+  const hostMemoryTotalGb =
+    typeof hostMemoryTotalBytes === "number" && hostMemoryTotalBytes > 0
+      ? hostMemoryTotalBytes / 1024 ** 3
+      : null;
   const effectiveGpuProcessMemoryMiB =
     processGpuMemoryMiB ??
     (preferredDevice === "cuda"
@@ -1146,6 +1474,8 @@ export function RnnLocalModelManager({
     runtimeStatus,
     gpuMemoryTotalMiB,
     preferredDevice,
+    hostMemoryTotalBytes,
+    runtimeStatus?.runtimeConfig,
   );
   const recommendedModelLabels = new Map(
     recommendedModels.map((item) => [item.entry.id, RECOMMENDATION_LABELS[item.slot]]),
@@ -1158,8 +1488,20 @@ export function RnnLocalModelManager({
       if (rightRecommendedIndex === -1) return -1;
       return leftRecommendedIndex - rightRecommendedIndex;
     }
-    const leftFit = hardwareFitForEntry(left, gpuMemoryTotalMiB, preferredDevice);
-    const rightFit = hardwareFitForEntry(right, gpuMemoryTotalMiB, preferredDevice);
+    const leftFit = hardwareFitForEntry(
+      left,
+      gpuMemoryTotalMiB,
+      preferredDevice,
+      hostMemoryTotalBytes,
+      runtimeStatus?.runtimeConfig,
+    );
+    const rightFit = hardwareFitForEntry(
+      right,
+      gpuMemoryTotalMiB,
+      preferredDevice,
+      hostMemoryTotalBytes,
+      runtimeStatus?.runtimeConfig,
+    );
     const toneRank = { good: 0, warn: 1, neutral: 2, bad: 3 } as const;
     if (toneRank[leftFit.tone] !== toneRank[rightFit.tone]) {
       return toneRank[leftFit.tone] - toneRank[rightFit.tone];
@@ -1170,6 +1512,8 @@ export function RnnLocalModelManager({
       runtimeStatus,
       gpuMemoryTotalMiB,
       preferredDevice,
+      hostMemoryTotalBytes,
+      runtimeStatus?.runtimeConfig,
     );
     const rightScore = recommendationScore(
       right,
@@ -1177,6 +1521,8 @@ export function RnnLocalModelManager({
       runtimeStatus,
       gpuMemoryTotalMiB,
       preferredDevice,
+      hostMemoryTotalBytes,
+      runtimeStatus?.runtimeConfig,
     );
     if (rightScore !== leftScore) return rightScore - leftScore;
     return formatCatalogName(left).localeCompare(formatCatalogName(right));
@@ -1219,14 +1565,35 @@ export function RnnLocalModelManager({
       seriesGroup.downloadedCount += 1;
     }
   }
+  groupedCatalogEntries.sort((left, right) => {
+    const leftPinned = left.family === "Nemotron";
+    const rightPinned = right.family === "Nemotron";
+    if (leftPinned !== rightPinned) {
+      return leftPinned ? -1 : 1;
+    }
+    return 0;
+  });
   const hardwareSummary =
     preferredDevice === "cuda" && gpuMemoryTotalMiB
-      ? `${formatMemory(gpuMemoryTotalMiB)} ${gpuMemoryName ? `· ${gpuMemoryName}` : "GPU"}`
+      ? [
+          `${formatMemory(gpuMemoryTotalMiB)} ${gpuMemoryName ? `· ${gpuMemoryName}` : "GPU"}`,
+          hostMemoryTotalBytes ? `${formatBytes(hostMemoryTotalBytes)} RAM` : null,
+        ].filter(Boolean).join(" · ")
       : preferredDevice === "mps"
-        ? "Apple GPU"
+        ? ["Apple GPU", hostMemoryTotalBytes ? `${formatBytes(hostMemoryTotalBytes)} unified RAM` : null]
+            .filter(Boolean)
+            .join(" · ")
         : preferredDevice === "cpu"
-          ? "CPU only"
-          : deviceBadge;
+          ? [hostMemoryTotalBytes ? `${formatBytes(hostMemoryTotalBytes)} RAM` : "CPU only"]
+              .filter(Boolean)
+              .join(" · ")
+          : [deviceBadge, hostMemoryTotalBytes ? `${formatBytes(hostMemoryTotalBytes)} RAM` : null]
+              .filter(Boolean)
+              .join(" · ");
+  const lowMemoryGgufNotice =
+    hostMemoryTotalGb !== null &&
+    hostMemoryTotalGb <= 8.5 &&
+    persistedLlamaCppConfig.nCtx > 16384;
   const activeModelMemoryHistory = memoryHistory
     .filter((sample) => sample.model === activeMemoryModelKey)
     .slice(-20);
@@ -1278,6 +1645,161 @@ export function RnnLocalModelManager({
     gpuMemoryTotalMiB,
   ]);
 
+  function renderCatalogModelEntry(
+    entry: RnnCatalogEntry,
+    opts?: {
+      summaryPaddingClassName?: string;
+      detailPaddingClassName?: string;
+    },
+  ) {
+    const localEntry = localByCatalogId.get(entry.id);
+    const activeDownload =
+      snapshot?.downloadState?.catalogId === entry.id ? snapshot.downloadState : null;
+    const isDownloading = activeDownload?.status === "downloading";
+    const progressSummary = downloadProgressSummary(activeDownload);
+    const progressDetail = downloadProgressDetail(activeDownload);
+    const fit = hardwareFitForEntry(
+      entry,
+      gpuMemoryTotalMiB,
+      preferredDevice,
+      hostMemoryTotalBytes,
+      runtimeStatus?.runtimeConfig,
+    );
+    const profile = recommendationProfileForEntry(entry);
+    const backendReady = backendReadyForEntry(entry, runtimeStatus);
+    const recommendationLabel = recommendedModelLabels.get(entry.id) || null;
+    return (
+      <details key={entry.id} className="group/model">
+        <summary
+          className={clsx(
+            "flex items-center justify-between gap-2 py-2 cursor-pointer list-none",
+            opts?.summaryPaddingClassName || "px-5",
+          )}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <ChevronDown className="w-3 h-3 text-[var(--text-tertiary)] transition-transform group-open/model:rotate-180 flex-shrink-0" />
+            <span className="text-[13px] font-medium text-[var(--text-primary)] truncate">
+              {formatCatalogName(entry)}
+            </span>
+            {formatSize(entry.size_gb) ? (
+              <span className="text-[11px] text-[var(--text-tertiary)] flex-shrink-0">
+                {formatSize(entry.size_gb)}
+              </span>
+            ) : null}
+          </div>
+          <div
+            className="flex items-center gap-1 flex-shrink-0"
+            onClick={(event) => event.preventDefault()}
+          >
+            {localEntry ? (
+              <span className="text-[11px] font-medium text-[var(--system-blue)]">Downloaded</span>
+            ) : isDownloading ? (
+              <span className="flex items-center gap-1.5 text-[11px] text-[var(--system-blue)]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {progressSummary}
+                {progressDetail ? (
+                  <span className="text-[var(--text-tertiary)]">{progressDetail}</span>
+                ) : null}
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void startDownload(entry.id, formatCatalogName(entry), entry.backend);
+                }}
+                disabled={busyAction !== null || snapshot?.downloadState?.status === "downloading"}
+                className={buttonClassName}
+              >
+                <Download className="h-3.5 w-3.5" />
+                Download
+              </button>
+            )}
+          </div>
+        </summary>
+        <div
+          className={clsx(
+            "pb-3 pt-1 border-t border-[var(--border-subtle)] bg-[var(--bg-secondary)]/50",
+            opts?.detailPaddingClassName || "px-5",
+          )}
+        >
+          <div className="flex flex-wrap gap-1.5">
+            {recommendationLabel ? (
+              <span className="inline-flex items-center rounded-full bg-[var(--system-blue)]/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--system-blue)]">
+                {recommendationLabel}
+              </span>
+            ) : null}
+            <span className={clsx(badgeClassName, hardwareFitBadgeClass(fit.tone))}>
+              {fit.label}
+            </span>
+            {!backendReady ? (
+              <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-600">
+                {backendMissingBadgeLabel(entry.backend)}
+              </span>
+            ) : null}
+          </div>
+          <div className="mt-2 text-[11px] text-[var(--text-secondary)] leading-relaxed">
+            {[
+              formatBackend(entry.backend),
+              formatArchitecture(entry.architecture),
+              entry.params,
+              entry.hf_repo ? formatProvider(entry.hf_repo) : null,
+              formatContext(resolvedContextWindow(entry, runtimeStatus?.runtimeConfig)),
+              fit.estimatedHostMemoryGb
+                ? `Est. ${fit.estimatedHostMemoryGb.toFixed(1)} GB RAM`
+                : null,
+              fit.estimatedVramGb
+                ? `Est. ${fit.estimatedVramGb.toFixed(1)} GB ${
+                    preferredDevice === "cuda" ? "VRAM" : "runtime mem"
+                  }`
+                : null,
+            ].filter(Boolean).join(" · ")}
+          </div>
+          {entry.description ? (
+            <div className="mt-1 text-[11px] text-[var(--text-tertiary)] leading-relaxed">
+              {entry.description}
+            </div>
+          ) : null}
+          {fit.loadBlocked && fit.loadBlockReason ? (
+            <div className="mt-2 text-[11px] font-medium text-red-600 leading-relaxed">
+              {fit.loadBlockReason}
+            </div>
+          ) : null}
+          {profile.bestFor ? (
+            <div className="mt-2 text-[12px] text-[var(--text-primary)] leading-relaxed">
+              {profile.bestFor}
+            </div>
+          ) : null}
+          <div className="mt-2 flex flex-wrap gap-1">
+            {profile.strengths.slice(0, 4).map((strength) => (
+              <span key={strength} className={badgeClassName}>
+                {strength}
+              </span>
+            ))}
+          </div>
+          {profile.caution ? (
+            <div className="mt-2 text-[11px] text-[var(--text-tertiary)] leading-relaxed">
+              {profile.caution}
+            </div>
+          ) : null}
+          {isDownloading ? (
+            <div className="mt-2 space-y-2">
+              <div className="text-[11px] text-[var(--text-secondary)]">
+                {progressDetail || "Download in progress"}
+              </div>
+              <div className="h-1 overflow-hidden rounded-full bg-[var(--border-subtle)]">
+                <div
+                  className="h-full rounded-full bg-[var(--system-blue)] transition-all"
+                  style={{ width: downloadProgressBarWidth(activeDownload) }}
+                />
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </details>
+    );
+  }
+
   return (
     <div className="space-y-4">
       <div className="space-y-1">
@@ -1290,10 +1812,23 @@ export function RnnLocalModelManager({
               const isLoaded = snapshot.loadedModel === entry.name || entry.loaded === true;
               const isBusy =
                 busyAction?.kind !== "refresh" && busyAction?.target === entry.name;
+              const normalizedBackend = (entry.backend || "").trim().toLowerCase();
+              const canAutoInstallBackend = backendAutoInstallsOnFirstUse(entry.backend);
+              const isInstallingBackend =
+                busyAction?.kind === "install-backend" && busyAction.target === normalizedBackend;
               const sourceCatalogEntry =
                 (entry.catalog_id
                   ? catalogEntries.find((candidate) => candidate.id === entry.catalog_id)
                   : null) || null;
+              const fit = hardwareFitForEntry(
+                sourceCatalogEntry || entry,
+                gpuMemoryTotalMiB,
+                preferredDevice,
+                hostMemoryTotalBytes,
+                runtimeStatus?.runtimeConfig,
+              );
+              const backendReady = backendReadyForEntry(entry, runtimeStatus);
+              const backendRequirement = backendLoadRequirementLabel(entry.backend);
               return (
                 <details key={entry.name} className="group">
                   <summary className="flex items-center justify-between gap-2 px-3 py-2 cursor-pointer list-none">
@@ -1308,12 +1843,26 @@ export function RnnLocalModelManager({
                         <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-600">
                           Active
                         </span>
+                      ) : fit.loadBlocked ? (
+                        <span
+                          className="inline-flex items-center rounded-full bg-red-500/10 px-2 py-0.5 text-[10px] font-semibold text-red-600"
+                          title={fit.loadBlockReason || undefined}
+                        >
+                          Load blocked
+                        </span>
                       ) : (
                         <>
-                          <button type="button" onClick={(e) => { e.stopPropagation(); void runAction({ kind: "load", target: entry.name }, () => invoke("load_rnn_model", { modelName: entry.name }), `Loaded ${entry.display_name || entry.name}.`); }} disabled={busyAction !== null} className={buttonClassName}>
-                            {isBusy && busyAction?.kind === "load" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Cpu className="h-3.5 w-3.5" />}
-                            Load
-                          </button>
+                          {backendReady || canAutoInstallBackend ? (
+                            <button type="button" onClick={(e) => { e.stopPropagation(); void loadLocalModel(entry); }} disabled={busyAction !== null} className={buttonClassName}>
+                              {isBusy && busyAction?.kind === "load" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Cpu className="h-3.5 w-3.5" />}
+                              Load
+                            </button>
+                          ) : (
+                            <button type="button" onClick={(e) => { e.stopPropagation(); void installBackend(entry.backend); }} disabled={busyAction !== null} className={buttonClassName}>
+                              {isInstallingBackend ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                              {backendInstallActionLabel(entry.backend)}
+                            </button>
+                          )}
                           <button type="button" onClick={(e) => { e.stopPropagation(); void runAction({ kind: "delete", target: entry.name }, () => invoke("delete_rnn_model", { modelName: entry.name }), `Deleted ${entry.display_name || entry.name}.`); }} disabled={busyAction !== null} className={clsx(buttonClassName, "text-red-500")}>
                             {isBusy && busyAction?.kind === "delete" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
                           </button>
@@ -1333,6 +1882,15 @@ export function RnnLocalModelManager({
                         ].filter(Boolean).join(" · ") || entry.filename}
                       </div>
                       {entry.description ? <div>{entry.description}</div> : null}
+                      {fit.loadBlocked && fit.loadBlockReason ? (
+                        <div className="text-red-600">{fit.loadBlockReason}</div>
+                      ) : null}
+                      {!backendReady && backendRequirement ? (
+                        <div className="text-amber-600">
+                          {backendRequirement}
+                          {!canAutoInstallBackend ? ". Use the install button above." : "."}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 </details>
@@ -1345,6 +1903,43 @@ export function RnnLocalModelManager({
           </div>
         )}
       </div>
+
+      {activeDownloadState ? (
+        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]/50 p-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[13px] font-semibold text-[var(--text-primary)]">
+                Downloading {activeDownloadState.modelName || "model"}
+              </div>
+              <div className="mt-1 text-xs text-[var(--text-secondary)]">
+                {downloadProgressSummary(activeDownloadState)}
+                {downloadProgressDetail(activeDownloadState)
+                  ? ` • ${downloadProgressDetail(activeDownloadState)}`
+                  : ""}
+              </div>
+            </div>
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-[var(--system-blue)]">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Live
+            </span>
+          </div>
+          <div className="mt-3 h-2 overflow-hidden rounded-full bg-[var(--border-subtle)]">
+            <div
+              className="h-full rounded-full bg-[var(--system-blue)] transition-all"
+              style={{ width: downloadProgressBarWidth(activeDownloadState) }}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {lowMemoryGgufNotice ? (
+        <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-700">
+          This machine reports {hostMemoryTotalGb?.toFixed(1)} GB of RAM and GGUF context is set to{" "}
+          {persistedLlamaCppConfig.nCtx.toLocaleString()}.
+          Lower <span className="font-medium">Context size</span> under{" "}
+          <span className="font-medium">GGUF Runtime Tuning</span> before loading larger GGUF models.
+        </div>
+      ) : null}
 
       {recommendedModels.length ? (
         <div className="space-y-1 pt-3 border-t border-[var(--border-subtle)]">
@@ -1361,6 +1956,13 @@ export function RnnLocalModelManager({
               const activeDownload =
                 snapshot?.downloadState?.catalogId === item.entry.id ? snapshot.downloadState : null;
               const isDownloading = activeDownload?.status === "downloading";
+              const progressSummary = downloadProgressSummary(activeDownload);
+              const progressDetail = downloadProgressDetail(activeDownload);
+              const backendRequirement = backendLoadRequirementLabel(item.entry.backend);
+              const normalizedBackend = (item.entry.backend || "").trim().toLowerCase();
+              const canAutoInstallBackend = backendAutoInstallsOnFirstUse(item.entry.backend);
+              const isInstallingBackend =
+                busyAction?.kind === "install-backend" && busyAction.target === normalizedBackend;
               return (
                 <div
                   key={`${item.slot}:${item.entry.id}`}
@@ -1380,33 +1982,76 @@ export function RnnLocalModelManager({
                   <div className="mt-1 text-[11px] text-[var(--text-tertiary)]">
                     {[formatSize(item.entry.size_gb), formatBackend(item.entry.backend)].filter(Boolean).join(" · ")}
                   </div>
+                  {item.fit.loadBlocked && item.fit.loadBlockReason ? (
+                    <div className="mt-2 text-[11px] font-medium text-red-600">
+                      {item.fit.loadBlockReason}
+                    </div>
+                  ) : null}
+                  {!item.backendReady && backendRequirement ? (
+                    <div className="mt-2 text-[11px] font-medium text-amber-600">
+                      {backendRequirement}
+                    </div>
+                  ) : null}
                   <div className="mt-auto pt-3">
                     {isLoaded ? (
                       <span className="text-[11px] font-medium text-emerald-600">Active</span>
                     ) : localEntry ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void runAction(
-                            { kind: "load", target: localEntry.name },
-                            () => invoke("load_rnn_model", { modelName: localEntry.name }),
-                            `Loaded ${localEntry.display_name || localEntry.name}.`,
-                          )
-                        }
-                        disabled={busyAction !== null}
-                        className={buttonClassName}
-                      >
-                        <Cpu className="h-3.5 w-3.5" />
-                        Load
-                      </button>
+                      item.fit.loadBlocked ? (
+                        <span
+                          className="text-[11px] font-medium text-red-600"
+                          title={item.fit.loadBlockReason || undefined}
+                        >
+                          Load blocked
+                        </span>
+                      ) : item.backendReady || canAutoInstallBackend ? (
+                        <button
+                          type="button"
+                          onClick={() => void loadLocalModel(localEntry)}
+                          disabled={busyAction !== null}
+                          className={buttonClassName}
+                        >
+                          <Cpu className="h-3.5 w-3.5" />
+                          Load
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void installBackend(item.entry.backend)}
+                          disabled={busyAction !== null}
+                          className={buttonClassName}
+                        >
+                          {isInstallingBackend ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Download className="h-3.5 w-3.5" />
+                          )}
+                          {backendInstallActionLabel(item.entry.backend)}
+                        </button>
+                      )
                     ) : isDownloading ? (
-                      <span className="flex items-center gap-1.5 text-[11px] text-[var(--system-blue)]">
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      </span>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                          <span className="inline-flex items-center gap-1.5 font-medium text-[var(--system-blue)]">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            {progressSummary}
+                          </span>
+                          {progressDetail ? (
+                            <span className="text-[var(--text-tertiary)]">{progressDetail}</span>
+                          ) : null}
+                        </div>
+                        <div className="h-1.5 overflow-hidden rounded-full bg-[var(--border-subtle)]">
+                          <div
+                            className="h-full rounded-full bg-[var(--system-blue)] transition-all"
+                            style={{ width: downloadProgressBarWidth(activeDownload) }}
+                          />
+                        </div>
+                      </div>
                     ) : (
                       <button
                         type="button"
-                        onClick={() => void startDownload(item.entry.id, formatCatalogName(item.entry))}
+                        onClick={() =>
+                          void startDownload(item.entry.id, formatCatalogName(item.entry), item.entry.backend)
+                        }
                         disabled={busyAction !== null || snapshot?.downloadState?.status === "downloading"}
                         className={buttonClassName}
                       >
@@ -1434,7 +2079,11 @@ export function RnnLocalModelManager({
         {catalogEntries.length ? (
           <div className="rounded-xl border border-[var(--border-subtle)] divide-y divide-[var(--border-subtle)] overflow-hidden">
             {groupedCatalogEntries.map((familyGroup) => (
-              <details key={familyGroup.family} className="group" open={familyGroup.loadedCount > 0}>
+              <details
+                key={familyGroup.family}
+                className="group"
+                open={familyGroup.loadedCount > 0 || familyGroup.family === "Nemotron"}
+              >
                 <summary className="flex items-center justify-between gap-2 px-3 py-2.5 cursor-pointer list-none bg-[var(--bg-panel)]/35">
                   <div className="flex items-center gap-2 min-w-0">
                     <ChevronDown className="w-3 h-3 text-[var(--text-tertiary)] transition-transform group-open:rotate-180 flex-shrink-0" />
@@ -1449,145 +2098,41 @@ export function RnnLocalModelManager({
                   </div>
                 </summary>
                 <div className="border-t border-[var(--border-subtle)] bg-[var(--bg-secondary)]/40">
-                  {familyGroup.series.map((seriesGroup) => (
-                    <details
-                      key={`${familyGroup.family}:${seriesGroup.series}`}
-                      className="group/series border-b border-[var(--border-subtle)] last:border-b-0"
-                      open={seriesGroup.loadedCount > 0}
-                    >
-                      <summary className="flex items-center justify-between gap-2 px-4 py-2 cursor-pointer list-none">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <ChevronDown className="w-3 h-3 text-[var(--text-tertiary)] transition-transform group-open/series:rotate-180 flex-shrink-0" />
-                          <span className="text-[12px] font-medium text-[var(--text-primary)] truncate">
-                            {seriesGroup.series}
-                          </span>
+                  {familyGroup.series.length === 1 ? (
+                    <div className="divide-y divide-[var(--border-subtle)] bg-[var(--bg-card)]/35">
+                      {familyGroup.series[0].entries.map((entry) =>
+                        renderCatalogModelEntry(entry, {
+                          summaryPaddingClassName: "px-4",
+                          detailPaddingClassName: "px-4",
+                        }),
+                      )}
+                    </div>
+                  ) : (
+                    familyGroup.series.map((seriesGroup) => (
+                      <details
+                        key={`${familyGroup.family}:${seriesGroup.series}`}
+                        className="group/series border-b border-[var(--border-subtle)] last:border-b-0"
+                        open={seriesGroup.loadedCount > 0}
+                      >
+                        <summary className="flex items-center justify-between gap-2 px-4 py-2 cursor-pointer list-none">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <ChevronDown className="w-3 h-3 text-[var(--text-tertiary)] transition-transform group-open/series:rotate-180 flex-shrink-0" />
+                            <span className="text-[12px] font-medium text-[var(--text-primary)] truncate">
+                              {seriesGroup.series}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-[11px] text-[var(--text-tertiary)]">
+                            {seriesGroup.loadedCount > 0 ? <span>{seriesGroup.loadedCount} active</span> : null}
+                            {seriesGroup.downloadedCount > 0 ? <span>{seriesGroup.downloadedCount} downloaded</span> : null}
+                            <span>{seriesGroup.entries.length}</span>
+                          </div>
+                        </summary>
+                        <div className="border-t border-[var(--border-subtle)] divide-y divide-[var(--border-subtle)] bg-[var(--bg-card)]/35">
+                          {seriesGroup.entries.map((entry) => renderCatalogModelEntry(entry))}
                         </div>
-                        <div className="flex items-center gap-2 text-[11px] text-[var(--text-tertiary)]">
-                          {seriesGroup.loadedCount > 0 ? <span>{seriesGroup.loadedCount} active</span> : null}
-                          {seriesGroup.downloadedCount > 0 ? <span>{seriesGroup.downloadedCount} downloaded</span> : null}
-                          <span>{seriesGroup.entries.length}</span>
-                        </div>
-                      </summary>
-                      <div className="border-t border-[var(--border-subtle)] divide-y divide-[var(--border-subtle)] bg-[var(--bg-card)]/35">
-                        {seriesGroup.entries.map((entry) => {
-                          const localEntry = localByCatalogId.get(entry.id);
-                          const activeDownload =
-                            snapshot?.downloadState?.catalogId === entry.id ? snapshot.downloadState : null;
-                          const isDownloading = activeDownload?.status === "downloading";
-                          const progressLabel = isDownloading
-                            ? typeof activeDownload?.progressPercent === "number"
-                              ? `${activeDownload.progressPercent.toFixed(0)}%`
-                              : null
-                            : null;
-                          const fit = hardwareFitForEntry(entry, gpuMemoryTotalMiB, preferredDevice);
-                          const profile = recommendationProfileForEntry(entry);
-                          const backendReady = backendReadyForEntry(entry, runtimeStatus);
-                          const recommendationLabel = recommendedModelLabels.get(entry.id) || null;
-                          return (
-                            <details key={entry.id} className="group/model">
-                              <summary className="flex items-center justify-between gap-2 px-5 py-2 cursor-pointer list-none">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <ChevronDown className="w-3 h-3 text-[var(--text-tertiary)] transition-transform group-open/model:rotate-180 flex-shrink-0" />
-                                  <span className="text-[13px] font-medium text-[var(--text-primary)] truncate">
-                                    {formatCatalogName(entry)}
-                                  </span>
-                                  {formatSize(entry.size_gb) ? (
-                                    <span className="text-[11px] text-[var(--text-tertiary)] flex-shrink-0">
-                                      {formatSize(entry.size_gb)}
-                                    </span>
-                                  ) : null}
-                                </div>
-                                <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.preventDefault()}>
-                                  {localEntry ? (
-                                    <span className="text-[11px] font-medium text-[var(--system-blue)]">Downloaded</span>
-                                  ) : isDownloading ? (
-                                    <span className="flex items-center gap-1.5 text-[11px] text-[var(--system-blue)]">
-                                      <Loader2 className="h-3 w-3 animate-spin" />
-                                      {progressLabel || "..."}
-                                    </span>
-                                  ) : (
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        void startDownload(entry.id, formatCatalogName(entry));
-                                      }}
-                                      disabled={busyAction !== null || snapshot?.downloadState?.status === "downloading"}
-                                      className={buttonClassName}
-                                    >
-                                      <Download className="h-3.5 w-3.5" />
-                                      Download
-                                    </button>
-                                  )}
-                                </div>
-                              </summary>
-                              <div className="px-5 pb-3 pt-1 border-t border-[var(--border-subtle)] bg-[var(--bg-secondary)]/50">
-                                <div className="flex flex-wrap gap-1.5">
-                                  {recommendationLabel ? (
-                                    <span className="inline-flex items-center rounded-full bg-[var(--system-blue)]/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--system-blue)]">
-                                      {recommendationLabel}
-                                    </span>
-                                  ) : null}
-                                  <span className={clsx(badgeClassName, hardwareFitBadgeClass(fit.tone))}>
-                                    {fit.label}
-                                  </span>
-                                  {!backendReady ? (
-                                    <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-600">
-                                      Install backend first
-                                    </span>
-                                  ) : null}
-                                </div>
-                                <div className="mt-2 text-[11px] text-[var(--text-secondary)] leading-relaxed">
-                                  {[
-                                    formatBackend(entry.backend),
-                                    formatArchitecture(entry.architecture),
-                                    entry.params,
-                                    entry.hf_repo ? formatProvider(entry.hf_repo) : null,
-                                    fit.estimatedVramGb ? `Est. ${fit.estimatedVramGb.toFixed(1)} GB VRAM` : null,
-                                  ].filter(Boolean).join(" · ")}
-                                </div>
-                                {entry.description ? (
-                                  <div className="mt-1 text-[11px] text-[var(--text-tertiary)] leading-relaxed">
-                                    {entry.description}
-                                  </div>
-                                ) : null}
-                                {profile.bestFor ? (
-                                  <div className="mt-2 text-[12px] text-[var(--text-primary)] leading-relaxed">
-                                    {profile.bestFor}
-                                  </div>
-                                ) : null}
-                                <div className="mt-2 flex flex-wrap gap-1">
-                                  {profile.strengths.slice(0, 4).map((strength) => (
-                                    <span key={strength} className={badgeClassName}>
-                                      {strength}
-                                    </span>
-                                  ))}
-                                </div>
-                                {profile.caution ? (
-                                  <div className="mt-2 text-[11px] text-[var(--text-tertiary)] leading-relaxed">
-                                    {profile.caution}
-                                  </div>
-                                ) : null}
-                                {isDownloading ? (
-                                  <div className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--border-subtle)]">
-                                    <div
-                                      className="h-full rounded-full bg-[var(--system-blue)] transition-all"
-                                      style={{
-                                        width:
-                                          typeof activeDownload?.progressPercent === "number"
-                                            ? `${Math.max(4, Math.min(100, activeDownload.progressPercent))}%`
-                                            : "20%",
-                                      }}
-                                    />
-                                  </div>
-                                ) : null}
-                              </div>
-                            </details>
-                          );
-                        })}
-                      </div>
-                    </details>
-                  ))}
+                      </details>
+                    ))
+                  )}
                 </div>
               </details>
             ))}
@@ -1774,7 +2319,7 @@ export function RnnLocalModelManager({
             disabled={busyAction !== null}
             className={clsx(buttonClassName, "mt-3")}
           >
-            {busyAction?.kind === "install-backend" ? (
+            {busyAction?.kind === "install-backend" && busyAction.target === "vllm" ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <Download className="h-3.5 w-3.5" />
@@ -1788,7 +2333,7 @@ export function RnnLocalModelManager({
         <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]/40 p-3 text-xs text-[var(--text-secondary)]">
           <div className="font-medium text-[var(--text-primary)]">GGUF Backend</div>
           <div className="mt-1">
-            The llama.cpp backend is not installed yet. Install it to run GGUF models like Nemotron Nano.
+            The llama.cpp backend is not installed yet. It will install automatically the first time you download or load a GGUF model, or you can install it now.
           </div>
           <button
             type="button"
@@ -1802,7 +2347,7 @@ export function RnnLocalModelManager({
             disabled={busyAction !== null}
             className={clsx(buttonClassName, "mt-3")}
           >
-            {busyAction?.kind === "install-backend" ? (
+            {busyAction?.kind === "install-backend" && busyAction.target === "llama-cpp" ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <Download className="h-3.5 w-3.5" />
@@ -1993,7 +2538,7 @@ export function RnnLocalModelManager({
       <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]/40 p-3">
         <div className="text-sm font-medium text-[var(--text-primary)]">GGUF Runtime Tuning</div>
         <div className="mt-1 text-xs text-[var(--text-secondary)]">
-          Settings for the llama.cpp backend used by GGUF models.
+          Settings for the llama.cpp backend used by GGUF models. Context size is the main RAM lever on 8 GB laptops.
         </div>
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           <label className="space-y-1 text-xs text-[var(--text-secondary)]">

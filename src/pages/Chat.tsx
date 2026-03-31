@@ -17,6 +17,8 @@ import {
   Bot,
   User,
   Bug,
+  Copy,
+  Check,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
@@ -103,6 +105,7 @@ import type { Page } from "../components/Layout";
 import {
   type Message,
   type MessageAttachment,
+  type MessageToolCall,
   type CalendarEvent,
   type ToolError,
   type TerminalCommandResult,
@@ -128,7 +131,9 @@ import {
   stripInlineClawdbotMetadata,
   stripOpenClawStatusLines,
   sanitizeAssistantDisplayContent,
+  type AssistantMessagePart,
   buildAssistantPayload,
+  buildAssistantMessageParts,
   normalizeCachedMessage,
   parseUtcBracketTimestamp,
   toTimestampMs,
@@ -145,6 +150,8 @@ import {
   shouldDisplayGatewaySession,
   isChannelOriginGatewayMessage,
   normalizeGatewayMessage,
+  resolveAssistantMessageParts,
+  mergeMessageToolCalls,
 } from "../lib/chatMessageUtils";
 
 type GatewayMutationResult = {
@@ -231,11 +238,282 @@ const DIRECT_LOCAL_DEBUG_PREVIEW_LIMIT = 4;
 const DIRECT_LOCAL_DEBUG_PREVIEW_CHARS = 220;
 const OPTIMIZATION_TRACE_RESPONSE_PREVIEW_CHARS = 320;
 const DEBUG_THINK_BLOCK_PREVIEW_CHARS = 120;
+const LIVE_REASONING_PREVIEW_CHARS = 1200;
+const LIVE_TOOL_PREVIEW_LIMIT = 6;
+
+const FRIENDLY_TOOL_ACTIVITY_LABELS: Record<string, string> = {
+  read_file: "Reading file",
+  write_file: "Writing file",
+  edit_file: "Editing file",
+  list_directory: "Listing directory",
+  search_files: "Searching files",
+  run_command: "Running command",
+  bash: "Running command",
+  web_search: "Searching the web",
+  web_fetch: "Fetching web page",
+  x_search: "Searching X",
+  x_profile: "Looking up profile",
+  x_thread: "Fetching thread",
+  x_user_tweets: "Fetching tweets",
+  google_calendar: "Checking calendar",
+  google_email: "Checking email",
+  memory_search: "Searching memory",
+  memory_store: "Saving to memory",
+};
 
 type LeadingThinkBlocks = {
   thoughts: string[];
   answer: string;
 };
+
+type LiveToolCallPreview = MessageToolCall;
+
+type LiveRunPreview = {
+  reasoningText: string;
+  toolCalls: LiveToolCallPreview[];
+};
+
+function createEmptyLiveRunPreview(): LiveRunPreview {
+  return {
+    reasoningText: "",
+    toolCalls: [],
+  };
+}
+
+function describeToolActivityName(name: string): string {
+  return FRIENDLY_TOOL_ACTIVITY_LABELS[name] || `Using ${name.replace(/_/g, " ")}`;
+}
+
+function normalizeReasoningText(raw: string, maxChars?: number): string {
+  const stripped = raw
+    .trim()
+    .replace(/^Reasoning:\s*/i, "")
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("_") && trimmed.endsWith("_") && trimmed.length >= 2) {
+        return trimmed.slice(1, -1);
+      }
+      return trimmed.replace(/^_+|_+$/g, "");
+    })
+    .join("\n")
+    .trim();
+  if (!maxChars || stripped.length <= maxChars) {
+    return stripped;
+  }
+  return `…${stripped.slice(-(maxChars - 1))}`;
+}
+
+function normalizeToolPreviewText(value: unknown, maxChars = 320): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.length <= maxChars ? trimmed : `${trimmed.slice(0, maxChars - 1)}…`;
+}
+
+function formatToolPreviewScalar(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return normalizeToolPreviewText(value, 160);
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  if (Array.isArray(value)) {
+    const items = value
+      .map((entry) => formatToolPreviewScalar(entry))
+      .filter((entry): entry is string => Boolean(entry))
+      .slice(0, 3);
+    return items.length > 0 ? items.join(", ") : undefined;
+  }
+  return undefined;
+}
+
+function formatToolArgsPreview(args: unknown): string | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return undefined;
+  }
+  const record = args as Record<string, unknown>;
+  const direct =
+    normalizeToolPreviewText(record.url, 220) ??
+    normalizeToolPreviewText(record.query, 220) ??
+    normalizeToolPreviewText(record.q, 220) ??
+    normalizeToolPreviewText(record.path, 220) ??
+    normalizeToolPreviewText(record.file_path, 220) ??
+    normalizeToolPreviewText(record.filePath, 220) ??
+    normalizeToolPreviewText(record.command, 220) ??
+    normalizeToolPreviewText(record.cmd, 220);
+  if (direct) {
+    return direct;
+  }
+  const entries = Object.entries(record)
+    .map(([key, value]) => {
+      const preview = formatToolPreviewScalar(value);
+      if (!preview) {
+        return null;
+      }
+      return `${key}: ${preview}`;
+    })
+    .filter((entry): entry is string => Boolean(entry))
+    .slice(0, 3);
+  if (entries.length === 0) {
+    return undefined;
+  }
+  return normalizeToolPreviewText(entries.join(" · "), 220);
+}
+
+function extractToolResultPreview(result: unknown): string | undefined {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return undefined;
+  }
+  const record = result as Record<string, unknown>;
+  const details =
+    record.details && typeof record.details === "object" && !Array.isArray(record.details)
+      ? (record.details as Record<string, unknown>)
+      : undefined;
+  if (details) {
+    const results = Array.isArray(details.results) ? details.results : [];
+    if (results.length > 0) {
+      const query = normalizeToolPreviewText(details.query, 120) ?? normalizeToolPreviewText(details.q, 120);
+      const lines = results
+        .slice(0, 3)
+        .map((entry, index) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+            return undefined;
+          }
+          const item = entry as Record<string, unknown>;
+          const title =
+            normalizeToolPreviewText(item.title, 140) ??
+            normalizeToolPreviewText(item.name, 140) ??
+            normalizeToolPreviewText(item.url, 140);
+          const url = normalizeToolPreviewText(item.url, 180) ?? normalizeToolPreviewText(item.link, 180);
+          const snippet =
+            normalizeToolPreviewText(item.snippet, 180) ??
+            normalizeToolPreviewText(item.description, 180) ??
+            normalizeToolPreviewText(item.summary, 180);
+          return [title ?? `Result ${index + 1}`, url && url !== title ? url : undefined, snippet]
+            .filter((value): value is string => Boolean(value))
+            .join("\n");
+        })
+        .filter((entry): entry is string => Boolean(entry));
+      if (lines.length > 0) {
+        return [query ? `Results for ${query}` : `${results.length} results`, ...lines].join("\n");
+      }
+    }
+    const title = normalizeToolPreviewText(details.title, 180) ?? normalizeToolPreviewText(details.name, 180);
+    const url =
+      normalizeToolPreviewText(details.finalUrl, 220) ??
+      normalizeToolPreviewText(details.final_url, 220) ??
+      normalizeToolPreviewText(details.url, 220);
+    const status =
+      typeof details.status === "number" && Number.isFinite(details.status)
+        ? `HTTP ${details.status}`
+        : normalizeToolPreviewText(details.status, 80);
+    const lines = [title, url, status].filter((entry): entry is string => Boolean(entry));
+    if (lines.length > 0) {
+      return lines.join("\n");
+    }
+  }
+  const content = Array.isArray(record.content) ? record.content : [];
+  const text = content
+    .map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        return undefined;
+      }
+      const item = entry as Record<string, unknown>;
+      if (item.type !== "text" || typeof item.text !== "string") {
+        return undefined;
+      }
+      return item.text.trim();
+    })
+    .filter((entry): entry is string => Boolean(entry))
+    .join("\n")
+    .trim();
+  if (!text) {
+    return undefined;
+  }
+  return normalizeToolPreviewText(
+    text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 5)
+      .join("\n"),
+    420,
+  );
+}
+
+function summarizeToolCallPreview(tool: Pick<MessageToolCall, "name" | "argsText" | "detailText">): string {
+  const label = describeToolActivityName(tool.name);
+  const detail =
+    tool.argsText ??
+    tool.detailText
+      ?.split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean);
+  if (!detail) {
+    return label;
+  }
+  return `${label} · ${detail}`;
+}
+
+function applyToolEventToLiveRunPreview(
+  preview: LiveRunPreview,
+  data: Record<string, unknown>,
+  limit = LIVE_TOOL_PREVIEW_LIMIT,
+): LiveRunPreview {
+  const name = typeof data.name === "string" ? data.name.trim() : "";
+  const toolCallIdRaw = typeof data.toolCallId === "string" ? data.toolCallId.trim() : "";
+  const toolCallId = toolCallIdRaw || name;
+  if (!toolCallId || !name) {
+    return preview;
+  }
+  const phase = typeof data.phase === "string" ? data.phase : "start";
+  const isError = data.isError === true;
+  const existingIndex = preview.toolCalls.findIndex((entry) => entry.toolCallId === toolCallId);
+  const existingTool = existingIndex >= 0 ? preview.toolCalls[existingIndex] : undefined;
+  const nextEntry: LiveToolCallPreview = {
+    toolCallId,
+    name,
+    phase,
+    isError,
+    argsText: formatToolArgsPreview(data.args) ?? existingTool?.argsText,
+    detailText:
+      normalizeToolPreviewText(data.detailText, 420) ??
+      normalizeToolPreviewText(data.detail_text, 420) ??
+      extractToolResultPreview(phase === "update" ? data.partialResult : phase === "result" ? data.result : undefined) ??
+      existingTool?.detailText,
+  };
+  if (existingIndex < 0) {
+    const nextToolCalls = [...preview.toolCalls, nextEntry].slice(-limit);
+    return {
+      ...preview,
+      toolCalls: nextToolCalls,
+    };
+  }
+  const existing = preview.toolCalls[existingIndex]!;
+  if (
+    existing.name === nextEntry.name &&
+    existing.phase === nextEntry.phase &&
+    existing.isError === nextEntry.isError &&
+    existing.argsText === nextEntry.argsText &&
+    existing.detailText === nextEntry.detailText
+  ) {
+    return preview;
+  }
+  const nextToolCalls = [...preview.toolCalls];
+  nextToolCalls[existingIndex] = nextEntry;
+  return {
+    ...preview,
+    toolCalls: nextToolCalls,
+  };
+}
 
 function buildDirectLocalDebugHistory(messages: Message[]): DirectLocalChatMessage[] {
   const normalized = messages
@@ -312,14 +590,65 @@ function splitLeadingThinkBlocks(raw: string): LeadingThinkBlocks | null {
 }
 
 function summarizeThinkBlock(raw: string): string {
-  const normalized = raw.replace(/\s+/g, " ").trim();
-  if (!normalized) {
+  const firstLine =
+    raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) ?? "";
+  if (!firstLine) {
     return "No visible thought text";
   }
-  if (normalized.length <= DEBUG_THINK_BLOCK_PREVIEW_CHARS) {
-    return normalized;
+  if (firstLine.length <= DEBUG_THINK_BLOCK_PREVIEW_CHARS) {
+    return firstLine;
   }
-  return `${normalized.slice(0, DEBUG_THINK_BLOCK_PREVIEW_CHARS - 1)}…`;
+  return `${firstLine.slice(0, DEBUG_THINK_BLOCK_PREVIEW_CHARS - 1)}…`;
+}
+
+function splitThinkBlockPreview(raw: string): {
+  preview: string;
+  remainder: string;
+} {
+  const lines = raw.split(/\r?\n/);
+  let previewIndex = -1;
+  let preview = "";
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const trimmed = lines[i]?.trim() ?? "";
+    if (!trimmed) {
+      continue;
+    }
+    previewIndex = i;
+    preview = trimmed;
+    break;
+  }
+
+  if (previewIndex < 0) {
+    return {
+      preview: "No visible thought text",
+      remainder: "",
+    };
+  }
+
+  return {
+    preview: summarizeThinkBlock(preview),
+    remainder: lines.slice(previewIndex + 1).join("\n").replace(/^\s+/, "").trim(),
+  };
+}
+
+function extractUsageStat(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function extractEventOutputTokens(raw: unknown): number | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const usage = raw as Record<string, unknown>;
+  return (
+    extractUsageStat(usage.outputTokens) ??
+    extractUsageStat(usage.output_tokens) ??
+    extractUsageStat(usage.output)
+  );
 }
 
 function truncateOptimizationTracePreview(value: string, maxChars = OPTIMIZATION_TRACE_RESPONSE_PREVIEW_CHARS): string {
@@ -566,6 +895,8 @@ const CHAT_STORE_FILE = "entropic-chat-history.json";
 const MAX_PERSISTED_SESSIONS = 50;
 const MAX_PERSISTED_MESSAGES = 1000;
 const MAX_PERSISTED_OUTBOX = 16;
+const OUTBOX_AUTO_REPLAY_MAX_AGE_MS = 15 * 60_000;
+const CONNECTING_SCREEN_SHOW_DELAY_MS = 450;
 
 type PersistedPendingSendAttachment = {
   fileName?: string;
@@ -815,6 +1146,7 @@ async function loadPersistedChatData(): Promise<PersistedChatData | null> {
     const store = await getChatStore();
     const data = await store.get("chatData") as PersistedChatData | null;
     if (!data) return null;
+    const now = Date.now();
 
     const sessions = normalizeSessionsList(Array.isArray(data.sessions) ? data.sessions : []);
     const allowedKeys = new Set(sessions.map((session) => session.key));
@@ -868,6 +1200,7 @@ async function loadPersistedChatData(): Promise<PersistedChatData | null> {
           .map(normalizePersistedPendingSend)
           .filter((entry): entry is PersistedPendingSend => entry !== null)
           .filter((entry) => allowedKeys.has(entry.sessionKey))
+          .filter((entry) => now - entry.createdAt <= OUTBOX_AUTO_REPLAY_MAX_AGE_MS)
       : [];
 
     return {
@@ -932,7 +1265,6 @@ const PRIVACY_URL = entropicSitePath("/privacy");
 const HISTORY_LIMIT = 500;
 const ACTIVE_RUN_IDLE_TIMEOUT_MS = 120_000;
 const LOCAL_MODEL_ACTIVE_RUN_IDLE_TIMEOUT_MS = 600_000;
-const LOCAL_FAST_CHAT_BOOTSTRAP_MODE: "lightweight" = "lightweight";
 const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 4;
 const MAX_IMAGE_ATTACHMENT_BYTES = 5_000_000;
 const GENERATED_IMAGES_DEST_PATH = "generated-images";
@@ -1313,6 +1645,7 @@ export function Chat({
   onModelChange: _onModelChange,
   imageModel: _imageModel,
   imageGenerationModel,
+  showReasoning = true,
   integrationsSyncing,
   integrationsMissing,
   onNavigate,
@@ -1339,6 +1672,7 @@ export function Chat({
   onModelChange?: (model: string) => void;
   imageModel: string;
   imageGenerationModel: string;
+  showReasoning?: boolean;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
   onNavigate?: (page: Page) => void;
@@ -1351,6 +1685,7 @@ export function Chat({
   const managedMode = connectionMode === "managed";
   const byokMode = connectionMode === "byok";
   const localModelsMode = connectionMode === "local-models";
+  const reasoningRequestMode = showReasoning ? "stream" : "off";
   const effectiveLocalModePerformanceSettings =
     localModePerformanceSettings ?? DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS;
   const localModelReady = Boolean(
@@ -1415,6 +1750,10 @@ export function Chat({
   const [creditsCheckoutLoading, setCreditsCheckoutLoading] = useState(false);
   const [componentMountedAt] = useState(Date.now());
   const [showGatewayOfflineCta, setShowGatewayOfflineCta] = useState(false);
+  const [liveRunPreview, setLiveRunPreview] = useState<LiveRunPreview>(() => createEmptyLiveRunPreview());
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [composerFocused, setComposerFocused] = useState(false);
+  const assistantTraceByRunIdRef = useRef<Record<string, LiveRunPreview>>({});
   const runTimingsRef = useRef<Record<string, {
     startedAt: number;
     ackAt?: number;
@@ -1440,6 +1779,7 @@ export function Chat({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clientRef = useRef<GatewayClient | null>(null);
   const connectInFlightRef = useRef(false);
   const currentSessionRef = useRef<string | null>(null);
@@ -2529,6 +2869,7 @@ export function Chat({
   function clearActiveRunTracking() {
     activeRunIdRef.current = null;
     activeRunSessionRef.current = null;
+    setLiveRunPreview(createEmptyLiveRunPreview());
     if (activeRunTimeoutRef.current) {
       window.clearTimeout(activeRunTimeoutRef.current);
       activeRunTimeoutRef.current = null;
@@ -2797,7 +3138,7 @@ export function Chat({
     const ta = textareaRef.current;
     ta.style.height = "auto";
     const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
-    const maxHeight = lineHeight * 5;
+    const maxHeight = lineHeight * 8;
     ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
     ta.style.overflowY = ta.scrollHeight > maxHeight ? "auto" : "hidden";
   }, [currentSession, activeComposerMode]);
@@ -3016,7 +3357,14 @@ export function Chat({
     }
 
     if (shouldHoldConnectingScreen) {
-      setShowConnectingScreen(true);
+      if (showConnectingScreen) {
+        setError(null);
+        return;
+      }
+      connectingScreenTimerRef.current = window.setTimeout(() => {
+        setShowConnectingScreen(true);
+        connectingScreenTimerRef.current = null;
+      }, CONNECTING_SCREEN_SHOW_DELAY_MS);
       setError(null);
       return;
     }
@@ -3033,7 +3381,7 @@ export function Chat({
         connectingScreenTimerRef.current = null;
       }
     };
-  }, [shouldHoldConnectingScreen, connected]);
+  }, [shouldHoldConnectingScreen, connected, showConnectingScreen]);
 
   useEffect(() => {
     if (gatewayRunning || gatewayStarting || showConnectingScreen) {
@@ -3295,33 +3643,15 @@ export function Chat({
     if (stream === "tool") {
       const name = typeof data.name === "string" ? data.name : typeof data.tool === "string" ? data.tool : null;
       if (name) {
-        const friendly: Record<string, string> = {
-          read_file: "Reading file",
-          write_file: "Writing file",
-          edit_file: "Editing file",
-          list_directory: "Listing directory",
-          search_files: "Searching files",
-          run_command: "Running command",
-          bash: "Running command",
-          web_search: "Searching the web",
-          web_fetch: "Fetching web page",
-          x_search: "Searching X",
-          x_profile: "Looking up profile",
-          x_thread: "Fetching thread",
-          x_user_tweets: "Fetching tweets",
-          google_calendar: "Checking calendar",
-          google_email: "Checking email",
-          memory_search: "Searching memory",
-          memory_store: "Saving to memory",
-        };
-        return friendly[name] || `Using ${name.replace(/_/g, " ")}`;
+        return describeToolActivityName(name);
       }
       return "Using tool";
     }
+    if (stream === "thinking" || stream === "reasoning") return "Reasoning";
     if (stream === "assistant") return "Thinking";
     if (stream === "lifecycle") {
       const phase = typeof data.phase === "string" ? data.phase : null;
-      if (phase === "start") return "Starting";
+      if (phase === "start") return null;
       if (phase === "end" || phase === "error") return null;
     }
     return null;
@@ -3391,6 +3721,92 @@ export function Chat({
     if (!event?.runId || event.runId !== activeRunIdRef.current) return;
     lastEventByRunIdRef.current[event.runId] = Date.now();
     refreshActiveRunTimeout(event.runId);
+    if ((event.stream === "thinking" || event.stream === "reasoning") && showReasoning) {
+      const text =
+        typeof event.data.text === "string" ? normalizeReasoningText(event.data.text) : "";
+      if (text) {
+        const nextTrace = {
+          ...(assistantTraceByRunIdRef.current[event.runId] ?? createEmptyLiveRunPreview()),
+          reasoningText: text,
+        };
+        assistantTraceByRunIdRef.current[event.runId] = nextTrace;
+        setLiveRunPreview((prev) => {
+          const previewText = normalizeReasoningText(text, LIVE_REASONING_PREVIEW_CHARS);
+          if (prev.reasoningText === previewText) {
+            return prev;
+          }
+          return {
+            ...prev,
+            reasoningText: previewText,
+          };
+        });
+        setMessages((prev) => {
+          const nextMessages = prev.map((message) =>
+            message.id === event.runId && message.role === "assistant"
+              ? (() => {
+                  if (message.reasoningText === text) {
+                    return message;
+                  }
+                  const nextMessage = { ...message, reasoningText: text };
+                    return {
+                      ...nextMessage,
+                      parts: buildAssistantMessageParts({
+                        parts: nextMessage.parts,
+                        content: nextMessage.content,
+                        reasoningText: showReasoning ? nextMessage.reasoningText : undefined,
+                        toolCalls: nextMessage.toolCalls,
+                      }),
+                    };
+                })()
+              : message,
+          );
+          if (currentSessionRef.current) {
+            sessionMessagesRef.current[currentSessionRef.current] = nextMessages;
+          }
+          return nextMessages;
+        });
+      }
+    } else if (event.stream === "tool") {
+      const nextTrace = applyToolEventToLiveRunPreview(
+        assistantTraceByRunIdRef.current[event.runId] ?? createEmptyLiveRunPreview(),
+        event.data,
+        24,
+      );
+      assistantTraceByRunIdRef.current[event.runId] = nextTrace;
+      setLiveRunPreview((prev) => applyToolEventToLiveRunPreview(prev, event.data));
+      setMessages((prev) => {
+        const nextMessages = prev.map((message) =>
+          message.id === event.runId && message.role === "assistant"
+            ? (() => {
+                const nextMessage = { ...message, toolCalls: nextTrace.toolCalls };
+                return {
+                  ...nextMessage,
+                  parts: buildAssistantMessageParts({
+                    parts: nextMessage.parts,
+                    content: nextMessage.content,
+                    reasoningText: showReasoning ? nextMessage.reasoningText : undefined,
+                    toolCalls: nextMessage.toolCalls,
+                  }),
+                };
+              })()
+            : message,
+        );
+        if (currentSessionRef.current) {
+          sessionMessagesRef.current[currentSessionRef.current] = nextMessages;
+        }
+        return nextMessages;
+      });
+    } else if (event.stream === "assistant") {
+      setLiveRunPreview((prev) => {
+        if (!prev.reasoningText) {
+          return prev;
+        }
+        return {
+          ...prev,
+          reasoningText: "",
+        };
+      });
+    }
     const diagnostics = formatAgentDiagnostics(event);
     const optimizationTraceId = runOptimizationTraceRef.current[event.runId];
     for (const diagnostic of diagnostics) {
@@ -3722,15 +4138,41 @@ export function Chat({
     }
     if (event.state === "delta" || event.state === "final") {
       const normalized = event.message ? normalizeGatewayMessage(event.message as GatewayMessage, eventRunId || "evt") : null;
+      const trace = eventRunId ? assistantTraceByRunIdRef.current[eventRunId] : undefined;
+      const visibleTraceReasoning = showReasoning ? trace?.reasoningText : undefined;
+      const visibleNormalizedReasoning = showReasoning ? normalized?.reasoningText : undefined;
+      const mergedToolCalls = mergeMessageToolCalls(trace?.toolCalls, normalized?.toolCalls);
+      if (eventRunId && mergedToolCalls) {
+        assistantTraceByRunIdRef.current[eventRunId] = {
+          reasoningText: visibleTraceReasoning ?? visibleNormalizedReasoning ?? "",
+          toolCalls: mergedToolCalls ?? trace?.toolCalls ?? [],
+        };
+      }
+      const eventOutputTokens = extractEventOutputTokens(event.usage);
+      const nextUsage =
+        normalized?.usage ??
+        (eventOutputTokens !== null ? { outputTokens: eventOutputTokens } : undefined);
       const text = normalized?.content ?? "";
       const hasRenderableAssistantPayload = Boolean(
         normalized?.assistantPayload &&
         (normalized.assistantPayload.events.length > 0 || normalized.assistantPayload.errors.length > 0)
       );
+      const hasTraceContent = Boolean(visibleTraceReasoning || trace?.toolCalls.length);
       const hadToolPayload = Boolean(normalized?.assistantPayload?.hadToolPayload);
-      if (text || hasRenderableAssistantPayload) {
+      if (text || hasRenderableAssistantPayload || hasTraceContent) {
         setThinkingStatus(null);
         setLastGatewayError(null);
+        if (text) {
+          setLiveRunPreview((prev) => {
+            if (!prev.reasoningText) {
+              return prev;
+            }
+            return {
+              ...prev,
+              reasoningText: "",
+            };
+          });
+        }
         if (event.state === "delta" && eventRunId && activeRunIdRef.current === eventRunId) {
           scheduleActiveRunSettle(eventRunId);
         }
@@ -3757,10 +4199,25 @@ export function Chat({
             nextMessages = [...prev];
             nextMessages[existingIdx] = {
               ...nextMessages[existingIdx],
-              content: text,
+              content: text || nextMessages[existingIdx].content,
               kind: normalized?.kind ?? nextMessages[existingIdx].kind,
               toolName: normalized?.toolName ?? nextMessages[existingIdx].toolName,
               assistantPayload: normalized?.assistantPayload ?? nextMessages[existingIdx].assistantPayload,
+              reasoningText:
+                visibleTraceReasoning ??
+                visibleNormalizedReasoning ??
+                (showReasoning ? nextMessages[existingIdx].reasoningText : undefined),
+              toolCalls: mergedToolCalls ?? nextMessages[existingIdx].toolCalls,
+              parts: buildAssistantMessageParts({
+                parts: normalized?.parts ?? nextMessages[existingIdx].parts,
+                content: text || nextMessages[existingIdx].content,
+                reasoningText:
+                  visibleTraceReasoning ??
+                  visibleNormalizedReasoning ??
+                  (showReasoning ? nextMessages[existingIdx].reasoningText : undefined),
+                toolCalls: mergedToolCalls ?? nextMessages[existingIdx].toolCalls,
+              }),
+              usage: nextUsage ?? nextMessages[existingIdx].usage,
               sentAt: nextMessages[existingIdx].sentAt ?? normalized?.sentAt ?? Date.now(),
             };
           } else {
@@ -3773,6 +4230,15 @@ export function Chat({
               kind: normalized?.kind,
               toolName: normalized?.toolName,
               assistantPayload: normalized?.assistantPayload,
+              reasoningText: visibleTraceReasoning ?? visibleNormalizedReasoning,
+              toolCalls: mergedToolCalls,
+              parts: buildAssistantMessageParts({
+                parts: normalized?.parts,
+                content: text,
+                reasoningText: visibleTraceReasoning ?? visibleNormalizedReasoning,
+                toolCalls: mergedToolCalls,
+              }),
+              usage: nextUsage,
               sentAt: normalized?.sentAt ?? Date.now(),
             },
             ];
@@ -3851,6 +4317,9 @@ export function Chat({
       }
       if (event.state === "final") {
         setIsLoading(false);
+        if (eventRunId) {
+          delete assistantTraceByRunIdRef.current[eventRunId];
+        }
         if (eventRunId && activeRunIdRef.current === eventRunId) {
           clearActiveRunTracking();
         }
@@ -4475,9 +4944,17 @@ export function Chat({
 
   async function prepareSessionModelForSend(sessionKey: string, routingContent: string) {
     const routingEnabled = import.meta.env.VITE_MODEL_ROUTING === "1";
-    const fastModelOverride = normalizeModelId(import.meta.env.VITE_FAST_MODEL, proxyEnabled);
-    const reasoningOverride = normalizeModelId(import.meta.env.VITE_REASONING_MODEL, proxyEnabled);
-    const defaultModel = normalizeModelId(selectedModel, proxyEnabled);
+    const fastModelOverride = normalizeModelId(
+      import.meta.env.VITE_FAST_MODEL,
+      proxyEnabled,
+      localModelConfig,
+    );
+    const reasoningOverride = normalizeModelId(
+      import.meta.env.VITE_REASONING_MODEL,
+      proxyEnabled,
+      localModelConfig,
+    );
+    const defaultModel = normalizeModelId(selectedModel, proxyEnabled, localModelConfig);
     const fastModel = fastModelOverride ?? defaultModel;
     const reasoningModel = reasoningOverride ?? defaultModel;
     const decision = getRoutingDecision(routingContent);
@@ -4589,39 +5066,11 @@ export function Chat({
       sessionComposerMode === "chat" &&
       effectiveLocalModePerformanceSettings.debugMode;
     const recordOptimizationTraceForSend = localChatDebugModeEnabled;
-    const localChatDirectBypassEnabled =
-      localChatDebugModeEnabled && effectiveLocalModePerformanceSettings.debugDirectBypass;
-    const localChatSendOptions =
-      localModelsMode && sessionComposerMode === "chat"
-        ? {
-            disableTools: effectiveLocalModePerformanceSettings.disableTools,
-            bootstrapContextMode: effectiveLocalModePerformanceSettings.lightweightBootstrap
-              ? LOCAL_FAST_CHAT_BOOTSTRAP_MODE
-              : undefined,
-            debugPromptCapture:
-              (localChatDebugModeEnabled &&
-                !localChatDirectBypassEnabled &&
-                effectiveLocalModePerformanceSettings.capturePromptPreview) ||
-              recordOptimizationTraceForSend,
-          }
-        : null;
-    const useLocalChatTuning =
-      Boolean(localChatSendOptions) &&
-      (localChatSendOptions?.disableTools === true ||
-        localChatSendOptions?.bootstrapContextMode === LOCAL_FAST_CHAT_BOOTSTRAP_MODE);
-    if (useLocalChatTuning) {
-      addDiag(
-        `local chat tuning: disableTools=${localChatSendOptions?.disableTools ? 1 : 0} bootstrap=${localChatSendOptions?.bootstrapContextMode || "full"}`,
-      );
-    }
-    if (localChatSendOptions?.debugPromptCapture) {
-      addDiag("local chat debug: capturePromptPreview=1");
-    }
     let optimizationTraceId: string | null = null;
     if (recordOptimizationTraceForSend) {
       const traceHistory = buildDirectLocalDebugHistory(sessionMessagesRef.current[entry.sessionKey] || []);
       const traceLines = [
-        `trace settings disableTools=${localChatSendOptions?.disableTools ? 1 : 0} bootstrap=${localChatSendOptions?.bootstrapContextMode || "full"} capturePromptPreview=${localChatSendOptions?.debugPromptCapture ? 1 : 0}`,
+        "trace settings debugMode=1 route=openclaw",
         `trace session payload messages=${traceHistory.length} inputChars=${traceHistory.reduce((total, item) => total + item.content.length, 0)}`,
         ...buildDirectLocalDebugPreview(traceHistory),
       ];
@@ -4637,7 +5086,7 @@ export function Chat({
       entry.outboundMessageContent,
       entry.attachments,
       entry.idempotencyKey,
-      useLocalChatTuning ? localChatSendOptions ?? undefined : undefined,
+      { reasoning: reasoningRequestMode },
     );
     if (!runId) {
       if (optimizationTraceId) {
@@ -4664,7 +5113,7 @@ export function Chat({
       );
       appendOptimizationTraceLine(optimizationTraceId, "trace send ok");
     }
-    setThinkingStatus("Starting");
+    setThinkingStatus(null);
     if (routingEnabled && chosenModel && fastModel && reasoningModel && chosenModel !== fastModel) {
       runRevertModelRef.current[runId] = fastModel;
     }
@@ -6164,31 +6613,166 @@ export function Chat({
       hadToolPayload: message.assistantPayload?.hadToolPayload ?? false,
     };
     const leadingThinkBlocks =
-      localChatDebugModeActive && payload.cleanText
-        ? splitLeadingThinkBlocks(payload.cleanText)
-        : null;
-    const visibleAssistantText = leadingThinkBlocks ? leadingThinkBlocks.answer : payload.cleanText;
-    const renderCollapsedThinkBlocks = (thoughts: string[]) => (
-      <div className="space-y-2">
-        {thoughts.map((thought, index) => (
-          <details
-            key={`${message.id || "assistant"}-think-${index}`}
-            className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)]/70 px-3 py-2"
-          >
-            <summary className="cursor-pointer list-none text-xs font-medium uppercase tracking-wide text-[var(--text-tertiary)]">
-              <span>Think {thoughts.length > 1 ? index + 1 : ""}</span>
-              <span className="ml-2 normal-case tracking-normal text-[var(--text-quaternary)]">
-                {summarizeThinkBlock(thought)}
+      localChatDebugModeActive && payload.cleanText ? splitLeadingThinkBlocks(payload.cleanText) : null;
+    const assistantPartsBase = resolveAssistantMessageParts(message);
+    const assistantParts =
+      (
+        assistantPartsBase.length > 0
+          ? assistantPartsBase
+          : leadingThinkBlocks
+            ? buildAssistantMessageParts({
+                content: leadingThinkBlocks.answer,
+                reasoningText: showReasoning ? leadingThinkBlocks.thoughts.join("\n\n") : undefined,
+              })
+            : buildAssistantMessageParts({
+                content: payload.cleanText,
+                reasoningText: showReasoning ? message.reasoningText : undefined,
+                toolCalls: message.toolCalls,
+              })
+      ).filter((part) => showReasoning || part.type !== "reasoning");
+    const attachments = renderMessageAttachments(message);
+    const renderReasoningPart = (value: string, key: string, opts?: { preview?: boolean }) => {
+      const { preview, remainder } = splitThinkBlockPreview(value);
+      if (!remainder) {
+        return (
+          <div key={key} className="italic text-[13px] leading-6 text-[var(--text-tertiary)]">
+            {preview}
+          </div>
+        );
+      }
+      return (
+        <details
+          key={key}
+          className="group text-[13px] leading-6 text-[var(--text-tertiary)]"
+        >
+          <summary className="flex cursor-pointer list-none items-start gap-2 italic text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)] [&::-webkit-details-marker]:hidden">
+            <span
+              aria-hidden="true"
+              className="mt-0.5 shrink-0 text-sm leading-none text-[var(--text-secondary)] transition-transform group-open:rotate-180"
+            >
+              ▾
+            </span>
+            <span className="min-w-0 truncate">{preview}</span>
+          </summary>
+          <div className="mt-2 pl-5 italic text-[var(--text-secondary)]">
+            {opts?.preview ? (
+              <div className="max-h-32 overflow-hidden whitespace-pre-wrap text-xs leading-5">
+                {remainder}
+              </div>
+            ) : (
+              <div className="italic">
+                <MarkdownContent
+                  content={remainder}
+                  onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
+                />
+              </div>
+            )}
+          </div>
+        </details>
+      );
+    };
+    const renderToolCallPart = (
+      tool: Extract<AssistantMessagePart, { type: "toolCall" }>,
+      key: string,
+      opts?: { pending?: boolean },
+    ) => {
+      const label = describeToolActivityName(tool.name);
+      const statusLabel =
+        tool.phase === "result" ? (tool.isError ? "failed" : "done") : opts?.pending ? "running" : "live";
+      const detailText =
+        tool.detailText && tool.detailText !== tool.argsText ? tool.detailText : undefined;
+      return (
+        <div key={key} className="rounded-xl bg-[var(--bg-tertiary)]/55 px-3 py-2.5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 space-y-1">
+              <div className="flex items-center gap-2 text-sm font-medium text-[var(--text-primary)]">
+                <Activity className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
+                <span className="truncate">{label}</span>
+              </div>
+              {tool.argsText ? (
+                <div className="whitespace-pre-wrap break-words text-xs text-[var(--text-tertiary)]">
+                  {tool.argsText}
+                </div>
+              ) : null}
+              {detailText ? (
+                <div className="whitespace-pre-wrap break-words text-xs leading-5 text-[var(--text-secondary)]">
+                  {detailText}
+                </div>
+              ) : null}
+            </div>
+            <span
+              className={clsx(
+                "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                tool.phase === "result"
+                  ? tool.isError
+                    ? "bg-red-500/10 text-red-600"
+                    : "bg-emerald-500/10 text-emerald-600"
+                  : "bg-[var(--bg-secondary)] text-[var(--text-secondary)]",
+              )}
+            >
+              {statusLabel}
+            </span>
+          </div>
+        </div>
+      );
+    };
+    const renderToolCallGroup = (
+      tools: Array<Extract<AssistantMessagePart, { type: "toolCall" }>>,
+      key: string,
+      opts?: { pending?: boolean },
+    ) => {
+      if (tools.length === 0) {
+        return null;
+      }
+      const latestTool = tools[tools.length - 1];
+      return (
+        <details key={key} className="group text-[13px] leading-6 text-[var(--text-tertiary)]">
+          <summary className="flex cursor-pointer list-none items-start gap-2 text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)] [&::-webkit-details-marker]:hidden">
+            <span
+              aria-hidden="true"
+              className="mt-0.5 shrink-0 text-sm leading-none text-[var(--text-secondary)] transition-transform group-open:rotate-180"
+            >
+              ▾
+            </span>
+            <span className="min-w-0 truncate">{summarizeToolCallPreview(latestTool)}</span>
+            {tools.length > 1 ? (
+              <span className="shrink-0 text-[11px] text-[var(--text-quaternary)]">
+                {tools.length}
               </span>
-            </summary>
-            <div className="mt-2 border-t border-[var(--border-subtle)] pt-2">
+            ) : null}
+          </summary>
+          <div className="mt-2 space-y-2 pl-5">
+            {[...tools].reverse().map((tool, index) =>
+              renderToolCallPart(tool, `${key}-${tool.toolCallId}-${index}`, opts),
+            )}
+          </div>
+        </details>
+      );
+    };
+    const renderAssistantParts = (parts: AssistantMessagePart[], opts?: { preview?: boolean }) => (
+      <div className="space-y-2.5">
+        {parts
+          .filter((part): part is Extract<AssistantMessagePart, { type: "reasoning" }> => part.type === "reasoning")
+          .map((part, index) =>
+            renderReasoningPart(part.text, `${message.id || "assistant"}-reasoning-${index}`, {
+              preview: opts?.preview,
+            }),
+          )}
+        {renderToolCallGroup(
+          parts.filter((part): part is Extract<AssistantMessagePart, { type: "toolCall" }> => part.type === "toolCall"),
+          `${message.id || "assistant"}-tools`,
+          { pending: opts?.preview },
+        )}
+        {parts
+          .filter((part): part is Extract<AssistantMessagePart, { type: "text" }> => part.type === "text")
+          .map((part, index) => (
+            <div key={`${message.id || "assistant"}-text-${index}`} className="min-w-0">
               <MarkdownContent
-                content={thought}
+                content={part.text}
                 onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
               />
             </div>
-          </details>
-        ))}
+          ))}
       </div>
     );
     if (payload.hadToolPayload && message.id) {
@@ -6200,39 +6784,10 @@ export function Chat({
         );
       }
     }
-    if (!payload.events.length && !payload.errors.length) {
-      return (
-        <div className="min-w-0 max-w-full space-y-2">
-          {renderMessageAttachments(message)}
-          {leadingThinkBlocks ? renderCollapsedThinkBlocks(leadingThinkBlocks.thoughts) : null}
-          {visibleAssistantText ? (
-            <MarkdownContent
-              content={visibleAssistantText}
-              onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
-            />
-          ) : null}
-        </div>
-      );
-    }
     return (
-      <div className="min-w-0 max-w-full space-y-2">
-        <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)]">
-          <span>{message.kind === "toolResult" ? "Tool Result" : "Assistant"}</span>
-          {message.toolName ? <span className="text-[var(--text-quaternary)]">{message.toolName}</span> : null}
-        </div>
-        {visibleAssistantText || leadingThinkBlocks ? (
-          <div>
-            {renderMessageAttachments(message)}
-            {leadingThinkBlocks ? renderCollapsedThinkBlocks(leadingThinkBlocks.thoughts) : null}
-            {visibleAssistantText ? (
-              <MarkdownContent
-                content={visibleAssistantText}
-                onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
-              />
-            ) : null}
-          </div>
-        ) : null}
-        {!visibleAssistantText && !leadingThinkBlocks ? renderMessageAttachments(message) : null}
+      <div className="min-w-0 max-w-full space-y-3">
+        {attachments}
+        {assistantParts.length > 0 ? renderAssistantParts(assistantParts) : null}
         {payload.events.length > 0 && (
           <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-3 shadow-sm">
             <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)] mb-2">
@@ -6744,6 +7299,68 @@ export function Chat({
     }
   }
 
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current) {
+        clearTimeout(copyResetTimerRef.current);
+      }
+    };
+  }, []);
+
+  async function copyMessageText(messageId: string, text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(trimmed);
+      setCopiedMessageId(messageId);
+      if (copyResetTimerRef.current) {
+        clearTimeout(copyResetTimerRef.current);
+      }
+      copyResetTimerRef.current = setTimeout(() => {
+        setCopiedMessageId((current) => (current === messageId ? null : current));
+      }, 1500);
+    } catch (e) {
+      setError(formatUnknownUiError(e, "Failed to copy message."));
+    }
+  }
+
+  function resolveMessageCopyText(message: Message): string {
+    if (message.role === "user") {
+      return normalizeUserContent(message.content, message.sentAt).content;
+    }
+    const textParts = resolveAssistantMessageParts(message)
+      .filter((part): part is Extract<AssistantMessagePart, { type: "text" }> => part.type === "text")
+      .map((part) => part.text.trim())
+      .filter(Boolean);
+    return textParts.join("\n\n").trim() || message.content.trim();
+  }
+
+  function resolveAssistantTokensPerSecond(message: Message): string | null {
+    if (message.role !== "assistant") {
+      return null;
+    }
+    const outputTokens = message.usage?.outputTokens ?? message.usage?.totalTokens ?? null;
+    if (!outputTokens || outputTokens <= 0) {
+      return null;
+    }
+    const timings = runTimingsRef.current[message.id];
+    if (!timings?.finalAt) {
+      return null;
+    }
+    const start = timings.firstDeltaAt ?? timings.startedAt;
+    const elapsedMs = timings.finalAt - start;
+    if (elapsedMs < 200) {
+      return null;
+    }
+    const tokensPerSecond = outputTokens / (elapsedMs / 1000);
+    if (!Number.isFinite(tokensPerSecond) || tokensPerSecond <= 0) {
+      return null;
+    }
+    return `${tokensPerSecond >= 10 ? tokensPerSecond.toFixed(0) : tokensPerSecond.toFixed(1)} tok/s`;
+  }
+
   // Memoize the message list so typing in the composer doesn't re-render
   // every message (and re-parse markdown) on each keystroke.
   // These hooks must be before early returns to satisfy Rules of Hooks.
@@ -6751,50 +7368,194 @@ export function Chat({
     const normalizedUser = msg.role === "user" ? normalizeUserContent(msg.content, msg.sentAt) : null;
     const bodyContent = msg.role === "user" ? normalizedUser?.content ?? "" : msg.content;
     const messageTime = formatMessageTime(msg.role === "user" ? normalizedUser?.sentAt : msg.sentAt);
+    const copyText = resolveMessageCopyText(msg);
+    const canCopy = copyText.trim().length > 0;
+    const copyLabel = copiedMessageId === msg.id ? "Copied" : "Copy";
+    const copyIcon = copiedMessageId === msg.id ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />;
+    const assistantTokensPerSecond = msg.role === "assistant" ? resolveAssistantTokensPerSecond(msg) : null;
     if (msg.role === "user" && !bodyContent) {
       return null;
     }
     return (
       <div key={msg.id} className={clsx("flex min-w-0", msg.role === "user" ? "justify-end" : "justify-start")}>
-        <div className={clsx("min-w-0 max-w-[85%]")}>
-          <div className={clsx("px-3.5 py-2 rounded-2xl",
-            msg.role === "user"
-              ? "bg-[var(--chat-user-bg)] text-[var(--chat-user-text)]"
-              : "bg-[var(--chat-assistant-bg)] text-[var(--chat-assistant-text)] border border-[var(--chat-assistant-border)]")}>
-            {msg.role === "assistant" ? (
-              renderAssistantContent(msg)
-            ) : (
-              <div>
-                {renderMessageAttachments(msg)}
-                <p className="whitespace-pre-wrap break-words">{bodyContent}</p>
+        <div className={clsx("min-w-0", msg.role === "user" ? "max-w-[75%]" : "w-full max-w-[min(46rem,100%)]")}>
+          {msg.role === "assistant" ? (
+            <>
+              <div className="min-w-0 text-[var(--chat-assistant-text)]">
+                {renderAssistantContent(msg)}
               </div>
-            )}
-          </div>
-          {messageTime ? (
-            <div
-              className={clsx(
-                "mt-0.5 px-1 text-[11px] text-[var(--text-tertiary)]",
-                msg.role === "user" ? "text-right" : "text-left"
-              )}
-            >
-              {messageTime}
-            </div>
-          ) : null}
+              <div className="mt-2 flex flex-wrap items-center gap-3 px-1 text-[11px] text-[var(--text-tertiary)]">
+                {assistantTokensPerSecond ? <span className="font-medium text-[var(--text-secondary)]">{assistantTokensPerSecond}</span> : null}
+                {messageTime ? <span>{messageTime}</span> : null}
+                {canCopy ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void copyMessageText(msg.id, copyText);
+                    }}
+                    className="inline-flex h-5 w-5 items-center justify-center text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+                    aria-label={copyLabel}
+                    title={copyLabel}
+                  >
+                    {copyIcon}
+                  </button>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="rounded-[24px] bg-[var(--chat-user-bg)] px-4 py-3 text-[var(--chat-user-text)] shadow-sm">
+                <div>
+                  {renderMessageAttachments(msg)}
+                  <p className="whitespace-pre-wrap break-words">{bodyContent}</p>
+                </div>
+              </div>
+              <div className="mt-1 flex flex-wrap items-center justify-end gap-3 px-1 text-[11px] text-[var(--text-tertiary)]">
+                {messageTime ? <span>{messageTime}</span> : null}
+                {canCopy ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void copyMessageText(msg.id, copyText);
+                    }}
+                    className="inline-flex h-5 w-5 items-center justify-center text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+                    aria-label={copyLabel}
+                    title={copyLabel}
+                  >
+                    {copyIcon}
+                  </button>
+                ) : null}
+              </div>
+            </>
+          )}
         </div>
       </div>
     );
-  }), [messages]);
+  }), [messages, copiedMessageId, showReasoning]);
 
-  const loadingIndicator = useMemo(() => isLoading ? (
-    <div className="flex justify-start">
-      <div className="px-3.5 py-2 rounded-2xl bg-[var(--chat-assistant-bg)] border border-[var(--chat-assistant-border)] flex items-center gap-2">
-        <Loader2 className="w-4 h-4 animate-spin text-[var(--purple-accent)]" />
-        <span className="text-sm text-[var(--text-secondary)] animate-pulse">
-          {thinkingStatus || "Thinking"}
-        </span>
+  const loadingIndicator = useMemo(() => {
+    if (!isLoading) {
+      return null;
+    }
+    const previewParts = buildAssistantMessageParts({
+      reasoningText: showReasoning ? liveRunPreview.reasoningText : undefined,
+      toolCalls: liveRunPreview.toolCalls,
+    });
+    const previewReasoningParts = previewParts.filter(
+      (part): part is Extract<AssistantMessagePart, { type: "reasoning" }> => part.type === "reasoning",
+    );
+    const previewToolParts = previewParts.filter(
+      (part): part is Extract<AssistantMessagePart, { type: "toolCall" }> => part.type === "toolCall",
+    );
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[min(46rem,100%)] space-y-2.5">
+          {previewReasoningParts.map((part, index) => {
+            const key = `live-preview-${index}`;
+            const { preview, remainder } = splitThinkBlockPreview(part.text);
+            if (!remainder) {
+              return (
+                <div key={key} className="italic text-[13px] leading-6 text-[var(--text-tertiary)]">
+                  {preview}
+                </div>
+              );
+            }
+            return (
+              <details
+                key={key}
+                className="group text-[13px] leading-6 text-[var(--text-tertiary)]"
+              >
+                <summary className="flex cursor-pointer list-none items-start gap-2 italic text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)] [&::-webkit-details-marker]:hidden">
+                  <span
+                    aria-hidden="true"
+                    className="mt-0.5 shrink-0 text-sm leading-none text-[var(--text-secondary)] transition-transform group-open:rotate-180"
+                  >
+                    ▾
+                  </span>
+                  <span className="min-w-0 truncate">{preview}</span>
+                </summary>
+                <div className="mt-2 pl-5 italic text-[var(--text-secondary)]">
+                  <div className="max-h-32 overflow-hidden whitespace-pre-wrap text-xs leading-5">
+                    {remainder}
+                  </div>
+                </div>
+              </details>
+            );
+          })}
+          {previewToolParts.length > 0 ? (
+            <details className="group text-[13px] leading-6 text-[var(--text-tertiary)]">
+              <summary className="flex cursor-pointer list-none items-start gap-2 text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)] [&::-webkit-details-marker]:hidden">
+                <span
+                  aria-hidden="true"
+                  className="mt-0.5 shrink-0 text-sm leading-none text-[var(--text-secondary)] transition-transform group-open:rotate-180"
+                >
+                  ▾
+                </span>
+                <span className="min-w-0 truncate">
+                  {summarizeToolCallPreview(previewToolParts[previewToolParts.length - 1])}
+                </span>
+                {previewToolParts.length > 1 ? (
+                  <span className="shrink-0 text-[11px] text-[var(--text-quaternary)]">
+                    {previewToolParts.length}
+                  </span>
+                ) : null}
+              </summary>
+              <div className="mt-2 space-y-2 pl-5">
+                {[...previewToolParts].reverse().map((part, index) => {
+                  const label = describeToolActivityName(part.name);
+                  const statusLabel =
+                    part.phase === "result" ? (part.isError ? "failed" : "done") : "running";
+                  const detailText =
+                    part.detailText && part.detailText !== part.argsText ? part.detailText : undefined;
+                  return (
+                    <div
+                      key={`live-tool-${part.toolCallId}-${index}`}
+                      className="rounded-xl bg-[var(--bg-tertiary)]/55 px-3 py-2.5"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-1">
+                          <div className="flex items-center gap-2 text-sm font-medium text-[var(--text-primary)]">
+                            <Activity className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
+                            <span className="truncate">{label}</span>
+                          </div>
+                          {part.argsText ? (
+                            <div className="whitespace-pre-wrap break-words text-xs text-[var(--text-tertiary)]">
+                              {part.argsText}
+                            </div>
+                          ) : null}
+                          {detailText ? (
+                            <div className="whitespace-pre-wrap break-words text-xs leading-5 text-[var(--text-secondary)]">
+                              {detailText}
+                            </div>
+                          ) : null}
+                        </div>
+                        <span
+                          className={clsx(
+                            "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                            part.phase === "result"
+                              ? part.isError
+                                ? "bg-red-500/10 text-red-600"
+                                : "bg-emerald-500/10 text-emerald-600"
+                              : "bg-[var(--bg-secondary)] text-[var(--text-secondary)]",
+                          )}
+                        >
+                          {statusLabel}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          ) : null}
+          <div className="flex items-center gap-2 px-1 text-sm text-[var(--text-secondary)]">
+            <Loader2 className="h-4 w-4 animate-spin text-[var(--purple-accent)]" />
+            <span>{thinkingStatus || "Working"}</span>
+          </div>
+        </div>
       </div>
-    </div>
-  ) : null, [isLoading, thinkingStatus]);
+    );
+  }, [isLoading, liveRunPreview, thinkingStatus, showReasoning]);
 
   const activeDraft = currentSession
     ? activeComposerMode === "shell"
@@ -6809,7 +7570,7 @@ export function Chat({
     const ta = textareaRef.current;
     ta.style.height = "auto";
     const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
-    const maxHeight = lineHeight * 5;
+    const maxHeight = lineHeight * 8;
     ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
     ta.style.overflowY = ta.scrollHeight > maxHeight ? "auto" : "hidden";
   }, [activeDraft]);
@@ -7071,70 +7832,83 @@ export function Chat({
                 </div>
             </div>
           ) : null}
-          <div className="flex items-end gap-2">
-            {activeComposerMode !== "shell" ? (
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isLoading}
-                className="btn-secondary !p-2.5"
-                title={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
-                aria-label={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
-              >
-                <Paperclip className="w-4 h-4" />
-              </button>
-            ) : null}
-            <textarea
-              ref={textareaRef}
-              value={activeDraft}
-              onFocus={() => {
-                ensureComposerSession();
-              }}
-              onChange={e => {
-                const sessionKey = currentSession || ensureComposerSession();
-                if (!sessionKey) return;
-                const nextValue = e.target.value;
-                if (activeComposerMode === "shell") {
-                  setShellDraftsBySession((prev) => {
-                    if ((prev[sessionKey] || "") === nextValue) return prev;
-                    return { ...prev, [sessionKey]: nextValue };
-                  });
-                } else if (activeComposerMode === "image") {
-                  setImageDraftsBySession((prev) => {
-                    if ((prev[sessionKey] || "") === nextValue) return prev;
-                    return { ...prev, [sessionKey]: nextValue };
-                  });
-                } else {
-                  setDraftsBySession((prev) => {
-                    if ((prev[sessionKey] || "") === nextValue) return prev;
-                    return { ...prev, [sessionKey]: nextValue };
-                  });
+          <div
+            className={clsx(
+              "overflow-hidden rounded-[28px] border bg-[var(--bg-card)] transition-[border-color,box-shadow] duration-150",
+              composerFocused
+                ? "border-[var(--purple-accent-subtle)] shadow-[0_0_0_1px_var(--purple-accent-subtle),0_12px_32px_-18px_var(--purple-accent)]"
+                : "border-[var(--border-subtle)] shadow-sm",
+            )}
+          >
+            <div className="relative min-h-[138px]">
+              {activeComposerMode !== "shell" ? (
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isLoading}
+                  className="absolute bottom-3 left-3 inline-flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+                  title={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
+                  aria-label={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
+                >
+                  <Paperclip className="h-4 w-4" />
+                </button>
+              ) : null}
+              <textarea
+                ref={textareaRef}
+                value={activeDraft}
+                onFocus={() => {
+                  setComposerFocused(true);
+                  ensureComposerSession();
+                }}
+                onBlur={() => {
+                  setComposerFocused(false);
+                }}
+                onChange={e => {
+                  const sessionKey = currentSession || ensureComposerSession();
+                  if (!sessionKey) return;
+                  const nextValue = e.target.value;
+                  if (activeComposerMode === "shell") {
+                    setShellDraftsBySession((prev) => {
+                      if ((prev[sessionKey] || "") === nextValue) return prev;
+                      return { ...prev, [sessionKey]: nextValue };
+                    });
+                  } else if (activeComposerMode === "image") {
+                    setImageDraftsBySession((prev) => {
+                      if ((prev[sessionKey] || "") === nextValue) return prev;
+                      return { ...prev, [sessionKey]: nextValue };
+                    });
+                  } else {
+                    setDraftsBySession((prev) => {
+                      if ((prev[sessionKey] || "") === nextValue) return prev;
+                      return { ...prev, [sessionKey]: nextValue };
+                    });
+                  }
+                  const ta = e.target;
+                  ta.style.height = 'auto';
+                  const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
+                  const maxHeight = lineHeight * 8;
+                  ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
+                  ta.style.overflowY = ta.scrollHeight > maxHeight ? 'auto' : 'hidden';
+                }}
+                onKeyDown={e => {if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }}}
+                placeholder={
+                  activeComposerMode === "shell"
+                    ? "Run a command in the workspace shell"
+                    : activeComposerMode === "image"
+                      ? "Describe the image you want to generate"
+                      : "Message your assistant"
                 }
-                const ta = e.target;
-                ta.style.height = 'auto';
-                const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
-                const maxHeight = lineHeight * 5;
-                ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
-                ta.style.overflowY = ta.scrollHeight > maxHeight ? 'auto' : 'hidden';
-              }}
-              onKeyDown={e => {if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }}}
-              placeholder={
-                activeComposerMode === "shell"
-                  ? "Run a command in the workspace shell"
-                  : activeComposerMode === "image"
-                    ? "Describe the image you want to generate"
-                    : "Message your assistant"
-              }
-              rows={1}
-              className="form-input flex-1 resize-none leading-tight"
-              style={{ overflow: 'hidden' }}
-            />
-            <button
-              onClick={() => handleSend()}
-              disabled={(!activeDraft.trim() && pendingAttachments.length === 0) || isLoading}
-              className="btn-primary !p-2.5 !bg-[var(--purple-accent)] hover:!bg-[var(--purple-accent-hover)] !text-white"
-            >
-              <Send className="w-5 h-5" />
-            </button>
+                rows={1}
+                className="min-h-[138px] w-full resize-none bg-transparent px-4 pb-16 pt-4 text-[15px] leading-7 text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] focus-visible:outline-none"
+                style={{ overflow: 'hidden' }}
+              />
+              <button
+                onClick={() => handleSend()}
+                disabled={(!activeDraft.trim() && pendingAttachments.length === 0) || isLoading}
+                className="absolute bottom-3 right-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-[var(--purple-accent)] text-white transition-colors hover:bg-[var(--purple-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Send className="h-5 w-5" />
+              </button>
+            </div>
           </div>
         </div>
         {dragActive && activeComposerMode !== "shell" && (

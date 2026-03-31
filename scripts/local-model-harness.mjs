@@ -38,10 +38,6 @@ const DEFAULT_AUTH_PATH = path.join(
   "ai.openclaw.entropic.dev",
   "auth.json",
 );
-const DEFAULT_COMPAT_CACHE_PATH = path.join(
-  path.dirname(new URL(import.meta.url).pathname),
-  ".local-model-harness-cache.json",
-);
 const DEFAULT_DEVICE_IDENTITY_PATH = path.join(
   os.homedir(),
   ".local",
@@ -75,12 +71,6 @@ Options:
   --model NAME               Filter printed captures by exact model name
   --session-model MODEL_REF  Patch the gateway session model before sending turns
   --session-key KEY          Reuse a specific gateway session key
-  --bootstrap MODE           full|lightweight (defaults from entropic-settings.json)
-  --no-bootstrap             Do not send bootstrapContextMode
-  --capture-prompt           Send debugPromptCapture=true
-  --no-capture-prompt        Do not send debugPromptCapture
-  --disable-tools            Send disableTools=true
-  --enable-tools             Do not send disableTools
   --json                     Emit JSON instead of formatted text
 `);
 }
@@ -119,18 +109,6 @@ function parseArgs(argv) {
       args.sessionModel = argv[++i];
     } else if (token === "--session-key") {
       args.sessionKey = argv[++i];
-    } else if (token === "--bootstrap") {
-      args.bootstrap = argv[++i];
-    } else if (token === "--no-bootstrap") {
-      args.noBootstrap = true;
-    } else if (token === "--capture-prompt") {
-      args.capturePrompt = true;
-    } else if (token === "--no-capture-prompt") {
-      args.capturePrompt = false;
-    } else if (token === "--disable-tools") {
-      args.disableTools = true;
-    } else if (token === "--enable-tools") {
-      args.disableTools = false;
     } else if (token === "--json") {
       args.json = true;
     } else if (token === "--help" || token === "-h") {
@@ -148,10 +126,6 @@ function loadJsonFile(filePath, fallback) {
   } catch {
     return fallback;
   }
-}
-
-function writeJsonFile(filePath, payload) {
-  fs.writeFileSync(filePath, JSON.stringify(payload, null, 2) + "\n", "utf8");
 }
 
 function loadSettings(settingsPath) {
@@ -326,18 +300,6 @@ function readRuntimeLog(runtimeLogPath) {
   return fs.readFileSync(runtimeLogPath, "utf8");
 }
 
-function isUnsupportedChatSendOptionsError(error) {
-  const message = error instanceof Error ? error.message : String(error);
-  if (!message.includes("invalid chat.send params")) {
-    return false;
-  }
-  return (
-    message.includes("unexpected property 'disableTools'") ||
-    message.includes("unexpected property 'bootstrapContextMode'") ||
-    message.includes("unexpected property 'debugPromptCapture'")
-  );
-}
-
 function shortJson(value) {
   return JSON.stringify(value, null, 2);
 }
@@ -423,6 +385,12 @@ function rewriteLoopbackForGateway(baseUrl) {
   return trimmed;
 }
 
+function rnnRuntimeGatewayBaseUrl() {
+  return process.platform === "linux"
+    ? "http://127.0.0.1:11445/v1"
+    : "http://host.docker.internal:11445/v1";
+}
+
 function gatewayBaseUrlForLocalModel(config) {
   const serviceType = normalizeText(config?.serviceType);
   const baseUrl = normalizeText(config?.baseUrl);
@@ -430,7 +398,7 @@ function gatewayBaseUrlForLocalModel(config) {
     return "";
   }
   if (serviceType === "rnn-local") {
-    return "http://127.0.0.1:11445/v1";
+    return rnnRuntimeGatewayBaseUrl();
   }
   const rewritten = rewriteLoopbackForGateway(baseUrl).replace(/\/+$/g, "");
   if (serviceType === "ollama") {
@@ -608,8 +576,6 @@ class GatewayHarnessClient {
     token,
     origin = "http://localhost",
     deviceIdentity = null,
-    legacyChatSendOptionsUnsupported = false,
-    onLegacyCompatibilityDetected = null,
   }) {
     this.url = url;
     this.token = token;
@@ -619,8 +585,6 @@ class GatewayHarnessClient {
     this.requestId = 0;
     this.pending = new Map();
     this.chatListeners = new Set();
-    this.legacyChatSendOptionsUnsupported = legacyChatSendOptionsUnsupported;
-    this.onLegacyCompatibilityDetected = onLegacyCompatibilityDetected;
   }
 
   async connect() {
@@ -811,7 +775,7 @@ class GatewayHarnessClient {
     return `agent:main:${randomUUID()}`;
   }
 
-  async sendMessage(sessionKey, message, options = {}) {
+  async sendMessage(sessionKey, message) {
     const idempotencyKey = randomUUID();
     const params = {
       sessionKey,
@@ -819,46 +783,8 @@ class GatewayHarnessClient {
       attachments: undefined,
       idempotencyKey,
     };
-    if (options.disableTools === true) {
-      params.disableTools = true;
-    }
-    if (!this.legacyChatSendOptionsUnsupported && options.bootstrapContextMode) {
-      params.bootstrapContextMode = options.bootstrapContextMode;
-    }
-    if (!this.legacyChatSendOptionsUnsupported && options.debugPromptCapture === true) {
-      params.debugPromptCapture = true;
-    }
-    try {
-      const response = await this.rpc("chat.send", params, 30000);
-      return response?.runId;
-    } catch (error) {
-      if (
-        (options.disableTools === true || options.bootstrapContextMode || options.debugPromptCapture === true) &&
-        isUnsupportedChatSendOptionsError(error)
-      ) {
-        this.legacyChatSendOptionsUnsupported = true;
-        if (typeof this.onLegacyCompatibilityDetected === "function") {
-          try {
-            this.onLegacyCompatibilityDetected();
-          } catch {
-            // best-effort
-          }
-        }
-        const fallbackResponse = await this.rpc(
-          "chat.send",
-          {
-            sessionKey,
-            message,
-            attachments: undefined,
-            idempotencyKey,
-            ...(options.disableTools === true ? { disableTools: true } : {}),
-          },
-          30000,
-        );
-        return fallbackResponse?.runId;
-      }
-      throw error;
-    }
+    const response = await this.rpc("chat.send", params, 30000);
+    return response?.runId;
   }
 
   async getChatHistory(sessionKey, limit = 80) {
@@ -1230,17 +1156,6 @@ async function runScenario(args) {
   const timeoutMs = Number.isFinite(args.timeoutMs) ? args.timeoutMs : 30000;
   const historyLimit = Number.isFinite(args.historyLimit) ? args.historyLimit : 80;
   const latestCaptures = Number.isFinite(args.latestCaptures) ? args.latestCaptures : 3;
-  const bootstrapContextMode = args.noBootstrap
-    ? undefined
-    : args.bootstrap || (settings?.localLightweightBootstrap ? "lightweight" : undefined);
-  const debugPromptCapture =
-    typeof args.capturePrompt === "boolean"
-      ? args.capturePrompt
-      : Boolean(settings?.localCapturePromptPreview);
-  const disableTools =
-    typeof args.disableTools === "boolean"
-      ? args.disableTools
-      : Boolean(settings?.localDisableTools);
   const gatewayToken = resolveGatewayToken(args.token, DEFAULT_AUTH_PATH);
   const sessionModelRef = deriveSessionModelRef(args, settings);
   const managedLoad = await maybeLoadManagedLocalModel(
@@ -1248,17 +1163,11 @@ async function runScenario(args) {
     args.model || settings?.localModelConfig?.modelName,
   );
   const deviceIdentity = readGatewayDeviceIdentity(DEFAULT_DEVICE_IDENTITY_PATH);
-  const compatCachePath = path.resolve(DEFAULT_COMPAT_CACHE_PATH);
-  const compatCache = loadJsonFile(compatCachePath, {});
   const wsUrl = normalizeText(args.wsUrl) || DEFAULT_WS_URL;
   const client = new GatewayHarnessClient({
     url: wsUrl,
     token: gatewayToken.token,
     deviceIdentity,
-    legacyChatSendOptionsUnsupported: Boolean(compatCache?.legacyChatSendOptionsUnsupported),
-    onLegacyCompatibilityDetected: () => {
-      writeJsonFile(compatCachePath, { legacyChatSendOptionsUnsupported: true });
-    },
   });
   let sessionKey = normalizeText(args.sessionKey) || client.createSessionKey();
   const allCapturesBefore = loadCaptures(capturePath);
@@ -1286,11 +1195,7 @@ async function runScenario(args) {
       const userMessage = scenario.messages[index];
       const historyBeforeLength = history.length;
       const turnStartMs = Date.now();
-      const runId = await client.sendMessage(sessionKey, userMessage, {
-        disableTools,
-        bootstrapContextMode,
-        debugPromptCapture,
-      });
+      const runId = await client.sendMessage(sessionKey, userMessage);
       const completion = await waitForRun(client, { runId, sessionKey, timeoutMs });
       history = Array.isArray(completion.history) ? completion.history.slice(-historyLimit) : [];
       const captures = filterRecentCaptures(loadCaptures(capturePath), {
@@ -1334,14 +1239,9 @@ async function runScenario(args) {
       wsUrl,
       tokenSource: gatewayToken.source,
       deviceIdentitySource: deviceIdentity ? DEFAULT_DEVICE_IDENTITY_PATH : null,
-      legacyChatSendOptionsUnsupported: client.legacyChatSendOptionsUnsupported,
-      compatCachePath,
       sessionKey,
     },
     settings: {
-      bootstrapContextMode: bootstrapContextMode || null,
-      debugPromptCapture,
-      disableTools,
       sessionModelRef: sessionModelRef || null,
       managedLoad,
       gatewayActivation,
@@ -1379,9 +1279,6 @@ function printSingleScenarioSummary(summary, asJson = false) {
   console.log(`Description: ${summary.description}`);
   console.log(`Gateway: ${summary.gateway.wsUrl} (${summary.gateway.tokenSource})`);
   console.log(`Session: ${summary.gateway.sessionKey}`);
-  console.log(
-    `Options: bootstrap=${summary.settings.bootstrapContextMode || "none"} debugPromptCapture=${summary.settings.debugPromptCapture ? "on" : "off"} disableTools=${summary.settings.disableTools ? "on" : "off"}`,
-  );
   console.log("");
   for (const turn of summary.turns) {
     printTurnSummary(turn, { json: false });

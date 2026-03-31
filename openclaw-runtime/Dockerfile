@@ -128,7 +128,9 @@ RUN echo "module.exports = { read: () => '', write: () => {}, readSync: () => ''
 # the final image. Pick the linux binding that matches the image architecture
 # instead of assuming an arm64 host.
 RUN SHARP_PNPM="$(find /app/node_modules/.pnpm -maxdepth 1 -name 'sharp@*' -type d | head -1)" && \
-    SHARP_VER="$(basename "$SHARP_PNPM" | sed 's/sharp@//')" && \
+    SHARP_BASE="$(basename "$SHARP_PNPM")" && \
+    SHARP_VER="${SHARP_BASE#sharp@}" && \
+    SHARP_VER="${SHARP_VER%%_*}" && \
     SHARP_IMG_DIR="$SHARP_PNPM/node_modules/@img" && \
     TARGET_ARCH="$(dpkg --print-architecture)" && \
     case "$TARGET_ARCH" in \
@@ -154,7 +156,9 @@ RUN SHARP_PNPM="$(find /app/node_modules/.pnpm -maxdepth 1 -name 'sharp@*' -type
 # time, so copying host node_modules into the runtime image can miss the Linux
 # binary entirely and cause the gateway to crash on boot.
 RUN DAVEY_PNPM="$(find /app/node_modules/.pnpm -maxdepth 1 -name '@snazzah+davey@*' -type d | head -1)" && \
-    DAVEY_VER="$(basename "$DAVEY_PNPM" | sed 's/@snazzah+davey@//')" && \
+    DAVEY_BASE="$(basename "$DAVEY_PNPM")" && \
+    DAVEY_VER="${DAVEY_BASE#@snazzah+davey@}" && \
+    DAVEY_VER="${DAVEY_VER%%_*}" && \
     DAVEY_SCOPE_DIR="/app/node_modules/.pnpm/node_modules/@snazzah" && \
     TARGET_ARCH="$(dpkg --print-architecture)" && \
     case "$TARGET_ARCH" in \

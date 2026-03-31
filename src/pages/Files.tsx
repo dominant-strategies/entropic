@@ -108,9 +108,11 @@ type Props = {
   codeModel: string;
   imageModel: string;
   imageGenerationModel: string;
+  showReasoning: boolean;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onImageModelChange: (model: string) => void;
+  onShowReasoningChange: (value: boolean) => void | Promise<void>;
   localModelConfig: LocalModelConfig;
   localModePerformanceSettings: LocalModePerformanceSettings;
   onLocalModelConfigChange: (config: LocalModelConfig) => void;
@@ -820,9 +822,11 @@ export function Files({
   codeModel,
   imageModel,
   imageGenerationModel,
+  showReasoning,
   onCodeModelChange,
   onImageGenerationModelChange,
   onImageModelChange,
+  onShowReasoningChange,
   localModelConfig,
   localModePerformanceSettings,
   onLocalModelConfigChange,
@@ -3868,6 +3872,7 @@ export function Files({
                       onModelChange={onModelChange}
                       imageModel={imageModel}
                       imageGenerationModel={imageGenerationModel}
+                      showReasoning={showReasoning}
                       integrationsSyncing={integrationsSyncing}
                       integrationsMissing={integrationsMissing}
                       onNavigate={handleDesktopChatNavigate}
@@ -4432,6 +4437,8 @@ export function Files({
                   codeModel={codeModel}
                   imageModel={imageModel}
                   imageGenerationModel={imageGenerationModel}
+                  showReasoning={showReasoning}
+                  onShowReasoningChange={onShowReasoningChange}
                   onCodeModelChange={onCodeModelChange}
                   onImageGenerationModelChange={onImageGenerationModelChange}
                   onImageModelChange={onImageModelChange}

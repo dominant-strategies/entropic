@@ -325,9 +325,6 @@ function applyProfile(settingsPath, profile) {
     useLocalKeys: profile.connectionMode !== "managed",
     selectedModel: profile.selectedModel,
     localDebugMode: true,
-    localCapturePromptPreview: true,
-    localLightweightBootstrap: true,
-    localDisableTools: false,
     localDebugDirectBypass: false,
     localModelConfig: {
       ...(current.localModelConfig || {}),

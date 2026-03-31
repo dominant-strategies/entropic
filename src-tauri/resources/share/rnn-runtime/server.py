@@ -2424,21 +2424,7 @@ class RuntimeManager:
             model_context = _as_int(
                 local_entry.get("context"), DEFAULT_LLAMA_CPP_N_CTX, 512
             )
-            if configured_n_ctx <= LEGACY_LLAMA_CPP_N_CTX and model_context > configured_n_ctx:
-                llama_cpp_config["nCtx"] = model_context
-                current_llama_cpp = (
-                    dict(self.runtime_config.get("llamaCpp") or {})
-                    if isinstance(self.runtime_config.get("llamaCpp"), dict)
-                    else {}
-                )
-                current_llama_cpp["nCtx"] = model_context
-                self.runtime_config["llamaCpp"] = current_llama_cpp
-                try:
-                    self._save_runtime_config(self.runtime_config)
-                except Exception:
-                    pass
-            else:
-                llama_cpp_config["nCtx"] = configured_n_ctx
+            llama_cpp_config["nCtx"] = min(configured_n_ctx, model_context)
             return LlamaCppEngine(llama_cpp_config)
         if backend == "rwkv":
             self.manager.ensure_rwkv_tokenizer()

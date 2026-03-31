@@ -1,3 +1,4 @@
+import importlib
 import os
 import re
 import time
@@ -153,10 +154,11 @@ class LlamaCppEngine(InferenceEngine):
 
     def load(self, model_path: str) -> Dict[str, object]:
         try:
+            importlib.invalidate_caches()
             from llama_cpp import Llama
         except ImportError as error:
             raise RuntimeError(
-                "llama-cpp-python is required to load managed GGUF models."
+                "The llama.cpp backend is not installed in the managed local runtime yet. Install the GGUF backend first."
             ) from error
 
         started_at = time.time()

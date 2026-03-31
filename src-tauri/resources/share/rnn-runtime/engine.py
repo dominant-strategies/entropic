@@ -40,6 +40,83 @@ def _resolve_nvcc_path() -> Optional[str]:
     return None
 
 
+def _detect_host_memory() -> Dict[str, Any]:
+    total_bytes: Optional[int] = None
+    available_bytes: Optional[int] = None
+    source: Optional[str] = None
+
+    try:
+        import psutil  # type: ignore
+
+        vm = psutil.virtual_memory()
+        total_bytes = int(getattr(vm, "total", 0) or 0) or None
+        available_bytes = int(getattr(vm, "available", 0) or 0) or None
+        source = "psutil"
+    except Exception:
+        pass
+
+    if total_bytes is None and hasattr(os, "sysconf"):
+        try:
+            page_count = int(os.sysconf("SC_PHYS_PAGES"))
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            if page_count > 0 and page_size > 0:
+                total_bytes = page_count * page_size
+                source = source or "sysconf"
+        except Exception:
+            pass
+
+    if available_bytes is None:
+        try:
+            meminfo_path = Path("/proc/meminfo")
+            if meminfo_path.exists():
+                meminfo: Dict[str, int] = {}
+                for raw_line in meminfo_path.read_text(encoding="utf-8").splitlines():
+                    if ":" not in raw_line:
+                        continue
+                    key, value = raw_line.split(":", 1)
+                    parts = value.strip().split()
+                    if not parts:
+                        continue
+                    parsed = int(parts[0])
+                    meminfo[key.strip()] = parsed * 1024
+                available_bytes = meminfo.get("MemAvailable") or meminfo.get("MemFree")
+                source = source or "procfs"
+        except Exception:
+            pass
+
+    if total_bytes is None and os.name == "nt":
+        try:
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                total_bytes = int(status.ullTotalPhys or 0) or None
+                available_bytes = int(status.ullAvailPhys or 0) or available_bytes
+                source = "GlobalMemoryStatusEx"
+        except Exception:
+            pass
+
+    return {
+        "hostMemoryTotalBytes": total_bytes,
+        "hostMemoryAvailableBytes": available_bytes,
+        "hostMemorySource": source,
+    }
+
+
 def detect_runtime_capabilities() -> Dict[str, Any]:
     transformers_available = find_spec("transformers") is not None
     vllm_available = find_spec("vllm") is not None
@@ -59,6 +136,7 @@ def detect_runtime_capabilities() -> Dict[str, Any]:
         "currentProcessCudaAllocatedMiB": 0.0,
         "currentProcessCudaReservedMiB": 0.0,
     }
+    payload.update(_detect_host_memory())
     if torch is None:
         payload["backendAvailability"] = {
             "rwkv": False,

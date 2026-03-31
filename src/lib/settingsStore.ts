@@ -7,36 +7,31 @@ export type DesktopSettingsSnapshot = {
   codeModel?: string;
   imageModel?: string;
   imageGenerationModel?: string;
-  localDisableTools?: boolean;
-  localLightweightBootstrap?: boolean;
-  localLightRuntimeDefaults?: boolean;
+  showReasoning?: boolean;
   localDebugMode?: boolean;
   localDebugDirectBypass?: boolean;
   localDirectDebugChat?: boolean;
-  localCapturePromptPreview?: boolean;
   desktopWallpaper?: string;
   desktopCustomWallpaper?: string;
 };
 
 export type LocalModePerformanceSettings = {
-  disableTools: boolean;
-  lightweightBootstrap: boolean;
-  lightRuntimeDefaults: boolean;
   debugMode: boolean;
   debugDirectBypass: boolean;
-  capturePromptPreview: boolean;
 };
 
 export const DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS: LocalModePerformanceSettings = {
-  disableTools: true,
-  lightweightBootstrap: true,
-  lightRuntimeDefaults: true,
   debugMode: false,
   debugDirectBypass: false,
-  capturePromptPreview: false,
 };
 
 const SETTINGS_FILE = "entropic-settings.json";
+const REMOVED_SETTING_KEYS = [
+  "localDisableTools",
+  "localLightweightBootstrap",
+  "localLightRuntimeDefaults",
+  "localCapturePromptPreview",
+] as const;
 
 const SETTING_KEYS = [
   "useLocalKeys",
@@ -45,13 +40,10 @@ const SETTING_KEYS = [
   "codeModel",
   "imageModel",
   "imageGenerationModel",
-  "localDisableTools",
-  "localLightweightBootstrap",
-  "localLightRuntimeDefaults",
+  "showReasoning",
   "localDebugMode",
   "localDebugDirectBypass",
   "localDirectDebugChat",
-  "localCapturePromptPreview",
   "desktopWallpaper",
   "desktopCustomWallpaper",
 ] as const satisfies ReadonlyArray<keyof DesktopSettingsSnapshot>;
@@ -87,25 +79,12 @@ function normalizeDesktopSettings(
     codeModel: normalizeString(raw?.codeModel),
     imageModel: normalizeString(raw?.imageModel),
     imageGenerationModel: normalizeString(raw?.imageGenerationModel),
-    localDisableTools:
-      typeof raw?.localDisableTools === "boolean" ? raw.localDisableTools : undefined,
-    localLightweightBootstrap:
-      typeof raw?.localLightweightBootstrap === "boolean"
-        ? raw.localLightweightBootstrap
-        : undefined,
-    localLightRuntimeDefaults:
-      typeof raw?.localLightRuntimeDefaults === "boolean"
-        ? raw.localLightRuntimeDefaults
-        : undefined,
+    showReasoning: typeof raw?.showReasoning === "boolean" ? raw.showReasoning : true,
     localDebugMode: typeof raw?.localDebugMode === "boolean" ? raw.localDebugMode : undefined,
     localDebugDirectBypass:
       typeof raw?.localDebugDirectBypass === "boolean" ? raw.localDebugDirectBypass : undefined,
     localDirectDebugChat:
       typeof raw?.localDirectDebugChat === "boolean" ? raw.localDirectDebugChat : undefined,
-    localCapturePromptPreview:
-      typeof raw?.localCapturePromptPreview === "boolean"
-        ? raw.localCapturePromptPreview
-        : undefined,
     desktopWallpaper: normalizeString(raw?.desktopWallpaper),
     desktopCustomWallpaper: normalizeString(raw?.desktopCustomWallpaper),
   };
@@ -117,22 +96,12 @@ export function resolveLocalModePerformanceSettings(
   const legacyDirectDebugChat =
     typeof raw?.localDirectDebugChat === "boolean" ? raw.localDirectDebugChat : undefined;
   return {
-    disableTools: raw?.localDisableTools ?? DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.disableTools,
-    lightweightBootstrap:
-      raw?.localLightweightBootstrap ??
-      DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.lightweightBootstrap,
-    lightRuntimeDefaults:
-      raw?.localLightRuntimeDefaults ??
-      DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.lightRuntimeDefaults,
     debugMode:
       raw?.localDebugMode ?? legacyDirectDebugChat ?? DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.debugMode,
     debugDirectBypass:
       raw?.localDebugDirectBypass ??
       legacyDirectDebugChat ??
       DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.debugDirectBypass,
-    capturePromptPreview:
-      raw?.localCapturePromptPreview ??
-      DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.capturePromptPreview,
   };
 }
 
@@ -204,6 +173,9 @@ export async function updateDesktopSettings(
         continue;
       }
       await store.set(String(key), value);
+    }
+    for (const key of REMOVED_SETTING_KEYS) {
+      await store.delete(String(key));
     }
     await store.save();
     publish(next);

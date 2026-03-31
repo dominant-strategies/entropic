@@ -73,9 +73,11 @@ type Props = {
   codeModel: string;
   imageModel: string;
   imageGenerationModel: string;
+  showReasoning: boolean;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onImageModelChange: (model: string) => void;
+  onShowReasoningChange: (value: boolean) => void | Promise<void>;
   localModelConfig: LocalModelConfig;
   localModePerformanceSettings: LocalModePerformanceSettings;
   onLocalModelConfigChange: (config: LocalModelConfig) => void | Promise<void>;
@@ -330,9 +332,11 @@ export function Settings({
   codeModel,
   imageModel,
   imageGenerationModel,
+  showReasoning,
   onCodeModelChange,
   onImageGenerationModelChange,
   onImageModelChange,
+  onShowReasoningChange,
   localModelConfig,
   localModePerformanceSettings,
   onLocalModelConfigChange,
@@ -1241,40 +1245,12 @@ export function Settings({
     }
   }
 
-  function renderLocalPerformanceToggles() {
+  function renderLocalDebugSettings() {
     return (
-      <SettingsGroup title="Performance">
-        <SettingsToggleRow
-          label="Disable tools in local chat"
-          description="Shrink prompt size by removing tool schemas from normal chat turns."
-          checked={localModePerformanceSettings.disableTools}
-          onChange={(checked) => {
-            void onLocalModePerformanceSettingsChange({ disableTools: checked });
-          }}
-        />
-        <SettingsToggleRow
-          label="Lightweight bootstrap"
-          description="Smaller bootstrap prompt for local chat turns."
-          checked={localModePerformanceSettings.lightweightBootstrap}
-          onChange={(checked) => {
-            void onLocalModePerformanceSettingsChange({
-              lightweightBootstrap: checked,
-            });
-          }}
-        />
-        <SettingsToggleRow
-          label="Lighter sandbox defaults"
-          description="Use lighter recall settings for local-model sandbox runs."
-          checked={localModePerformanceSettings.lightRuntimeDefaults}
-          onChange={(checked) => {
-            void onLocalModePerformanceSettingsChange({
-              lightRuntimeDefaults: checked,
-            });
-          }}
-        />
+      <SettingsGroup title="Developer">
         <SettingsToggleRow
           label="Debug mode"
-          description="Enable diagnostics and debug routing for local chats."
+          description="Enable local-chat diagnostics and developer tracing."
           checked={localModePerformanceSettings.debugMode}
           onChange={(checked) => {
             void onLocalModePerformanceSettingsChange({
@@ -1294,18 +1270,6 @@ export function Settings({
                 });
               }}
             />
-            {!localModePerformanceSettings.debugDirectBypass && (
-              <SettingsToggleRow
-                label="Capture prompt previews"
-                description="Record truncated prompts in diagnostics for inspection."
-                checked={localModePerformanceSettings.capturePromptPreview}
-                onChange={(checked) => {
-                  void onLocalModePerformanceSettingsChange({
-                    capturePromptPreview: checked,
-                  });
-                }}
-              />
-            )}
           </>
         )}
       </SettingsGroup>
@@ -1620,6 +1584,14 @@ export function Settings({
                 : selectedModel || "Not selected"
             }
           />
+          <SettingsToggleRow
+            label="Show Reasoning"
+            description="Display model reasoning in chat when the current provider or runtime emits it."
+            checked={showReasoning}
+            onChange={(checked) => {
+              void Promise.resolve(onShowReasoningChange(checked));
+            }}
+          />
           {managedMode && (
             <>
               <SettingsRow label="Coding Model" icon={Cpu} description={codeModel || "Not selected"} />
@@ -1869,7 +1841,7 @@ export function Settings({
             excludeServiceTypes={["rnn-local"]}
           />
         </div>
-        {renderLocalPerformanceToggles()}
+        {renderLocalDebugSettings()}
       </div>
       </>
       )}
@@ -1899,7 +1871,7 @@ export function Settings({
             onModelActivated={onManagedLocalRuntimeModelActivated}
           />
         </div>
-        {renderLocalPerformanceToggles()}
+        {renderLocalDebugSettings()}
       </div>
       </>
       )}

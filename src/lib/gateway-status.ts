@@ -8,26 +8,30 @@ let inFlight: Promise<boolean> | null = null;
 export async function getGatewayStatusCached(opts?: {
   force?: boolean;
   maxAgeMs?: number;
+  throwOnError?: boolean;
 }): Promise<boolean> {
   const maxAgeMs = opts?.maxAgeMs ?? 4000;
   const now = Date.now();
   if (!opts?.force && cache && now - cache.ts <= maxAgeMs) {
     return cache.value;
   }
-  if (inFlight) return inFlight;
-  inFlight = (async () => {
-    try {
-      const running = await invoke<boolean>("get_gateway_status");
-      cache = { value: running, ts: Date.now() };
-      return running;
-    } catch {
-      cache = { value: false, ts: Date.now() };
-      return false;
-    } finally {
+  if (!inFlight) {
+    inFlight = invoke<boolean>("get_gateway_status").finally(() => {
       inFlight = null;
+    });
+  }
+
+  try {
+    const running = await inFlight;
+    cache = { value: running, ts: Date.now() };
+    return running;
+  } catch (error) {
+    cache = { value: false, ts: Date.now() };
+    if (opts?.throwOnError) {
+      throw error;
     }
-  })();
-  return inFlight;
+    return false;
+  }
 }
 
 export function clearGatewayStatusCache() {

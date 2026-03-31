@@ -39,6 +39,16 @@ const OPENCLAW_CONTEXT_WINDOW_MIN = 16000;
 const GATEWAY_SCHEMA_VERSION = "2026-02-13";
 const DEFAULT_SEED_CONTAINER = process.env.ENTROPIC_OPENCLAW_SEED_CONTAINER || "entropic-openclaw";
 
+function requiresManagedRuntimeBridge(serviceType) {
+  return normalizeText(serviceType) === "rnn-local" && process.platform === "linux";
+}
+
+function rnnRuntimeGatewayBaseUrl() {
+  return process.platform === "linux"
+    ? "http://127.0.0.1:11445/v1"
+    : "http://host.docker.internal:11445/v1";
+}
+
 function usage() {
   console.log(`Usage:
   node ./scripts/local-model-gateway.mjs ensure --profile <profile-id> [options]
@@ -212,7 +222,7 @@ function gatewayBaseUrlForLocalModel(config) {
     return "";
   }
   if (serviceType === "rnn-local") {
-    return "http://127.0.0.1:11445/v1";
+    return rnnRuntimeGatewayBaseUrl();
   }
   const rewritten = rewriteLoopbackForGateway(baseUrl).replace(/\/+$/g, "");
   if (serviceType === "ollama") {
@@ -271,7 +281,7 @@ function buildGatewaySpec(profile) {
     actualContextWindow,
     declaredContextWindow,
     apiKey: normalizeText(localModelConfig.apiKey) || "local-placeholder",
-    requiresManagedRuntimeBridge: serviceType === "rnn-local",
+    requiresManagedRuntimeBridge: requiresManagedRuntimeBridge(serviceType),
   };
 }
 
