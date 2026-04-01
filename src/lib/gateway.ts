@@ -31,6 +31,14 @@ export class GatewayError extends Error {
   }
 }
 
+function isUnsupportedChatSendOptionsError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message.includes("invalid chat.send params")) {
+    return false;
+  }
+  return message.includes("unexpected property 'reasoning'");
+}
+
 type GatewayDeviceIdentity = {
   device_id: string;
   public_key: string;
@@ -216,6 +224,7 @@ export class GatewayClient {
   private url: string;
   private token: string;
   private authenticated = false;
+  private legacyReasoningUnsupported = false;
   private requestId = 0;
   private pendingRequests = new Map<
     string,
@@ -457,7 +466,7 @@ export class GatewayClient {
             scopes,
             auth: authToken ? { token: authToken } : undefined,
             device,
-            caps: [],
+            caps: ["tool-events"],
             userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "Entropic Desktop",
             locale: typeof navigator !== "undefined" ? navigator.language : "en-US",
           });
@@ -676,14 +685,41 @@ export class GatewayClient {
       content?: string;
     }>,
     idempotencyKey?: string,
+    options?: {
+      reasoning?: "on" | "off" | "stream";
+    },
   ): Promise<string> {
-    const result = await this.rpc<{ runId: string }>("chat.send", {
+    const idempotency = idempotencyKey || crypto.randomUUID();
+    const requestedReasoning = options?.reasoning ?? "stream";
+    const params: Record<string, unknown> = {
       sessionKey,
       message,
       attachments,
-      idempotencyKey: idempotencyKey || crypto.randomUUID(),
-    });
-    return result.runId;
+      idempotencyKey: idempotency,
+    };
+    if (!this.legacyReasoningUnsupported && requestedReasoning) {
+      params.reasoning = requestedReasoning;
+    }
+
+    try {
+      const result = await this.rpc<{ runId: string }>("chat.send", params);
+      return result.runId;
+    } catch (error) {
+      if (requestedReasoning && isUnsupportedChatSendOptionsError(error)) {
+        this.legacyReasoningUnsupported = true;
+        this.log(
+          "chat.send runtime rejected reasoning; caching legacy compatibility mode and retrying without it",
+        );
+        const fallbackResult = await this.rpc<{ runId: string }>("chat.send", {
+          sessionKey,
+          message,
+          attachments,
+          idempotencyKey: idempotency,
+        });
+        return fallbackResult.runId;
+      }
+      throw error;
+    }
   }
 
   async abortChat(sessionKey: string, runId?: string): Promise<void> {

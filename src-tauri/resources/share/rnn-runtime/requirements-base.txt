@@ -1,0 +1,6 @@
+# Managed Local Runtime base dependencies
+torch>=2.6
+transformers>=4.51
+huggingface_hub>=0.30
+safetensors>=0.5
+sentencepiece>=0.2

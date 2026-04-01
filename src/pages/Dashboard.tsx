@@ -16,7 +16,15 @@ import { Tasks } from "./Tasks";
 import { Jobs } from "./Jobs";
 import { BillingPage } from "./BillingPage";
 import { useAuth } from "../contexts/AuthContext";
-import { createGatewayToken, getProxyUrl, getBalance, ApiRequestError } from "../lib/auth";
+import {
+  createGatewayToken,
+  getProxyUrl,
+  getBalance,
+  ApiRequestError,
+  localModelProviderLabel,
+  normalizeConnectionMode,
+  normalizeLocalModelConfig,
+} from "../lib/auth";
 import { getLocalCreditBalance } from "../lib/localCredits";
 import {
   hasPendingIntegrationImports,
@@ -26,13 +34,17 @@ import {
   startIntegrationRefreshLoop,
   stopIntegrationRefreshLoop,
 } from "../lib/integrations";
-import { getGatewayStatusCached } from "../lib/gateway-status";
+import { clearGatewayStatusCache, getGatewayStatusCached } from "../lib/gateway-status";
 import {
   LOCAL_IMAGE_GENERATION_MODEL_IDS,
   LOCAL_MODEL_IDS,
   PROXY_IMAGE_GENERATION_MODEL_IDS,
   PROXY_MODEL_IDS,
+  isLocalModelId,
+  sanitizeLocalModelId,
 } from "../components/ModelSelector";
+import type { ConnectionMode, LocalModelConfig } from "../lib/auth";
+import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { hideEmbeddedPreviewWebview } from "../lib/nativePreview";
 import {
   defaultUseLocalKeys,
@@ -40,7 +52,11 @@ import {
   hostedFeaturesEnabled,
 } from "../lib/buildProfile";
 import {
+  DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS,
+  loadDesktopSettings,
   primeDesktopSettings,
+  resolveLocalModePerformanceSettings,
+  type LocalModePerformanceSettings,
   type DesktopSettingsSnapshot,
   updateDesktopSettings,
 } from "../lib/settingsStore";
@@ -82,6 +98,11 @@ type DashboardBootstrapAction =
       gatewayLaunchMode?: GatewayLaunchMode;
       gatewayHealthStatus?: string;
     };
+
+type RnnCatalogBootstrapSnapshot = {
+  local?: Array<{ name?: string | null }>;
+  loadedModel?: string | null;
+};
 
 let settingsPagePrefetchPromise: Promise<unknown> | null = null;
 
@@ -410,6 +431,11 @@ type Props = {
   onRefresh: () => void;
 };
 
+type AuthStateSnapshot = {
+  active_provider: string | null;
+  providers: Array<{ id: string; has_key: boolean; last4?: string | null }>;
+};
+
 // Default models per mode
 const DEFAULT_PROXY_MODEL = "openai/gpt-5.4";
 const DEFAULT_PROXY_ANTHROPIC_MODEL = "anthropic/claude-opus-4-6";
@@ -437,6 +463,10 @@ function defaultLocalImageGenerationModel(primaryModel?: string) {
 }
 
 function remapModelForMode(model: string, useLocalKeys: boolean): string {
+  if (isLocalModelId(model)) {
+    return sanitizeLocalModelId(model);
+  }
+
   if (useLocalKeys) {
     if (LOCAL_MODEL_IDS.has(model)) {
       return model;
@@ -500,6 +530,28 @@ function remapModelForMode(model: string, useLocalKeys: boolean): string {
   return DEFAULT_PROXY_MODEL;
 }
 
+function localModelSelection(config: LocalModelConfig): string | null {
+  return config.enabled && config.modelName.trim()
+    ? `local/${config.modelName.trim()}`
+    : null;
+}
+
+function remapModelForConnectionMode(
+  model: string,
+  connectionMode: ConnectionMode,
+  localModelConfig: LocalModelConfig,
+): string {
+  if (connectionMode === "local-models") {
+    return localModelSelection(localModelConfig) || model;
+  }
+  const candidateModel = isLocalModelId(model)
+    ? connectionMode === "byok"
+      ? DEFAULT_LOCAL_MODEL
+      : DEFAULT_PROXY_MODEL
+    : model;
+  return remapModelForMode(candidateModel, connectionMode !== "managed");
+}
+
 function remapImageGenerationModelForMode(
   model: string,
   useLocalKeys: boolean,
@@ -543,13 +595,24 @@ function buildProxyUnavailableStartupError() {
   };
 }
 
+function isRuntimeClockDriftError(message: string): boolean {
+  const text = message.toLowerCase();
+  return (
+    text.includes("sandbox clock drift detected") ||
+    (text.includes("runtime vm clock") && text.includes("resync")) ||
+    (text.includes("device signature expired") && text.includes("clock"))
+  );
+}
+
 export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const { isAuthenticated, isAuthConfigured, refreshBalance } = useAuth();
   const [bootstrapState, dispatchBootstrap] = useReducer(
     dashboardBootstrapReducer,
     initialDashboardBootstrapState,
   );
-  const [useLocalKeys, setUseLocalKeys] = useState(defaultUseLocalKeys);
+  const [connectionMode, setConnectionMode] = useState<ConnectionMode>(
+    defaultUseLocalKeys ? "byok" : "managed",
+  );
   const [currentPage, setCurrentPage] = useState<Page>("chat");
   const [isTogglingGateway, setIsTogglingGateway] = useState(false);
   const [showGatewayStartup, setShowGatewayStartup] = useState(false);
@@ -574,11 +637,18 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       ? defaultLocalImageGenerationModel(DEFAULT_LOCAL_MODEL)
       : DEFAULT_PROXY_IMAGE_GENERATION_MODEL,
   );
+  const [showReasoning, setShowReasoning] = useState(true);
+  const [localModelConfig, setLocalModelConfig] = useState<LocalModelConfig>(
+    normalizeLocalModelConfig(),
+  );
+  const [localModePerformanceSettings, setLocalModePerformanceSettings] =
+    useState<LocalModePerformanceSettings>(DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS);
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [currentChatSession, setCurrentChatSession] = useState<string | null>(null);
   const [pendingChatSession, setPendingChatSession] = useState<string | null>(null);
   const [pendingChatAction, setPendingChatAction] = useState<ChatSessionActionRequest | null>(null);
   const [localCreditBalanceCents, setLocalCreditBalanceCents] = useState<number | null>(null);
+  const [hasConfiguredLocalProvider, setHasConfiguredLocalProvider] = useState(false);
   const gatewayTokenRef = useRef<string | null>(null);
   const selectedModelRef = useRef(selectedModel);
   const imageModelRef = useRef(imageModel);
@@ -601,6 +671,28 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const gatewayHealthFailureStreakRef = useRef(0);
   const gatewayRunning = bootstrapState.gatewayRunning;
   const prefsLoaded = bootstrapState.status !== "loading";
+  const useLocalKeys = connectionMode !== "managed";
+  const byokMode = connectionMode === "byok";
+  const localModelsMode = connectionMode === "local-models";
+  const activeLocalModel = localModelSelection(localModelConfig);
+  const activeSelectedModel = localModelsMode ? activeLocalModel || selectedModel : selectedModel;
+
+  function resolveConfiguredLocalRuntimeModel(config: LocalModelConfig = localModelConfig): string | null {
+    const configured = localModelSelection(config);
+    if (configured) {
+      return configured;
+    }
+    if (connectionMode !== "local-models") {
+      return null;
+    }
+    if (isLocalModelId(activeSelectedModel)) {
+      return sanitizeLocalModelId(activeSelectedModel);
+    }
+    if (isLocalModelId(selectedModelRef.current)) {
+      return sanitizeLocalModelId(selectedModelRef.current);
+    }
+    return null;
+  }
 
   useEffect(() => {
     selectedModelRef.current = selectedModel;
@@ -609,6 +701,36 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   useEffect(() => {
     imageModelRef.current = imageModel;
   }, [imageModel]);
+
+  async function tryHydrateManagedLocalModelConfig(
+    config: LocalModelConfig,
+  ): Promise<LocalModelConfig> {
+    if (
+      !config.enabled ||
+      config.serviceType !== "rnn-local" ||
+      config.modelName.trim()
+    ) {
+      return config;
+    }
+
+    try {
+      const snapshot = await invoke<RnnCatalogBootstrapSnapshot>("get_rnn_catalog");
+      const resolvedModel =
+        snapshot.loadedModel?.trim() ||
+        (snapshot.local?.length === 1 ? snapshot.local[0]?.name?.trim() || "" : "");
+      if (!resolvedModel) {
+        return config;
+      }
+      return {
+        ...config,
+        enabled: true,
+        modelName: resolvedModel,
+      };
+    } catch (error) {
+      console.warn("[Entropic] Failed to hydrate managed local model selection:", error);
+      return config;
+    }
+  }
 
   async function openFeedbackPage() {
     if (!FEEDBACK_FORM_URL) {
@@ -648,6 +770,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }
 
   function markGatewayStopped() {
+    clearGatewayStatusCache();
     setAwaitingChatConnection(false);
     setGatewayLifecycleMode("idle");
     updateGatewayState({
@@ -659,6 +782,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }
 
   function markGatewayStarting(mode: GatewayLaunchMode) {
+    clearGatewayStatusCache();
     setAwaitingChatConnection(false);
     setGatewayLifecycleMode((current) => (current === "recreating" || current === "restarting" ? current : "starting"));
     updateGatewayState({
@@ -670,6 +794,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }
 
   function markGatewayReady(mode: GatewayLaunchMode) {
+    clearGatewayStatusCache();
     setGatewayLifecycleMode("idle");
     updateGatewayState({
       gatewayRunning: true,
@@ -677,6 +802,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       gatewayLaunchMode: mode,
       gatewayHealthStatus: "healthy",
     });
+  }
+
+  function resetGatewayAfterFailedStart() {
+    gatewayHealthFailureStreakRef.current = 0;
+    markGatewayStopped();
   }
 
   function completeGatewayReady(mode: GatewayLaunchMode) {
@@ -731,6 +861,16 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
   }
 
+  async function refreshAuthStateSnapshot() {
+    try {
+      const state = await invoke<AuthStateSnapshot>("get_auth_state");
+      setHasConfiguredLocalProvider(state.providers.some((entry) => entry.has_key));
+    } catch (error) {
+      console.error("[Entropic] Failed to refresh auth state:", error);
+      setHasConfiguredLocalProvider(false);
+    }
+  }
+
   useEffect(() => {
     let cancelled = false;
     dispatchBootstrap({ type: "bootstrap_loading" });
@@ -749,6 +889,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           : typeof storedUseLocal === "boolean"
             ? storedUseLocal
             : defaultUseLocalKeys;
+        const nextConnectionMode: ConnectionMode =
+          bootstrap.settings.selectedModel && isLocalModelId(bootstrap.settings.selectedModel)
+            ? "local-models"
+            : isLocal
+              ? "byok"
+              : "managed";
         const nextSelectedModel = bootstrap.settings.selectedModel
           ? remapModelForMode(bootstrap.settings.selectedModel, isLocal)
           : isLocal
@@ -762,30 +908,18 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           isLocal,
           nextSelectedModel,
         );
+        const nextShowReasoning = bootstrap.settings.showReasoning ?? true;
 
         selectedModelRef.current = nextSelectedModel;
         imageModelRef.current = nextImageModel;
 
-        setUseLocalKeys(isLocal);
+        setConnectionMode(nextConnectionMode);
         setSelectedModel(nextSelectedModel);
         setCodeModel(nextCodeModel);
         setImageModel(nextImageModel);
         setImageGenerationModel(nextImageGenerationModel);
+        setShowReasoning(nextShowReasoning);
         dispatchBootstrap({ type: "bootstrap_loaded", payload: bootstrap });
-
-        const normalizedPatch: Partial<DesktopSettingsSnapshot> = {};
-        if (storedUseLocal !== isLocal) {
-          normalizedPatch.useLocalKeys = isLocal;
-        }
-        if (bootstrap.settings.selectedModel !== nextSelectedModel) {
-          normalizedPatch.selectedModel = nextSelectedModel;
-        }
-        if (bootstrap.settings.imageGenerationModel !== nextImageGenerationModel) {
-          normalizedPatch.imageGenerationModel = nextImageGenerationModel;
-        }
-        if (Object.keys(normalizedPatch).length > 0) {
-          await updateDesktopSettings(normalizedPatch);
-        }
       } catch (error) {
         if (cancelled) return;
         console.error("[Entropic] Failed to load app bootstrap state:", error);
@@ -797,6 +931,112 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
 
     void loadBootstrap();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthConfigured]);
+
+  // Load saved model preference
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadModel() {
+      try {
+        const store = await TauriStore.load("entropic-settings.json");
+        const rawConnectionMode = await store.get("connectionMode");
+        const storedConnectionMode = normalizeConnectionMode(
+          rawConnectionMode,
+          defaultUseLocalKeys ? "byok" : "managed",
+        );
+        const storedUseLocal = await store.get("useLocalKeys") as boolean | null;
+        const lmc = await store.get("localModelConfig") as LocalModelConfig | null;
+        let normalizedLocalModelConfig = normalizeLocalModelConfig(lmc);
+        normalizedLocalModelConfig = await tryHydrateManagedLocalModelConfig(normalizedLocalModelConfig);
+        const saved = await store.get("selectedModel") as string | null;
+        const nextConnectionMode =
+          rawConnectionMode != null
+            ? storedConnectionMode
+            : isLocalModelId(saved || "")
+              ? "local-models"
+              : typeof storedUseLocal === "boolean"
+                ? storedUseLocal
+                  ? "byok"
+                  : "managed"
+                : storedConnectionMode;
+        const nextSelectedModel = saved
+          ? isLocalModelId(saved)
+            ? normalizedLocalModelConfig.enabled && normalizedLocalModelConfig.modelName
+              ? `local/${normalizedLocalModelConfig.modelName}`
+              : sanitizeLocalModelId(saved)
+            : remapModelForConnectionMode(saved, nextConnectionMode, normalizedLocalModelConfig)
+          : nextConnectionMode === "managed"
+            ? DEFAULT_PROXY_MODEL
+            : nextConnectionMode === "byok"
+              ? DEFAULT_LOCAL_MODEL
+              : localModelSelection(normalizedLocalModelConfig) || DEFAULT_PROXY_MODEL;
+        const savedCode = await store.get("codeModel") as string | null;
+        const savedImage = await store.get("imageModel") as string | null;
+        const savedImageGeneration = await store.get("imageGenerationModel") as string | null;
+        const desktopSettings = await loadDesktopSettings({ force: true });
+        const nextLocalModePerformanceSettings =
+          resolveLocalModePerformanceSettings(desktopSettings);
+        const nextShowReasoning = desktopSettings.showReasoning ?? true;
+        const nextImageGenerationModel = remapImageGenerationModelForMode(
+          savedImageGeneration || "",
+          nextConnectionMode === "byok",
+          nextSelectedModel,
+        );
+
+        if (cancelled) return;
+
+        setConnectionMode(nextConnectionMode);
+        setLocalModelConfig(normalizedLocalModelConfig);
+        setLocalModePerformanceSettings(nextLocalModePerformanceSettings);
+        setSelectedModel(nextSelectedModel);
+        if (savedCode) setCodeModel(savedCode);
+        if (savedImage) setImageModel(savedImage);
+        setImageGenerationModel(nextImageGenerationModel);
+        setShowReasoning(nextShowReasoning);
+
+        const shouldPersistNormalizedMode =
+          rawConnectionMode !== nextConnectionMode ||
+          storedUseLocal !== (nextConnectionMode !== "managed");
+        if (shouldPersistNormalizedMode) {
+          try {
+            await store.set("connectionMode", nextConnectionMode);
+            await store.set("useLocalKeys", nextConnectionMode !== "managed");
+            await store.save();
+          } catch (persistError) {
+            console.error("[Entropic] Failed to persist normalized connection mode:", persistError);
+          }
+        }
+
+        let shouldSave = false;
+        if (lmc && JSON.stringify(normalizedLocalModelConfig) !== JSON.stringify(lmc)) {
+          await store.set("localModelConfig", normalizedLocalModelConfig);
+          shouldSave = true;
+        }
+        if (
+          saved !== nextSelectedModel ||
+          savedImageGeneration !== nextImageGenerationModel ||
+          nextConnectionMode !== storedConnectionMode
+        ) {
+          await store.set("connectionMode", nextConnectionMode);
+          await store.set("useLocalKeys", nextConnectionMode !== "managed");
+          await store.set("selectedModel", nextSelectedModel);
+          await store.set("imageGenerationModel", nextImageGenerationModel);
+          shouldSave = true;
+        }
+        if (shouldSave) {
+          await store.save();
+        }
+      } catch (error) {
+        if (cancelled) return;
+        console.error("[Entropic] Failed to load model preferences:", error);
+      }
+    }
+
+    void loadModel();
     return () => {
       cancelled = true;
     };
@@ -836,6 +1076,17 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       window.clearInterval(pollInterval);
     };
   }, [isAuthenticated, isAuthConfigured, refreshBalance]);
+
+  useEffect(() => {
+    void refreshAuthStateSnapshot();
+    const handleAuthChanged = () => {
+      void refreshAuthStateSnapshot();
+    };
+    window.addEventListener("entropic-auth-changed", handleAuthChanged);
+    return () => {
+      window.removeEventListener("entropic-auth-changed", handleAuthChanged);
+    };
+  }, []);
 
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -1037,6 +1288,175 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     return model.trim();
   }
 
+  async function persistLocalModelConfig(config: LocalModelConfig) {
+    const normalizedConfig = normalizeLocalModelConfig(config);
+    setLocalModelConfig(normalizedConfig);
+    let nextSelectedModel: string | null = null;
+    if (connectionMode === "local-models") {
+      nextSelectedModel = localModelSelection(normalizedConfig);
+      if (nextSelectedModel) {
+        setSelectedModel(nextSelectedModel);
+      }
+    } else if (isLocalModelId(selectedModel)) {
+      nextSelectedModel =
+        normalizedConfig.enabled && normalizedConfig.modelName
+          ? `local/${normalizedConfig.modelName}`
+          : useLocalKeys
+            ? DEFAULT_LOCAL_MODEL
+            : DEFAULT_PROXY_MODEL;
+      setSelectedModel(nextSelectedModel);
+    }
+    try {
+      const store = await TauriStore.load("entropic-settings.json");
+      await store.set("localModelConfig", normalizedConfig);
+      if (nextSelectedModel) {
+        await store.set("selectedModel", nextSelectedModel);
+      }
+      await store.save();
+    } catch (error) {
+      console.error("[Entropic] Failed to save localModelConfig:", error);
+    }
+  }
+
+  async function persistLocalModePerformanceSettings(
+    patch: Partial<LocalModePerformanceSettings>,
+  ) {
+    const next = {
+      ...localModePerformanceSettings,
+      ...patch,
+    };
+    setLocalModePerformanceSettings(next);
+    try {
+      await updateDesktopSettings({
+        localDebugMode: next.debugMode,
+        localDebugDirectBypass: next.debugDirectBypass,
+        localDirectDebugChat: undefined,
+      });
+    } catch (error) {
+      console.error("[Entropic] Failed to save local mode performance settings:", error);
+    }
+  }
+
+  async function handleManagedLocalRuntimeModelActivated(modelName: string) {
+    const runtimeModel = `local/${modelName}`;
+    setSelectedModel(runtimeModel);
+
+    if (connectionMode !== "local-models" || !gatewayRunning) {
+      return;
+    }
+
+    setIsTogglingGateway(true);
+    setStartupError(null);
+    clearGatewayRetry();
+    setShowGatewayStartup(true);
+    setGatewayStartupStage("launch");
+    markGatewayStarting("local");
+
+    try {
+      await invoke("restart_gateway", { model: runtimeModel });
+      setGatewayStartupStage("health");
+      await new Promise((r) => setTimeout(r, 2000));
+      await checkGateway();
+    } catch (error) {
+      console.error("[Entropic] Failed to switch managed local runtime model:", error);
+      const message = extractGatewayStartError(error);
+      const recoveredRuntime = await tryAutoRecoverRuntime(message);
+      if (recoveredRuntime) {
+        clearGatewayRetry();
+        scheduleGatewayRetry(() => {
+          void retryGatewayStartup();
+        });
+      } else {
+        setStartupError({ message });
+      }
+    } finally {
+      setIsTogglingGateway(false);
+    }
+  }
+
+  function ensureRuntimeModelConfigured(): string | null {
+    if (connectionMode !== "local-models") {
+      return activeSelectedModel;
+    }
+    const localModel = resolveConfiguredLocalRuntimeModel();
+    if (localModel) {
+      return localModel;
+    }
+    setStartupError({
+      message: "Finish configuring Local Models before starting the sandbox.",
+      actions: [{ label: "Open Settings", onClick: () => setCurrentPage("settings") }],
+    });
+    return null;
+  }
+
+  async function handleConnectionModeChange(nextMode: ConnectionMode) {
+    const resolvedNextMode = normalizeConnectionMode(
+      nextMode,
+      defaultUseLocalKeys ? "byok" : "managed",
+    );
+    autoStartAttemptedRef.current = false;
+    clearGatewayRetry();
+    setIsTogglingGateway(true);
+    setConnectionMode(resolvedNextMode);
+    setStartupError(null);
+    setGatewayStartupStage("idle");
+    setShowGatewayStartup(false);
+
+    const nextLocalModelConfig =
+      resolvedNextMode === "local-models"
+        ? { ...localModelConfig, enabled: true }
+        : localModelConfig;
+    if (nextLocalModelConfig !== localModelConfig) {
+      setLocalModelConfig(nextLocalModelConfig);
+    }
+
+    const nextModel = remapModelForConnectionMode(
+      selectedModel,
+      resolvedNextMode,
+      nextLocalModelConfig,
+    );
+    const nextImageGenerationModel =
+      resolvedNextMode === "local-models"
+        ? imageGenerationModel
+        : remapImageGenerationModelForMode(
+            imageGenerationModel,
+            resolvedNextMode === "byok",
+            nextModel,
+          );
+
+    if (nextModel !== selectedModel) {
+      setSelectedModel(nextModel);
+    }
+    if (nextImageGenerationModel !== imageGenerationModel) {
+      setImageGenerationModel(nextImageGenerationModel);
+    }
+
+    try {
+      const store = await TauriStore.load("entropic-settings.json");
+      await store.set("connectionMode", resolvedNextMode);
+      await store.set("useLocalKeys", resolvedNextMode !== "managed");
+      await store.set("selectedModel", nextModel);
+      await store.set("imageGenerationModel", nextImageGenerationModel);
+      if (resolvedNextMode === "local-models" && !localModelConfig.enabled) {
+        await store.set("localModelConfig", nextLocalModelConfig);
+      }
+      await store.save();
+    } catch (error) {
+      console.error("[Entropic] Failed to save connection mode:", error);
+    }
+
+    if (gatewayRunning) {
+      try {
+        await invoke("stop_gateway");
+      } catch (error) {
+        console.error("[Entropic] Failed to stop gateway:", error);
+      }
+      markGatewayStopped();
+    }
+
+    setIsTogglingGateway(false);
+  }
+
   function extractGatewayStartError(error: unknown): string {
     if (error instanceof Error) {
       return error.message || "Failed to start gateway";
@@ -1061,6 +1481,23 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     return "Failed to start gateway";
   }
 
+  function buildStartupError(message: string) {
+    if (!isRuntimeClockDriftError(message)) {
+      return { message };
+    }
+    return {
+      message,
+      actions: [
+        {
+          label: "Reset Runtime",
+          onClick: () => {
+            void resetRuntimeAfterClockDrift();
+          },
+        },
+      ],
+    };
+  }
+
   function isGatewayPortConflictError(message: string): boolean {
     const text = message.toLowerCase();
     return (
@@ -1082,14 +1519,64 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     );
   }
 
+  function isConnectionSetupStartupError(message: string): boolean {
+    const text = message.toLowerCase();
+    return (
+      text.includes("no provider key configured") ||
+      text.includes("no local api key configured") ||
+      text.includes("bring your own keys needs") ||
+      text.includes("finish configuring local models before starting the sandbox")
+    );
+  }
+
+  async function resetRuntimeAfterClockDrift() {
+    if (isTogglingGateway) {
+      return;
+    }
+
+    setIsTogglingGateway(true);
+    clearGatewayRetry();
+    setShowGatewayStartup(true);
+    setGatewayStartupStage("launch");
+    setStartupError({
+      message: "Resetting sandbox runtime to resync its clock...",
+    });
+    resetGatewayAfterFailedStart();
+
+    try {
+      try {
+        await invoke("stop_gateway");
+      } catch (error) {
+        console.warn("[Entropic] Failed to stop gateway before runtime clock repair:", error);
+      }
+      await invoke("reset_isolated_runtime");
+      await invoke("start_runtime");
+      await retryGatewayStartup();
+    } catch (error) {
+      resetGatewayAfterFailedStart();
+      setStartupError(buildStartupError(extractGatewayStartError(error)));
+      setGatewayStartupStage("idle");
+      setShowGatewayStartup(false);
+    } finally {
+      setIsTogglingGateway(false);
+    }
+  }
+
   async function retryGatewayStartup() {
     if (!useLocalKeys && !isAuthConfigured) {
+      resetGatewayAfterFailedStart();
       setStartupError(buildProxyUnavailableStartupError());
       setGatewayStartupStage("idle");
       setShowGatewayStartup(false);
       return;
     }
-
+    const runtimeModel = ensureRuntimeModelConfigured();
+    if (!runtimeModel) {
+      resetGatewayAfterFailedStart();
+      setGatewayStartupStage("idle");
+      setShowGatewayStartup(false);
+      return;
+    }
     const proxyEnabled =
       isAuthConfigured &&
       !useLocalKeys &&
@@ -1097,7 +1584,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
     if (proxyEnabled) {
       await startGatewayProxyFlow({
-        model: selectedModel,
+        model: runtimeModel,
         image: imageModel,
         stopFirst: false,
         allowRetry: false,
@@ -1106,19 +1593,27 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
 
     if (isAuthConfigured && !useLocalKeys) {
+      resetGatewayAfterFailedStart();
       setStartupError(buildOutOfCreditsStartupError());
       setGatewayStartupStage("idle");
       setShowGatewayStartup(false);
       return;
     }
 
-    setShowGatewayStartup(true);
-    setGatewayStartupStage("launch");
-    markGatewayStarting("local");
-    await invoke("start_gateway", { model: selectedModel });
-    setGatewayStartupStage("health");
-    await new Promise((r) => setTimeout(r, 2000));
-    await checkGateway();
+    try {
+      setShowGatewayStartup(true);
+      setGatewayStartupStage("launch");
+      markGatewayStarting("local");
+      await invoke("start_gateway", { model: runtimeModel });
+      setGatewayStartupStage("health");
+      await new Promise((r) => setTimeout(r, 2000));
+      await checkGateway();
+    } catch (error) {
+      resetGatewayAfterFailedStart();
+      setStartupError(buildStartupError(extractGatewayStartError(error)));
+      setGatewayStartupStage("idle");
+      setShowGatewayStartup(false);
+    }
   }
 
   async function tryAutoRecoverRuntime(message: string): Promise<"cleanup" | "refresh" | null> {
@@ -1200,6 +1695,32 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       return false;
     }
 
+    // Local models bypass proxy — start gateway directly
+    if (isLocalModelId(model)) {
+      console.log("[Entropic] Local model detected, bypassing proxy flow");
+      setShowGatewayStartup(true);
+      setGatewayStartupStage("launch");
+      try {
+        if (stopFirst) {
+          await invoke("restart_gateway", { model });
+        } else {
+          await invoke("start_gateway", { model });
+        }
+        setGatewayStartupStage("health");
+        await new Promise((r) => setTimeout(r, 2000));
+        await checkGateway();
+        return true;
+      } catch (error) {
+        console.error("[Entropic] Failed to start gateway with local model:", error);
+        resetGatewayAfterFailedStart();
+        setStartupError({ message: extractGatewayStartError(error) });
+        return false;
+      } finally {
+        setIsTogglingGateway(false);
+        setShowGatewayStartup(false);
+      }
+    }
+
     let anonymousBalanceCents = localCreditBalanceCents ?? 0;
     if (!isAuthenticated) {
       if (anonymousBalanceCents <= 0) {
@@ -1248,6 +1769,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         if (isAuthenticated) {
           const balance = await getBalance();
           if (balance.balance_cents <= 0) {
+        resetGatewayAfterFailedStart();
         setStartupError(buildOutOfCreditsStartupError());
         setShowGatewayStartup(false);
         setGatewayLifecycleMode("idle");
@@ -1255,6 +1777,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           }
         } else {
           if (anonymousBalanceCents <= 0) {
+            resetGatewayAfterFailedStart();
             setStartupError(buildOutOfCreditsStartupError());
             setShowGatewayStartup(false);
             setGatewayLifecycleMode("idle");
@@ -1308,7 +1831,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           if (startGatewayAttemptRef.current !== attemptId) {
             return false;
           }
-          const ok = await getGatewayStatusCached({ force: true });
+          const ok = await getGatewayStatusCached({ force: true, throwOnError: true });
           if (ok) {
             wsReady = true;
             break;
@@ -1339,6 +1862,15 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       const isApiError = error instanceof ApiRequestError;
       const status = isApiError ? error.status : undefined;
       const message = extractGatewayStartError(error);
+      if (isRuntimeClockDriftError(message)) {
+        resetGatewayAfterFailedStart();
+        clearGatewayRetry();
+        setStartupError(buildStartupError(message));
+        setGatewayStartupStage("idle");
+        setShowGatewayStartup(false);
+        setGatewayLifecycleMode("idle");
+        return false;
+      }
       const normalizedMessage =
         typeof message === "string" ? message.toLowerCase() : "";
       const hasFetchNetworkSignal =
@@ -1353,6 +1885,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         hasFetchNetworkSignal;
 
       if (status === 402) {
+        resetGatewayAfterFailedStart();
         setStartupError(buildOutOfCreditsStartupError());
         setGatewayStartupStage("idle");
         setShowGatewayStartup(false);
@@ -1361,6 +1894,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       }
 
       if (status === 401) {
+        resetGatewayAfterFailedStart();
         setStartupError(
           isAuthenticated
             ? {
@@ -1379,6 +1913,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       }
 
       if (isNetwork) {
+        resetGatewayAfterFailedStart();
         setStartupError({
           message:
             "Can’t reach the Entropic backend from the app (network/API error). Check backend availability and local proxy settings.",
@@ -1393,6 +1928,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       }
 
       if (isGatewayPortConflictError(message)) {
+        resetGatewayAfterFailedStart();
         setStartupError({
           message,
           actions: [
@@ -1417,6 +1953,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
       const recoveredRuntime = await tryAutoRecoverRuntime(message);
       if (recoveredRuntime) {
+        resetGatewayAfterFailedStart();
         clearGatewayRetry();
         scheduleGatewayRetry(() => {
           void startGatewayProxyFlow({
@@ -1432,6 +1969,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       setStartupError({
         message,
       });
+      resetGatewayAfterFailedStart();
       if (allowRetry) {
         scheduleGatewayRetry(() => {
           void startGatewayProxyFlow({
@@ -1460,7 +1998,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
 
     async function autoStartGateway() {
-      const desiredModel = selectedModelRef.current;
+      const runtimeModel = localModelsMode
+        ? resolveConfiguredLocalRuntimeModel()
+        : activeSelectedModel;
+      const localProviderReady = localModelsMode || hasConfiguredLocalProvider;
+      const desiredModel = (localModelsMode ? runtimeModel : selectedModelRef.current) || selectedModelRef.current;
       const desiredImageModel = imageModelRef.current;
       const proxyEnabled =
         isAuthConfigured &&
@@ -1478,6 +2020,14 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         gatewayRetryIn,
         autoStartAttempted: autoStartAttemptedRef.current
       });
+
+      if (byokMode && !localProviderReady) {
+        return;
+      }
+
+      if (!proxyEnabled && localModelsMode && !runtimeModel) {
+        return;
+      }
 
       if (autoStartAttemptedRef.current || gatewayRunning || isTogglingGateway || gatewayRetryIn !== null) {
         return;
@@ -1545,11 +2095,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           const message = extractGatewayStartError(error);
           const recoveredRuntime = await tryAutoRecoverRuntime(message);
           if (recoveredRuntime) {
+            resetGatewayAfterFailedStart();
             clearGatewayRetry();
             scheduleGatewayRetry(() => {
               void retryGatewayStartup();
             });
           } else {
+            resetGatewayAfterFailedStart();
             setStartupError({ message });
           }
         } finally {
@@ -1613,11 +2165,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           const message = extractGatewayStartError(error);
           const recoveredRuntime = await tryAutoRecoverRuntime(message);
           if (recoveredRuntime) {
+            resetGatewayAfterFailedStart();
             clearGatewayRetry();
             scheduleGatewayRetry(() => {
               void retryGatewayStartup();
             });
           } else {
+            resetGatewayAfterFailedStart();
             setStartupError({ message });
           }
         } finally {
@@ -1634,9 +2188,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     isAuthConfigured,
     localCreditBalanceCents,
     useLocalKeys,
+    connectionMode,
+    byokMode,
+    hasConfiguredLocalProvider,
     gatewayRunning,
     isTogglingGateway,
-    selectedModel,
+    activeSelectedModel,
+    activeLocalModel,
     gatewayRetryIn,
     imageModel,
     bootstrapState.gatewayContainerRunning,
@@ -1680,13 +2238,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     useLocalKeys,
     gatewayRunning,
     isTogglingGateway,
-    selectedModel,
+    activeSelectedModel,
     imageModel,
   ]);
 
   async function checkGateway(): Promise<boolean> {
     try {
-      const running = await getGatewayStatusCached({ force: true });
+      const running = await getGatewayStatusCached({ force: true, throwOnError: true });
       if (running) {
         console.log("[Entropic] Gateway health check: healthy");
         return completeGatewayReady(
@@ -1728,11 +2286,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus;
         const awaitingOperatorConnection =
           reportedHealthStatus.trim().toLowerCase() === "healthy";
+        const nextHealthStatus = awaitingOperatorConnection ? "starting" : reportedHealthStatus;
         updateGatewayState({
-          gatewayRunning: false,
+          gatewayRunning,
           gatewayContainerRunning: true,
           gatewayLaunchMode: liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode,
-          gatewayHealthStatus: reportedHealthStatus,
+          gatewayHealthStatus: nextHealthStatus,
         });
         if (showGatewayStartup && awaitingOperatorConnection) {
           setGatewayStartupStage("connect");
@@ -1750,6 +2309,16 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       return false;
     } catch (error) {
       console.error("[Entropic] Gateway check failed:", error);
+      const message = extractGatewayStartError(error);
+      if (isRuntimeClockDriftError(message)) {
+        clearGatewayRetry();
+        resetGatewayAfterFailedStart();
+        setStartupError(buildStartupError(message));
+        setGatewayStartupStage("idle");
+        setShowGatewayStartup(false);
+        setGatewayLifecycleMode("idle");
+        return false;
+      }
       let liveBootstrap: AppBootstrapState | null = null;
       try {
         liveBootstrap = await invoke<AppBootstrapState>("get_app_bootstrap_state");
@@ -1779,11 +2348,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus;
         const awaitingOperatorConnection =
           reportedHealthStatus.trim().toLowerCase() === "healthy";
+        const nextHealthStatus = awaitingOperatorConnection ? "starting" : reportedHealthStatus;
         updateGatewayState({
-          gatewayRunning: false,
+          gatewayRunning,
           gatewayContainerRunning: true,
           gatewayLaunchMode: liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode,
-          gatewayHealthStatus: reportedHealthStatus,
+          gatewayHealthStatus: nextHealthStatus,
         });
         if (showGatewayStartup && awaitingOperatorConnection) {
           setGatewayStartupStage("connect");
@@ -1814,6 +2384,18 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           setStartupError(buildProxyUnavailableStartupError());
           return;
         }
+        if (byokMode && !hasConfiguredLocalProvider) {
+          setStartupError({
+            message:
+              "Bring Your Own Keys needs an Anthropic, OpenAI, or Google key before the sandbox can start.",
+            actions: [{ label: "Open Settings", onClick: () => setCurrentPage("settings") }],
+          });
+          return;
+        }
+        const runtimeModel = ensureRuntimeModelConfigured();
+        if (!runtimeModel) {
+          return;
+        }
         const proxyEnabled =
           isAuthConfigured &&
           !useLocalKeys &&
@@ -1821,8 +2403,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
         if (proxyEnabled) {
           // If proxy mode is available, start with proxy flow.
+          // (startGatewayProxyFlow handles local models internally by bypassing proxy)
           const started = await startGatewayProxyFlow({
-            model: selectedModel,
+            model: runtimeModel,
             image: imageModel,
             stopFirst: false,
             allowRetry: false,
@@ -1839,7 +2422,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         } else {
           // Local keys mode (or auth disabled), use direct API keys.
           markGatewayStarting("local");
-          await invoke("start_gateway", { model: selectedModel });
+          await invoke("start_gateway", { model: runtimeModel });
         }
 
         console.log("[Entropic] Gateway started successfully");
@@ -1851,11 +2434,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       const message = extractGatewayStartError(error);
       const recoveredRuntime = await tryAutoRecoverRuntime(message);
       if (recoveredRuntime) {
+        resetGatewayAfterFailedStart();
         clearGatewayRetry();
         scheduleGatewayRetry(() => {
           void retryGatewayStartup();
         });
       } else {
+        resetGatewayAfterFailedStart();
         setStartupError({ message });
       }
     } finally {
@@ -1868,6 +2453,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     setStartupError(null);
     try {
       gatewayHealthFailureStreakRef.current = 0;
+      const runtimeModel = ensureRuntimeModelConfigured();
+      if (!runtimeModel) {
+        return;
+      }
 
       if (!useLocalKeys && !isAuthConfigured) {
         setStartupError(buildProxyUnavailableStartupError());
@@ -1881,7 +2470,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
       if (proxyEnabled) {
         const started = await startGatewayProxyFlow({
-          model: selectedModel,
+          model: runtimeModel,
           image: imageModel,
           stopFirst: gatewayRunning,
           allowRetry: true,
@@ -1897,9 +2486,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         setGatewayStartupStage("launch");
         markGatewayStarting("local");
         if (gatewayRunning) {
-          await invoke("restart_gateway", { model: selectedModel });
+          await invoke("restart_gateway", { model: runtimeModel });
         } else {
-          await invoke("start_gateway", { model: selectedModel });
+          await invoke("start_gateway", { model: runtimeModel });
         }
       }
 
@@ -1910,11 +2499,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       const message = extractGatewayStartError(error);
       const recoveredRuntime = await tryAutoRecoverRuntime(message);
       if (recoveredRuntime) {
+        resetGatewayAfterFailedStart();
         clearGatewayRetry();
         scheduleGatewayRetry(() => {
           void retryGatewayStartup();
         });
       } else {
+        resetGatewayAfterFailedStart();
         setStartupError({ message });
       }
     } finally {
@@ -1948,6 +2539,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         throw new Error("Sandbox restart requires a managed build with hosted auth, or local keys.");
       }
 
+      const runtimeModel = ensureRuntimeModelConfigured();
+      if (!runtimeModel) {
+        setShowGatewayStartup(false);
+        throw new Error("Sandbox restart requires a configured model.");
+      }
+
       const proxyEnabled =
         isAuthConfigured &&
         !useLocalKeys &&
@@ -1955,7 +2552,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
       if (proxyEnabled) {
         const started = await startGatewayProxyFlow({
-          model: selectedModel,
+          model: runtimeModel,
           image: imageModel,
           stopFirst: false,
           allowRetry: false,
@@ -1972,15 +2569,25 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         throw new Error("Sandbox restart requires available proxy credits.");
       }
 
+      if (byokMode && !hasConfiguredLocalProvider) {
+        setStartupError({
+          message:
+            "Bring Your Own Keys needs an Anthropic, OpenAI, or Google key before the sandbox can restart.",
+          actions: [{ label: "Open Settings", onClick: () => setCurrentPage("settings") }],
+        });
+        setShowGatewayStartup(false);
+        throw new Error("Sandbox restart requires a configured provider key.");
+      }
+
       setGatewayStartupStage("launch");
       markGatewayStarting("local");
-      await invoke("start_gateway", { model: selectedModel });
+      await invoke("start_gateway", { model: runtimeModel });
       setGatewayStartupStage("health");
 
       const healthStart = Date.now();
       let wsReady = false;
       while (Date.now() - healthStart < 90_000) {
-        const ok = await getGatewayStatusCached({ force: true });
+        const ok = await getGatewayStatusCached({ force: true, throwOnError: true });
         if (ok) {
           wsReady = true;
           break;
@@ -2002,10 +2609,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       setShowGatewayStartup(false);
     } catch (error) {
       console.error("[Entropic] Failed to apply runtime resources:", error);
-      setStartupError((current) => current ?? { message: extractGatewayStartError(error) });
+      const message = extractGatewayStartError(error);
+      setStartupError((current) => current ?? buildStartupError(message));
       setGatewayStartupStage("idle");
       setShowGatewayStartup(false);
-      throw error instanceof Error ? error : new Error(extractGatewayStartError(error));
+      throw error instanceof Error ? error : new Error(message);
     } finally {
       setIsTogglingGateway(false);
     }
@@ -2026,7 +2634,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     setIsTogglingGateway(true);
     try {
       const started = await startGatewayProxyFlow({
-        model: selectedModel,
+        model: activeSelectedModel,
         image: imageModel,
         stopFirst: false,
         allowRetry: false,
@@ -2044,6 +2652,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
   // Handle model change - restart gateway with new model
   function handleModelChange(newModel: string) {
+    // Local model — always restart gateway
+    if (isLocalModelId(newModel)) {
+      executeModelChange(newModel);
+      return;
+    }
     // In local-keys mode, warn if switching providers (container restart interrupts running tasks)
     if (useLocalKeys && gatewayRunning) {
       const oldProvider = selectedModel.split("/")[0];
@@ -2062,18 +2675,43 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     const oldProvider = previousModel.split("/")[0];
     const newProvider = newModel.split("/")[0];
     const expectsRestart = useLocalKeys && oldProvider !== newProvider;
+    const sanitized = sanitizeLocalModelId(newModel);
+    const isLocalModel = isLocalModelId(sanitized);
 
     setProviderSwitchConfirm(null);
-    setSelectedModel(newModel);
-    selectedModelRef.current = newModel;
+    setSelectedModel(sanitized);
+    selectedModelRef.current = sanitized;
 
     try {
-      await updateDesktopSettings({ selectedModel: newModel });
+      await updateDesktopSettings({ selectedModel: sanitized });
     } catch (error) {
       console.error("[Entropic] Failed to save model preference:", error);
     }
 
     if (!gatewayRunning) return;
+
+    if (isLocalModel) {
+      console.log("[Entropic] Switching to local model, restarting gateway:", sanitized);
+      setShowGatewayStartup(true);
+      setGatewayLifecycleMode("restarting");
+      setGatewayStartupStage("launch");
+      markGatewayStarting("local");
+      setIsTogglingGateway(true);
+      try {
+        await invoke("restart_gateway", { model: sanitized });
+        setGatewayStartupStage("health");
+        await new Promise((r) => setTimeout(r, 2000));
+        await checkGateway();
+      } catch (error) {
+        console.error("[Entropic] Failed to restart gateway with local model:", error);
+        resetGatewayAfterFailedStart();
+        setGatewayLifecycleMode("idle");
+      } finally {
+        setIsTogglingGateway(false);
+        setShowGatewayStartup(false);
+      }
+      return;
+    }
 
     setIsTogglingGateway(true);
     if (expectsRestart) {
@@ -2085,7 +2723,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     try {
       const result = await invoke<GatewayMutationResult>("apply_gateway_mutation", {
         request: {
-          model: newModel,
+          model: sanitized,
         },
       });
 
@@ -2100,60 +2738,20 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         );
         await checkGateway();
       }
-      } catch (error) {
-        console.error("[Entropic] Failed to apply model change:", error);
-        setGatewayLifecycleMode("idle");
-      } finally {
-        setIsTogglingGateway(false);
-        if (expectsRestart) {
-          setShowGatewayStartup(false);
-        }
+    } catch (error) {
+      console.error("[Entropic] Failed to apply model change:", error);
+      resetGatewayAfterFailedStart();
+      setGatewayLifecycleMode("idle");
+    } finally {
+      setIsTogglingGateway(false);
+      if (expectsRestart) {
+        setShowGatewayStartup(false);
+      }
     }
   }
 
   async function handleUseLocalKeysChange(value: boolean) {
-    if (!value && !isAuthConfigured) {
-      setStartupError(buildProxyUnavailableStartupError());
-      return;
-    }
-
-    autoStartAttemptedRef.current = false;
-    setIsTogglingGateway(true);
-    setUseLocalKeys(value);
-
-    const newModel = remapModelForMode(selectedModel, value);
-    const newImageGenerationModel = remapImageGenerationModelForMode(
-      imageGenerationModel,
-      value,
-      newModel,
-    );
-    if (newModel !== selectedModel) {
-      setSelectedModel(newModel);
-    }
-    if (newImageGenerationModel !== imageGenerationModel) {
-      setImageGenerationModel(newImageGenerationModel);
-    }
-
-    try {
-      await updateDesktopSettings({
-        useLocalKeys: value,
-        selectedModel: newModel,
-        imageGenerationModel: newImageGenerationModel,
-      });
-    } catch (error) {
-      console.error("[Entropic] Failed to save useLocalKeys:", error);
-    }
-
-    if (gatewayRunning) {
-      try {
-        await invoke("stop_gateway");
-      } catch (error) {
-        console.error("[Entropic] Failed to stop gateway:", error);
-      }
-      markGatewayStopped();
-    }
-
-    setIsTogglingGateway(false);
+    await handleConnectionModeChange(value ? "byok" : "managed");
   }
 
   async function handleCodeModelChange(value: string) {
@@ -2202,6 +2800,15 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
   }
 
+  async function handleShowReasoningChange(value: boolean) {
+    setShowReasoning(value);
+    try {
+      await updateDesktopSettings({ showReasoning: value });
+    } catch (error) {
+      console.error("[Entropic] Failed to save showReasoning:", error);
+    }
+  }
+
   useEffect(() => {
     if (currentPage === "files") return;
     void hideEmbeddedPreviewWebview().catch(() => {});
@@ -2224,6 +2831,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     const gatewayStarting =
       gatewayBootstrapPending ||
       gatewayRecovering ||
+      bootstrapState.gatewayHealthStatus.trim().toLowerCase() === "starting" ||
       showGatewayStartup ||
       (isTogglingGateway && !gatewayRunning) ||
       gatewayRetryIn !== null;
@@ -2245,11 +2853,17 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         onGatewayConnectionReady={handleGatewayConnectionReady}
         onStartGateway={startGatewayFromChat}
         onRecoverProxyAuth={recoverProxyAuthFromChat}
-        useLocalKeys={useLocalKeys}
-        selectedModel={selectedModel}
+        connectionMode={connectionMode}
+        onConnectionModeChange={handleConnectionModeChange}
+        localModelConfig={localModelConfig}
+        localModePerformanceSettings={localModePerformanceSettings}
+        managedTrialBalanceCents={localCreditBalanceCents}
+        onLocalModelConfigChange={persistLocalModelConfig}
+        selectedModel={activeSelectedModel}
         onModelChange={handleModelChange}
         imageModel={imageModel}
         imageGenerationModel={imageGenerationModel}
+        showReasoning={showReasoning}
         integrationsSyncing={integrationsSyncing}
         integrationsMissing={integrationsMissing}
         onNavigate={setCurrentPage}
@@ -2295,16 +2909,31 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           onGatewayToggle={restartGatewayFromSettings}
           onApplyRuntimeResources={applyRuntimeResourcesAndRestart}
           isTogglingGateway={isTogglingGateway}
-          selectedModel={selectedModel}
+          connectionMode={connectionMode}
+          onConnectionModeChange={handleConnectionModeChange}
+          selectedModel={activeSelectedModel}
           onModelChange={handleModelChange}
-          useLocalKeys={useLocalKeys}
-          onUseLocalKeysChange={handleUseLocalKeysChange}
           codeModel={codeModel}
           imageModel={imageModel}
           imageGenerationModel={imageGenerationModel}
+          showReasoning={showReasoning}
+          onShowReasoningChange={handleShowReasoningChange}
           onCodeModelChange={handleCodeModelChange}
           onImageGenerationModelChange={handleImageGenerationModelChange}
           onImageModelChange={handleImageModelChange}
+          localModelConfig={localModelConfig}
+          localModePerformanceSettings={localModePerformanceSettings}
+          onLocalModelConfigChange={persistLocalModelConfig}
+          onLocalModePerformanceSettingsChange={persistLocalModePerformanceSettings}
+          onManagedLocalRuntimeModelActivated={handleManagedLocalRuntimeModelActivated}
+          localModel={localModelConfig.enabled && localModelConfig.modelName
+            ? {
+                id: `local/${localModelConfig.modelName}`,
+                name: `${localModelConfig.modelName} (${localModelProviderLabel(localModelConfig)})`,
+                provider: localModelProviderLabel(localModelConfig),
+                tier: "fast",
+              }
+            : null}
         />
       </Suspense>
     );
@@ -2336,16 +2965,33 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             onApplyRuntimeResources={applyRuntimeResourcesAndRestart}
             onRecoverProxyAuth={recoverProxyAuthFromChat}
             isTogglingGateway={isTogglingGateway}
-            selectedModel={selectedModel}
+            selectedModel={activeSelectedModel}
             onModelChange={handleModelChange}
             useLocalKeys={useLocalKeys}
-            onUseLocalKeysChange={handleUseLocalKeysChange}
+            connectionMode={connectionMode}
+            onConnectionModeChange={handleConnectionModeChange}
             codeModel={codeModel}
             imageModel={imageModel}
             imageGenerationModel={imageGenerationModel}
+            showReasoning={showReasoning}
+            onShowReasoningChange={handleShowReasoningChange}
             onCodeModelChange={handleCodeModelChange}
             onImageGenerationModelChange={handleImageGenerationModelChange}
             onImageModelChange={handleImageModelChange}
+            localModelConfig={localModelConfig}
+            localModePerformanceSettings={localModePerformanceSettings}
+            onLocalModelConfigChange={persistLocalModelConfig}
+            onLocalModePerformanceSettingsChange={persistLocalModePerformanceSettings}
+            localModel={
+              localModelConfig.enabled && localModelConfig.modelName
+                ? {
+                    id: `local/${localModelConfig.modelName}`,
+                    name: `${localModelConfig.modelName} (${localModelProviderLabel(localModelConfig)})`,
+                    provider: localModelProviderLabel(localModelConfig),
+                    tier: "fast",
+                  }
+                : null
+            }
           />
         );
       case "tasks":
@@ -2360,6 +3006,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         return null;
     }
   }
+
+  const suppressStartupErrorToast =
+    currentPage === "chat" &&
+    startupError !== null &&
+    isConnectionSetupStartupError(startupError.message);
 
   return (
     <Layout
@@ -2421,7 +3072,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           showFirstTimeHint
         />
       )}
-      {!showGatewayStartup && startupError && (
+      {!showGatewayStartup && startupError && !suppressStartupErrorToast && (
         <div className="absolute right-4 top-4 z-40 w-[min(28rem,calc(100%-2rem))] rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-sm text-[var(--text-primary)] shadow-lg">
           <div className="font-medium">Gateway Start Failed</div>
           <div className="mt-1 text-xs">{startupError.message}</div>

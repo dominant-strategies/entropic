@@ -1,0 +1,2 @@
+# Optional managed runtime backend for transformer-class models on Linux
+vllm>=0.9

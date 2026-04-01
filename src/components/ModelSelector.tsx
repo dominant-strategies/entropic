@@ -122,6 +122,7 @@ const PROVIDER_AUTH_ID: Record<string, string> = {
   OpenAI: "openai",
   Google: "google",
   OpenRouter: "openrouter",
+  Local: "local",
 };
 
 const TIER_ICONS: Record<string, typeof Zap> = {
@@ -148,6 +149,14 @@ const TIER_COLORS: Record<string, string> = {
 //   Mistral: "bg-amber-500/20 text-amber-400",
 // };
 
+export function isLocalModelId(modelId: string): boolean {
+  return modelId.startsWith("local/");
+}
+
+export function sanitizeLocalModelId(modelId: string): string {
+  return modelId;
+}
+
 interface ModelSelectorProps {
   selectedModel: string;
   onModelChange: (modelId: string) => void;
@@ -156,6 +165,8 @@ interface ModelSelectorProps {
   models?: Model[];
   /** Provider IDs that have keys configured (e.g. ["anthropic", "openai"]). When set, only matching providers are shown. */
   connectedProviders?: string[];
+  /** Local model entry to inject into the model list. */
+  localModel?: Model | null;
 }
 
 export function ModelSelector({
@@ -165,12 +176,14 @@ export function ModelSelector({
   useLocalKeys = false,
   models,
   connectedProviders,
+  localModel,
 }: ModelSelectorProps) {
   const allModels = models ?? (useLocalKeys ? LOCAL_MODELS : PROXY_MODELS);
   // Filter to only show models from providers the user has connected
-  const availableModels = connectedProviders && connectedProviders.length > 0
+  const filtered = connectedProviders && connectedProviders.length > 0
     ? allModels.filter(m => connectedProviders.includes(PROVIDER_AUTH_ID[m.provider] ?? m.provider.toLowerCase()))
     : allModels;
+  const availableModels = localModel ? [localModel, ...filtered] : filtered;
   const [isOpen, setIsOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);

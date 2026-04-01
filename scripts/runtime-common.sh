@@ -60,6 +60,14 @@ entropic_mode_label() {
     fi
 }
 
+entropic_host_os() {
+    uname -s | tr '[:upper:]' '[:lower:]'
+}
+
+entropic_linux_uses_native_docker() {
+    [ "$(entropic_host_os)" = "linux" ]
+}
+
 entropic_colima_home_candidates() {
     local seen=":"
     local home
@@ -197,6 +205,11 @@ entropic_resolve_mode_docker_host() {
     done < <(entropic_colima_home_candidates)
 
     return 1
+}
+
+entropic_default_docker_is_ready() {
+    local docker_bin="$1"
+    "$docker_bin" info >/dev/null 2>&1
 }
 
 entropic_runtime_path_for_colima() {

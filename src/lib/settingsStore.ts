@@ -7,11 +7,31 @@ export type DesktopSettingsSnapshot = {
   codeModel?: string;
   imageModel?: string;
   imageGenerationModel?: string;
+  showReasoning?: boolean;
+  localDebugMode?: boolean;
+  localDebugDirectBypass?: boolean;
+  localDirectDebugChat?: boolean;
   desktopWallpaper?: string;
   desktopCustomWallpaper?: string;
 };
 
+export type LocalModePerformanceSettings = {
+  debugMode: boolean;
+  debugDirectBypass: boolean;
+};
+
+export const DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS: LocalModePerformanceSettings = {
+  debugMode: false,
+  debugDirectBypass: false,
+};
+
 const SETTINGS_FILE = "entropic-settings.json";
+const REMOVED_SETTING_KEYS = [
+  "localDisableTools",
+  "localLightweightBootstrap",
+  "localLightRuntimeDefaults",
+  "localCapturePromptPreview",
+] as const;
 
 const SETTING_KEYS = [
   "useLocalKeys",
@@ -20,6 +40,10 @@ const SETTING_KEYS = [
   "codeModel",
   "imageModel",
   "imageGenerationModel",
+  "showReasoning",
+  "localDebugMode",
+  "localDebugDirectBypass",
+  "localDirectDebugChat",
   "desktopWallpaper",
   "desktopCustomWallpaper",
 ] as const satisfies ReadonlyArray<keyof DesktopSettingsSnapshot>;
@@ -55,8 +79,29 @@ function normalizeDesktopSettings(
     codeModel: normalizeString(raw?.codeModel),
     imageModel: normalizeString(raw?.imageModel),
     imageGenerationModel: normalizeString(raw?.imageGenerationModel),
+    showReasoning: typeof raw?.showReasoning === "boolean" ? raw.showReasoning : true,
+    localDebugMode: typeof raw?.localDebugMode === "boolean" ? raw.localDebugMode : undefined,
+    localDebugDirectBypass:
+      typeof raw?.localDebugDirectBypass === "boolean" ? raw.localDebugDirectBypass : undefined,
+    localDirectDebugChat:
+      typeof raw?.localDirectDebugChat === "boolean" ? raw.localDirectDebugChat : undefined,
     desktopWallpaper: normalizeString(raw?.desktopWallpaper),
     desktopCustomWallpaper: normalizeString(raw?.desktopCustomWallpaper),
+  };
+}
+
+export function resolveLocalModePerformanceSettings(
+  raw: Partial<DesktopSettingsSnapshot> | null | undefined,
+): LocalModePerformanceSettings {
+  const legacyDirectDebugChat =
+    typeof raw?.localDirectDebugChat === "boolean" ? raw.localDirectDebugChat : undefined;
+  return {
+    debugMode:
+      raw?.localDebugMode ?? legacyDirectDebugChat ?? DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.debugMode,
+    debugDirectBypass:
+      raw?.localDebugDirectBypass ??
+      legacyDirectDebugChat ??
+      DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.debugDirectBypass,
   };
 }
 
@@ -128,6 +173,9 @@ export async function updateDesktopSettings(
         continue;
       }
       await store.set(String(key), value);
+    }
+    for (const key of REMOVED_SETTING_KEYS) {
+      await store.delete(String(key));
     }
     await store.save();
     publish(next);

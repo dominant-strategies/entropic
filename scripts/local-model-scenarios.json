@@ -1,0 +1,106 @@
+[
+  {
+    "id": "hello",
+    "description": "Single-turn greeting to catch planning-text leakage on easy replies.",
+    "messages": [
+      "Hi"
+    ]
+  },
+  {
+    "id": "weather_austin",
+    "description": "Single-turn live-info request that should force a tool call instead of a memory answer.",
+    "messages": [
+      "What's the weather in Austin, Texas?"
+    ]
+  },
+  {
+    "id": "weather_followup",
+    "description": "Weather lookup followed by a follow-up question to see whether the model actually surfaces the tool result.",
+    "messages": [
+      "Hi",
+      "Can you check the weather in Austin?",
+      "what result did you get?"
+    ]
+  },
+  {
+    "id": "weather_repeat",
+    "description": "Repeated weather turns to catch stale reply reuse, malformed tool tags, or missing finalization.",
+    "messages": [
+      "What is the weather in Austin, Texas?",
+      "What is the weather in Austin, Texas?"
+    ]
+  },
+  {
+    "id": "current_info",
+    "description": "General current-information request to inspect tool routing outside of weather-specific prompts.",
+    "messages": [
+      "What's the latest news about NVIDIA today?"
+    ]
+  },
+  {
+    "id": "animals_lookup",
+    "description": "General animal lookup to test browser/web/tool use outside weather.",
+    "messages": [
+      "Can you look up axolotls and tell me one notable fact about them?"
+    ]
+  },
+  {
+    "id": "clothing_lookup",
+    "description": "General clothing advice lookup.",
+    "messages": [
+      "Can you look up layering advice for cold weather and give me one practical tip?"
+    ]
+  },
+  {
+    "id": "news_site_lookup",
+    "description": "News site request to test headline retrieval.",
+    "messages": [
+      "Can you look up AP News and tell me one current headline?"
+    ]
+  },
+  {
+    "id": "politics_lookup",
+    "description": "Politics-related current-info request.",
+    "messages": [
+      "Can you look up a current U.S. politics headline and summarize it?"
+    ]
+  },
+  {
+    "id": "space_research_lookup",
+    "description": "Space research current-info request.",
+    "messages": [
+      "Can you look up a current NASA or ESA space research update and summarize one key point?"
+    ]
+  },
+  {
+    "id": "gardening_lookup",
+    "description": "Gardening advice lookup.",
+    "messages": [
+      "Can you look up spring vegetable gardening advice and give me one practical tip?"
+    ]
+  },
+  {
+    "id": "workspace_probe",
+    "description": "Simple workspace/tooling request to compare local tool behavior outside of live web lookups.",
+    "messages": [
+      "List the top-level files in the workspace and tell me what kind of project this is."
+    ]
+  },
+  {
+    "id": "spreadsheet_local_dogs",
+    "description": "Local spreadsheet creation request that should prefer workspace tools over Google Drive or Sheets.",
+    "messages": [
+      "Can you help me build an excel sheet?",
+      "Create an Excel-compatible spreadsheet in the local workspace listing 10 dog breeds and tell me the file path."
+    ]
+  },
+  {
+    "id": "spreadsheet_local_followup",
+    "description": "Spreadsheet creation followed by a location/status follow-up.",
+    "messages": [
+      "Can you help me build an excel sheet?",
+      "Create an Excel-compatible spreadsheet in the local workspace listing 10 dog breeds and tell me the file path.",
+      "Where is it?"
+    ]
+  }
+]

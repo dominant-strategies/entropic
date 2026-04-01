@@ -37,6 +37,33 @@ export type AssistantPayload = {
   hadToolPayload: boolean;
 };
 
+export type MessageUsage = {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+};
+
+export type MessageToolCall = {
+  toolCallId: string;
+  name: string;
+  phase: string;
+  isError: boolean;
+  argsText?: string;
+  detailText?: string;
+};
+
+export type AssistantMessagePart =
+  | {
+      type: "reasoning";
+      text: string;
+    }
+  | ({ type: "toolCall" } & MessageToolCall)
+  | {
+      type: "text";
+      text: string;
+    };
+
 export type Message = {
   id: string;
   role: "user" | "assistant";
@@ -47,6 +74,10 @@ export type Message = {
   attachments?: MessageAttachment[];
   terminalResult?: TerminalCommandResult;
   assistantPayload?: AssistantPayload;
+  reasoningText?: string;
+  toolCalls?: MessageToolCall[];
+  parts?: AssistantMessagePart[];
+  usage?: MessageUsage;
 };
 
 export type ChatSession = {
@@ -93,7 +124,7 @@ export function parseRunSlashCommand(raw: string): string | null {
 
 export function extractJsonBlocks(text: string): Array<{ jsonText: string; start: number; end: number }> {
   const blocks: Array<{ jsonText: string; start: number; end: number }> = [];
-  const codeFence = /```json\\s*([\\s\\S]*?)```/gi;
+  const codeFence = /```json\s*([\s\S]*?)```/gi;
   let match: RegExpExecArray | null = null;
   const fencedRanges: Array<{ start: number; end: number }> = [];
   while ((match = codeFence.exec(text))) {
@@ -197,6 +228,68 @@ export function stripExternalUntrustedSections(raw: string): string {
   return text.trim();
 }
 
+export function unwrapExternalUntrustedText(raw: string): string {
+  if (!raw) return "";
+  const isSafetyNoticeLine = (line: string): boolean => {
+    const lowered = line.trim().toLowerCase();
+    if (!lowered) return false;
+    if (lowered.startsWith("security notice:")) return true;
+    if (lowered.startsWith("source:")) return true;
+    if (lowered === "---") return true;
+    return (
+      lowered.startsWith("- do not ") ||
+      lowered.startsWith("- this content may contain ") ||
+      lowered.startsWith("- respond helpfully ") ||
+      lowered.startsWith("- delete data,") ||
+      lowered.startsWith("- execute system commands") ||
+      lowered.startsWith("- change your behavior") ||
+      lowered.startsWith("- reveal sensitive information") ||
+      lowered.startsWith("- send messages to third parties")
+    );
+  };
+  const stripSafetyPreamble = (value: string): string => {
+    const trimmed = value.trimStart();
+    if (!trimmed.toLowerCase().startsWith("security notice:")) {
+      return value;
+    }
+    const lines = value.split(/\r?\n/);
+    let index = 1;
+    while (index < lines.length) {
+      const line = lines[index]?.trim() ?? "";
+      if (!line) {
+        index += 1;
+        continue;
+      }
+      if (line.startsWith("<<<EXTERNAL_UNTRUSTED_CONTENT")) {
+        return lines.slice(index).join("\n");
+      }
+      if (isSafetyNoticeLine(line)) {
+        index += 1;
+        continue;
+      }
+      return lines.slice(index).join("\n");
+    }
+    return "";
+  };
+  let text = stripSafetyPreamble(raw);
+  text = text.replace(
+    /<<<EXTERNAL_UNTRUSTED_CONTENT(?:\s+id="[^"]*")?\s*>>>\s*([\s\S]*?)\s*<<<END_EXTERNAL_UNTRUSTED_CONTENT(?:\s+id="[^"]*")?\s*>>>/gi,
+    (_match, inner: string) =>
+      inner
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(line => line && !isSafetyNoticeLine(line))
+        .join("\n")
+  );
+  text = text.replace(/<<<(?:END_)?EXTERNAL_UNTRUSTED_CONTENT(?:\s+id="[^"]*")?\s*>>>/gi, "");
+  text = text
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !isSafetyNoticeLine(line))
+    .join("\n");
+  return text.trim();
+}
+
 export function sanitizeAuthStoreDetails(raw: string): string {
   if (!raw) return "";
   return raw
@@ -249,7 +342,7 @@ export function sanitizeGatewayErrorMessage(raw?: string | null): string {
   const providerMatches = [...message.matchAll(/No API key found for provider "([^"]+)"/g)];
   const providers = [...new Set(providerMatches.map((m) => m[1]).filter(Boolean))];
   if (providers.length > 0) {
-    return `Missing API key for ${providers.join(", ")}. Add provider keys in Settings, or disable Use Local Keys.`;
+    return `Missing API key for ${providers.join(", ")}. Add provider keys in Settings, or switch back to Managed Provider mode.`;
   }
 
   return sanitizeAuthStoreDetails(message);
@@ -491,6 +584,10 @@ export function sanitizeAssistantDisplayContent(raw: string): string {
   let text = stripConversationMetadata(raw);
   text = stripExternalUntrustedSections(text);
   text = stripOpenClawStatusLines(text);
+  text = text.replace(/<\/?tool_call>\s*/gi, "");
+  text = text.replace(/<\/?function(?:=[^>]+)?>\s*/gi, "");
+  text = text.replace(/<\/?parameter(?:=[^>]+)?>\s*/gi, "");
+  text = text.replace(/^\s*(?:assistant|user|system|tool)\s*:?\s*$/gim, "");
 
   try {
     const direct = JSON.parse(text);
@@ -524,7 +621,11 @@ export function sanitizeAssistantDisplayContent(raw: string): string {
   text = stripInlineClawdbotMetadata(text);
 
   text = sanitizeAuthStoreDetails(text);
-  return text.replace(/\n{3,}/g, "\n\n").trim();
+  text = text.replace(/\n{3,}/g, "\n\n").trim();
+  if (/^(?:assistant|user|system|tool)$/i.test(text)) {
+    return "";
+  }
+  return text;
 }
 
 export function buildAssistantPayload(raw: string) {
@@ -540,16 +641,380 @@ export function buildAssistantPayload(raw: string) {
   };
 }
 
+function splitInlineAssistantReasoning(raw: string): {
+  content: string;
+  reasoningText?: string;
+} {
+  const text = raw.trim();
+  if (!text) {
+    return { content: "" };
+  }
+
+  const pairedMatch = text.match(/<think>([\s\S]*?)<\/think>([\s\S]*)/i);
+  if (pairedMatch) {
+    const reasoningText = pairedMatch[1]?.trim();
+    const content = pairedMatch[2]?.trim() ?? "";
+    return {
+      content,
+      reasoningText: reasoningText || undefined,
+    };
+  }
+
+  if (/<think>/i.test(text)) {
+    return { content: text };
+  }
+
+  const closeMatch = text.match(/<\/think>/i);
+  if (!closeMatch || closeMatch.index === undefined) {
+    const leakedReasoning = splitLeakedAssistantReasoning(text);
+    return leakedReasoning ?? { content: text };
+  }
+
+  const reasoningText = text.slice(0, closeMatch.index).trim();
+  const content = text.slice(closeMatch.index + closeMatch[0].length).trim();
+  if (!reasoningText || !content) {
+    return { content: text.replace(/<\/think>/gi, "").trim() };
+  }
+  return {
+    content,
+    reasoningText,
+  };
+}
+
+const LEAKED_REASONING_PREFIX_RE =
+  /^(?:okay|alright|hmm|wait|right|so\b|the user\b|we need to\b|i need to\b|i should\b|let me\b|since\b)/i;
+
+const LEAKED_REASONING_MARKERS = [
+  /\bthe user (?:said|says|asked|wants|is asking)\b/i,
+  /\bi need to\b/i,
+  /\bi should\b/i,
+  /\blet me\b/i,
+  /\bno tools?(?: required| needed)?\b/i,
+  /\bthe response should be\b/i,
+  /\brespond (?:directly|briefly|concisely)\b/i,
+  /\bjust (?:say|reply|give)\b/i,
+  /\bprobably\b/i,
+  /\bmaybe\b/i,
+  /\bthat's (?:good|fine)\b/i,
+  /\byep\b/i,
+  /\balright\b/i,
+  /\bas joulie\b/i,
+];
+
+function looksLikeLeakedAssistantReasoning(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length < 96) {
+    return false;
+  }
+  if (!LEAKED_REASONING_PREFIX_RE.test(trimmed)) {
+    return false;
+  }
+  let markerCount = 0;
+  for (const marker of LEAKED_REASONING_MARKERS) {
+    if (marker.test(trimmed)) {
+      markerCount += 1;
+    }
+  }
+  return markerCount >= 2;
+}
+
+function looksLikeStandaloneAssistantAnswer(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 280) {
+    return false;
+  }
+  if (!/[A-Za-z0-9]/.test(trimmed)) {
+    return false;
+  }
+  if (LEAKED_REASONING_PREFIX_RE.test(trimmed)) {
+    return false;
+  }
+  for (const marker of LEAKED_REASONING_MARKERS) {
+    if (marker.test(trimmed)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function splitLeakedAssistantReasoning(text: string): {
+  content: string;
+  reasoningText?: string;
+} | null {
+  if (!looksLikeLeakedAssistantReasoning(text)) {
+    return null;
+  }
+
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+  if (paragraphs.length >= 2) {
+    const candidate = paragraphs[paragraphs.length - 1] ?? "";
+    const reasoningText = paragraphs.slice(0, -1).join("\n\n").trim();
+    if (reasoningText && looksLikeStandaloneAssistantAnswer(candidate)) {
+      return {
+        content: candidate,
+        reasoningText,
+      };
+    }
+  }
+
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length >= 2) {
+    const candidate = lines[lines.length - 1] ?? "";
+    const reasoningText = lines.slice(0, -1).join("\n").trim();
+    if (reasoningText && looksLikeStandaloneAssistantAnswer(candidate)) {
+      return {
+        content: candidate,
+        reasoningText,
+      };
+    }
+  }
+
+  return {
+    content: "",
+    reasoningText: text,
+  };
+}
+
+function normalizeToolText(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = unwrapExternalUntrustedText(value).trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function sanitizeMessageToolCall(value: unknown): MessageToolCall | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const tool = value as Record<string, unknown>;
+  const toolCallId =
+    typeof tool.toolCallId === "string"
+      ? tool.toolCallId.trim()
+      : typeof tool.tool_call_id === "string"
+        ? tool.tool_call_id.trim()
+        : typeof tool.id === "string"
+          ? tool.id.trim()
+          : "";
+  const name =
+    typeof tool.name === "string"
+      ? tool.name.trim()
+      : typeof tool.tool_name === "string"
+        ? tool.tool_name.trim()
+        : "";
+  const phase =
+    typeof tool.phase === "string" && tool.phase.trim()
+      ? tool.phase.trim()
+      : "start";
+  if (!toolCallId || !name) {
+    return null;
+  }
+  return {
+    toolCallId,
+    name,
+    phase,
+    isError: tool.isError === true,
+    argsText:
+      normalizeToolText(tool.argsText) ??
+      normalizeToolText(tool.args_text) ??
+      normalizeToolText(tool.argsSummary) ??
+      normalizeToolText(tool.args_summary),
+    detailText:
+      normalizeToolText(tool.detailText) ??
+      normalizeToolText(tool.detail_text) ??
+      normalizeToolText(tool.summary),
+  };
+}
+
+function mergeMessageToolCallEntry(
+  existing: MessageToolCall | undefined,
+  incoming: MessageToolCall,
+): MessageToolCall {
+  if (!existing) {
+    return incoming;
+  }
+  return {
+    toolCallId: incoming.toolCallId || existing.toolCallId,
+    name: incoming.name || existing.name,
+    phase: incoming.phase || existing.phase,
+    isError: existing.isError || incoming.isError,
+    argsText: incoming.argsText ?? existing.argsText,
+    detailText: incoming.detailText ?? existing.detailText,
+  };
+}
+
+export function mergeMessageToolCalls(
+  ...sources: Array<MessageToolCall[] | undefined>
+): MessageToolCall[] | undefined {
+  const order: string[] = [];
+  const merged = new Map<string, MessageToolCall>();
+  for (const source of sources) {
+    if (!Array.isArray(source)) {
+      continue;
+    }
+    for (const entry of source) {
+      const sanitized = sanitizeMessageToolCall(entry);
+      if (!sanitized) {
+        continue;
+      }
+      if (!merged.has(sanitized.toolCallId)) {
+        order.push(sanitized.toolCallId);
+      }
+      merged.set(
+        sanitized.toolCallId,
+        mergeMessageToolCallEntry(merged.get(sanitized.toolCallId), sanitized),
+      );
+    }
+  }
+  if (order.length === 0) {
+    return undefined;
+  }
+  return order
+    .map((toolCallId) => merged.get(toolCallId))
+    .filter((entry): entry is MessageToolCall => Boolean(entry));
+}
+
+function isAssistantMessagePart(value: unknown): value is AssistantMessagePart {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const part = value as Record<string, unknown>;
+  if (part.type === "reasoning") {
+    return typeof part.text === "string";
+  }
+  if (part.type === "toolCall") {
+    return sanitizeMessageToolCall(part) !== null;
+  }
+  if (part.type === "text") {
+    return typeof part.text === "string";
+  }
+  return false;
+}
+
+function sanitizeAssistantMessageParts(parts: AssistantMessagePart[] | undefined): AssistantMessagePart[] {
+  if (!Array.isArray(parts) || parts.length === 0) {
+    return [];
+  }
+  const next: AssistantMessagePart[] = [];
+  for (const part of parts) {
+    if (!isAssistantMessagePart(part)) {
+      continue;
+    }
+    if (part.type === "reasoning") {
+      const text = part.text.trim();
+      if (!text) continue;
+      next.push({ type: "reasoning", text });
+      continue;
+    }
+    if (part.type === "toolCall") {
+      const sanitized = sanitizeMessageToolCall(part);
+      if (!sanitized) continue;
+      next.push({
+        type: "toolCall",
+        ...sanitized,
+      });
+      continue;
+    }
+    if (!part.text.trim()) {
+      continue;
+    }
+    next.push({ type: "text", text: part.text });
+  }
+  return next;
+}
+
+export function buildAssistantMessageParts(params: {
+  parts?: AssistantMessagePart[];
+  content?: string;
+  reasoningText?: string;
+  toolCalls?: Message["toolCalls"];
+}): AssistantMessagePart[] {
+  const next: AssistantMessagePart[] = [];
+  const sanitizedParts = sanitizeAssistantMessageParts(params.parts);
+  const reasoningParts = sanitizedParts.filter(
+    (part): part is Extract<AssistantMessagePart, { type: "reasoning" }> => part.type === "reasoning",
+  );
+  const mergedToolCalls = mergeMessageToolCalls(
+    sanitizedParts
+      .filter((part): part is Extract<AssistantMessagePart, { type: "toolCall" }> => part.type === "toolCall")
+      .map((part) => ({
+        toolCallId: part.toolCallId,
+        name: part.name,
+        phase: part.phase,
+        isError: part.isError,
+        argsText: part.argsText,
+        detailText: part.detailText,
+      })),
+    params.toolCalls,
+  );
+
+  const reasoningText = params.reasoningText?.trim() ?? "";
+  if (reasoningText && reasoningParts.length === 0) {
+    next.unshift({ type: "reasoning", text: reasoningText });
+  }
+  next.push(...reasoningParts);
+
+  for (const toolCall of mergedToolCalls ?? []) {
+    next.push({ type: "toolCall", ...toolCall });
+  }
+
+  if (params.content && params.content.trim()) {
+    next.push({ type: "text", text: params.content });
+  }
+
+  return next;
+}
+
+export function resolveAssistantMessageParts(message: Pick<
+  Message,
+  "role" | "parts" | "content" | "reasoningText" | "toolCalls"
+>): AssistantMessagePart[] {
+  if (message.role !== "assistant") {
+    return [];
+  }
+  return buildAssistantMessageParts({
+    parts: message.parts,
+    content: message.content,
+    reasoningText: message.reasoningText,
+    toolCalls: message.toolCalls,
+  });
+}
+
 export function normalizeCachedMessage(message: Message): Message {
   if (message.role !== "assistant") return message;
   const prepared = buildAssistantPayload(message.content || "");
+  const split = splitInlineAssistantReasoning(prepared.content);
   if (!prepared.content && prepared.assistantPayload.events.length === 0 && prepared.assistantPayload.errors.length === 0) {
-    return { ...message, content: "", assistantPayload: prepared.assistantPayload };
+    return {
+      ...message,
+      content: "",
+      reasoningText: split.reasoningText ?? message.reasoningText,
+      assistantPayload: prepared.assistantPayload,
+      parts: buildAssistantMessageParts({
+        parts: message.parts,
+        content: "",
+        reasoningText: split.reasoningText ?? message.reasoningText,
+        toolCalls: message.toolCalls,
+      }),
+    };
   }
   return {
     ...message,
-    content: prepared.content,
+    content: split.content,
+    reasoningText: split.reasoningText ?? message.reasoningText,
     assistantPayload: prepared.assistantPayload,
+    parts: buildAssistantMessageParts({
+      parts: message.parts,
+      content: split.content,
+      reasoningText: split.reasoningText ?? message.reasoningText,
+      toolCalls: message.toolCalls,
+    }),
   };
 }
 
@@ -580,6 +1045,41 @@ export function toTimestampMs(value: unknown): number | null {
     if (!Number.isNaN(parsed)) return parsed;
   }
   return null;
+}
+
+function toFiniteUsageNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function extractMessageUsage(raw: unknown): MessageUsage | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const usage = raw as Record<string, unknown>;
+  const inputTokens =
+    toFiniteUsageNumber(usage.inputTokens) ??
+    toFiniteUsageNumber(usage.input_tokens) ??
+    toFiniteUsageNumber(usage.input);
+  const outputTokens =
+    toFiniteUsageNumber(usage.outputTokens) ??
+    toFiniteUsageNumber(usage.output_tokens) ??
+    toFiniteUsageNumber(usage.output);
+  const totalTokens =
+    toFiniteUsageNumber(usage.totalTokens) ??
+    toFiniteUsageNumber(usage.total_tokens) ??
+    toFiniteUsageNumber(usage.total);
+  const nestedCost =
+    usage.cost && typeof usage.cost === "object" && !Array.isArray(usage.cost)
+      ? (usage.cost as Record<string, unknown>)
+      : undefined;
+  const costUsd = toFiniteUsageNumber(nestedCost?.total) ?? toFiniteUsageNumber(usage.costUsd);
+
+  const next: MessageUsage = {};
+  if (inputTokens !== undefined) next.inputTokens = inputTokens;
+  if (outputTokens !== undefined) next.outputTokens = outputTokens;
+  if (totalTokens !== undefined) next.totalTokens = totalTokens;
+  if (costUsd !== undefined) next.costUsd = costUsd;
+  return Object.keys(next).length > 0 ? next : undefined;
 }
 
 export function extractMessageTimestamp(message: GatewayMessage): number | null {
@@ -713,6 +1213,98 @@ export function extractMessageText(message: GatewayMessage): { text: string; has
   return { text: "", hasText: false, hasNonText: false };
 }
 
+function extractGatewayAssistantTrace(
+  message: GatewayMessage,
+): Pick<Message, "reasoningText" | "toolCalls" | "parts"> {
+  if (!Array.isArray(message.content)) {
+    return {};
+  }
+
+  const reasoningParts: string[] = [];
+  const toolCalls: NonNullable<Message["toolCalls"]> = [];
+  const parts: AssistantMessagePart[] = [];
+
+  for (const block of message.content) {
+    if (!block || typeof block !== "object") {
+      continue;
+    }
+    const entry = block as Record<string, unknown>;
+    const type = typeof entry.type === "string" ? entry.type : "";
+
+    if (type === "thinking" || type === "reasoning") {
+      const raw =
+        typeof entry.thinking === "string"
+          ? entry.thinking
+          : typeof entry.reasoning === "string"
+            ? entry.reasoning
+            : typeof entry.text === "string"
+              ? entry.text
+              : "";
+      const trimmed = raw.trim();
+      if (trimmed) {
+        reasoningParts.push(trimmed);
+        parts.push({ type: "reasoning", text: trimmed });
+      }
+      continue;
+    }
+
+    if (type === "text" && typeof entry.text === "string" && entry.text.trim()) {
+      parts.push({ type: "text", text: entry.text });
+      continue;
+    }
+
+    if (type !== "toolCall" && type !== "tool_call" && type !== "tool_use") {
+      continue;
+    }
+
+    const name =
+      typeof entry.name === "string"
+        ? entry.name.trim()
+        : typeof entry.tool_name === "string"
+          ? entry.tool_name.trim()
+          : "";
+    const toolCallId =
+      typeof entry.id === "string"
+        ? entry.id.trim()
+        : typeof entry.toolCallId === "string"
+          ? entry.toolCallId.trim()
+          : typeof entry.tool_call_id === "string"
+            ? entry.tool_call_id.trim()
+            : "";
+
+    if (!name || !toolCallId) {
+      continue;
+    }
+
+    const toolCallPart = {
+      toolCallId,
+      name,
+      phase:
+        typeof entry.phase === "string" && entry.phase.trim()
+          ? entry.phase.trim()
+          : "result",
+      isError: entry.isError === true,
+      argsText:
+        normalizeToolText(entry.argsText) ??
+        normalizeToolText(entry.args_text) ??
+        normalizeToolText(entry.argsSummary) ??
+        normalizeToolText(entry.args_summary),
+      detailText:
+        normalizeToolText(entry.detailText) ??
+        normalizeToolText(entry.detail_text) ??
+        normalizeToolText(entry.summary),
+    } as const;
+    toolCalls.push(toolCallPart);
+    parts.push({ type: "toolCall", ...toolCallPart });
+  }
+
+  return {
+    reasoningText: reasoningParts.length > 0 ? reasoningParts.join("\n\n") : undefined,
+    toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+    parts: parts.length > 0 ? parts : undefined,
+  };
+}
+
 // ── Session filtering ──────────────────────────────────────────
 
 export function isChannelOrSystemSessionKey(rawKey: string | null | undefined): boolean {
@@ -782,19 +1374,38 @@ export function normalizeGatewayMessage(message: GatewayMessage, id: string): Me
   }
   if (roleRaw === "assistant") {
     const assistantError = extractAssistantErrorFromGatewayMessage(message);
+    const assistantTrace = extractGatewayAssistantTrace(message);
+    const hasAssistantTrace = Boolean(
+      assistantTrace.reasoningText || assistantTrace.toolCalls?.length,
+    );
     if (!hasText && !hasNonText && !assistantError) return null;
     if (!hasText) {
-      if (!assistantError) return null;
+      if (!assistantError && !hasAssistantTrace) return null;
       return {
         id,
         role: "assistant",
-        content: assistantError,
+        content: assistantError ?? "",
+        reasoningText: assistantTrace.reasoningText,
+        toolCalls: assistantTrace.toolCalls,
+        parts: buildAssistantMessageParts({
+          parts: assistantTrace.parts,
+          content: assistantError ?? "",
+          reasoningText: assistantTrace.reasoningText,
+          toolCalls: assistantTrace.toolCalls,
+        }),
+        usage: extractMessageUsage(message.usage),
         sentAt: messageTimestamp ?? Date.now(),
       };
     }
     const prepared = buildAssistantPayload(text);
-    const resolvedContent = prepared.content || assistantError || "";
-    if (!resolvedContent && prepared.assistantPayload.events.length === 0 && prepared.assistantPayload.errors.length === 0) {
+    const split = splitInlineAssistantReasoning(prepared.content);
+    const resolvedContent = split.content || assistantError || "";
+    if (
+      !resolvedContent &&
+      prepared.assistantPayload.events.length === 0 &&
+      prepared.assistantPayload.errors.length === 0 &&
+      !hasAssistantTrace
+    ) {
       return null;
     }
     return {
@@ -802,6 +1413,15 @@ export function normalizeGatewayMessage(message: GatewayMessage, id: string): Me
       role: "assistant",
       content: resolvedContent,
       assistantPayload: prepared.assistantPayload,
+      reasoningText: assistantTrace.reasoningText ?? split.reasoningText,
+      toolCalls: assistantTrace.toolCalls,
+      parts: buildAssistantMessageParts({
+        parts: assistantTrace.parts,
+        content: resolvedContent,
+        reasoningText: assistantTrace.reasoningText ?? split.reasoningText,
+        toolCalls: assistantTrace.toolCalls,
+      }),
+      usage: extractMessageUsage(message.usage),
       sentAt: messageTimestamp,
     };
   }

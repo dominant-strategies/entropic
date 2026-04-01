@@ -72,6 +72,11 @@ ensure_docker_ready_for_mode() {
         return 0
     fi
 
+    if entropic_linux_uses_native_docker && entropic_default_docker_is_ready "$DOCKER_BIN"; then
+        ACTIVE_DOCKER_HOST=""
+        return 0
+    fi
+
     ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
     if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "$COLIMA_BIN" ]; then
         echo "Starting Colima for $(entropic_mode_label) runtime build..."
@@ -85,6 +90,15 @@ ensure_docker_ready_for_mode() {
     if entropic_default_context_allowed && "$DOCKER_BIN" info >/dev/null 2>&1; then
         echo "WARNING: Using default Docker context because ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1."
         return 0
+    fi
+
+    if entropic_linux_uses_native_docker; then
+        echo "ERROR: Docker daemon is not reachable on Linux."
+        echo "Make sure Docker Engine is installed and running, and that your user can access the Docker socket."
+        echo "Example fixes:"
+        echo "  sudo systemctl start docker"
+        echo "  sudo usermod -aG docker \$USER"
+        return 1
     fi
 
     echo "ERROR: No $(entropic_mode_label) Colima Docker socket is reachable."
@@ -178,6 +192,7 @@ echo "Staging OpenClaw files..."
 # Copy Dockerfile and entrypoint
 rsync -a "$RUNTIME_DIR/Dockerfile" "$STAGING_DIR/Dockerfile"
 rsync -a "$RUNTIME_DIR/entrypoint.sh" "$STAGING_DIR/entrypoint.sh"
+rsync -a "$RUNTIME_DIR/managed_runtime_unix_proxy.py" "$STAGING_DIR/managed_runtime_unix_proxy.py"
 normalize_lf_file "$STAGING_DIR/entrypoint.sh"
 assert_no_crlf_file "$STAGING_DIR/entrypoint.sh"
 rsync -a --delete "$RUNTIME_DIR/browser-service/" "$STAGING_DIR/browser-service/"
@@ -208,7 +223,7 @@ for manifest in sorted(source_root.glob("*/package.json")):
             merged.setdefault(dep, spec)
 
 output_path.write_text(
-    " ".join(f"{dep}@{spec}" for dep, spec in sorted(merged.items())) + "\n",
+    "\n".join(f"{dep}@{spec}" for dep, spec in sorted(merged.items())) + "\n",
     encoding="utf-8",
 )
 PY

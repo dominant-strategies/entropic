@@ -14,10 +14,20 @@ src-tauri/gen/
 # fresh checkouts and CI without running bundle-runtime.sh first.
 src-tauri/resources/bin/*
 !src-tauri/resources/bin/README.txt
+src-tauri/resources/openclaw-runtime.tar.gz
 src-tauri/resources/share/*
 !src-tauri/resources/share/placeholders/
 src-tauri/resources/share/placeholders/*
 !src-tauri/resources/share/placeholders/README.txt
+!src-tauri/resources/share/rnn-runtime/
+src-tauri/resources/share/rnn-runtime/__pycache__/
+src-tauri/resources/share/rnn-runtime/albatross_reference/__pycache__/
+!src-tauri/resources/share/rnn-runtime/*.py
+openclaw-runtime/__pycache__/
+scripts/__pycache__/
+scripts/.local-model-harness-cache.json
+/tmp/entropic-local-model-loop-runtime.log
+.local-model-tooling-logs/
 
 # Environment
 .env

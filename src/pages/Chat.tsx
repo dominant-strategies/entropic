@@ -14,10 +14,11 @@ import {
   Activity,
   TrendingUp,
   Terminal,
-  ChevronDown,
-  ChevronUp,
   Bot,
   User,
+  Bug,
+  Copy,
+  Check,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
@@ -43,12 +44,15 @@ import {
 import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
 import { TelegramSetupModal } from "../components/TelegramSetupModal";
 import { MarkdownContent } from "../components/MarkdownContent";
+import { ConnectionModeSelector } from "../components/ConnectionModeSelector";
+import { LocalAiServiceForm } from "../components/LocalAiServiceForm";
 import { useAuth } from "../contexts/AuthContext";
 import {
   syncAllIntegrationsToGateway,
   getCachedIntegrationProviders,
   getIntegrations,
   connectIntegration,
+  hasPendingIntegrationImports,
 } from "../lib/integrations";
 import {
   getVisibleQuickActions,
@@ -68,19 +72,44 @@ import {
   type TaskBoardChatIntent,
 } from "../lib/taskBoard";
 import { resolveGatewayAuth } from "../lib/gateway-auth";
-import { appendDiagnosticLog } from "../lib/diagnostics";
+import {
+  appendDiagnosticLog,
+  appendOptimizationTraceLine,
+  attachOptimizationTraceRunId,
+  beginOptimizationTrace,
+  finishOptimizationTrace,
+} from "../lib/diagnostics";
 import { entropicSitePath } from "../lib/buildProfile";
 import {
   workspaceBrowserUrl,
 } from "../lib/nativePreview";
-import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { getLocalCreditBalance } from "../lib/localCredits";
-import { signInWithDiscord, signInWithEmail, signInWithGoogle, signUpWithEmail, createCheckout, getBalance } from "../lib/auth";
+import {
+  DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS,
+  type LocalModePerformanceSettings,
+} from "../lib/settingsStore";
+import {
+  CHAT_HISTORY_CLEARED_EVENT,
+  getChatHistoryStore,
+  clearPersistedChatHistory,
+} from "../lib/chatHistoryStore";
+import {
+  signInWithDiscord,
+  signInWithEmail,
+  signInWithGoogle,
+  signUpWithEmail,
+  createCheckout,
+  getBalance,
+  resolveLocalModelGatewayModel,
+  type ConnectionMode,
+  type LocalModelConfig,
+} from "../lib/auth";
 import entropicLogo from "../assets/entropic-logo.png";
 import type { Page } from "../components/Layout";
 import {
   type Message,
   type MessageAttachment,
+  type MessageToolCall,
   type CalendarEvent,
   type ToolError,
   type TerminalCommandResult,
@@ -94,6 +123,7 @@ import {
   extractJsonBlocks,
   isToolTransportPayload,
   stripExternalUntrustedSections,
+  unwrapExternalUntrustedText,
   sanitizeAuthStoreDetails,
   isBillingIssueMessage,
   isPolicyMessageRemovedError,
@@ -106,7 +136,9 @@ import {
   stripInlineClawdbotMetadata,
   stripOpenClawStatusLines,
   sanitizeAssistantDisplayContent,
+  type AssistantMessagePart,
   buildAssistantPayload,
+  buildAssistantMessageParts,
   normalizeCachedMessage,
   parseUtcBracketTimestamp,
   toTimestampMs,
@@ -123,6 +155,8 @@ import {
   shouldDisplayGatewaySession,
   isChannelOriginGatewayMessage,
   normalizeGatewayMessage,
+  resolveAssistantMessageParts,
+  mergeMessageToolCalls,
 } from "../lib/chatMessageUtils";
 
 type GatewayMutationResult = {
@@ -175,6 +209,22 @@ type ChatImageGenerationResponse = {
   }>;
 };
 
+type DirectLocalChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+type DirectLocalChatDebugResponse = {
+  text: string;
+  provider: string;
+  model: string;
+  baseUrl: string;
+  durationMs: number;
+  historyMessages: number;
+  inputChars: number;
+  responseChars: number;
+};
+
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
 const TERMINAL_DEFAULT_CWD = "/data/workspace";
 const DEFAULT_COMPOSER_MODE: ComposerMode = "chat";
@@ -186,6 +236,479 @@ const CHAT_WORKSPACE_PREFIXES = [
 const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/node\/\.openclaw\/workspace)(?:\/[^\s`"'<>]+)?)/g;
 const FINAL_RESPONSE_RECOVERY_RETRY_MS = 1200;
 const FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS = 2;
+const ACTIVE_RUN_SETTLE_IDLE_MS = 2000;
+const DIRECT_LOCAL_DEBUG_HISTORY_LIMIT = 12;
+const DIRECT_LOCAL_DEBUG_HISTORY_CHAR_LIMIT = 12_000;
+const DIRECT_LOCAL_DEBUG_PREVIEW_LIMIT = 4;
+const DIRECT_LOCAL_DEBUG_PREVIEW_CHARS = 220;
+const OPTIMIZATION_TRACE_RESPONSE_PREVIEW_CHARS = 320;
+const DEBUG_THINK_BLOCK_PREVIEW_CHARS = 120;
+const LIVE_REASONING_PREVIEW_CHARS = 1200;
+const LIVE_TOOL_PREVIEW_LIMIT = 6;
+
+const FRIENDLY_TOOL_ACTIVITY_LABELS: Record<string, string> = {
+  read_file: "Reading file",
+  write_file: "Writing file",
+  edit_file: "Editing file",
+  list_directory: "Listing directory",
+  search_files: "Searching files",
+  run_command: "Running command",
+  bash: "Running command",
+  web_search: "Searching the web",
+  web_fetch: "Fetching web page",
+  x_search: "Searching X",
+  x_profile: "Looking up profile",
+  x_thread: "Fetching thread",
+  x_user_tweets: "Fetching tweets",
+  google_calendar: "Checking calendar",
+  google_email: "Checking email",
+  memory_search: "Searching memory",
+  memory_store: "Saving to memory",
+};
+
+type LeadingThinkBlocks = {
+  thoughts: string[];
+  answer: string;
+};
+
+type LiveToolCallPreview = MessageToolCall;
+
+type LiveRunPreview = {
+  reasoningText: string;
+  toolCalls: LiveToolCallPreview[];
+};
+
+function createEmptyLiveRunPreview(): LiveRunPreview {
+  return {
+    reasoningText: "",
+    toolCalls: [],
+  };
+}
+
+function describeToolActivityName(name: string): string {
+  return FRIENDLY_TOOL_ACTIVITY_LABELS[name] || `Using ${name.replace(/_/g, " ")}`;
+}
+
+function normalizeReasoningText(raw: string, maxChars?: number): string {
+  const stripped = raw
+    .trim()
+    .replace(/^Reasoning:\s*/i, "")
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("_") && trimmed.endsWith("_") && trimmed.length >= 2) {
+        return trimmed.slice(1, -1);
+      }
+      return trimmed.replace(/^_+|_+$/g, "");
+    })
+    .join("\n")
+    .trim();
+  if (!maxChars || stripped.length <= maxChars) {
+    return stripped;
+  }
+  return `…${stripped.slice(-(maxChars - 1))}`;
+}
+
+function normalizeToolPreviewText(value: unknown, maxChars = 320): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = unwrapExternalUntrustedText(value).trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.length <= maxChars ? trimmed : `${trimmed.slice(0, maxChars - 1)}…`;
+}
+
+function formatToolPreviewScalar(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return normalizeToolPreviewText(value, 160);
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  if (Array.isArray(value)) {
+    const items = value
+      .map((entry) => formatToolPreviewScalar(entry))
+      .filter((entry): entry is string => Boolean(entry))
+      .slice(0, 3);
+    return items.length > 0 ? items.join(", ") : undefined;
+  }
+  return undefined;
+}
+
+function formatToolArgsPreview(args: unknown): string | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return undefined;
+  }
+  const record = args as Record<string, unknown>;
+  const direct =
+    normalizeToolPreviewText(record.url, 220) ??
+    normalizeToolPreviewText(record.query, 220) ??
+    normalizeToolPreviewText(record.q, 220) ??
+    normalizeToolPreviewText(record.path, 220) ??
+    normalizeToolPreviewText(record.file_path, 220) ??
+    normalizeToolPreviewText(record.filePath, 220) ??
+    normalizeToolPreviewText(record.command, 220) ??
+    normalizeToolPreviewText(record.cmd, 220);
+  if (direct) {
+    return direct;
+  }
+  const entries = Object.entries(record)
+    .map(([key, value]) => {
+      const preview = formatToolPreviewScalar(value);
+      if (!preview) {
+        return null;
+      }
+      return `${key}: ${preview}`;
+    })
+    .filter((entry): entry is string => Boolean(entry))
+    .slice(0, 3);
+  if (entries.length === 0) {
+    return undefined;
+  }
+  return normalizeToolPreviewText(entries.join(" · "), 220);
+}
+
+function extractToolResultPreview(result: unknown): string | undefined {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return undefined;
+  }
+  const record = result as Record<string, unknown>;
+  const details =
+    record.details && typeof record.details === "object" && !Array.isArray(record.details)
+      ? (record.details as Record<string, unknown>)
+      : undefined;
+  if (details) {
+    const results = Array.isArray(details.results) ? details.results : [];
+    if (results.length > 0) {
+      const query = normalizeToolPreviewText(details.query, 120) ?? normalizeToolPreviewText(details.q, 120);
+      const lines = results
+        .slice(0, 3)
+        .map((entry, index) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+            return undefined;
+          }
+          const item = entry as Record<string, unknown>;
+          const title =
+            normalizeToolPreviewText(item.title, 140) ??
+            normalizeToolPreviewText(item.name, 140) ??
+            normalizeToolPreviewText(item.url, 140);
+          const url = normalizeToolPreviewText(item.url, 180) ?? normalizeToolPreviewText(item.link, 180);
+          const snippet =
+            normalizeToolPreviewText(item.snippet, 180) ??
+            normalizeToolPreviewText(item.description, 180) ??
+            normalizeToolPreviewText(item.summary, 180);
+          return [title ?? `Result ${index + 1}`, url && url !== title ? url : undefined, snippet]
+            .filter((value): value is string => Boolean(value))
+            .join("\n");
+        })
+        .filter((entry): entry is string => Boolean(entry));
+      if (lines.length > 0) {
+        return [query ? `Results for ${query}` : `${results.length} results`, ...lines].join("\n");
+      }
+    }
+    const title = normalizeToolPreviewText(details.title, 180) ?? normalizeToolPreviewText(details.name, 180);
+    const snippet = (() => {
+      const rawText = typeof details.text === "string" ? details.text : "";
+      if (!rawText.trim()) {
+        return undefined;
+      }
+      const normalizeCompare = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const titleCompare = title ? normalizeCompare(title) : "";
+      const lines = rawText
+        .split(/\r?\n/)
+        .map((rawLine) => {
+          const cleaned = unwrapExternalUntrustedText(rawLine)
+            .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+            .replace(/^\s*[-*#]+\s*/, "")
+            .replace(/(?<=[a-z])(?=[A-Z])/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+          return { rawLine, cleaned };
+        })
+        .filter(({ cleaned }) => Boolean(cleaned))
+        .filter(({ rawLine, cleaned }) => {
+          if (cleaned.toLowerCase() === "advertisement") {
+            return false;
+          }
+          if (cleaned.toLowerCase().startsWith("search for a location")) {
+            return false;
+          }
+          if (rawLine.trimStart().startsWith("#")) {
+            const words = cleaned.split(/\s+/).filter(Boolean);
+            if (words.length <= 4 && !/\d/.test(cleaned)) {
+              return false;
+            }
+          }
+          if ((rawLine.match(/\]\(/g) ?? []).length >= 2) {
+            return false;
+          }
+          if (titleCompare && normalizeCompare(cleaned).startsWith(titleCompare)) {
+            return false;
+          }
+          return true;
+        })
+        .map(({ cleaned }) => cleaned);
+      if (lines.length === 0) {
+        return undefined;
+      }
+      return normalizeToolPreviewText(lines.slice(0, 3).join("\n"), 240);
+    })();
+    const url =
+      normalizeToolPreviewText(details.finalUrl, 220) ??
+      normalizeToolPreviewText(details.final_url, 220) ??
+      normalizeToolPreviewText(details.url, 220);
+    const status =
+      typeof details.status === "number" && Number.isFinite(details.status)
+        ? `HTTP ${details.status}`
+        : normalizeToolPreviewText(details.status, 80);
+    const lines = [title, snippet, url, status].filter((entry): entry is string => Boolean(entry));
+    if (lines.length > 0) {
+      return lines.join("\n");
+    }
+  }
+  const content = Array.isArray(record.content) ? record.content : [];
+  const text = content
+    .map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        return undefined;
+      }
+      const item = entry as Record<string, unknown>;
+      if (item.type !== "text" || typeof item.text !== "string") {
+        return undefined;
+      }
+      return item.text.trim();
+    })
+    .filter((entry): entry is string => Boolean(entry))
+    .join("\n")
+    .trim();
+  if (!text) {
+    return undefined;
+  }
+  return normalizeToolPreviewText(
+    text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 5)
+      .join("\n"),
+    420,
+  );
+}
+
+function summarizeToolCallPreview(tool: Pick<MessageToolCall, "name" | "argsText" | "detailText">): string {
+  const label = describeToolActivityName(tool.name);
+  const detail =
+    tool.argsText ??
+    tool.detailText
+      ?.split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean);
+  if (!detail) {
+    return label;
+  }
+  return `${label} · ${detail}`;
+}
+
+function applyToolEventToLiveRunPreview(
+  preview: LiveRunPreview,
+  data: Record<string, unknown>,
+  limit = LIVE_TOOL_PREVIEW_LIMIT,
+): LiveRunPreview {
+  const name = typeof data.name === "string" ? data.name.trim() : "";
+  const toolCallIdRaw = typeof data.toolCallId === "string" ? data.toolCallId.trim() : "";
+  const toolCallId = toolCallIdRaw || name;
+  if (!toolCallId || !name) {
+    return preview;
+  }
+  const phase = typeof data.phase === "string" ? data.phase : "start";
+  const isError = data.isError === true;
+  const existingIndex = preview.toolCalls.findIndex((entry) => entry.toolCallId === toolCallId);
+  const existingTool = existingIndex >= 0 ? preview.toolCalls[existingIndex] : undefined;
+  const nextEntry: LiveToolCallPreview = {
+    toolCallId,
+    name,
+    phase,
+    isError,
+    argsText: formatToolArgsPreview(data.args) ?? existingTool?.argsText,
+    detailText:
+      normalizeToolPreviewText(data.detailText, 420) ??
+      normalizeToolPreviewText(data.detail_text, 420) ??
+      extractToolResultPreview(phase === "update" ? data.partialResult : phase === "result" ? data.result : undefined) ??
+      existingTool?.detailText,
+  };
+  if (existingIndex < 0) {
+    const nextToolCalls = [...preview.toolCalls, nextEntry].slice(-limit);
+    return {
+      ...preview,
+      toolCalls: nextToolCalls,
+    };
+  }
+  const existing = preview.toolCalls[existingIndex]!;
+  if (
+    existing.name === nextEntry.name &&
+    existing.phase === nextEntry.phase &&
+    existing.isError === nextEntry.isError &&
+    existing.argsText === nextEntry.argsText &&
+    existing.detailText === nextEntry.detailText
+  ) {
+    return preview;
+  }
+  const nextToolCalls = [...preview.toolCalls];
+  nextToolCalls[existingIndex] = nextEntry;
+  return {
+    ...preview,
+    toolCalls: nextToolCalls,
+  };
+}
+
+function buildDirectLocalDebugHistory(messages: Message[]): DirectLocalChatMessage[] {
+  const normalized = messages
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .filter((message) => message.kind !== "toolResult")
+    .map((message) => ({
+      role: message.role,
+      content: message.content.trim(),
+    }))
+    .filter((message) => message.content.length > 0);
+
+  const limited = normalized.slice(-DIRECT_LOCAL_DEBUG_HISTORY_LIMIT);
+  const result: DirectLocalChatMessage[] = [];
+  let charBudget = DIRECT_LOCAL_DEBUG_HISTORY_CHAR_LIMIT;
+
+  for (let index = limited.length - 1; index >= 0; index -= 1) {
+    const entry = limited[index]!;
+    if (charBudget <= 0) {
+      break;
+    }
+    const content =
+      entry.content.length > charBudget
+        ? entry.content.slice(entry.content.length - charBudget)
+        : entry.content;
+    result.unshift({
+      role: entry.role,
+      content,
+    });
+    charBudget -= content.length;
+  }
+
+  return result;
+}
+
+function buildDirectLocalDebugPreview(messages: DirectLocalChatMessage[]): string[] {
+  const truncate = (value: string): string => {
+    const normalized = value.replace(/\s+/g, " ").trim();
+    if (normalized.length <= DIRECT_LOCAL_DEBUG_PREVIEW_CHARS) {
+      return normalized;
+    }
+    return `${normalized.slice(0, Math.max(0, DIRECT_LOCAL_DEBUG_PREVIEW_CHARS - 1))}…`;
+  };
+
+  return messages
+    .slice(-DIRECT_LOCAL_DEBUG_PREVIEW_LIMIT)
+    .map((entry, index, items) => {
+      const ordinal = items.length - (items.length - index);
+      return `direct local debug payload[${ordinal + 1}/${items.length}] ${entry.role}=${JSON.stringify(truncate(entry.content))}`;
+    });
+}
+
+function splitLeadingThinkBlocks(raw: string): LeadingThinkBlocks | null {
+  let remaining = raw.trimStart();
+  const thoughts: string[] = [];
+
+  while (remaining.startsWith("<think>")) {
+    const endIndex = remaining.indexOf("</think>");
+    if (endIndex === -1) {
+      break;
+    }
+    const content = remaining.slice("<think>".length, endIndex).trim();
+    thoughts.push(content);
+    remaining = remaining.slice(endIndex + "</think>".length).replace(/^\s+/, "");
+  }
+
+  if (!thoughts.length) {
+    return null;
+  }
+
+  return {
+    thoughts,
+    answer: remaining,
+  };
+}
+
+function summarizeThinkBlock(raw: string): string {
+  const firstLine =
+    raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) ?? "";
+  if (!firstLine) {
+    return "No visible thought text";
+  }
+  if (firstLine.length <= DEBUG_THINK_BLOCK_PREVIEW_CHARS) {
+    return firstLine;
+  }
+  return `${firstLine.slice(0, DEBUG_THINK_BLOCK_PREVIEW_CHARS - 1)}…`;
+}
+
+function splitThinkBlockPreview(raw: string): {
+  preview: string;
+  remainder: string;
+} {
+  const lines = raw.split(/\r?\n/);
+  let previewIndex = -1;
+  let preview = "";
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const trimmed = lines[i]?.trim() ?? "";
+    if (!trimmed) {
+      continue;
+    }
+    previewIndex = i;
+    preview = trimmed;
+    break;
+  }
+
+  if (previewIndex < 0) {
+    return {
+      preview: "No visible thought text",
+      remainder: "",
+    };
+  }
+
+  return {
+    preview: summarizeThinkBlock(preview),
+    remainder: lines.slice(previewIndex + 1).join("\n").replace(/^\s+/, "").trim(),
+  };
+}
+
+function extractUsageStat(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function extractEventOutputTokens(raw: unknown): number | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const usage = raw as Record<string, unknown>;
+  return (
+    extractUsageStat(usage.outputTokens) ??
+    extractUsageStat(usage.output_tokens) ??
+    extractUsageStat(usage.output)
+  );
+}
+
+function truncateOptimizationTracePreview(value: string, maxChars = OPTIMIZATION_TRACE_RESPONSE_PREVIEW_CHARS): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxChars - 1))}…`;
+}
 
 function trimChatWorkspaceToken(raw: string): string {
   return raw
@@ -221,26 +744,134 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function buildNoVisibleResponseMessage(params: {
+type NoVisibleResponseState = {
+  reason:
+    | "invalid_history_path"
+    | "startup_grace_period"
+    | "gateway_starting"
+    | "gateway_connecting"
+    | "gateway_not_running"
+    | "socket_closed_during_connect"
+    | "connection_lost_mid_response"
+    | "gateway_disconnected"
+    | "no_visible_reply";
+  message: string;
+  detail?: string;
+};
+
+function summarizeNoVisibleResponseDetail(raw?: string | null): string | undefined {
+  const normalized = sanitizeGatewayErrorMessage(raw || "");
+  if (!normalized) return undefined;
+  return normalized.length > 140 ? `${normalized.slice(0, 137)}...` : normalized;
+}
+
+function classifyNoVisibleResponseState(params: {
   lastGatewayError?: string | null;
   connected: boolean;
-}): string {
+  gatewayStarting?: boolean;
+  isConnecting?: boolean;
+  gatewayRunning?: boolean;
+  inStartupGracePeriod?: boolean;
+}): NoVisibleResponseState {
   const lastGatewayError = params.lastGatewayError || "";
   const normalized = sanitizeGatewayErrorMessage(lastGatewayError);
+  const detail = summarizeNoVisibleResponseDetail(lastGatewayError);
   if (
     /conversation history path was invalid/i.test(normalized) ||
     /session file path must be within sessions directory/i.test(lastGatewayError)
   ) {
-    return "The conversation history path was invalid. Restart the sandbox and retry.";
+    return {
+      reason: "invalid_history_path",
+      message: "The conversation history path was invalid. Restart the sandbox and retry.",
+      detail,
+    };
   }
-  if (
-    !params.connected ||
-    isTransientGatewayConnectCloseMessage(lastGatewayError) ||
-    /connection lost while waiting for response/i.test(normalized)
-  ) {
-    return "The response was interrupted while the sandbox was reconnecting. Please retry.";
+  if (params.inStartupGracePeriod) {
+    return {
+      reason: "startup_grace_period",
+      message: "The response finished before the sandbox startup checks settled. Please retry in a moment.",
+      detail,
+    };
   }
-  return "The assistant finished without a visible reply. Retry once; if it keeps happening, check Billing, auth, and network.";
+  if (params.gatewayStarting) {
+    return {
+      reason: "gateway_starting",
+      message: "The response was interrupted because the sandbox gateway was still starting. Please retry.",
+      detail,
+    };
+  }
+  if (params.isConnecting) {
+    return {
+      reason: "gateway_connecting",
+      message: "The response was interrupted because Entropic was reconnecting to the sandbox gateway. Please retry.",
+      detail,
+    };
+  }
+  if (params.gatewayRunning === false) {
+    return {
+      reason: "gateway_not_running",
+      message: "The response was interrupted because the sandbox gateway was not running. Restart it and retry.",
+      detail,
+    };
+  }
+  if (isTransientGatewayConnectCloseMessage(lastGatewayError)) {
+    return {
+      reason: "socket_closed_during_connect",
+      message: "The response was interrupted because the gateway socket closed while connecting. Please retry.",
+      detail,
+    };
+  }
+  if (/connection lost while waiting for response/i.test(normalized)) {
+    return {
+      reason: "connection_lost_mid_response",
+      message: "The response was interrupted because the gateway connection dropped mid-response. Please retry.",
+      detail,
+    };
+  }
+  if (!params.connected) {
+    if (!normalized) {
+      return {
+        reason: "no_visible_reply",
+        message:
+          "The assistant finished without a visible reply. Retry once; if it keeps happening, check Diagnostics for the final recovery state.",
+        detail,
+      };
+    }
+    return {
+      reason: "gateway_disconnected",
+      message: "The response was interrupted because the sandbox gateway disconnected. Please retry.",
+      detail,
+    };
+  }
+  return {
+    reason: "no_visible_reply",
+    message:
+      "The assistant finished without a visible reply. Retry once; if it keeps happening, check Diagnostics for the gateway error and final recovery state.",
+    detail,
+  };
+}
+
+function buildNoVisibleResponseMessage(params: {
+  lastGatewayError?: string | null;
+  connected: boolean;
+  gatewayStarting?: boolean;
+  isConnecting?: boolean;
+  gatewayRunning?: boolean;
+  inStartupGracePeriod?: boolean;
+}): string {
+  return classifyNoVisibleResponseState(params).message;
+}
+
+function summarizeNoVisibleResponseReason(params: {
+  lastGatewayError?: string | null;
+  connected: boolean;
+  gatewayStarting?: boolean;
+  isConnecting?: boolean;
+  gatewayRunning?: boolean;
+  inStartupGracePeriod?: boolean;
+}): string {
+  const classified = classifyNoVisibleResponseState(params);
+  return classified.detail ? `${classified.reason} (${classified.detail})` : classified.reason;
 }
 
 function extractWorkspaceChatReferences(content: string): WorkspaceChatReference[] {
@@ -319,10 +950,11 @@ function XLogo({ className }: { className?: string }) {
 }
 
 // ── Local chat persistence ─────────────────────────────────────
-const CHAT_STORE_FILE = "entropic-chat-history.json";
 const MAX_PERSISTED_SESSIONS = 50;
 const MAX_PERSISTED_MESSAGES = 1000;
 const MAX_PERSISTED_OUTBOX = 16;
+const OUTBOX_AUTO_REPLAY_MAX_AGE_MS = 15 * 60_000;
+const CONNECTING_SCREEN_SHOW_DELAY_MS = 450;
 
 type PersistedPendingSendAttachment = {
   fileName?: string;
@@ -399,14 +1031,6 @@ function overlaySessionMetadata(next: ChatSession[], metadataSources: ChatSessio
   return normalizeSessionsList(merged);
 }
 
-let _chatStore: TauriStore | null = null;
-async function getChatStore(): Promise<TauriStore> {
-  if (!_chatStore) {
-    _chatStore = await TauriStore.load(CHAT_STORE_FILE);
-  }
-  return _chatStore;
-}
-
 function normalizePersistedPendingSend(raw: unknown): PersistedPendingSend | null {
   if (!raw || typeof raw !== "object") {
     return null;
@@ -469,7 +1093,7 @@ function normalizePersistedPendingSend(raw: unknown): PersistedPendingSend | nul
 
 async function persistChatData(data: PersistedChatData): Promise<void> {
   try {
-    const store = await getChatStore();
+    const store = await getChatHistoryStore();
     const protectedSessionKeys = new Set<string>();
     if (typeof data.currentSession === "string" && data.currentSession.trim()) {
       protectedSessionKeys.add(data.currentSession);
@@ -569,9 +1193,10 @@ async function persistChatData(data: PersistedChatData): Promise<void> {
 
 async function loadPersistedChatData(): Promise<PersistedChatData | null> {
   try {
-    const store = await getChatStore();
+    const store = await getChatHistoryStore();
     const data = await store.get("chatData") as PersistedChatData | null;
     if (!data) return null;
+    const now = Date.now();
 
     const sessions = normalizeSessionsList(Array.isArray(data.sessions) ? data.sessions : []);
     const allowedKeys = new Set(sessions.map((session) => session.key));
@@ -625,6 +1250,7 @@ async function loadPersistedChatData(): Promise<PersistedChatData | null> {
           .map(normalizePersistedPendingSend)
           .filter((entry): entry is PersistedPendingSend => entry !== null)
           .filter((entry) => allowedKeys.has(entry.sessionKey))
+          .filter((entry) => now - entry.createdAt <= OUTBOX_AUTO_REPLAY_MAX_AGE_MS)
       : [];
 
     return {
@@ -646,6 +1272,37 @@ async function loadPersistedChatData(): Promise<PersistedChatData | null> {
 
 // Message parsing/sanitization functions imported from ../lib/chatMessageUtils
 
+function summarizeGatewayMessageForDiag(message: GatewayMessage | null | undefined): string {
+  if (!message || typeof message !== "object") return "null";
+  try {
+    const summary = {
+      role: typeof message.role === "string" ? message.role : null,
+      type: typeof message.type === "string" ? message.type : null,
+      stopReason: typeof message.stopReason === "string" ? message.stopReason : null,
+      errorMessage: typeof message.errorMessage === "string" ? message.errorMessage : null,
+      contentType: Array.isArray(message.content) ? "array" : typeof message.content,
+      contentPreview:
+        typeof message.content === "string"
+          ? message.content.slice(0, 200)
+          : Array.isArray(message.content)
+            ? message.content.slice(0, 2)
+            : null,
+      textPreview: typeof message.text === "string" ? message.text.slice(0, 200) : null,
+      messageKeys: message.message && typeof message.message === "object" ? Object.keys(message.message as object).slice(0, 10) : null,
+      outputKeys: message.output && typeof message.output === "object" ? Object.keys(message.output as object).slice(0, 10) : null,
+      responseKeys: message.response && typeof message.response === "object" ? Object.keys(message.response as object).slice(0, 10) : null,
+      choiceKeys:
+        Array.isArray(message.choices) && message.choices[0] && typeof message.choices[0] === "object"
+          ? Object.keys(message.choices[0] as object).slice(0, 10)
+          : null,
+      keys: Object.keys(message).slice(0, 20),
+    };
+    return JSON.stringify(summary);
+  } catch {
+    return "[unserializable gateway message]";
+  }
+}
+
 const PROVIDERS: Provider[] = [
   { id: "anthropic", name: "Anthropic", icon: "A", placeholder: "sk-ant-...", keyUrl: "https://console.anthropic.com/settings/keys" },
   { id: "openai", name: "OpenAI", icon: "O", placeholder: "sk-...", keyUrl: "https://platform.openai.com/api-keys" },
@@ -657,6 +1314,7 @@ const TERMS_URL = entropicSitePath("/terms");
 const PRIVACY_URL = entropicSitePath("/privacy");
 const HISTORY_LIMIT = 500;
 const ACTIVE_RUN_IDLE_TIMEOUT_MS = 120_000;
+const LOCAL_MODEL_ACTIVE_RUN_IDLE_TIMEOUT_MS = 600_000;
 const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 4;
 const MAX_IMAGE_ATTACHMENT_BYTES = 5_000_000;
 const GENERATED_IMAGES_DEST_PATH = "generated-images";
@@ -920,8 +1578,14 @@ function integrationRequirementLabel(requirement: IntegrationQuickActionRequirem
   return requirement.label;
 }
 
-function normalizeModelId(id: string | null | undefined, proxyMode: boolean): string | null {
+function normalizeModelId(
+  id: string | null | undefined,
+  proxyMode: boolean,
+  localModelConfig?: Pick<LocalModelConfig, "serviceType"> | null,
+): string | null {
   if (!id) return null;
+  const localModel = resolveLocalModelGatewayModel(id, localModelConfig);
+  if (localModel !== id) return localModel;
   if (!proxyMode) return id;
   if (id.startsWith("openrouter/")) return id;
   return `openrouter/${id}`;
@@ -1021,11 +1685,17 @@ export function Chat({
   onGatewayConnectionReady,
   onStartGateway,
   onRecoverProxyAuth,
-  useLocalKeys,
+  connectionMode,
+  onConnectionModeChange,
+  localModelConfig,
+  localModePerformanceSettings,
+  managedTrialBalanceCents,
+  onLocalModelConfigChange,
   selectedModel,
   onModelChange: _onModelChange,
   imageModel: _imageModel,
   imageGenerationModel,
+  showReasoning = true,
   integrationsSyncing,
   integrationsMissing,
   onNavigate,
@@ -1042,11 +1712,17 @@ export function Chat({
   onGatewayConnectionReady?: () => void;
   onStartGateway?: () => void;
   onRecoverProxyAuth?: () => Promise<boolean> | boolean;
-  useLocalKeys: boolean;
+  connectionMode: ConnectionMode;
+  onConnectionModeChange?: (mode: ConnectionMode) => void | Promise<void>;
+  localModelConfig?: LocalModelConfig | null;
+  localModePerformanceSettings?: LocalModePerformanceSettings;
+  managedTrialBalanceCents?: number | null;
+  onLocalModelConfigChange?: (config: LocalModelConfig) => void | Promise<void>;
   selectedModel: string;
   onModelChange?: (model: string) => void;
   imageModel: string;
   imageGenerationModel: string;
+  showReasoning?: boolean;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
   onNavigate?: (page: Page) => void;
@@ -1056,13 +1732,33 @@ export function Chat({
   wideLayout?: boolean;
 }) {
   const { isAuthenticated, isAuthConfigured, refreshBalance } = useAuth();
+  const managedMode = connectionMode === "managed";
+  const byokMode = connectionMode === "byok";
+  const localModelsMode = connectionMode === "local-models";
+  const reasoningRequestMode = showReasoning ? "stream" : "off";
+  const effectiveLocalModePerformanceSettings =
+    localModePerformanceSettings ?? DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS;
+  const localModelReady = Boolean(
+    localModelsMode &&
+      localModelConfig?.enabled &&
+      localModelConfig?.modelName?.trim() &&
+      localModelConfig?.baseUrl?.trim(),
+  );
+  const activeRunIdleTimeoutMs = localModelsMode
+    ? LOCAL_MODEL_ACTIVE_RUN_IDLE_TIMEOUT_MS
+    : ACTIVE_RUN_IDLE_TIMEOUT_MS;
   const [localCreditsCents, setLocalCreditsCents] = useState<number | null>(null);
+  const effectiveLocalCreditsCents =
+    managedTrialBalanceCents ?? localCreditsCents;
   const localTrialLoading =
-    !isAuthenticated && isAuthConfigured && !useLocalKeys && localCreditsCents === null;
+    !isAuthenticated &&
+    isAuthConfigured &&
+    managedMode &&
+    effectiveLocalCreditsCents === null;
   const proxyEnabled =
     isAuthConfigured &&
-    !useLocalKeys &&
-    (isAuthenticated || (localCreditsCents ?? 0) > 0);
+    managedMode &&
+    (isAuthenticated || (effectiveLocalCreditsCents ?? 0) > 0);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
   const [shellDraftsBySession, setShellDraftsBySession] = useState<Record<string, string>>({});
@@ -1090,7 +1786,6 @@ export function Chat({
   const [emailAuthMode, setEmailAuthMode] = useState<"signin" | "signup">("signin");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
-  const [showOwnProviderOptions, setShowOwnProviderOptions] = useState(false);
   const [providerStatus, setProviderStatus] = useState<AuthState["providers"]>([]);
   const [gatewayUrl, setGatewayUrl] = useState(DEFAULT_GATEWAY_URL);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
@@ -1105,12 +1800,18 @@ export function Chat({
   const [creditsCheckoutLoading, setCreditsCheckoutLoading] = useState(false);
   const [componentMountedAt] = useState(Date.now());
   const [showGatewayOfflineCta, setShowGatewayOfflineCta] = useState(false);
+  const [liveRunPreview, setLiveRunPreview] = useState<LiveRunPreview>(() => createEmptyLiveRunPreview());
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [composerFocused, setComposerFocused] = useState(false);
+  const assistantTraceByRunIdRef = useRef<Record<string, LiveRunPreview>>({});
   const runTimingsRef = useRef<Record<string, {
     startedAt: number;
     ackAt?: number;
     firstDeltaAt?: number;
     finalAt?: number;
     toolSeenAt?: number;
+    toolPayloadSeenAt?: number;
+    toolUsageLogged?: boolean;
   }>>({});
   const sessionModelRef = useRef<Record<string, string | null>>({});
   const runRevertModelRef = useRef<Record<string, string | null>>({});
@@ -1128,6 +1829,7 @@ export function Chat({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clientRef = useRef<GatewayClient | null>(null);
   const connectInFlightRef = useRef(false);
   const currentSessionRef = useRef<string | null>(null);
@@ -1162,7 +1864,11 @@ export function Chat({
   const activeRunIdRef = useRef<string | null>(null);
   const activeRunSessionRef = useRef<string | null>(null);
   const activeRunTimeoutRef = useRef<number | null>(null);
+  const activeRunSettleTimerRef = useRef<number | null>(null);
+  const autoSettledRunIdsRef = useRef<Set<string>>(new Set());
+  const supersededRunIdsRef = useRef<Set<string>>(new Set());
   const runSessionKeyRef = useRef<Record<string, string>>({});
+  const runOptimizationTraceRef = useRef<Record<string, string>>({});
   const runHistoryRecoveryRef = useRef<Record<string, boolean>>({});
   const gatewaySessionKeysRef = useRef<Set<string>>(new Set());
   const visibleMessagesSessionRef = useRef<string | null>(null);
@@ -1177,6 +1883,24 @@ export function Chat({
   const activeComposerMode = currentSession
     ? composerModeBySession[currentSession] || DEFAULT_COMPOSER_MODE
     : DEFAULT_COMPOSER_MODE;
+  const localChatDebugModeActive =
+    localModelsMode &&
+    activeComposerMode === "chat" &&
+    effectiveLocalModePerformanceSettings.debugMode;
+  const directLocalDebugBypassActive =
+    localChatDebugModeActive && effectiveLocalModePerformanceSettings.debugDirectBypass;
+  const activeDirectLocalDebugHistory = useMemo(
+    () => buildDirectLocalDebugHistory(messages),
+    [messages],
+  );
+  const activeDirectLocalDebugHistoryChars = useMemo(
+    () => activeDirectLocalDebugHistory.reduce((total, entry) => total + entry.content.length, 0),
+    [activeDirectLocalDebugHistory],
+  );
+  const activeDirectLocalDebugPreview = useMemo(
+    () => buildDirectLocalDebugPreview(activeDirectLocalDebugHistory),
+    [activeDirectLocalDebugHistory],
+  );
   const activeTerminalState = currentSession
     ? terminalStateBySession[currentSession] || { cwd: TERMINAL_DEFAULT_CWD }
     : { cwd: TERMINAL_DEFAULT_CWD };
@@ -1422,7 +2146,7 @@ export function Chat({
   }
 
   async function refreshTrialCredits() {
-    if (isAuthenticated || !isAuthConfigured || useLocalKeys) {
+    if (isAuthenticated || !isAuthConfigured || !managedMode) {
       return;
     }
     try {
@@ -1549,7 +2273,7 @@ export function Chat({
   }
 
   function currentRecoverableOAuthProvider(): "anthropic" | "openai" | null {
-    if (!useLocalKeys) return null;
+    if (connectionMode !== "byok") return null;
     if (connectedProvider === "anthropic" || connectedProvider === "openai") {
       return connectedProvider;
     }
@@ -1589,7 +2313,7 @@ export function Chat({
   }
 
   async function getRecoveryCreditBalanceCents(): Promise<number | null> {
-    if (!isAuthConfigured || useLocalKeys) {
+    if (!isAuthConfigured || !managedMode) {
       return null;
     }
 
@@ -1707,7 +2431,7 @@ export function Chat({
   async function refreshGatewayAfterProviderAuthChange(): Promise<void> {
     window.dispatchEvent(new Event("entropic-auth-changed"));
 
-    if (!useLocalKeys) {
+    if (connectionMode === "managed") {
       const refreshed = onRecoverProxyAuth
         ? await Promise.resolve(onRecoverProxyAuth())
         : false;
@@ -1716,6 +2440,10 @@ export function Chat({
           "Proxy mode is selected, but the proxy session could not be refreshed. Sign in to Entropic or enable local keys to use direct provider auth.",
         );
       }
+      return;
+    }
+
+    if (connectionMode !== "byok") {
       return;
     }
 
@@ -1970,7 +2698,7 @@ export function Chat({
 
     addDiag(`session remap ${from} -> ${to}`);
     schedulePersist();
-  }, [applySessionTitles, schedulePersist]);
+  }, [schedulePersist]);
 
   // Keep a ref to sessions for persistence
   const sessionsRef = useRef<ChatSession[]>([]);
@@ -2052,6 +2780,46 @@ export function Chat({
       source: "chat",
       message,
     });
+  }
+
+  function beginOptimizationTraceForSend(params: {
+    mode: "direct-local-debug" | "openclaw-local-chat";
+    sessionKey: string;
+    model: string;
+    lines?: string[];
+  }): string {
+    const traceId = beginOptimizationTrace({
+      mode: params.mode,
+      sessionKey: params.sessionKey,
+      model: params.model,
+    });
+    appendOptimizationTraceLine(
+      traceId,
+      `trace start mode=${params.mode} session=${params.sessionKey} model=${params.model}`,
+    );
+    for (const line of params.lines || []) {
+      appendOptimizationTraceLine(traceId, line);
+    }
+    return traceId;
+  }
+
+  function appendOptimizationTracePreview(traceId: string, prefix: string, value: string) {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    appendOptimizationTraceLine(
+      traceId,
+      `${prefix}=${JSON.stringify(truncateOptimizationTracePreview(trimmed))}`,
+    );
+  }
+
+  function completeRunOptimizationTrace(
+    runId: string,
+    status: "completed" | "error" | "aborted",
+  ) {
+    const traceId = runOptimizationTraceRef.current[runId];
+    if (!traceId) return;
+    finishOptimizationTrace(traceId, status);
+    delete runOptimizationTraceRef.current[runId];
   }
 
   function sortOutboxEntries(entries: PersistedPendingSend[]): PersistedPendingSend[] {
@@ -2151,10 +2919,223 @@ export function Chat({
   function clearActiveRunTracking() {
     activeRunIdRef.current = null;
     activeRunSessionRef.current = null;
+    setLiveRunPreview(createEmptyLiveRunPreview());
     if (activeRunTimeoutRef.current) {
       window.clearTimeout(activeRunTimeoutRef.current);
       activeRunTimeoutRef.current = null;
     }
+    if (activeRunSettleTimerRef.current) {
+      window.clearTimeout(activeRunSettleTimerRef.current);
+      activeRunSettleTimerRef.current = null;
+    }
+  }
+
+  const resetAllChatsState = useCallback(() => {
+    clearActiveRunTracking();
+    assistantTraceByRunIdRef.current = {};
+    runTimingsRef.current = {};
+    sessionModelRef.current = {};
+    runRevertModelRef.current = {};
+    lastEventByRunIdRef.current = {};
+    gatewaySessionKeysRef.current = new Set();
+    visibleMessagesSessionRef.current = null;
+    currentSessionRef.current = null;
+    sessionMessagesRef.current = {};
+    draftsRef.current = {};
+    shellDraftsRef.current = {};
+    imageDraftsRef.current = {};
+    outboxEntriesRef.current = [];
+    composerModeBySessionRef.current = {};
+    terminalStateBySessionRef.current = {};
+    runSessionKeyRef.current = {};
+    runOptimizationTraceRef.current = {};
+    runHistoryRecoveryRef.current = {};
+    autoSettledRunIdsRef.current = new Set();
+    supersededRunIdsRef.current = new Set();
+    outboxDispatchInFlightRef.current = new Set();
+    outboxReplayInFlightRef.current = false;
+    if (outboxWakeTimerRef.current !== null) {
+      window.clearTimeout(outboxWakeTimerRef.current);
+      outboxWakeTimerRef.current = null;
+    }
+
+    sessionsRef.current = [];
+    setSessions([]);
+    setCurrentSession(null);
+    setMessages([]);
+    setDraftsBySession({});
+    setShellDraftsBySession({});
+    setImageDraftsBySession({});
+    setComposerModeBySession({});
+    setTerminalStateBySession({});
+    setIntegrationSetupBySession({});
+    setQuickSuggestionBySession({});
+    setBuilderChecklistBySession({});
+    setPendingAttachments([]);
+    setSavingWorkspaceImageKeys({});
+    setSavedWorkspaceImagePaths({});
+    setOutboxEntries([]);
+    setShowWelcome(true);
+    setThinkingStatus(null);
+    setError(null);
+    setLastGatewayError(null);
+    setIsLoading(false);
+    setCopiedMessageId(null);
+    schedulePersist();
+  }, [schedulePersist]);
+
+  function isRenderableAssistantMessage(message: Message | null | undefined): boolean {
+    if (!message || message.role !== "assistant") return false;
+    return Boolean(
+      message.content.trim() ||
+        (message.assistantPayload &&
+          (message.assistantPayload.events.length > 0 ||
+            message.assistantPayload.errors.length > 0)),
+    );
+  }
+
+  function findVisibleAssistantMessage(runId: string, sessionKey?: string | null): Message | null {
+    if (!runId) return null;
+    const sources: Message[][] = [];
+    const seen = new Set<Message[]>();
+    const pushSource = (items?: Message[] | null) => {
+      if (!items || seen.has(items)) return;
+      seen.add(items);
+      sources.push(items);
+    };
+
+    if (sessionKey) {
+      pushSource(sessionMessagesRef.current[sessionKey] || []);
+    }
+    if (currentSessionRef.current) {
+      pushSource(sessionMessagesRef.current[currentSessionRef.current] || []);
+    }
+    if (!sessionKey || currentSessionRef.current === sessionKey) {
+      pushSource(messages);
+    }
+
+    for (const items of sources) {
+      for (let index = items.length - 1; index >= 0; index -= 1) {
+        const message = items[index];
+        if (message?.id === runId && isRenderableAssistantMessage(message)) {
+          return message;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function gatewayMessageRole(raw: any): string {
+    return typeof raw?.role === "string" ? raw.role.trim().toLowerCase() : "";
+  }
+
+  function gatewayMessageRunId(raw: any): string {
+    const direct =
+      typeof raw?.runId === "string"
+        ? raw.runId
+        : typeof raw?.run_id === "string"
+          ? raw.run_id
+          : typeof raw?.messageRunId === "string"
+            ? raw.messageRunId
+            : "";
+    if (direct.trim()) return direct.trim();
+    const meta = raw?.meta;
+    if (meta && typeof meta === "object") {
+      const nested =
+        typeof meta.runId === "string"
+          ? meta.runId
+          : typeof meta.run_id === "string"
+            ? meta.run_id
+            : "";
+      if (nested.trim()) return nested.trim();
+    }
+    return "";
+  }
+
+  function finalizeVisibleAssistantRun(
+    runId: string,
+    sessionKey: string,
+    reason: string,
+    optimizationTraceId?: string,
+  ): boolean {
+    const visibleAssistant = findVisibleAssistantMessage(runId, sessionKey);
+    if (!visibleAssistant) {
+      return false;
+    }
+    setIsLoading(false);
+    setThinkingStatus(null);
+    setError(null);
+    addDiag(`${reason} runId=${runId} (using streamed assistant content)`);
+    schedulePersist();
+    if (optimizationTraceId) {
+      appendOptimizationTraceLine(
+        optimizationTraceId,
+        `${reason} runId=${runId} (using streamed assistant content)`,
+      );
+      appendOptimizationTracePreview(
+        optimizationTraceId,
+        "trace assistantPreview",
+        visibleAssistant.content,
+      );
+      completeRunOptimizationTrace(runId, "completed");
+    }
+    return true;
+  }
+
+  function appendToolUsageTraceSummary(runId: string, optimizationTraceId?: string) {
+    if (!optimizationTraceId) return;
+    const timings = runTimingsRef.current[runId];
+    if (!timings || timings.toolUsageLogged) return;
+    const toolCallUsage = timings.toolPayloadSeenAt ? "seen" : "none_seen";
+    const toolUsage = timings.toolSeenAt ? "seen" : "none_seen";
+    appendOptimizationTraceLine(optimizationTraceId, `trace tool_call=${toolCallUsage}`);
+    appendOptimizationTraceLine(optimizationTraceId, `trace tool_result=${toolUsage}`);
+    timings.toolUsageLogged = true;
+  }
+
+  function scheduleActiveRunSettle(runId: string) {
+    if (!runId || activeRunIdRef.current !== runId) return;
+    if (activeRunSettleTimerRef.current) {
+      window.clearTimeout(activeRunSettleTimerRef.current);
+      activeRunSettleTimerRef.current = null;
+    }
+    activeRunSettleTimerRef.current = window.setTimeout(() => {
+      if (activeRunIdRef.current !== runId) return;
+      const lastActivity = lastEventByRunIdRef.current[runId] ?? 0;
+      if (Date.now() - lastActivity < ACTIVE_RUN_SETTLE_IDLE_MS) {
+        scheduleActiveRunSettle(runId);
+        return;
+      }
+      const sessionKey =
+        activeRunSessionRef.current ||
+        runSessionKeyRef.current[runId] ||
+        currentSessionRef.current ||
+        "";
+      const visibleAssistant = findVisibleAssistantMessage(runId, sessionKey);
+      if (!visibleAssistant) {
+        return;
+      }
+      autoSettledRunIdsRef.current.add(runId);
+      setIsLoading(false);
+      setThinkingStatus(null);
+      addDiag(`auto-settled response after quiet period runId=${runId}`);
+      const optimizationTraceId = runOptimizationTraceRef.current[runId];
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(
+          optimizationTraceId,
+          `trace auto_settled_after_quiet_period=${ACTIVE_RUN_SETTLE_IDLE_MS}ms`,
+        );
+        appendToolUsageTraceSummary(runId, optimizationTraceId);
+        appendOptimizationTracePreview(
+          optimizationTraceId,
+          "trace assistantPreview",
+          visibleAssistant.content,
+        );
+        completeRunOptimizationTrace(runId, "completed");
+      }
+      clearActiveRunTracking();
+    }, ACTIVE_RUN_SETTLE_IDLE_MS);
   }
 
   function recoverInterruptedActiveRun(reason: string) {
@@ -2191,15 +3172,19 @@ export function Chat({
       if (activeRunIdRef.current !== runId) return;
       const lastActivity = lastEventByRunIdRef.current[runId] ?? Date.now();
       const idleMs = Date.now() - lastActivity;
-      if (idleMs < ACTIVE_RUN_IDLE_TIMEOUT_MS) {
+      if (idleMs < activeRunIdleTimeoutMs) {
         refreshActiveRunTimeout(runId);
         return;
       }
       setIsLoading(false);
-      setError("Response timed out waiting for stream activity. Please retry.");
-      addDiag(`run timeout after ${Math.round(ACTIVE_RUN_IDLE_TIMEOUT_MS / 1000)}s idle runId=${runId}`);
+      setError(
+        localModelsMode
+          ? "Response timed out waiting for local model stream activity. The model may still be warming up or overloaded. Please retry."
+          : "Response timed out waiting for stream activity. Please retry.",
+      );
+      addDiag(`run timeout after ${Math.round(activeRunIdleTimeoutMs / 1000)}s idle runId=${runId}`);
       clearActiveRunTracking();
-    }, ACTIVE_RUN_IDLE_TIMEOUT_MS);
+    }, activeRunIdleTimeoutMs);
   }
 
   function scheduleActiveRunTimeout(runId: string, sessionKey: string) {
@@ -2257,7 +3242,7 @@ export function Chat({
     const ta = textareaRef.current;
     ta.style.height = "auto";
     const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
-    const maxHeight = lineHeight * 5;
+    const maxHeight = lineHeight * 8;
     ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
     ta.style.overflowY = ta.scrollHeight > maxHeight ? "auto" : "hidden";
   }, [currentSession, activeComposerMode]);
@@ -2309,7 +3294,7 @@ export function Chat({
   }, []);
 
   useEffect(() => {
-    if (isAuthenticated || !isAuthConfigured || useLocalKeys) {
+    if (isAuthenticated || !isAuthConfigured || !managedMode) {
       setLocalCreditsCents(null);
       return;
     }
@@ -2333,7 +3318,7 @@ export function Chat({
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, isAuthConfigured, useLocalKeys]);
+  }, [isAuthenticated, isAuthConfigured, managedMode]);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -2365,6 +3350,17 @@ export function Chat({
     return () => window.removeEventListener("entropic-auth-changed", onAuthChanged);
   }, []);
 
+  useEffect(() => {
+    const onChatsCleared = () => {
+      void clearPersistedChatHistory().catch((err) => {
+        console.warn("[Entropic] Failed to clear persisted chat history after bulk delete:", err);
+      });
+      resetAllChatsState();
+    };
+    window.addEventListener(CHAT_HISTORY_CLEARED_EVENT, onChatsCleared);
+    return () => window.removeEventListener(CHAT_HISTORY_CLEARED_EVENT, onChatsCleared);
+  }, [resetAllChatsState]);
+
   // If authenticated via proxy, treat as connected even without local API keys
   useEffect(() => {
     if (proxyEnabled && !connectedProvider) {
@@ -2382,7 +3378,10 @@ export function Chat({
 
   // Keep a single gateway socket alive while gateway + provider are available.
   useEffect(() => {
-    const shouldConnect = gatewayRunning && !gatewayStarting && (connectedProvider || proxyEnabled);
+    const shouldConnect =
+      gatewayRunning &&
+      !gatewayStarting &&
+      (connectedProvider || proxyEnabled || localModelReady);
     if (!shouldConnect) {
       if (clientRef.current) {
         detachGatewayListeners(clientRef.current);
@@ -2404,14 +3403,18 @@ export function Chat({
       }
       void connectToGateway();
     }
-  }, [gatewayRunning, gatewayStarting, connectedProvider, proxyEnabled, connected]);
+  }, [gatewayRunning, gatewayStarting, connectedProvider, proxyEnabled, localModelReady, connected]);
 
   // Reconnect-polling: when the gateway is running but the WS socket isn't
   // established yet (e.g. during the warm-up window after a container start),
   // retry connectToGateway() every 1 s rather than waiting for a dep change.
   useEffect(() => {
     const shouldPoll =
-      gatewayRunning && !gatewayStarting && !connected && !showOutOfCreditsModal && (connectedProvider || proxyEnabled);
+      gatewayRunning &&
+      !gatewayStarting &&
+      !connected &&
+      !showOutOfCreditsModal &&
+      (connectedProvider || proxyEnabled || localModelReady);
     if (!shouldPoll) return;
     const id = window.setInterval(() => {
       if (!connectInFlightRef.current && !clientRef.current?.isConnected()) {
@@ -2419,7 +3422,15 @@ export function Chat({
       }
     }, 1000);
     return () => window.clearInterval(id);
-  }, [gatewayRunning, gatewayStarting, connected, connectedProvider, proxyEnabled, showOutOfCreditsModal]);
+  }, [
+    gatewayRunning,
+    gatewayStarting,
+    connected,
+    connectedProvider,
+    proxyEnabled,
+    localModelReady,
+    showOutOfCreditsModal,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -2435,7 +3446,6 @@ export function Chat({
   useEffect(() => {
     if (gatewayStarting) {
       setError(null);
-      setIsConnecting(true);
     }
   }, [gatewayStarting]);
 
@@ -2462,7 +3472,14 @@ export function Chat({
     }
 
     if (shouldHoldConnectingScreen) {
-      setShowConnectingScreen(true);
+      if (showConnectingScreen) {
+        setError(null);
+        return;
+      }
+      connectingScreenTimerRef.current = window.setTimeout(() => {
+        setShowConnectingScreen(true);
+        connectingScreenTimerRef.current = null;
+      }, CONNECTING_SCREEN_SHOW_DELAY_MS);
       setError(null);
       return;
     }
@@ -2479,7 +3496,7 @@ export function Chat({
         connectingScreenTimerRef.current = null;
       }
     };
-  }, [shouldHoldConnectingScreen, connected]);
+  }, [shouldHoldConnectingScreen, connected, showConnectingScreen]);
 
   useEffect(() => {
     if (gatewayRunning || gatewayStarting || showConnectingScreen) {
@@ -2583,24 +3600,10 @@ export function Chat({
         setConnected(true);
         setIsConnecting(false);
         setError(null);
+        setLastGatewayError(null);
         onGatewayConnectionReady?.();
         loadSessions();
-        syncAllIntegrationsToGateway()
-          .then((providers) => {
-            addDiag(`integrations synced: ${providers.length ? providers.join(", ") : "none"}`);
-            if (providers.length === 0) {
-              getCachedIntegrationProviders()
-                .then((cached) => {
-                  if (cached.length > 0) {
-                    addDiag("integrations missing secrets; reconnect in Integrations");
-                  }
-                })
-                .catch(() => {});
-            }
-          })
-          .catch((err) => {
-            addDiag(`integrations sync failed: ${String(err)}`);
-          });
+        void maybeSyncIntegrationsOnConnect();
         addDiag("gateway connected");
       };
       const onDisconnected = () => {
@@ -2755,45 +3758,184 @@ export function Chat({
     if (stream === "tool") {
       const name = typeof data.name === "string" ? data.name : typeof data.tool === "string" ? data.tool : null;
       if (name) {
-        const friendly: Record<string, string> = {
-          read_file: "Reading file",
-          write_file: "Writing file",
-          edit_file: "Editing file",
-          list_directory: "Listing directory",
-          search_files: "Searching files",
-          run_command: "Running command",
-          bash: "Running command",
-          web_search: "Searching the web",
-          web_fetch: "Fetching web page",
-          x_search: "Searching X",
-          x_profile: "Looking up profile",
-          x_thread: "Fetching thread",
-          x_user_tweets: "Fetching tweets",
-          google_calendar: "Checking calendar",
-          google_email: "Checking email",
-          memory_search: "Searching memory",
-          memory_store: "Saving to memory",
-        };
-        return friendly[name] || `Using ${name.replace(/_/g, " ")}`;
+        return describeToolActivityName(name);
       }
       return "Using tool";
     }
+    if (stream === "thinking" || stream === "reasoning") return "Reasoning";
     if (stream === "assistant") return "Thinking";
     if (stream === "lifecycle") {
       const phase = typeof data.phase === "string" ? data.phase : null;
-      if (phase === "start") return "Starting";
+      if (phase === "start") return null;
       if (phase === "end" || phase === "error") return null;
     }
     return null;
+  }
+
+  function formatAgentDiagnostics(evt: AgentEvent): string[] {
+    if (evt.stream !== "diagnostic") return [];
+    const kind = typeof evt.data.kind === "string" ? evt.data.kind : "";
+    const readNumber = (value: unknown): number | null =>
+      typeof value === "number" && Number.isFinite(value) ? value : null;
+    const readString = (value: unknown): string | null =>
+      typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+
+    if (kind === "contextPreview") {
+      const provider = readString(evt.data.provider);
+      const model = readString(evt.data.model);
+      const systemPreview = readString(evt.data.systemPromptPreview);
+      const promptPreview = readString(evt.data.promptPreview);
+      const historyPreview = readString(evt.data.historyPreview);
+      const lines: string[] = [];
+      const target = provider && model ? `${provider}/${model}` : "run";
+      if (systemPreview) {
+        lines.push(`context preview ${target} system=${JSON.stringify(systemPreview)}`);
+      }
+      if (promptPreview) {
+        lines.push(`context preview ${target} prompt=${JSON.stringify(promptPreview)}`);
+      }
+      if (historyPreview) {
+        lines.push(`context preview ${target} history=${JSON.stringify(historyPreview)}`);
+      }
+      return lines;
+    }
+
+    if (kind !== "context") return [];
+
+    const numCtx = readNumber(evt.data.numCtx);
+    const systemPromptChars = readNumber(evt.data.systemPromptChars);
+    const promptChars = readNumber(evt.data.promptChars);
+    const historyTextChars = readNumber(evt.data.historyTextChars);
+    const messageCount = readNumber(evt.data.messageCount);
+    const toolCount = readNumber(evt.data.toolCount);
+    const toolSchemaChars = readNumber(evt.data.toolSchemaChars);
+    const skillsPromptChars = readNumber(evt.data.skillsPromptChars);
+    const provider = readString(evt.data.provider);
+    const model = readString(evt.data.model);
+    const bootstrapContextMode = readString(evt.data.bootstrapContextMode);
+    const disableTools = evt.data.disableTools === true;
+
+    const parts = [
+      `context ${provider && model ? `${provider}/${model}` : "run"}`,
+      numCtx !== null ? `num_ctx=${numCtx}` : null,
+      messageCount !== null ? `messages=${messageCount}` : null,
+      historyTextChars !== null ? `historyChars=${historyTextChars}` : null,
+      systemPromptChars !== null ? `systemChars=${systemPromptChars}` : null,
+      promptChars !== null ? `promptChars=${promptChars}` : null,
+      toolCount !== null ? `tools=${toolCount}` : null,
+      toolSchemaChars !== null ? `toolSchemaChars=${toolSchemaChars}` : null,
+      skillsPromptChars !== null ? `skillsChars=${skillsPromptChars}` : null,
+      `bootstrap=${bootstrapContextMode || "full"}`,
+      disableTools ? "disableTools=1" : "disableTools=0",
+    ].filter(Boolean);
+
+    return [parts.join(" ")];
   }
 
   function handleAgentEvent(event: AgentEvent) {
     if (!event?.runId || event.runId !== activeRunIdRef.current) return;
     lastEventByRunIdRef.current[event.runId] = Date.now();
     refreshActiveRunTimeout(event.runId);
+    if ((event.stream === "thinking" || event.stream === "reasoning") && showReasoning) {
+      const text =
+        typeof event.data.text === "string" ? normalizeReasoningText(event.data.text) : "";
+      if (text) {
+        const nextTrace = {
+          ...(assistantTraceByRunIdRef.current[event.runId] ?? createEmptyLiveRunPreview()),
+          reasoningText: text,
+        };
+        assistantTraceByRunIdRef.current[event.runId] = nextTrace;
+        setLiveRunPreview((prev) => {
+          const previewText = normalizeReasoningText(text, LIVE_REASONING_PREVIEW_CHARS);
+          if (prev.reasoningText === previewText) {
+            return prev;
+          }
+          return {
+            ...prev,
+            reasoningText: previewText,
+          };
+        });
+        setMessages((prev) => {
+          const nextMessages = prev.map((message) =>
+            message.id === event.runId && message.role === "assistant"
+              ? (() => {
+                  if (message.reasoningText === text) {
+                    return message;
+                  }
+                  const nextMessage = { ...message, reasoningText: text };
+                    return {
+                      ...nextMessage,
+                      parts: buildAssistantMessageParts({
+                        parts: nextMessage.parts,
+                        content: nextMessage.content,
+                        reasoningText: showReasoning ? nextMessage.reasoningText : undefined,
+                        toolCalls: nextMessage.toolCalls,
+                      }),
+                    };
+                })()
+              : message,
+          );
+          if (currentSessionRef.current) {
+            sessionMessagesRef.current[currentSessionRef.current] = nextMessages;
+          }
+          return nextMessages;
+        });
+      }
+    } else if (event.stream === "tool") {
+      const nextTrace = applyToolEventToLiveRunPreview(
+        assistantTraceByRunIdRef.current[event.runId] ?? createEmptyLiveRunPreview(),
+        event.data,
+        24,
+      );
+      assistantTraceByRunIdRef.current[event.runId] = nextTrace;
+      setLiveRunPreview((prev) => applyToolEventToLiveRunPreview(prev, event.data));
+      setMessages((prev) => {
+        const nextMessages = prev.map((message) =>
+          message.id === event.runId && message.role === "assistant"
+            ? (() => {
+                const nextMessage = { ...message, toolCalls: nextTrace.toolCalls };
+                return {
+                  ...nextMessage,
+                  parts: buildAssistantMessageParts({
+                    parts: nextMessage.parts,
+                    content: nextMessage.content,
+                    reasoningText: showReasoning ? nextMessage.reasoningText : undefined,
+                    toolCalls: nextMessage.toolCalls,
+                  }),
+                };
+              })()
+            : message,
+        );
+        if (currentSessionRef.current) {
+          sessionMessagesRef.current[currentSessionRef.current] = nextMessages;
+        }
+        return nextMessages;
+      });
+    } else if (event.stream === "assistant") {
+      setLiveRunPreview((prev) => {
+        if (!prev.reasoningText) {
+          return prev;
+        }
+        return {
+          ...prev,
+          reasoningText: "",
+        };
+      });
+    }
+    const diagnostics = formatAgentDiagnostics(event);
+    const optimizationTraceId = runOptimizationTraceRef.current[event.runId];
+    for (const diagnostic of diagnostics) {
+      addDiag(diagnostic);
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(optimizationTraceId, diagnostic);
+      }
+    }
     const status = describeAgentActivity(event);
     if (status) {
       setThinkingStatus(status);
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(optimizationTraceId, `trace status=${status}`);
+      }
     }
   }
 
@@ -2804,7 +3946,26 @@ export function Chat({
     runHistoryRecoveryRef.current[runId] = true;
     setIsLoading(true);
     try {
+      const optimizationTraceId = runOptimizationTraceRef.current[runId];
+      const noVisibleResponseParams = (overrideError?: string | null) => ({
+        lastGatewayError: overrideError ?? lastGatewayError,
+        connected,
+        gatewayStarting,
+        isConnecting,
+        gatewayRunning,
+        inStartupGracePeriod: Date.now() - componentMountedAt < 15_000,
+      });
       for (let attempt = 0; attempt < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS; attempt += 1) {
+        if (
+          finalizeVisibleAssistantRun(
+            runId,
+            sessionKey,
+            `final recovery satisfied from in-memory assistant attempt=${attempt + 1}`,
+            optimizationTraceId,
+          )
+        ) {
+          return;
+        }
         const client = clientRef.current;
         if (!client || !client.isConnected()) {
           if (attempt + 1 < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS) {
@@ -2813,21 +3974,36 @@ export function Chat({
             await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
             continue;
           }
-          setError(
-            buildNoVisibleResponseMessage({
-              lastGatewayError,
-              connected,
-            }),
-          );
-          addDiag(`final recovery missed runId=${runId} (client disconnected)`);
+          if (
+            finalizeVisibleAssistantRun(
+              runId,
+              sessionKey,
+              `final recovery fell back to in-memory assistant after disconnect attempt=${attempt + 1}`,
+              optimizationTraceId,
+            )
+          ) {
+            return;
+          }
+          const responseState = summarizeNoVisibleResponseReason(noVisibleResponseParams());
+          setError(buildNoVisibleResponseMessage(noVisibleResponseParams()));
+          addDiag(`final recovery missed runId=${runId} (client disconnected) classification=${responseState}`);
           return;
         }
 
         try {
           const history = await client.getChatHistory(sessionKey, 40);
-          const fallback = [...history].reverse().find((item) => {
-            const role = typeof item?.role === "string" ? item.role.toLowerCase() : "";
+          const latestUserIndex = history.reduce((foundIndex, item, index) => {
+            return gatewayMessageRole(item) === "user" ? index : foundIndex;
+          }, -1);
+          const recoveryWindow =
+            latestUserIndex >= 0 ? history.slice(latestUserIndex + 1) : history;
+          const fallback = [...recoveryWindow].reverse().find((item) => {
+            const role = gatewayMessageRole(item);
             if (role !== "assistant" && role !== "toolresult" && role !== "tool_result" && role !== "tool") {
+              return false;
+            }
+            const messageRunId = gatewayMessageRunId(item);
+            if (messageRunId && messageRunId !== runId) {
               return false;
             }
             const normalized = normalizeGatewayMessage(item as GatewayMessage, runId);
@@ -2846,13 +4022,21 @@ export function Chat({
               await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
               continue;
             }
-            setError(
-              buildNoVisibleResponseMessage({
-                lastGatewayError,
-                connected,
-              }),
+            if (
+              finalizeVisibleAssistantRun(
+                runId,
+                sessionKey,
+                `final recovery fell back to in-memory assistant after empty history attempt=${attempt + 1}`,
+                optimizationTraceId,
+              )
+            ) {
+              return;
+            }
+            const responseState = summarizeNoVisibleResponseReason(noVisibleResponseParams());
+            setError(buildNoVisibleResponseMessage(noVisibleResponseParams()));
+            addDiag(
+              `final recovery missed runId=${runId} (no assistant payload after latest user) classification=${responseState}`,
             );
-            addDiag(`final recovery missed runId=${runId} (no assistant payload in history)`);
             return;
           }
 
@@ -2864,13 +4048,19 @@ export function Chat({
               await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
               continue;
             }
-            setError(
-              buildNoVisibleResponseMessage({
-                lastGatewayError,
-                connected,
-              }),
-            );
-            addDiag(`final recovery missed runId=${runId} (normalize failed)`);
+            if (
+              finalizeVisibleAssistantRun(
+                runId,
+                sessionKey,
+                `final recovery fell back to in-memory assistant after normalize failure attempt=${attempt + 1}`,
+                optimizationTraceId,
+              )
+            ) {
+              return;
+            }
+            const responseState = summarizeNoVisibleResponseReason(noVisibleResponseParams());
+            setError(buildNoVisibleResponseMessage(noVisibleResponseParams()));
+            addDiag(`final recovery missed runId=${runId} (normalize failed) classification=${responseState}`);
             return;
           }
 
@@ -2886,31 +4076,39 @@ export function Chat({
               await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
               continue;
             }
-            setError(
-              buildNoVisibleResponseMessage({
-                lastGatewayError,
-                connected,
-              }),
+            if (
+              finalizeVisibleAssistantRun(
+                runId,
+                sessionKey,
+                `final recovery fell back to in-memory assistant after empty normalized payload attempt=${attempt + 1}`,
+                optimizationTraceId,
+              )
+            ) {
+              return;
+            }
+            const responseState = summarizeNoVisibleResponseReason(noVisibleResponseParams());
+            setError(buildNoVisibleResponseMessage(noVisibleResponseParams()));
+            addDiag(
+              `final recovery missed runId=${runId} (empty normalized payload) classification=${responseState}`,
             );
-            addDiag(`final recovery missed runId=${runId} (empty normalized payload)`);
             return;
           }
 
           setMessages((prev) => {
+            let nextMessages: Message[];
             const existingIdx = prev.findIndex((m) => m.id === runId && m.role === "assistant");
             if (existingIdx >= 0) {
-              const updated = [...prev];
-              updated[existingIdx] = {
-                ...updated[existingIdx],
+              nextMessages = [...prev];
+              nextMessages[existingIdx] = {
+                ...nextMessages[existingIdx],
                 content: text,
-                kind: normalized.kind ?? updated[existingIdx].kind,
-                toolName: normalized.toolName ?? updated[existingIdx].toolName,
-                assistantPayload: normalized.assistantPayload ?? updated[existingIdx].assistantPayload,
-                sentAt: updated[existingIdx].sentAt ?? normalized.sentAt ?? Date.now(),
+                kind: normalized.kind ?? nextMessages[existingIdx].kind,
+                toolName: normalized.toolName ?? nextMessages[existingIdx].toolName,
+                assistantPayload: normalized.assistantPayload ?? nextMessages[existingIdx].assistantPayload,
+                sentAt: nextMessages[existingIdx].sentAt ?? normalized.sentAt ?? Date.now(),
               };
-              return updated;
-            }
-            return [
+            } else {
+              nextMessages = [
               ...prev,
               {
                 id: runId,
@@ -2921,7 +4119,10 @@ export function Chat({
                 assistantPayload: normalized.assistantPayload,
                 sentAt: normalized.sentAt ?? Date.now(),
               },
-            ];
+              ];
+            }
+            sessionMessagesRef.current[sessionKey] = nextMessages;
+            return nextMessages;
           });
           setThinkingStatus(null);
           setError(null);
@@ -2931,6 +4132,15 @@ export function Chat({
             setShowOutOfCreditsModal(true);
           }
           addDiag(`recovered final response from history runId=${runId} attempt=${attempt + 1}`);
+          if (optimizationTraceId) {
+            appendOptimizationTraceLine(
+              optimizationTraceId,
+              `trace recovered final response from history attempt=${attempt + 1}`,
+            );
+            appendToolUsageTraceSummary(runId, optimizationTraceId);
+            appendOptimizationTracePreview(optimizationTraceId, "trace assistantPreview", text);
+            completeRunOptimizationTrace(runId, "completed");
+          }
           return;
         } catch (err) {
           if (attempt + 1 < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS) {
@@ -2939,14 +4149,29 @@ export function Chat({
             await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
             continue;
           }
-          setError(
-            buildNoVisibleResponseMessage({
-              lastGatewayError: err instanceof Error ? err.message : lastGatewayError,
-              connected,
-            }),
+          if (
+            finalizeVisibleAssistantRun(
+              runId,
+              sessionKey,
+              `final recovery fell back to in-memory assistant after error attempt=${attempt + 1}`,
+              optimizationTraceId,
+            )
+          ) {
+            return;
+          }
+          const responseState = summarizeNoVisibleResponseReason(
+            noVisibleResponseParams(err instanceof Error ? err.message : lastGatewayError),
           );
+          setError(buildNoVisibleResponseMessage(noVisibleResponseParams(err instanceof Error ? err.message : lastGatewayError)));
           setIsLoading(false);
-          addDiag(`final recovery failed runId=${runId}: ${String(err)}`);
+          addDiag(`final recovery failed runId=${runId}: ${String(err)} classification=${responseState}`);
+          if (optimizationTraceId) {
+            appendOptimizationTraceLine(
+              optimizationTraceId,
+              `trace final recovery failed: ${String(err)}`,
+            );
+            completeRunOptimizationTrace(runId, "error");
+          }
           return;
         }
       }
@@ -2964,6 +4189,15 @@ export function Chat({
       : null;
 
     const eventRunId = typeof event?.runId === "string" ? event.runId.trim() : "";
+    if (eventRunId && supersededRunIdsRef.current.has(eventRunId)) {
+      if (event.state === "final" || event.state === "error" || event.state === "aborted") {
+        supersededRunIdsRef.current.delete(eventRunId);
+        autoSettledRunIdsRef.current.delete(eventRunId);
+        delete runSessionKeyRef.current[eventRunId];
+      }
+      addDiag(`ignored late event for superseded auto-settled runId=${eventRunId} state=${String(event?.state || "unknown")}`);
+      return;
+    }
     if (eventRunId) {
       lastEventByRunIdRef.current[eventRunId] = Date.now();
       if (activeRunIdRef.current === eventRunId) {
@@ -2981,6 +4215,7 @@ export function Chat({
         : eventRunId
           ? runSessionKeyRef.current[eventRunId] || ""
           : "";
+    const optimizationTraceId = eventRunId ? runOptimizationTraceRef.current[eventRunId] : undefined;
     const isActiveRun = Boolean(eventRunId && activeRunIdRef.current === eventRunId);
     if (isActiveRun) {
       lastEventByRunIdRef.current[eventRunId!] = Date.now();
@@ -3018,13 +4253,44 @@ export function Chat({
     }
     if (event.state === "delta" || event.state === "final") {
       const normalized = event.message ? normalizeGatewayMessage(event.message as GatewayMessage, eventRunId || "evt") : null;
+      const trace = eventRunId ? assistantTraceByRunIdRef.current[eventRunId] : undefined;
+      const visibleTraceReasoning = showReasoning ? trace?.reasoningText : undefined;
+      const visibleNormalizedReasoning = showReasoning ? normalized?.reasoningText : undefined;
+      const mergedToolCalls = mergeMessageToolCalls(trace?.toolCalls, normalized?.toolCalls);
+      if (eventRunId && mergedToolCalls) {
+        assistantTraceByRunIdRef.current[eventRunId] = {
+          reasoningText: visibleTraceReasoning ?? visibleNormalizedReasoning ?? "",
+          toolCalls: mergedToolCalls ?? trace?.toolCalls ?? [],
+        };
+      }
+      const eventOutputTokens = extractEventOutputTokens(event.usage);
+      const nextUsage =
+        normalized?.usage ??
+        (eventOutputTokens !== null ? { outputTokens: eventOutputTokens } : undefined);
       const text = normalized?.content ?? "";
       const hasRenderableAssistantPayload = Boolean(
         normalized?.assistantPayload &&
         (normalized.assistantPayload.events.length > 0 || normalized.assistantPayload.errors.length > 0)
       );
-      if (text || hasRenderableAssistantPayload) {
+      const hasTraceContent = Boolean(visibleTraceReasoning || trace?.toolCalls.length);
+      const hadToolPayload = Boolean(normalized?.assistantPayload?.hadToolPayload);
+      if (text || hasRenderableAssistantPayload || hasTraceContent) {
         setThinkingStatus(null);
+        setLastGatewayError(null);
+        if (text) {
+          setLiveRunPreview((prev) => {
+            if (!prev.reasoningText) {
+              return prev;
+            }
+            return {
+              ...prev,
+              reasoningText: "",
+            };
+          });
+        }
+        if (event.state === "delta" && eventRunId && activeRunIdRef.current === eventRunId) {
+          scheduleActiveRunSettle(eventRunId);
+        }
         if (isProxyAuthFailure(text)) {
           triggerProxyAuthRecovery("chat message");
         }
@@ -3033,23 +4299,44 @@ export function Chat({
           if (timings && !timings.firstDeltaAt) {
             timings.firstDeltaAt = Date.now();
             addDiag(`timing first_delta runId=${eventRunId} t=${timings.firstDeltaAt - timings.startedAt}ms`);
+            if (optimizationTraceId) {
+              appendOptimizationTraceLine(
+                optimizationTraceId,
+                `trace timing first_delta=${timings.firstDeltaAt - timings.startedAt}ms`,
+              );
+            }
           }
         }
         setMessages(prev => {
+          let nextMessages: Message[];
           const existingIdx = prev.findIndex(m => m.id === eventRunId && m.role === "assistant");
           if (existingIdx >= 0) {
-            const updated = [...prev];
-            updated[existingIdx] = {
-              ...updated[existingIdx],
-              content: text,
-              kind: normalized?.kind ?? updated[existingIdx].kind,
-              toolName: normalized?.toolName ?? updated[existingIdx].toolName,
-              assistantPayload: normalized?.assistantPayload ?? updated[existingIdx].assistantPayload,
-              sentAt: updated[existingIdx].sentAt ?? normalized?.sentAt ?? Date.now(),
+            nextMessages = [...prev];
+            nextMessages[existingIdx] = {
+              ...nextMessages[existingIdx],
+              content: text || nextMessages[existingIdx].content,
+              kind: normalized?.kind ?? nextMessages[existingIdx].kind,
+              toolName: normalized?.toolName ?? nextMessages[existingIdx].toolName,
+              assistantPayload: normalized?.assistantPayload ?? nextMessages[existingIdx].assistantPayload,
+              reasoningText:
+                visibleTraceReasoning ??
+                visibleNormalizedReasoning ??
+                (showReasoning ? nextMessages[existingIdx].reasoningText : undefined),
+              toolCalls: mergedToolCalls ?? nextMessages[existingIdx].toolCalls,
+              parts: buildAssistantMessageParts({
+                parts: normalized?.parts ?? nextMessages[existingIdx].parts,
+                content: text || nextMessages[existingIdx].content,
+                reasoningText:
+                  visibleTraceReasoning ??
+                  visibleNormalizedReasoning ??
+                  (showReasoning ? nextMessages[existingIdx].reasoningText : undefined),
+                toolCalls: mergedToolCalls ?? nextMessages[existingIdx].toolCalls,
+              }),
+              usage: nextUsage ?? nextMessages[existingIdx].usage,
+              sentAt: nextMessages[existingIdx].sentAt ?? normalized?.sentAt ?? Date.now(),
             };
-            return updated;
-          }
-          return [
+          } else {
+            nextMessages = [
             ...prev,
             {
               id: eventRunId || crypto.randomUUID(),
@@ -3058,9 +4345,23 @@ export function Chat({
               kind: normalized?.kind,
               toolName: normalized?.toolName,
               assistantPayload: normalized?.assistantPayload,
+              reasoningText: visibleTraceReasoning ?? visibleNormalizedReasoning,
+              toolCalls: mergedToolCalls,
+              parts: buildAssistantMessageParts({
+                parts: normalized?.parts,
+                content: text,
+                reasoningText: visibleTraceReasoning ?? visibleNormalizedReasoning,
+                toolCalls: mergedToolCalls,
+              }),
+              usage: nextUsage,
               sentAt: normalized?.sentAt ?? Date.now(),
             },
-          ];
+            ];
+          }
+          if (knownSessionKey) {
+            sessionMessagesRef.current[knownSessionKey] = nextMessages;
+          }
+          return nextMessages;
         });
         if (keepComposerFocus) {
           requestAnimationFrame(() => {
@@ -3080,6 +4381,27 @@ export function Chat({
           if (timings && !timings.toolSeenAt) {
             timings.toolSeenAt = Date.now();
             addDiag(`timing tool_result runId=${eventRunId} t=${timings.toolSeenAt - timings.startedAt}ms`);
+            if (optimizationTraceId) {
+              appendOptimizationTraceLine(
+                optimizationTraceId,
+                `trace timing tool_result=${timings.toolSeenAt - timings.startedAt}ms`,
+              );
+            }
+          }
+        }
+        if (hadToolPayload && eventRunId) {
+          const timings = runTimingsRef.current[eventRunId];
+          if (timings && !timings.toolPayloadSeenAt) {
+            timings.toolPayloadSeenAt = Date.now();
+            addDiag(
+              `timing tool_payload runId=${eventRunId} t=${timings.toolPayloadSeenAt - timings.startedAt}ms`,
+            );
+            if (optimizationTraceId) {
+              appendOptimizationTraceLine(
+                optimizationTraceId,
+                `trace timing tool_call=${timings.toolPayloadSeenAt - timings.startedAt}ms`,
+              );
+            }
           }
         }
         // Throttled persist during streaming: save every 5s so partial responses
@@ -3091,20 +4413,50 @@ export function Chat({
           }, 5000);
         }
       } else if (event.state === "final" && eventRunId && knownSessionKey) {
-        addDiag(`final event missing payload runId=${eventRunId}; attempting history recovery`);
-        void recoverFinalRunFromHistory(eventRunId, knownSessionKey);
+        if (
+          finalizeVisibleAssistantRun(
+            eventRunId,
+            knownSessionKey,
+            "final event missing payload; preserving streamed assistant",
+            optimizationTraceId,
+          )
+        ) {
+          addDiag(`final event missing payload runId=${eventRunId}; kept in-memory assistant`);
+        } else {
+          addDiag(`final event missing payload runId=${eventRunId}; attempting history recovery`);
+          if (event.message) {
+            addDiag(`final raw runId=${eventRunId} ${summarizeGatewayMessageForDiag(event.message as GatewayMessage)}`);
+          }
+          void recoverFinalRunFromHistory(eventRunId, knownSessionKey);
+        }
       }
       if (event.state === "final") {
         setIsLoading(false);
+        if (eventRunId) {
+          delete assistantTraceByRunIdRef.current[eventRunId];
+        }
         if (eventRunId && activeRunIdRef.current === eventRunId) {
           clearActiveRunTracking();
         }
       }
       if (event.state === "final" && eventRunId) {
+        autoSettledRunIdsRef.current.delete(eventRunId);
+        supersededRunIdsRef.current.delete(eventRunId);
         const timings = runTimingsRef.current[eventRunId];
         if (timings && !timings.finalAt) {
           timings.finalAt = Date.now();
           addDiag(`timing final runId=${eventRunId} t=${timings.finalAt - timings.startedAt}ms`);
+          if (optimizationTraceId) {
+            appendOptimizationTraceLine(
+              optimizationTraceId,
+              `trace timing final=${timings.finalAt - timings.startedAt}ms`,
+            );
+          }
+        }
+        if (optimizationTraceId && (text || hasRenderableAssistantPayload)) {
+          appendToolUsageTraceSummary(eventRunId, optimizationTraceId);
+          appendOptimizationTracePreview(optimizationTraceId, "trace assistantPreview", text);
+          completeRunOptimizationTrace(eventRunId, "completed");
         }
         const revertModel = runRevertModelRef.current[eventRunId];
         if (revertModel && currentSessionRef.current && clientRef.current) {
@@ -3176,6 +4528,10 @@ export function Chat({
       } else {
         addDiag(`chat error: ${rawErrorMessage}`);
       }
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(optimizationTraceId, `trace error: ${rawErrorMessage}`);
+        completeRunOptimizationTrace(eventRunId, "error");
+      }
       if (isPolicyMessageRemovedError(rawErrorMessage)) {
         // The provider stripped all messages (e.g. internal-only history). Reset
         // the session context on the gateway so the next send starts clean.
@@ -3199,6 +4555,10 @@ export function Chat({
         delete runSessionKeyRef.current[eventRunId];
       }
       addDiag("chat aborted");
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(optimizationTraceId, "trace aborted");
+        completeRunOptimizationTrace(eventRunId, "aborted");
+      }
     }
 
   }
@@ -3699,9 +5059,17 @@ export function Chat({
 
   async function prepareSessionModelForSend(sessionKey: string, routingContent: string) {
     const routingEnabled = import.meta.env.VITE_MODEL_ROUTING === "1";
-    const fastModelOverride = normalizeModelId(import.meta.env.VITE_FAST_MODEL, proxyEnabled);
-    const reasoningOverride = normalizeModelId(import.meta.env.VITE_REASONING_MODEL, proxyEnabled);
-    const defaultModel = normalizeModelId(selectedModel, proxyEnabled);
+    const fastModelOverride = normalizeModelId(
+      import.meta.env.VITE_FAST_MODEL,
+      proxyEnabled,
+      localModelConfig,
+    );
+    const reasoningOverride = normalizeModelId(
+      import.meta.env.VITE_REASONING_MODEL,
+      proxyEnabled,
+      localModelConfig,
+    );
+    const defaultModel = normalizeModelId(selectedModel, proxyEnabled, localModelConfig);
     const fastModel = fastModelOverride ?? defaultModel;
     const reasoningModel = reasoningOverride ?? defaultModel;
     const decision = getRoutingDecision(routingContent);
@@ -3754,6 +5122,36 @@ export function Chat({
     }
   }
 
+  async function maybeSyncIntegrationsOnConnect() {
+    const now = Date.now();
+    if (now - lastIntegrationsSyncRef.current <= 60_000) {
+      return;
+    }
+    let hasPending = false;
+    try {
+      hasPending = await hasPendingIntegrationImports();
+    } catch (err) {
+      addDiag(`integrations pending-import check failed: ${String(err)}`);
+      return;
+    }
+    if (!hasPending) {
+      return;
+    }
+    lastIntegrationsSyncRef.current = now;
+    try {
+      const providers = await syncAllIntegrationsToGateway();
+      addDiag(`integrations synced: ${providers.length ? providers.join(", ") : "none"}`);
+      if (providers.length === 0) {
+        const cached = await getCachedIntegrationProviders().catch(() => []);
+        if (cached.length > 0) {
+          addDiag("integrations missing secrets; reconnect in Integrations");
+        }
+      }
+    } catch (err) {
+      addDiag(`integrations sync failed: ${String(err)}`);
+    }
+  }
+
   async function dispatchPendingSend(entry: PersistedPendingSend): Promise<string> {
     const liveClient = clientRef.current;
     if (!liveClient || !liveClient.isConnected()) {
@@ -3776,14 +5174,46 @@ export function Chat({
     addDiag(
       `send -> session=${entry.sessionKey} len=${entry.outboundMessageContent.length} attachments=${entry.attachments.length}`,
     );
+    const sessionComposerMode =
+      composerModeBySessionRef.current[entry.sessionKey] || DEFAULT_COMPOSER_MODE;
+    const localChatDebugModeEnabled =
+      localModelsMode &&
+      sessionComposerMode === "chat" &&
+      effectiveLocalModePerformanceSettings.debugMode;
+    const recordOptimizationTraceForSend = localChatDebugModeEnabled;
+    let optimizationTraceId: string | null = null;
+    if (recordOptimizationTraceForSend) {
+      const traceHistory = buildDirectLocalDebugHistory(sessionMessagesRef.current[entry.sessionKey] || []);
+      const traceLines = [
+        "trace settings debugMode=1 route=openclaw",
+        `trace session payload messages=${traceHistory.length} inputChars=${traceHistory.reduce((total, item) => total + item.content.length, 0)}`,
+        ...buildDirectLocalDebugPreview(traceHistory),
+      ];
+      optimizationTraceId = beginOptimizationTraceForSend({
+        mode: "openclaw-local-chat",
+        sessionKey: entry.sessionKey,
+        model: localModelConfig?.modelName || chosenModel || "unknown",
+        lines: traceLines,
+      });
+    }
     const runId = await liveClient.sendMessage(
       entry.sessionKey,
       entry.outboundMessageContent,
       entry.attachments,
       entry.idempotencyKey,
+      { reasoning: reasoningRequestMode },
     );
     if (!runId) {
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(optimizationTraceId, "trace error: failed to start response stream");
+        finishOptimizationTrace(optimizationTraceId, "error");
+      }
       throw new Error("Failed to start response stream");
+    }
+    if (optimizationTraceId) {
+      attachOptimizationTraceRunId(optimizationTraceId, runId);
+      runOptimizationTraceRef.current[runId] = optimizationTraceId;
+      appendOptimizationTraceLine(optimizationTraceId, `trace runId=${runId}`);
     }
 
     scheduleActiveRunTimeout(runId, entry.sessionKey);
@@ -3791,7 +5221,14 @@ export function Chat({
     runTimingsRef.current[runId] = { startedAt: sendStart, ackAt: Date.now() };
     addDiag(`timing send_ack runId=${runId} t=${runTimingsRef.current[runId].ackAt! - sendStart}ms`);
     addDiag(`send ok runId=${runId}`);
-    setThinkingStatus("Starting");
+    if (optimizationTraceId) {
+      appendOptimizationTraceLine(
+        optimizationTraceId,
+        `trace timing send_ack=${runTimingsRef.current[runId].ackAt! - sendStart}ms`,
+      );
+      appendOptimizationTraceLine(optimizationTraceId, "trace send ok");
+    }
+    setThinkingStatus(null);
     if (routingEnabled && chosenModel && fastModel && reasoningModel && chosenModel !== fastModel) {
       runRevertModelRef.current[runId] = fastModel;
     }
@@ -3802,6 +5239,63 @@ export function Chat({
       }
     }, 15000);
     return runId;
+  }
+
+  async function dispatchDirectLocalDebugSend(sessionKey: string): Promise<void> {
+    const history = buildDirectLocalDebugHistory(sessionMessagesRef.current[sessionKey] || []);
+    const historyChars = history.reduce((total, entry) => total + entry.content.length, 0);
+    addDiag(
+      `direct local debug send session=${sessionKey} messages=${history.length} inputChars=${historyChars}`,
+    );
+    for (const line of buildDirectLocalDebugPreview(history)) {
+      addDiag(line);
+    }
+    const optimizationTraceId =
+      localModelsMode && effectiveLocalModePerformanceSettings.debugMode
+        ? beginOptimizationTraceForSend({
+            mode: "direct-local-debug",
+            sessionKey,
+            model: localModelConfig?.modelName || "unknown",
+            lines: [
+              `trace session payload messages=${history.length} inputChars=${historyChars}`,
+              ...buildDirectLocalDebugPreview(history),
+            ],
+          })
+        : null;
+    try {
+      const response = await invoke<DirectLocalChatDebugResponse>("debug_local_model_chat", {
+        messages: history,
+      });
+      addDiag(
+        `direct local debug ok ${response.provider}/${response.model} t=${response.durationMs}ms historyMessages=${response.historyMessages} inputChars=${response.inputChars} responseChars=${response.responseChars}`,
+      );
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(
+          optimizationTraceId,
+          `trace direct response provider=${response.provider}/${response.model} durationMs=${response.durationMs} historyMessages=${response.historyMessages} inputChars=${response.inputChars} responseChars=${response.responseChars}`,
+        );
+        appendOptimizationTracePreview(optimizationTraceId, "trace assistantPreview", response.text);
+        finishOptimizationTrace(optimizationTraceId, "completed");
+      }
+      appendLocalMessage(
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: response.text || "The local model returned no visible text.",
+          sentAt: Date.now(),
+        },
+        sessionKey,
+      );
+    } catch (error) {
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(
+          optimizationTraceId,
+          `trace direct error: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        finishOptimizationTrace(optimizationTraceId, "error");
+      }
+      throw error;
+    }
   }
 
   async function replayOutboxEntry(entry: PersistedPendingSend) {
@@ -4005,8 +5499,9 @@ export function Chat({
     }
 
     if (composerMode === "image") {
-      if (!useLocalKeys && !proxyEnabled) {
-        const message = "Image generation currently requires proxy mode in Settings.";
+      if (!(proxyEnabled || byokMode)) {
+        const message =
+          "Image generation currently requires Managed Provider or Bring Your Own Keys mode in Settings.";
         setError(message);
         appendAssistantNotice(message, sendSession);
         return;
@@ -4088,6 +5583,55 @@ export function Chat({
       return;
     }
 
+    const useDirectLocalDebugChat =
+      localModelsMode &&
+      composerMode === "chat" &&
+      effectiveLocalModePerformanceSettings.debugMode &&
+      effectiveLocalModePerformanceSettings.debugDirectBypass;
+
+    if (useDirectLocalDebugChat) {
+      if (hasAttachments) {
+        const message = "Direct local debug chat does not support image attachments yet.";
+        setError(message);
+        appendAssistantNotice(message, sendSession);
+        return;
+      }
+
+      const userMessage: Message = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: userVisibleContent,
+        sentAt: Date.now(),
+      };
+      appendLocalMessage(userMessage, sendSession);
+
+      if (!content && sendSession) {
+        setDraftsBySession((prev) => ({ ...prev, [sendSession]: "" }));
+        if (textareaRef.current) {
+          textareaRef.current.style.height = "auto";
+          textareaRef.current.style.overflowY = "hidden";
+        }
+      }
+
+      setShowWelcome(false);
+      setIsLoading(true);
+      setThinkingStatus("Direct local model");
+      setError(null);
+
+      try {
+        await dispatchDirectLocalDebugSend(sendSession);
+      } catch (e) {
+        const message = formatUnknownUiError(e, "Direct local debug chat failed.");
+        setError(message);
+        addDiag(`direct local debug failed: ${message}`);
+        appendAssistantNotice(`Direct local debug failed: ${message}`, sendSession);
+      } finally {
+        setIsLoading(false);
+        setThinkingStatus(null);
+      }
+      return;
+    }
+
     const liveClient = clientRef.current;
     const shouldQueueForReconnect =
       gatewayStarting || isConnecting || connectInFlightRef.current || gatewayRunning;
@@ -4116,6 +5660,28 @@ export function Chat({
           }))
         : undefined,
     };
+    const supersededActiveRunId = activeRunIdRef.current;
+    const supersededActiveRunSession = activeRunSessionRef.current;
+    if (supersededActiveRunId) {
+      supersededRunIdsRef.current.add(supersededActiveRunId);
+      autoSettledRunIdsRef.current.delete(supersededActiveRunId);
+      addDiag(`superseding in-flight run on new send: ${supersededActiveRunId}`);
+      clearActiveRunTracking();
+      if (liveClient && supersededActiveRunSession) {
+        liveClient.abortChat(supersededActiveRunSession, supersededActiveRunId).catch((err) => {
+          addDiag(`abort superseded run failed: ${String(err)}`);
+        });
+      }
+    }
+    if (autoSettledRunIdsRef.current.size > 0) {
+      for (const runId of autoSettledRunIdsRef.current) {
+        supersededRunIdsRef.current.add(runId);
+      }
+      addDiag(
+        `superseding auto-settled run(s) on new send: ${Array.from(autoSettledRunIdsRef.current).join(", ")}`,
+      );
+      autoSettledRunIdsRef.current.clear();
+    }
     visibleMessagesSessionRef.current = sendSession;
     setMessages(prev => [...prev, userMessage]);
 
@@ -4261,6 +5827,7 @@ export function Chat({
     setIsLoading(true);
     setThinkingStatus("Thinking");
     setError(null);
+    setLastGatewayError(null);
     try {
       await dispatchPendingSend(pendingSend);
     } catch (e) {
@@ -5160,40 +6727,182 @@ export function Chat({
       errors: message.assistantPayload?.errors ?? [],
       hadToolPayload: message.assistantPayload?.hadToolPayload ?? false,
     };
-    if (payload.hadToolPayload && message.id) {
-      const timings = runTimingsRef.current[message.id];
-      if (timings && !timings.toolSeenAt) {
-        timings.toolSeenAt = Date.now();
-        addDiag(`timing tool_payload runId=${message.id} t=${timings.toolSeenAt - timings.startedAt}ms`);
+    const leadingThinkBlocks =
+      localChatDebugModeActive && payload.cleanText ? splitLeadingThinkBlocks(payload.cleanText) : null;
+    const assistantPartsBase = resolveAssistantMessageParts(message);
+    const assistantParts =
+      (
+        assistantPartsBase.length > 0
+          ? assistantPartsBase
+          : leadingThinkBlocks
+            ? buildAssistantMessageParts({
+                content: leadingThinkBlocks.answer,
+                reasoningText: showReasoning ? leadingThinkBlocks.thoughts.join("\n\n") : undefined,
+              })
+            : buildAssistantMessageParts({
+                content: payload.cleanText,
+                reasoningText: showReasoning ? message.reasoningText : undefined,
+                toolCalls: message.toolCalls,
+              })
+      ).filter((part) => showReasoning || part.type !== "reasoning");
+    const attachments = renderMessageAttachments(message);
+    const renderReasoningPart = (value: string, key: string, opts?: { preview?: boolean }) => {
+      const { preview, remainder } = splitThinkBlockPreview(value);
+      if (!remainder) {
+        return (
+          <div key={key} className="italic text-[13px] leading-6 text-[var(--text-tertiary)]">
+            {preview}
+          </div>
+        );
       }
-    }
-    if (!payload.events.length && !payload.errors.length) {
       return (
-        <div className="min-w-0 max-w-full">
-          {renderMessageAttachments(message)}
-          <MarkdownContent
-            content={payload.cleanText}
-            onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
-          />
+        <details
+          key={key}
+          className="group text-[13px] leading-6 text-[var(--text-tertiary)]"
+        >
+          <summary className="flex cursor-pointer list-none items-start gap-2 italic text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)] [&::-webkit-details-marker]:hidden">
+            <span
+              aria-hidden="true"
+              className="mt-0.5 shrink-0 text-sm leading-none text-[var(--text-secondary)] transition-transform group-open:rotate-180"
+            >
+              ▾
+            </span>
+            <span className="min-w-0 truncate">{preview}</span>
+          </summary>
+          <div className="mt-2 pl-5 italic text-[var(--text-secondary)]">
+            {opts?.preview ? (
+              <div className="max-h-32 overflow-hidden whitespace-pre-wrap text-xs leading-5">
+                {remainder}
+              </div>
+            ) : (
+              <div className="italic">
+                <MarkdownContent
+                  content={remainder}
+                  onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
+                />
+              </div>
+            )}
+          </div>
+        </details>
+      );
+    };
+    const renderToolCallPart = (
+      tool: Extract<AssistantMessagePart, { type: "toolCall" }>,
+      key: string,
+      opts?: { pending?: boolean },
+    ) => {
+      const label = describeToolActivityName(tool.name);
+      const statusLabel =
+        tool.phase === "result" ? (tool.isError ? "failed" : "done") : opts?.pending ? "running" : "live";
+      const detailText =
+        tool.detailText && tool.detailText !== tool.argsText ? tool.detailText : undefined;
+      return (
+        <div key={key} className="rounded-xl bg-[var(--bg-tertiary)]/55 px-3 py-2.5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 space-y-1">
+              <div className="flex items-center gap-2 text-sm font-medium text-[var(--text-primary)]">
+                <Activity className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
+                <span className="truncate">{label}</span>
+              </div>
+              {tool.argsText ? (
+                <div className="whitespace-pre-wrap break-words text-xs text-[var(--text-tertiary)]">
+                  {tool.argsText}
+                </div>
+              ) : null}
+              {detailText ? (
+                <div className="whitespace-pre-wrap break-words text-xs leading-5 text-[var(--text-secondary)]">
+                  {detailText}
+                </div>
+              ) : null}
+            </div>
+            <span
+              className={clsx(
+                "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                tool.phase === "result"
+                  ? tool.isError
+                    ? "bg-red-500/10 text-red-600"
+                    : "bg-emerald-500/10 text-emerald-600"
+                  : "bg-[var(--bg-secondary)] text-[var(--text-secondary)]",
+              )}
+            >
+              {statusLabel}
+            </span>
+          </div>
         </div>
       );
+    };
+    const renderToolCallGroup = (
+      tools: Array<Extract<AssistantMessagePart, { type: "toolCall" }>>,
+      key: string,
+      opts?: { pending?: boolean },
+    ) => {
+      if (tools.length === 0) {
+        return null;
+      }
+      const latestTool = tools[tools.length - 1];
+      return (
+        <details key={key} className="group text-[13px] leading-6 text-[var(--text-tertiary)]">
+          <summary className="flex cursor-pointer list-none items-start gap-2 text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)] [&::-webkit-details-marker]:hidden">
+            <span
+              aria-hidden="true"
+              className="mt-0.5 shrink-0 text-sm leading-none text-[var(--text-secondary)] transition-transform group-open:rotate-180"
+            >
+              ▾
+            </span>
+            <span className="min-w-0 truncate">{summarizeToolCallPreview(latestTool)}</span>
+            {tools.length > 1 ? (
+              <span className="shrink-0 text-[11px] text-[var(--text-quaternary)]">
+                {tools.length}
+              </span>
+            ) : null}
+          </summary>
+          <div className="mt-2 space-y-2 pl-5">
+            {[...tools].reverse().map((tool, index) =>
+              renderToolCallPart(tool, `${key}-${tool.toolCallId}-${index}`, opts),
+            )}
+          </div>
+        </details>
+      );
+    };
+    const renderAssistantParts = (parts: AssistantMessagePart[], opts?: { preview?: boolean }) => (
+      <div className="space-y-2.5">
+        {parts
+          .filter((part): part is Extract<AssistantMessagePart, { type: "reasoning" }> => part.type === "reasoning")
+          .map((part, index) =>
+            renderReasoningPart(part.text, `${message.id || "assistant"}-reasoning-${index}`, {
+              preview: opts?.preview,
+            }),
+          )}
+        {renderToolCallGroup(
+          parts.filter((part): part is Extract<AssistantMessagePart, { type: "toolCall" }> => part.type === "toolCall"),
+          `${message.id || "assistant"}-tools`,
+          { pending: opts?.preview },
+        )}
+        {parts
+          .filter((part): part is Extract<AssistantMessagePart, { type: "text" }> => part.type === "text")
+          .map((part, index) => (
+            <div key={`${message.id || "assistant"}-text-${index}`} className="min-w-0">
+              <MarkdownContent
+                content={part.text}
+                onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
+              />
+            </div>
+          ))}
+      </div>
+    );
+    if (payload.hadToolPayload && message.id) {
+      const timings = runTimingsRef.current[message.id];
+      if (timings && !timings.toolPayloadSeenAt) {
+        timings.toolPayloadSeenAt = Date.now();
+        addDiag(
+          `timing tool_payload runId=${message.id} t=${timings.toolPayloadSeenAt - timings.startedAt}ms`,
+        );
+      }
     }
     return (
-      <div className="min-w-0 max-w-full space-y-2">
-        <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)]">
-          <span>{message.kind === "toolResult" ? "Tool Result" : "Assistant"}</span>
-          {message.toolName ? <span className="text-[var(--text-quaternary)]">{message.toolName}</span> : null}
-        </div>
-        {payload.cleanText ? (
-          <div>
-            {renderMessageAttachments(message)}
-            <MarkdownContent
-              content={payload.cleanText}
-              onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
-            />
-          </div>
-        ) : null}
-        {!payload.cleanText ? renderMessageAttachments(message) : null}
+      <div className="min-w-0 max-w-full space-y-3">
+        {attachments}
+        {assistantParts.length > 0 ? renderAssistantParts(assistantParts) : null}
         {payload.events.length > 0 && (
           <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-3 shadow-sm">
             <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)] mb-2">
@@ -5231,173 +6940,175 @@ export function Chat({
   }
 
   // Simplified render helpers for different states
-  const renderConnecting = () => (
+  const renderConnecting = (message?: string) => (
     <div className="h-full flex items-center justify-center">
       <div className="text-center p-8 glass-card">
         <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3 text-[var(--text-accent)]" />
         <p className="text-[var(--text-secondary)]">
-          {gatewayLifecycleLabel || "Connecting to your assistant..."}
+          {message ?? (gatewayLifecycleLabel || "Connecting to your assistant...")}
         </p>
-        <p className="mt-2 text-sm text-[var(--text-tertiary)]">
-          Chat will open as soon as the sandbox is ready.
-        </p>
+        {!message && (
+          <p className="mt-2 text-sm text-[var(--text-tertiary)]">
+            Chat will open as soon as the sandbox is ready.
+          </p>
+        )}
       </div>
     </div>
   );
 
   const renderNoProvider = () => {
-    const accountSignInAvailable = isAuthConfigured && !useLocalKeys && !isAuthenticated;
+    const accountSignInAvailable = isAuthConfigured && managedMode && !isAuthenticated;
     const trialCreditsExhausted =
       accountSignInAvailable &&
       localCreditsCents !== null &&
       localCreditsCents <= 0;
-    const ownProviderExpanded =
-      !accountSignInAvailable || showOwnProviderOptions || anthropicCodePending;
 
     return (
       <>
-        <div className="h-full flex flex-col items-center justify-center p-6 text-center">
-          <div className={accountSignInAvailable
-            ? "w-full max-w-[420px] bg-[var(--bg-card)] rounded-3xl shadow-xl p-10 border border-[var(--border-subtle)]"
-            : "bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-2xl shadow-sm p-8 max-w-md"}
-          >
-            {accountSignInAvailable ? (
-              <div className="text-center mb-8">
-                <div className="w-20 h-20 rounded-[2rem] bg-transparent mx-auto flex items-center justify-center mb-6">
-                  <img src={entropicLogo} alt="Entropic" className="w-20 h-20 rounded-[2rem] shadow-xl" />
-                </div>
-                <h2 className="text-3xl font-bold text-[var(--text-primary)] mb-3 tracking-tight">Continue with Entropic</h2>
-                <p className="text-sm text-[var(--text-secondary)]">
-                  {trialCreditsExhausted
-                    ? "Your free credits are used. Sign in to continue, or use your own provider."
-                    : "Sign in with your Entropic account, or use your own provider."}
-                </p>
-              </div>
-            ) : (
-              <>
-                <Sparkles className="w-10 h-10 mx-auto mb-4 text-[var(--text-accent)]" />
-                <h2 className="text-xl font-semibold mb-2 text-[var(--text-primary)]">Connect an AI Service</h2>
-                <p className="mb-6 text-[var(--text-secondary)]">Use provider OAuth or add an API key.</p>
-              </>
-            )}
-
-            {accountSignInAvailable ? (
-              <div className="space-y-3 mb-6">
-                {authError ? (
-                  <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-500 text-center">
-                    {authError}
-                  </div>
-                ) : null}
-                {authNotice ? (
-                  <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-500 text-center">
-                    {authNotice}
-                  </div>
-                ) : null}
-                <button
-                  onClick={() => handleEntropicOAuthSignIn("google")}
-                  disabled={authLoading !== null || oauthLoading !== null}
-                  className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[var(--bg-card)] hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)] font-medium rounded-2xl border border-[var(--border-default)] transition-all hover:border-[var(--border-primary)] active:scale-95 duration-200 disabled:opacity-50"
-                >
-                  <GoogleIcon className="w-5 h-5" />
-                  {authLoading === "google" ? "Opening Google..." : "Continue with Google"}
-                </button>
-                <button
-                  onClick={() => handleEntropicOAuthSignIn("discord")}
-                  disabled={authLoading !== null || oauthLoading !== null}
-                  className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[#5865F2] hover:bg-[#4752C4] text-white font-medium rounded-2xl transition-all shadow-md hover:shadow-lg active:scale-95 duration-200 disabled:opacity-50"
-                >
-                  <DiscordIcon className="w-5 h-5" />
-                  {authLoading === "discord" ? "Opening Discord..." : "Continue with Discord"}
-                </button>
-                <div className="relative py-2">
-                  <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-[var(--border-subtle)]" />
-                  </div>
-                  <div className="relative flex justify-center text-[10px] uppercase tracking-wider">
-                    <span className="bg-[var(--bg-card)] px-2 text-[var(--text-tertiary)]">or</span>
-                  </div>
-                </div>
-                <button
-                  onClick={() => {
-                    setShowEmailAuth((prev) => !prev);
-                    setAuthError(null);
-                    setAuthNotice(null);
-                  }}
-                  disabled={authLoading !== null || oauthLoading !== null}
-                  className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[var(--bg-tertiary)] hover:bg-[var(--bg-secondary)] text-[var(--text-primary)] font-medium rounded-2xl transition-all active:scale-95 duration-200 disabled:opacity-50"
-                >
-                  <Mail className="w-5 h-5 text-[var(--text-secondary)]" />
-                  <span>Continue with Email</span>
-                </button>
-                {showEmailAuth ? (
-                  <form onSubmit={handleEntropicEmailAuthSubmit} className="space-y-3 rounded-2xl bg-[var(--bg-tertiary)] p-4 text-left">
-                    <input
-                      type="email"
-                      value={authEmail}
-                      onChange={(event) => setAuthEmail(event.target.value)}
-                      placeholder="name@example.com"
-                      className="w-full px-4 py-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border-default)] focus:ring-2 focus:ring-[var(--purple-accent-subtle)] focus:outline-none text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] text-sm transition-all"
-                      required
-                    />
-                    <input
-                      type="password"
-                      value={authPassword}
-                      onChange={(event) => setAuthPassword(event.target.value)}
-                      placeholder={emailAuthMode === "signup" ? "Create password" : "Password"}
-                      className="w-full px-4 py-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border-default)] focus:ring-2 focus:ring-[var(--purple-accent-subtle)] focus:outline-none text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] text-sm transition-all"
-                      required
-                      minLength={emailAuthMode === "signup" ? 8 : undefined}
-                    />
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="submit"
-                        disabled={authLoading !== null}
-                        className="px-4 py-2.5 rounded-xl bg-[#1A1A2E] hover:opacity-80 text-white text-xs font-semibold transition-all disabled:opacity-50"
-                      >
-                        {emailAuthMode === "signup"
-                          ? authLoading === "email-signup"
-                            ? "Creating..."
-                            : "Create account"
-                          : authLoading === "email-signin"
-                            ? "Signing in..."
-                            : "Sign in"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEmailAuthMode((prev) => (prev === "signup" ? "signin" : "signup"));
-                          setAuthError(null);
-                          setAuthNotice(null);
-                        }}
-                        className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
-                      >
-                        {emailAuthMode === "signup"
-                          ? "Have an account? Sign in"
-                          : "Need an account? Sign up"}
-                      </button>
-                    </div>
-                  </form>
-                ) : null}
-              </div>
-            ) : null}
-
-            <button
-              onClick={() => setShowOwnProviderOptions((prev) => !prev)}
-              className={accountSignInAvailable
-                ? "w-full mb-2 flex flex-col items-center justify-center gap-0.5 text-[11px] uppercase tracking-[0.16em] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors"
-                : "w-full mb-2 flex flex-col items-center justify-center gap-0.5 text-[11px] uppercase tracking-[0.16em] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors"}
-            >
-              <span>Use your own provider</span>
-              {ownProviderExpanded ? (
-                <ChevronUp className="w-3.5 h-3.5" />
+        <div className="h-full flex flex-col items-center overflow-y-auto p-6 text-center">
+          <div className="my-auto w-full max-w-[720px] shrink-0 rounded-3xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-8 shadow-xl">
+            <div className="text-center mb-6">
+              {managedMode ? (
+                <img src={entropicLogo} alt="Entropic" className="mx-auto mb-4 h-16 w-16 rounded-2xl shadow-lg" />
               ) : (
-                <ChevronDown className="w-3.5 h-3.5" />
+                <Sparkles className="mx-auto mb-4 h-8 w-8 text-[var(--text-accent)]" />
               )}
-            </button>
+              <h2 className="text-2xl font-semibold text-[var(--text-primary)]">
+                Connect an AI Service
+              </h2>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">
+                Choose how to connect: through Entropic, with your own API keys, or using local models.
+              </p>
+            </div>
 
-            {ownProviderExpanded ? (
-              <>
-                <div className="space-y-2 mb-4">
+            <ConnectionModeSelector
+              value={connectionMode}
+              onChange={(value) => {
+                void onConnectionModeChange?.(value);
+              }}
+              className="mb-6"
+            />
+
+            {managedMode ? (
+              <div className="mx-auto max-w-[420px] space-y-3">
+                {accountSignInAvailable ? (
+                  <>
+                    <p className="text-sm text-[var(--text-secondary)]">
+                      {trialCreditsExhausted
+                        ? "Your free credits have been used. Sign in to continue, or choose a different option above."
+                        : "Sign in with your Entropic account to use the managed provider."}
+                    </p>
+                    {authError ? (
+                      <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-500 text-center">
+                        {authError}
+                      </div>
+                    ) : null}
+                    {authNotice ? (
+                      <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-500 text-center">
+                        {authNotice}
+                      </div>
+                    ) : null}
+                    <button
+                      onClick={() => handleEntropicOAuthSignIn("google")}
+                      disabled={authLoading !== null || oauthLoading !== null}
+                      className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[var(--bg-card)] hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)] font-medium rounded-2xl border border-[var(--border-default)] transition-all hover:border-[var(--border-primary)] active:scale-95 duration-200 disabled:opacity-50"
+                    >
+                      <GoogleIcon className="w-5 h-5" />
+                      {authLoading === "google" ? "Opening Google..." : "Continue with Google"}
+                    </button>
+                    <button
+                      onClick={() => handleEntropicOAuthSignIn("discord")}
+                      disabled={authLoading !== null || oauthLoading !== null}
+                      className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[#5865F2] hover:bg-[#4752C4] text-white font-medium rounded-2xl transition-all shadow-md hover:shadow-lg active:scale-95 duration-200 disabled:opacity-50"
+                    >
+                      <DiscordIcon className="w-5 h-5" />
+                      {authLoading === "discord" ? "Opening Discord..." : "Continue with Discord"}
+                    </button>
+                    <div className="relative py-2">
+                      <div className="absolute inset-0 flex items-center">
+                        <div className="w-full border-t border-[var(--border-subtle)]" />
+                      </div>
+                      <div className="relative flex justify-center text-[10px] uppercase tracking-wider">
+                        <span className="bg-[var(--bg-card)] px-2 text-[var(--text-tertiary)]">or</span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setShowEmailAuth((prev) => !prev);
+                        setAuthError(null);
+                        setAuthNotice(null);
+                      }}
+                      disabled={authLoading !== null || oauthLoading !== null}
+                      className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[var(--bg-tertiary)] hover:bg-[var(--bg-secondary)] text-[var(--text-primary)] font-medium rounded-2xl transition-all active:scale-95 duration-200 disabled:opacity-50"
+                    >
+                      <Mail className="w-5 h-5 text-[var(--text-secondary)]" />
+                      <span>Continue with Email</span>
+                    </button>
+                    {showEmailAuth ? (
+                      <form onSubmit={handleEntropicEmailAuthSubmit} className="space-y-3 rounded-2xl bg-[var(--bg-tertiary)] p-4 text-left">
+                        <input
+                          type="email"
+                          value={authEmail}
+                          onChange={(event) => setAuthEmail(event.target.value)}
+                          placeholder="name@example.com"
+                          className="w-full px-4 py-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border-default)] focus:ring-2 focus:ring-[var(--purple-accent-subtle)] focus:outline-none text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] text-sm transition-all"
+                          required
+                        />
+                        <input
+                          type="password"
+                          value={authPassword}
+                          onChange={(event) => setAuthPassword(event.target.value)}
+                          placeholder={emailAuthMode === "signup" ? "Create password" : "Password"}
+                          className="w-full px-4 py-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border-default)] focus:ring-2 focus:ring-[var(--purple-accent-subtle)] focus:outline-none text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] text-sm transition-all"
+                          required
+                          minLength={emailAuthMode === "signup" ? 8 : undefined}
+                        />
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="submit"
+                            disabled={authLoading !== null}
+                            className="px-4 py-2.5 rounded-xl bg-[#1A1A2E] hover:opacity-80 text-white text-xs font-semibold transition-all disabled:opacity-50"
+                          >
+                            {emailAuthMode === "signup"
+                              ? authLoading === "email-signup"
+                                ? "Creating..."
+                                : "Create account"
+                              : authLoading === "email-signin"
+                                ? "Signing in..."
+                                : "Sign in"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEmailAuthMode((prev) => (prev === "signup" ? "signin" : "signup"));
+                              setAuthError(null);
+                              setAuthNotice(null);
+                            }}
+                            className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+                          >
+                            {emailAuthMode === "signup"
+                              ? "Have an account? Sign in"
+                              : "Need an account? Sign up"}
+                          </button>
+                        </div>
+                      </form>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-4 py-4 text-sm text-[var(--text-secondary)] text-left">
+                    {isAuthConfigured
+                      ? "You're connected through the managed provider. Switch to Bring Your Own Keys or Local Models to use a different service."
+                      : "The managed provider isn't available in this version. Use Bring Your Own Keys or Local Models instead."}
+                  </div>
+                )}
+              </div>
+            ) : byokMode ? (
+              <div className="space-y-5 text-left">
+                <p className="text-sm text-[var(--text-secondary)]">
+                  Sign in to a provider or enter an API key directly.
+                </p>
+
+                <div className="space-y-2">
                   {anthropicCodePending ? (
                     <div className="p-3 rounded-lg bg-[var(--border-subtle)]">
                       <p className="text-sm font-medium text-[var(--text-primary)] mb-1">Paste the code from your browser</p>
@@ -5458,7 +7169,7 @@ export function Chat({
                     </div>
                     <div className="flex-1">
                       <p className="font-medium text-[var(--text-primary)]">Sign in with OpenAI</p>
-                      <p className="text-xs text-[var(--text-tertiary)]">Use your existing subscription</p>
+                      <p className="text-xs text-[var(--text-tertiary)]">Use your existing subscription or API key</p>
                     </div>
                     {oauthLoading === "openai" ? (
                       <Loader2 className="w-4 h-4 animate-spin text-[var(--text-tertiary)]" />
@@ -5468,29 +7179,62 @@ export function Chat({
                   </button>
                 </div>
 
-                <div className="flex items-center gap-3 my-4">
+                <div className="flex items-center gap-3">
                   <div className="flex-1 h-px bg-[var(--border-default)]" />
                   <span className="text-xs text-[var(--text-tertiary)] font-medium">or use an API key</span>
                   <div className="flex-1 h-px bg-[var(--border-default)]" />
                 </div>
 
                 <div className="space-y-2">
-                  {PROVIDERS.map(p => (
-                    <button key={p.id} onClick={() => { setSelectedProvider(p); setShowKeyModal(true); }}
-                      className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors hover:bg-[var(--border-subtle)]">
+                  {PROVIDERS.map((provider) => (
+                    <button
+                      key={provider.id}
+                      onClick={() => {
+                        setSelectedProvider(provider);
+                        setShowKeyModal(true);
+                      }}
+                      className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors hover:bg-[var(--border-subtle)]"
+                    >
                       <div className="w-9 h-9 rounded-md bg-[var(--border-subtle)] flex items-center justify-center font-semibold text-[var(--text-accent)]">
-                        {p.icon}
+                        {provider.icon}
                       </div>
                       <div className="flex-1">
-                        <p className="font-medium text-[var(--text-primary)]">{p.name}</p>
+                        <p className="font-medium text-[var(--text-primary)]">{provider.name}</p>
                       </div>
                       <ExternalLink className="w-4 h-4 text-[var(--text-tertiary)]" />
                     </button>
                   ))}
                 </div>
-                <p className="text-xs mt-6 text-[var(--text-tertiary)]">Your credentials are stored locally and securely.</p>
-              </>
-            ) : null}
+              </div>
+            ) : (
+              <div className="space-y-5 text-left">
+                <p className="text-sm text-[var(--text-secondary)]">
+                  Connect a local model service. Models will be detected automatically.
+                </p>
+                <LocalAiServiceForm
+                  config={{
+                    ...(localModelConfig ?? {
+                      enabled: true,
+                      serviceType: "ollama",
+                      apiMode: "ollama",
+                      baseUrl: "http://localhost:11434",
+                      apiKey: "local-placeholder",
+                      modelName: "",
+                      allowNonLocal: false,
+                    }),
+                    enabled: true,
+                  }}
+                  onChange={(config) => {
+                    void onLocalModelConfigChange?.({ ...config, enabled: true });
+                  }}
+                />
+                {localModelReady ? (
+                  <p className="text-xs text-[var(--text-secondary)]">
+                    Your local model will be ready to use once the sandbox starts.
+                  </p>
+                ) : null}
+              </div>
+            )}
 
             {TERMS_URL && PRIVACY_URL ? (
               <p className="text-xs text-center text-[var(--text-tertiary)] mt-6 pt-4 border-t border-[var(--border-subtle)] leading-relaxed">
@@ -5591,6 +7335,23 @@ export function Chat({
     </div>
   );
 
+  async function finalizeByokConnection(provider: string) {
+    setConnectedProvider(provider);
+    if (connectionMode !== "byok") {
+      await onConnectionModeChange?.("byok");
+      return;
+    }
+    if (gatewayRunning) {
+      await invoke("restart_gateway", { model: selectedModel });
+      return;
+    }
+    if (onStartGateway) {
+      await onStartGateway();
+      return;
+    }
+    await invoke("start_gateway", { model: selectedModel });
+  }
+
   async function connectWithKey() {
     if (!selectedProvider || !keyInput.trim()) return;
     try {
@@ -5600,10 +7361,9 @@ export function Chat({
         key: keyInput.trim(),
       });
       await invoke("set_active_provider", { provider });
-      setConnectedProvider(provider);
       setKeyInput("");
       setShowKeyModal(false);
-      await refreshGatewayAfterProviderAuthChange();
+      await finalizeByokConnection(provider);
     } catch (e) {
       console.error("Failed to set API key:", e);
       setError(e instanceof Error ? e.message : typeof e === "string" ? e : "Failed to save API key");
@@ -5624,8 +7384,7 @@ export function Chat({
       }
       // OpenAI: single-step localhost callback
       await invoke<{ access_token: string; provider: string }>("start_openai_oauth");
-      setConnectedProvider(provider);
-      await refreshGatewayAfterProviderAuthChange();
+      await finalizeByokConnection(provider);
     } catch (e) {
       console.error(`OAuth login failed for ${provider}:`, e);
       setError(e instanceof Error ? e.message : typeof e === "string" ? e : "OAuth login failed");
@@ -5644,8 +7403,7 @@ export function Chat({
       });
       setAnthropicCodePending(false);
       setAnthropicCodeInput("");
-      setConnectedProvider("anthropic");
-      await refreshGatewayAfterProviderAuthChange();
+      await finalizeByokConnection("anthropic");
     } catch (e) {
       console.error("Anthropic OAuth code exchange failed:", e);
       setError(
@@ -5656,6 +7414,68 @@ export function Chat({
     }
   }
 
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current) {
+        clearTimeout(copyResetTimerRef.current);
+      }
+    };
+  }, []);
+
+  async function copyMessageText(messageId: string, text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(trimmed);
+      setCopiedMessageId(messageId);
+      if (copyResetTimerRef.current) {
+        clearTimeout(copyResetTimerRef.current);
+      }
+      copyResetTimerRef.current = setTimeout(() => {
+        setCopiedMessageId((current) => (current === messageId ? null : current));
+      }, 1500);
+    } catch (e) {
+      setError(formatUnknownUiError(e, "Failed to copy message."));
+    }
+  }
+
+  function resolveMessageCopyText(message: Message): string {
+    if (message.role === "user") {
+      return normalizeUserContent(message.content, message.sentAt).content;
+    }
+    const textParts = resolveAssistantMessageParts(message)
+      .filter((part): part is Extract<AssistantMessagePart, { type: "text" }> => part.type === "text")
+      .map((part) => part.text.trim())
+      .filter(Boolean);
+    return textParts.join("\n\n").trim() || message.content.trim();
+  }
+
+  function resolveAssistantTokensPerSecond(message: Message): string | null {
+    if (message.role !== "assistant") {
+      return null;
+    }
+    const outputTokens = message.usage?.outputTokens ?? message.usage?.totalTokens ?? null;
+    if (!outputTokens || outputTokens <= 0) {
+      return null;
+    }
+    const timings = runTimingsRef.current[message.id];
+    if (!timings?.finalAt) {
+      return null;
+    }
+    const start = timings.firstDeltaAt ?? timings.startedAt;
+    const elapsedMs = timings.finalAt - start;
+    if (elapsedMs < 200) {
+      return null;
+    }
+    const tokensPerSecond = outputTokens / (elapsedMs / 1000);
+    if (!Number.isFinite(tokensPerSecond) || tokensPerSecond <= 0) {
+      return null;
+    }
+    return `${tokensPerSecond >= 10 ? tokensPerSecond.toFixed(0) : tokensPerSecond.toFixed(1)} tok/s`;
+  }
+
   // Memoize the message list so typing in the composer doesn't re-render
   // every message (and re-parse markdown) on each keystroke.
   // These hooks must be before early returns to satisfy Rules of Hooks.
@@ -5663,50 +7483,194 @@ export function Chat({
     const normalizedUser = msg.role === "user" ? normalizeUserContent(msg.content, msg.sentAt) : null;
     const bodyContent = msg.role === "user" ? normalizedUser?.content ?? "" : msg.content;
     const messageTime = formatMessageTime(msg.role === "user" ? normalizedUser?.sentAt : msg.sentAt);
+    const copyText = resolveMessageCopyText(msg);
+    const canCopy = copyText.trim().length > 0;
+    const copyLabel = copiedMessageId === msg.id ? "Copied" : "Copy";
+    const copyIcon = copiedMessageId === msg.id ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />;
+    const assistantTokensPerSecond = msg.role === "assistant" ? resolveAssistantTokensPerSecond(msg) : null;
     if (msg.role === "user" && !bodyContent) {
       return null;
     }
     return (
       <div key={msg.id} className={clsx("flex min-w-0", msg.role === "user" ? "justify-end" : "justify-start")}>
-        <div className={clsx("min-w-0 max-w-[85%]")}>
-          <div className={clsx("px-3.5 py-2 rounded-2xl",
-            msg.role === "user"
-              ? "bg-[var(--chat-user-bg)] text-[var(--chat-user-text)]"
-              : "bg-[var(--chat-assistant-bg)] text-[var(--chat-assistant-text)] border border-[var(--chat-assistant-border)]")}>
-            {msg.role === "assistant" ? (
-              renderAssistantContent(msg)
-            ) : (
-              <div>
-                {renderMessageAttachments(msg)}
-                <p className="whitespace-pre-wrap break-words">{bodyContent}</p>
+        <div className={clsx("min-w-0", msg.role === "user" ? "max-w-[75%]" : "w-full max-w-[min(46rem,100%)]")}>
+          {msg.role === "assistant" ? (
+            <>
+              <div className="min-w-0 text-[var(--chat-assistant-text)]">
+                {renderAssistantContent(msg)}
               </div>
-            )}
-          </div>
-          {messageTime ? (
-            <div
-              className={clsx(
-                "mt-0.5 px-1 text-[11px] text-[var(--text-tertiary)]",
-                msg.role === "user" ? "text-right" : "text-left"
-              )}
-            >
-              {messageTime}
-            </div>
-          ) : null}
+              <div className="mt-2 flex flex-wrap items-center gap-3 px-1 text-[11px] text-[var(--text-tertiary)]">
+                {assistantTokensPerSecond ? <span className="font-medium text-[var(--text-secondary)]">{assistantTokensPerSecond}</span> : null}
+                {messageTime ? <span>{messageTime}</span> : null}
+                {canCopy ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void copyMessageText(msg.id, copyText);
+                    }}
+                    className="inline-flex h-5 w-5 items-center justify-center text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+                    aria-label={copyLabel}
+                    title={copyLabel}
+                  >
+                    {copyIcon}
+                  </button>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="rounded-[24px] bg-[var(--chat-user-bg)] px-4 py-3 text-[var(--chat-user-text)] shadow-sm">
+                <div>
+                  {renderMessageAttachments(msg)}
+                  <p className="whitespace-pre-wrap break-words">{bodyContent}</p>
+                </div>
+              </div>
+              <div className="mt-1 flex flex-wrap items-center justify-end gap-3 px-1 text-[11px] text-[var(--text-tertiary)]">
+                {messageTime ? <span>{messageTime}</span> : null}
+                {canCopy ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void copyMessageText(msg.id, copyText);
+                    }}
+                    className="inline-flex h-5 w-5 items-center justify-center text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+                    aria-label={copyLabel}
+                    title={copyLabel}
+                  >
+                    {copyIcon}
+                  </button>
+                ) : null}
+              </div>
+            </>
+          )}
         </div>
       </div>
     );
-  }), [messages]);
+  }), [messages, copiedMessageId, showReasoning]);
 
-  const loadingIndicator = useMemo(() => isLoading ? (
-    <div className="flex justify-start">
-      <div className="px-3.5 py-2 rounded-2xl bg-[var(--chat-assistant-bg)] border border-[var(--chat-assistant-border)] flex items-center gap-2">
-        <Loader2 className="w-4 h-4 animate-spin text-[var(--purple-accent)]" />
-        <span className="text-sm text-[var(--text-secondary)] animate-pulse">
-          {thinkingStatus || "Thinking"}
-        </span>
+  const loadingIndicator = useMemo(() => {
+    if (!isLoading) {
+      return null;
+    }
+    const previewParts = buildAssistantMessageParts({
+      reasoningText: showReasoning ? liveRunPreview.reasoningText : undefined,
+      toolCalls: liveRunPreview.toolCalls,
+    });
+    const previewReasoningParts = previewParts.filter(
+      (part): part is Extract<AssistantMessagePart, { type: "reasoning" }> => part.type === "reasoning",
+    );
+    const previewToolParts = previewParts.filter(
+      (part): part is Extract<AssistantMessagePart, { type: "toolCall" }> => part.type === "toolCall",
+    );
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[min(46rem,100%)] space-y-2.5">
+          {previewReasoningParts.map((part, index) => {
+            const key = `live-preview-${index}`;
+            const { preview, remainder } = splitThinkBlockPreview(part.text);
+            if (!remainder) {
+              return (
+                <div key={key} className="italic text-[13px] leading-6 text-[var(--text-tertiary)]">
+                  {preview}
+                </div>
+              );
+            }
+            return (
+              <details
+                key={key}
+                className="group text-[13px] leading-6 text-[var(--text-tertiary)]"
+              >
+                <summary className="flex cursor-pointer list-none items-start gap-2 italic text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)] [&::-webkit-details-marker]:hidden">
+                  <span
+                    aria-hidden="true"
+                    className="mt-0.5 shrink-0 text-sm leading-none text-[var(--text-secondary)] transition-transform group-open:rotate-180"
+                  >
+                    ▾
+                  </span>
+                  <span className="min-w-0 truncate">{preview}</span>
+                </summary>
+                <div className="mt-2 pl-5 italic text-[var(--text-secondary)]">
+                  <div className="max-h-32 overflow-hidden whitespace-pre-wrap text-xs leading-5">
+                    {remainder}
+                  </div>
+                </div>
+              </details>
+            );
+          })}
+          {previewToolParts.length > 0 ? (
+            <details className="group text-[13px] leading-6 text-[var(--text-tertiary)]">
+              <summary className="flex cursor-pointer list-none items-start gap-2 text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)] [&::-webkit-details-marker]:hidden">
+                <span
+                  aria-hidden="true"
+                  className="mt-0.5 shrink-0 text-sm leading-none text-[var(--text-secondary)] transition-transform group-open:rotate-180"
+                >
+                  ▾
+                </span>
+                <span className="min-w-0 truncate">
+                  {summarizeToolCallPreview(previewToolParts[previewToolParts.length - 1])}
+                </span>
+                {previewToolParts.length > 1 ? (
+                  <span className="shrink-0 text-[11px] text-[var(--text-quaternary)]">
+                    {previewToolParts.length}
+                  </span>
+                ) : null}
+              </summary>
+              <div className="mt-2 space-y-2 pl-5">
+                {[...previewToolParts].reverse().map((part, index) => {
+                  const label = describeToolActivityName(part.name);
+                  const statusLabel =
+                    part.phase === "result" ? (part.isError ? "failed" : "done") : "running";
+                  const detailText =
+                    part.detailText && part.detailText !== part.argsText ? part.detailText : undefined;
+                  return (
+                    <div
+                      key={`live-tool-${part.toolCallId}-${index}`}
+                      className="rounded-xl bg-[var(--bg-tertiary)]/55 px-3 py-2.5"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-1">
+                          <div className="flex items-center gap-2 text-sm font-medium text-[var(--text-primary)]">
+                            <Activity className="h-3.5 w-3.5 text-[var(--text-tertiary)]" />
+                            <span className="truncate">{label}</span>
+                          </div>
+                          {part.argsText ? (
+                            <div className="whitespace-pre-wrap break-words text-xs text-[var(--text-tertiary)]">
+                              {part.argsText}
+                            </div>
+                          ) : null}
+                          {detailText ? (
+                            <div className="whitespace-pre-wrap break-words text-xs leading-5 text-[var(--text-secondary)]">
+                              {detailText}
+                            </div>
+                          ) : null}
+                        </div>
+                        <span
+                          className={clsx(
+                            "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                            part.phase === "result"
+                              ? part.isError
+                                ? "bg-red-500/10 text-red-600"
+                                : "bg-emerald-500/10 text-emerald-600"
+                              : "bg-[var(--bg-secondary)] text-[var(--text-secondary)]",
+                          )}
+                        >
+                          {statusLabel}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          ) : null}
+          <div className="flex items-center gap-2 px-1 text-sm text-[var(--text-secondary)]">
+            <Loader2 className="h-4 w-4 animate-spin text-[var(--purple-accent)]" />
+            <span>{thinkingStatus || "Working"}</span>
+          </div>
+        </div>
       </div>
-    </div>
-  ) : null, [isLoading, thinkingStatus]);
+    );
+  }, [isLoading, liveRunPreview, thinkingStatus, showReasoning]);
 
   const activeDraft = currentSession
     ? activeComposerMode === "shell"
@@ -5721,7 +7685,7 @@ export function Chat({
     const ta = textareaRef.current;
     ta.style.height = "auto";
     const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
-    const maxHeight = lineHeight * 5;
+    const maxHeight = lineHeight * 8;
     ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
     ta.style.overflowY = ta.scrollHeight > maxHeight ? "auto" : "hidden";
   }, [activeDraft]);
@@ -5733,11 +7697,13 @@ export function Chat({
   }, [activeComposerMode, dragActive]);
 
   if (showConnectingScreen) return renderConnecting();
-  if (localTrialLoading) return renderConnecting();
-  if (!connectedProvider && !proxyEnabled) return renderNoProvider();
+  if (localTrialLoading) return renderConnecting("Checking managed provider access...");
+  if (!connectedProvider && !proxyEnabled && !localModelReady) return renderNoProvider();
   const autoStartExpected = proxyEnabled && !gatewayRunning;
   const showGatewayWarmupBanner =
     gatewayStarting || autoStartExpected || (!gatewayRunning && !showGatewayOfflineCta);
+  const hasVisibleChatState = messages.length > 0 || sessions.length > 0;
+  if (isConnecting && !showGatewayWarmupBanner && !hasVisibleChatState) return renderConnecting();
   const showBillingAction = Boolean(error && isBillingIssueMessage(error));
   const showSignInAction = Boolean(
     error && isBillingIssueMessage(error) && !isAuthenticated && isAuthConfigured
@@ -5913,6 +7879,24 @@ export function Chat({
                   </button>
                 );
               })}
+              {localChatDebugModeActive ? (
+                <div
+                  className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs text-[var(--text-secondary)]"
+                  title={
+                    directLocalDebugBypassActive
+                      ? "Debug mode is on with direct local bypass."
+                      : "Debug mode is on."
+                  }
+                >
+                  <Bug className="h-3.5 w-3.5 shrink-0 text-[var(--system-blue)]" />
+                  <span
+                    className="truncate font-mono text-[var(--text-primary)]"
+                    title={localModelConfig?.modelName || "the configured local model"}
+                  >
+                    {localModelConfig?.modelName || "local model"}
+                  </span>
+                </div>
+              ) : null}
             </div>
             {activeComposerMode === "shell" ? (
               <div className="min-w-0 max-w-full text-[11px] text-[var(--text-tertiary)]">
@@ -5942,70 +7926,104 @@ export function Chat({
               </div>
             ) : null}
           </div>
-          <div className="flex items-end gap-2">
-            {activeComposerMode !== "shell" ? (
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isLoading}
-                className="btn-secondary !p-2.5"
-                title={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
-                aria-label={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
-              >
-                <Paperclip className="w-4 h-4" />
-              </button>
-            ) : null}
-            <textarea
-              ref={textareaRef}
-              value={activeDraft}
-              onFocus={() => {
-                ensureComposerSession();
-              }}
-              onChange={e => {
-                const sessionKey = currentSession || ensureComposerSession();
-                if (!sessionKey) return;
-                const nextValue = e.target.value;
-                if (activeComposerMode === "shell") {
-                  setShellDraftsBySession((prev) => {
-                    if ((prev[sessionKey] || "") === nextValue) return prev;
-                    return { ...prev, [sessionKey]: nextValue };
-                  });
-                } else if (activeComposerMode === "image") {
-                  setImageDraftsBySession((prev) => {
-                    if ((prev[sessionKey] || "") === nextValue) return prev;
-                    return { ...prev, [sessionKey]: nextValue };
-                  });
-                } else {
-                  setDraftsBySession((prev) => {
-                    if ((prev[sessionKey] || "") === nextValue) return prev;
-                    return { ...prev, [sessionKey]: nextValue };
-                  });
+          {localModelsMode && activeComposerMode === "chat" && localChatDebugModeActive && directLocalDebugBypassActive ? (
+            <div className="mt-2 space-y-1">
+                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] px-3 py-2 text-[11px] text-[var(--text-secondary)]">
+                  <div>
+                    Direct debug reuses this chat session&apos;s recent user/assistant history
+                    even after model switches. Start a new chat for a clean prompt.
+                  </div>
+                  <div className="mt-1 text-[var(--text-tertiary)]">
+                    Current payload: {activeDirectLocalDebugHistory.length} messages,{" "}
+                    {activeDirectLocalDebugHistoryChars} chars.
+                  </div>
+                  {activeDirectLocalDebugPreview.length ? (
+                    <div className="mt-2 space-y-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-primary)]/60 px-2 py-2 font-mono text-[10px] text-[var(--text-tertiary)]">
+                      {activeDirectLocalDebugPreview.map((line) => (
+                        <div key={line}>{line}</div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+            </div>
+          ) : null}
+          <div
+            className={clsx(
+              "overflow-hidden rounded-[28px] border bg-[var(--bg-card)] transition-[border-color,box-shadow] duration-150",
+              composerFocused
+                ? "border-[var(--purple-accent-subtle)] shadow-[0_0_0_1px_var(--purple-accent-subtle),0_12px_32px_-18px_var(--purple-accent)]"
+                : "border-[var(--border-subtle)] shadow-sm",
+            )}
+          >
+            <div className="relative min-h-[138px]">
+              {activeComposerMode !== "shell" ? (
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isLoading}
+                  className="absolute bottom-3 left-3 inline-flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+                  title={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
+                  aria-label={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
+                >
+                  <Paperclip className="h-4 w-4" />
+                </button>
+              ) : null}
+              <textarea
+                ref={textareaRef}
+                value={activeDraft}
+                onFocus={() => {
+                  setComposerFocused(true);
+                  ensureComposerSession();
+                }}
+                onBlur={() => {
+                  setComposerFocused(false);
+                }}
+                onChange={e => {
+                  const sessionKey = currentSession || ensureComposerSession();
+                  if (!sessionKey) return;
+                  const nextValue = e.target.value;
+                  if (activeComposerMode === "shell") {
+                    setShellDraftsBySession((prev) => {
+                      if ((prev[sessionKey] || "") === nextValue) return prev;
+                      return { ...prev, [sessionKey]: nextValue };
+                    });
+                  } else if (activeComposerMode === "image") {
+                    setImageDraftsBySession((prev) => {
+                      if ((prev[sessionKey] || "") === nextValue) return prev;
+                      return { ...prev, [sessionKey]: nextValue };
+                    });
+                  } else {
+                    setDraftsBySession((prev) => {
+                      if ((prev[sessionKey] || "") === nextValue) return prev;
+                      return { ...prev, [sessionKey]: nextValue };
+                    });
+                  }
+                  const ta = e.target;
+                  ta.style.height = 'auto';
+                  const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
+                  const maxHeight = lineHeight * 8;
+                  ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
+                  ta.style.overflowY = ta.scrollHeight > maxHeight ? 'auto' : 'hidden';
+                }}
+                onKeyDown={e => {if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }}}
+                placeholder={
+                  activeComposerMode === "shell"
+                    ? "Run a command in the workspace shell"
+                    : activeComposerMode === "image"
+                      ? "Describe the image you want to generate"
+                      : "Message your assistant"
                 }
-                const ta = e.target;
-                ta.style.height = 'auto';
-                const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
-                const maxHeight = lineHeight * 5;
-                ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
-                ta.style.overflowY = ta.scrollHeight > maxHeight ? 'auto' : 'hidden';
-              }}
-              onKeyDown={e => {if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }}}
-              placeholder={
-                activeComposerMode === "shell"
-                  ? "Run a command in the workspace shell"
-                  : activeComposerMode === "image"
-                    ? "Describe the image you want to generate"
-                    : "Message your assistant"
-              }
-              rows={1}
-              className="form-input flex-1 resize-none leading-tight"
-              style={{ overflow: 'hidden' }}
-            />
-            <button
-              onClick={() => handleSend()}
-              disabled={(!activeDraft.trim() && pendingAttachments.length === 0) || isLoading}
-              className="btn-primary !p-2.5 !bg-[var(--purple-accent)] hover:!bg-[var(--purple-accent-hover)] !text-white"
-            >
-              <Send className="w-5 h-5" />
-            </button>
+                rows={1}
+                className="min-h-[138px] w-full resize-none bg-transparent px-4 pb-16 pt-4 text-[15px] leading-7 text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] focus-visible:outline-none"
+                style={{ overflow: 'hidden' }}
+              />
+              <button
+                onClick={() => handleSend()}
+                disabled={(!activeDraft.trim() && pendingAttachments.length === 0) || isLoading}
+                className="absolute bottom-3 right-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-[var(--purple-accent)] text-white transition-colors hover:bg-[var(--purple-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Send className="h-5 w-5" />
+              </button>
+            </div>
           </div>
         </div>
         {dragActive && activeComposerMode !== "shell" && (

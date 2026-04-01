@@ -20,6 +20,25 @@ DOCKER_BIN=""
 COLIMA_BIN=""
 
 usage() {
+  if entropic_linux_uses_native_docker; then
+    cat <<USAGE
+Usage: ./scripts/dev-runtime.sh <command>
+
+This helper is dev-only and uses the native Linux Docker daemon:
+  ENTROPIC_RUNTIME_MODE=dev
+
+Commands:
+  status       Print current dev Docker/container status
+  start        Ensure bundled runtime tools and verify Docker is ready
+  up           Start runtime, bundle/build missing assets, launch pnpm tauri:dev
+  stop         Stop dev runtime containers (keeps Docker images)
+  prune        Remove dev containers/networks/volumes and reset cached dev state
+  logs [name]  Tail logs for entropic-openclaw (or provided container)
+  help         Show this help
+USAGE
+    return
+  fi
+
   cat <<USAGE
 Usage: ./scripts/dev-runtime.sh <command>
 
@@ -44,6 +63,10 @@ refresh_binaries() {
 }
 
 bundled_runtime_ready() {
+  if entropic_linux_uses_native_docker; then
+    [ -x "$PROJECT_ROOT/src-tauri/resources/bin/check-docker.sh" ] || return 1
+    return 0
+  fi
   [ -x "$PROJECT_ROOT/src-tauri/resources/bin/colima" ] || return 1
   [ -x "$PROJECT_ROOT/src-tauri/resources/bin/limactl" ] || return 1
   [ -x "$PROJECT_ROOT/src-tauri/resources/bin/docker" ] || return 1
@@ -73,10 +96,22 @@ run_docker() {
   fi
 }
 
+vite_dev_server_running() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS "http://127.0.0.1:5174" >/dev/null 2>&1
+    return $?
+  fi
+  (exec 3<>/dev/tcp/127.0.0.1/5174) >/dev/null 2>&1
+}
+
 resolve_docker_host_without_start() {
   refresh_binaries
   if [ -z "$DOCKER_BIN" ]; then
     return 1
+  fi
+  if entropic_linux_uses_native_docker && entropic_default_docker_is_ready "$DOCKER_BIN"; then
+    ACTIVE_DOCKER_HOST=""
+    return 0
   fi
   ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
   [ -n "$ACTIVE_DOCKER_HOST" ]
@@ -91,9 +126,20 @@ resolve_or_start_docker_host() {
     return 1
   fi
 
+  if entropic_linux_uses_native_docker && entropic_default_docker_is_ready "$DOCKER_BIN"; then
+    ACTIVE_DOCKER_HOST=""
+    return 0
+  fi
+
   ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
   if [ -n "$ACTIVE_DOCKER_HOST" ]; then
     return 0
+  fi
+
+  if entropic_linux_uses_native_docker; then
+    echo "[dev] ERROR: Docker daemon is not ready on Linux." >&2
+    echo "[dev] Install/start Docker Engine, or fix socket permissions (for example: sudo systemctl start docker)." >&2
+    return 1
   fi
 
   if [ -z "$COLIMA_BIN" ]; then
@@ -130,7 +176,11 @@ ensure_runtime_tars() {
     image_created="$(run_docker image inspect openclaw-runtime:latest --format '{{.Created}}' 2>/dev/null || true)"
   fi
   if [ -f "$runtime_tar" ]; then
-    tar_mtime="$(stat -f '%m' "$runtime_tar" 2>/dev/null || true)"
+    if entropic_linux_uses_native_docker; then
+      tar_mtime="$(stat -c '%Y' "$runtime_tar" 2>/dev/null || true)"
+    else
+      tar_mtime="$(stat -f '%m' "$runtime_tar" 2>/dev/null || true)"
+    fi
   fi
 
   if [ ! -f "$runtime_tar" ]; then
@@ -155,14 +205,26 @@ ensure_runtime_tars() {
 status() {
   refresh_binaries
   ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "${DOCKER_BIN:-docker}" || true)"
+  if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "${DOCKER_BIN:-}" ] && entropic_linux_uses_native_docker && entropic_default_docker_is_ready "$DOCKER_BIN"; then
+    ACTIVE_DOCKER_HOST="native"
+  fi
 
   echo "[dev] Mode: $(entropic_runtime_mode)"
-  echo "[dev] Colima home: $ENTROPIC_COLIMA_HOME"
   echo "[dev] Docker CLI: ${DOCKER_BIN:-missing}"
-  echo "[dev] Colima CLI: ${COLIMA_BIN:-missing}"
+  if entropic_linux_uses_native_docker; then
+    echo "[dev] Docker mode: native Linux daemon"
+  else
+    echo "[dev] Colima home: $ENTROPIC_COLIMA_HOME"
+    echo "[dev] Colima CLI: ${COLIMA_BIN:-missing}"
+  fi
 
   if [ -n "$ACTIVE_DOCKER_HOST" ]; then
-    echo "[dev] Docker host: $ACTIVE_DOCKER_HOST"
+    if [ "$ACTIVE_DOCKER_HOST" = "native" ]; then
+      ACTIVE_DOCKER_HOST=""
+      echo "[dev] Docker host: native"
+    else
+      echo "[dev] Docker host: $ACTIVE_DOCKER_HOST"
+    fi
     if run_docker info >/dev/null 2>&1; then
       echo "[dev] Docker socket: ready"
     else
@@ -198,14 +260,22 @@ status() {
 
 start_stack() {
   resolve_or_start_docker_host
-  echo "[dev] Using Docker host: $ACTIVE_DOCKER_HOST"
+  if [ -n "$ACTIVE_DOCKER_HOST" ]; then
+    echo "[dev] Using Docker host: $ACTIVE_DOCKER_HOST"
+  else
+    echo "[dev] Using Docker host: native Linux daemon"
+  fi
   run_docker info >/dev/null
   echo "[dev] Runtime ready."
 }
 
 stop_stack() {
   if ! resolve_docker_host_without_start; then
-    echo "[dev] No dev Colima Docker socket found. Nothing to stop."
+    if entropic_linux_uses_native_docker; then
+      echo "[dev] Docker daemon is not reachable on Linux. Nothing to stop."
+    else
+      echo "[dev] No dev Colima Docker socket found. Nothing to stop."
+    fi
     return 0
   fi
 
@@ -226,7 +296,11 @@ prune_stack() {
     run_docker network rm entropic-net nova-net 2>/dev/null || true
     run_docker volume rm entropic-openclaw-data entropic-skill-scanner-data nova-openclaw-data nova-skill-scanner-data 2>/dev/null || true
   else
-    echo "[dev] No dev Colima Docker socket found. Skipping container prune."
+    if entropic_linux_uses_native_docker; then
+      echo "[dev] Docker daemon is not reachable on Linux. Skipping container prune."
+    else
+      echo "[dev] No dev Colima Docker socket found. Skipping container prune."
+    fi
   fi
 
   refresh_binaries
@@ -262,18 +336,35 @@ up_stack() {
     fi
   done
 
-  echo "[dev] Launching pnpm tauri:dev (ENTROPIC_BUILD_PROFILE=$build_profile)"
-  ENTROPIC_RUNTIME_MODE=dev \
-  ENTROPIC_BUILD_PROFILE="$build_profile" \
-  ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
-  DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
-    pnpm tauri:dev
+  if vite_dev_server_running; then
+    echo "[dev] Reusing existing Vite dev server on http://127.0.0.1:5174"
+    echo "[dev] Launching Rust backend directly (ENTROPIC_BUILD_PROFILE=$build_profile)"
+    (
+      cd "$PROJECT_ROOT/src-tauri"
+      ENTROPIC_RUNTIME_MODE=dev \
+      ENTROPIC_BUILD_PROFILE="$build_profile" \
+      ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
+      DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
+        cargo run --no-default-features --color always --
+    )
+  else
+    echo "[dev] Launching pnpm tauri:dev (ENTROPIC_BUILD_PROFILE=$build_profile)"
+    ENTROPIC_RUNTIME_MODE=dev \
+    ENTROPIC_BUILD_PROFILE="$build_profile" \
+    ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
+    DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
+      pnpm tauri:dev
+  fi
 }
 
 tail_logs() {
   local target="${1:-entropic-openclaw}"
   if ! resolve_docker_host_without_start; then
-    echo "[dev] ERROR: No dev Colima Docker host available for logs." >&2
+    if entropic_linux_uses_native_docker; then
+      echo "[dev] ERROR: Docker daemon is not reachable on Linux." >&2
+    else
+      echo "[dev] ERROR: No dev Colima Docker host available for logs." >&2
+    fi
     return 1
   fi
   run_docker logs --tail 200 -f "$target"

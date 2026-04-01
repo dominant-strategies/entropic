@@ -203,7 +203,7 @@ export function Layout({
         onMouseDown={startDrag}
         className={clsx(
           "flex flex-col flex-shrink-0 bg-transparent pb-4 pt-2 transition-[width,padding] duration-200",
-          sidebarCollapsed ? "w-[74px] pl-1.5 pr-1" : "w-[240px] pl-3 pr-2"
+          sidebarCollapsed ? "w-[74px] pl-1.5 pr-1" : "w-[192px] pl-3 pr-2"
         )}
       >
         {sidebarCollapsed ? (
@@ -228,28 +228,21 @@ export function Layout({
             </div>
           </div>
         ) : (
-          /* Expanded: horizontal row — spacer, logo + title, collapse button */
-          <div className="h-8 mb-3 flex items-center gap-2 px-1">
-            {isMacOS && <div className="w-[68px] shrink-0" />}
-            <div
-              data-tauri-drag-region
-              onMouseDown={startDrag}
-              className="h-full flex items-center gap-3 flex-1 min-w-0"
-            >
-              <img src={entropicLogo} alt="Entropic" className="w-8 h-8 rounded-lg shadow-md pointer-events-none" />
-              <div className="font-semibold text-lg tracking-tight text-[var(--text-primary)] pointer-events-none">
-                Entropic
+          /* Expanded: logo/title row only; collapse control lives with the MENU row */
+          <div className="mb-3 px-1">
+            <div className="flex items-center gap-2">
+              {isMacOS && <div className="w-[68px] shrink-0" />}
+              <div
+                data-tauri-drag-region
+                onMouseDown={startDrag}
+                className="h-8 flex items-center gap-3 flex-1 min-w-0"
+              >
+                <img src={entropicLogo} alt="Entropic" className="w-8 h-8 rounded-lg shadow-md pointer-events-none" />
+                <div className="font-semibold text-lg tracking-tight text-[var(--text-primary)] pointer-events-none">
+                  Entropic
+                </div>
               </div>
             </div>
-            <button
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={toggleSidebarCollapsed}
-              className="w-7 h-7 rounded-md bg-[var(--border-subtle)] hover:bg-[var(--border-default)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center justify-center transition-colors"
-              title="Collapse navigation"
-              aria-label="Collapse navigation"
-            >
-              <PanelLeftClose className="w-4 h-4" />
-            </button>
           </div>
         )}
 
@@ -261,8 +254,19 @@ export function Layout({
           )}
         >
           {!sidebarCollapsed && (
-            <div className="text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wider px-3 mb-2 mt-0">
-              Menu
+            <div className="mb-2 mt-0 flex items-center justify-between px-3">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
+                Menu
+              </div>
+              <button
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={toggleSidebarCollapsed}
+                className="flex h-7 w-7 items-center justify-center rounded-md bg-[var(--border-subtle)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--border-default)] hover:text-[var(--text-primary)]"
+                title="Collapse navigation"
+                aria-label="Collapse navigation"
+              >
+                <PanelLeftClose className="h-4 w-4" />
+              </button>
             </div>
           )}
           

@@ -5,7 +5,7 @@ set -e
 # Keys stay in memory (tmpfs), never written to host disk
 
 json_escape() {
-    node -e 'const v = process.argv[1] ?? ""; process.stdout.write(JSON.stringify(v).slice(1,-1));' "$1"
+    node -e 'const v = process.argv[1] ?? ""; process.stdout.write(JSON.stringify(v).slice(1,-1));' -- "$1"
 }
 
 resolve_entropic_skill_path() {
@@ -115,6 +115,16 @@ if [ -n "$OPENAI_API_KEY" ]; then
 fi
 if [ -n "$GEMINI_API_KEY" ]; then
     append_auth_profile "google:default" "google" "$(json_escape "${GEMINI_API_KEY}")"
+fi
+# Register openrouter auth profile for local models (uses openrouter provider name).
+# OpenClaw requires an auth profile entry to route API calls and rejects empty keys,
+# even when the upstream local server ignores authentication.
+if [ -n "${ENTROPIC_LOCAL_MODEL_NAME:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    LOCAL_OPENROUTER_KEY="${ENTROPIC_LOCAL_MODEL_API_KEY:-local-placeholder}"
+    if [ -z "${LOCAL_OPENROUTER_KEY}" ]; then
+        LOCAL_OPENROUTER_KEY="local-placeholder"
+    fi
+    append_auth_profile "openrouter:default" "openrouter" "$(json_escape "${LOCAL_OPENROUTER_KEY}")"
 fi
 
 cat > "$AUTH_DIR/auth-profiles.json" << EOF
@@ -352,6 +362,11 @@ if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
     \"auth\": { \"token\": \"${OPENCLAW_GATEWAY_TOKEN_ESC}\" }"
 fi
 
+CONTROL_UI_DISABLE_DEVICE_AUTH_JSON="false"
+if [ "${ENTROPIC_GATEWAY_DISABLE_DEVICE_AUTH:-0}" = "1" ]; then
+    CONTROL_UI_DISABLE_DEVICE_AUTH_JSON="true"
+fi
+
 if [ -n "${OPENCLAW_MODEL:-}" ]; then
     OPENCLAW_MODEL_ESC="$(json_escape "${OPENCLAW_MODEL}")"
     IMAGE_MODEL_BLOCK=""
@@ -415,6 +430,39 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
       }
     }
   }"
+    elif [ -n "${ENTROPIC_LOCAL_MODEL_BASE_URL:-}" ] && [ -n "${ENTROPIC_LOCAL_MODEL_NAME:-}" ]; then
+        LOCAL_BASE_URL_ESC="$(json_escape "${ENTROPIC_LOCAL_MODEL_BASE_URL}")"
+        # Strip colon-based tags (e.g. :7b) — OpenClaw uses colons as parameter separators
+        LOCAL_MODEL_ID="${ENTROPIC_LOCAL_MODEL_NAME%%:*}"
+        LOCAL_MODEL_ID_ESC="$(json_escape "${LOCAL_MODEL_ID}")"
+        LOCAL_CONTEXT_WINDOW="${ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW:-16384}"
+        LOCAL_SERVICE_TYPE="${ENTROPIC_LOCAL_MODEL_SERVICE_TYPE:-openai-compatible}"
+        # Use 'openrouter' as the provider name — OpenClaw only recognizes built-in providers.
+        # This is safe because local model mode and proxy mode are mutually exclusive in the if/elif chain.
+        MODELS_BLOCK=",
+  \"models\": {
+    \"providers\": {
+      \"openrouter\": {
+        \"baseUrl\": \"${LOCAL_BASE_URL_ESC}\",
+        \"api\": \"openai-completions\",
+        \"models\": [
+          { \"id\": \"${LOCAL_MODEL_ID_ESC}\", \"name\": \"${LOCAL_MODEL_ID_ESC}\", \"input\": [\"text\"], \"reasoning\": false, \"contextWindow\": ${LOCAL_CONTEXT_WINDOW}, \"maxTokens\": 4096, \"cost\": { \"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0 } }
+        ]
+      }"
+        if [ "$LOCAL_SERVICE_TYPE" = "rnn-local" ]; then
+            MODELS_BLOCK="${MODELS_BLOCK},
+      \"rnn\": {
+        \"baseUrl\": \"${LOCAL_BASE_URL_ESC}\",
+        \"api\": \"openai-completions\",
+        \"apiKey\": \"local-placeholder\",
+        \"models\": [
+          { \"id\": \"${LOCAL_MODEL_ID_ESC}\", \"name\": \"${LOCAL_MODEL_ID_ESC}\", \"input\": [\"text\"], \"reasoning\": false, \"contextWindow\": ${LOCAL_CONTEXT_WINDOW}, \"maxTokens\": 8192, \"cost\": { \"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0 } }
+        ]
+      }"
+        fi
+        MODELS_BLOCK="${MODELS_BLOCK}
+    }
+  }"
     fi
 
     cat > /home/node/.openclaw/openclaw.json << EOF
@@ -447,7 +495,7 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
       "http://127.0.0.1:5174"
       ],
       "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": false
+      "dangerouslyDisableDeviceAuth": ${CONTROL_UI_DISABLE_DEVICE_AUTH_JSON}
     }${GATEWAY_AUTH_BLOCK}
   },
   "plugins": {
@@ -478,8 +526,9 @@ const pruneLegacyControlUiFallback = (value) => {
   if (!gateway || typeof gateway !== 'object' || Array.isArray(gateway)) return;
   const controlUi = gateway.controlUi;
   if (!controlUi || typeof controlUi !== 'object' || Array.isArray(controlUi)) return;
+  const disableDeviceAuth = process.env.ENTROPIC_GATEWAY_DISABLE_DEVICE_AUTH === '1';
   delete controlUi.dangerouslyAllowHostHeaderOriginFallback;
-  controlUi.dangerouslyDisableDeviceAuth = false;
+  controlUi.dangerouslyDisableDeviceAuth = disableDeviceAuth;
 };
 
 const stripBundledPluginOverrides = (value) => {
@@ -540,6 +589,38 @@ try {
 NODE
 fi
 
+# Start the managed-runtime Unix socket bridge when Entropic mounts one in.
+MANAGED_RUNTIME_UNIX_SOCKET="${ENTROPIC_MANAGED_RUNTIME_UNIX_SOCKET:-}"
+if [ -n "$MANAGED_RUNTIME_UNIX_SOCKET" ] && [ -f /app/managed_runtime_unix_proxy.py ]; then
+    MANAGED_RUNTIME_PROXY_PORT="${ENTROPIC_MANAGED_RUNTIME_PROXY_PORT:-11445}"
+    python3 /app/managed_runtime_unix_proxy.py \
+        --listen-host 127.0.0.1 \
+        --listen-port "$MANAGED_RUNTIME_PROXY_PORT" \
+        --unix-socket "$MANAGED_RUNTIME_UNIX_SOCKET" \
+        >/data/browser/managed-runtime-proxy.log 2>&1 &
+    managed_runtime_proxy_pid="$!"
+    managed_runtime_proxy_ready=0
+    managed_runtime_proxy_attempt=0
+    while [ "$managed_runtime_proxy_attempt" -lt 20 ]; do
+        if curl -fsS "http://127.0.0.1:${MANAGED_RUNTIME_PROXY_PORT}/healthz" >/dev/null 2>&1; then
+            managed_runtime_proxy_ready=1
+            break
+        fi
+        if ! kill -0 "$managed_runtime_proxy_pid" >/dev/null 2>&1; then
+            break
+        fi
+        managed_runtime_proxy_attempt=$((managed_runtime_proxy_attempt + 1))
+        sleep 0.3
+    done
+
+    if [ "$managed_runtime_proxy_ready" -ne 1 ]; then
+        echo "[entrypoint] Managed runtime proxy failed to become ready on 127.0.0.1:${MANAGED_RUNTIME_PROXY_PORT}" >&2
+        if [ -f /data/browser/managed-runtime-proxy.log ]; then
+            tail -n 40 /data/browser/managed-runtime-proxy.log >&2 || true
+        fi
+    fi
+fi
+
 # Start the browser service in the background for desktop/browser bridge commands.
 BROWSER_SERVICE_PORT="${ENTROPIC_BROWSER_SERVICE_PORT:-19791}"
 export ENTROPIC_BROWSER_SERVICE_PORT="$BROWSER_SERVICE_PORT"
@@ -568,10 +649,9 @@ if [ -f /app/browser-service/server.mjs ]; then
     fi
 fi
 
-# Start the gateway
+# Start the gateway.
+# The gateway token is already written into /home/node/.openclaw/openclaw.json
+# above, so do not also pass it on the command line. Tokens that begin with "-"
+# can otherwise be misparsed during startup/restart and crash the container.
 PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
-set -- node /app/dist/index.js gateway --bind lan --port "${PORT}" --allow-unconfigured
-if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
-    set -- "$@" --token "${OPENCLAW_GATEWAY_TOKEN}"
-fi
-exec "$@"
+exec node /app/dist/index.js gateway --bind lan --port "${PORT}" --allow-unconfigured

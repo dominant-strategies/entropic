@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
+use std::net::IpAddr;
 #[cfg(target_os = "macos")]
 use std::os::raw::c_uchar;
 #[cfg(unix)]
@@ -76,11 +77,46 @@ const DEFAULT_PROXY_OPENROUTER_GATEWAY_MODEL: &str = "openrouter/free";
 const DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL: &str = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL: &str = "openai-codex/gpt-5.3-codex";
 const DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL: &str = "google/gemini-2.5-pro";
+const RNN_RUNTIME_BIND_HOST: &str = "127.0.0.1";
+
+const RNN_RUNTIME_PORT: u16 = 11445;
+const RNN_RUNTIME_BASE_URL: &str = "http://127.0.0.1:11445/v1";
+const RNN_RUNTIME_ROOT_URL: &str = "http://127.0.0.1:11445";
+const RNN_RUNTIME_HEALTH_URL: &str = "http://127.0.0.1:11445/healthz";
+const RNN_RUNTIME_SOCKET_FILE_NAME: &str = "runtime.sock";
+const RNN_RUNTIME_ADMIN_TOKEN_FILE_NAME: &str = "admin-token";
+const RNN_RUNTIME_ADMIN_TOKEN_ENV: &str = "ENTROPIC_RNN_RUNTIME_ADMIN_TOKEN";
+const RNN_RUNTIME_STATE_DIR_ENV: &str = "ENTROPIC_RNN_RUNTIME_STATE_DIR";
+const RNN_RUNTIME_PRISM_LLAMA_SERVER_ENV: &str = "ENTROPIC_RNN_PRISM_LLAMA_SERVER";
+const RNN_RUNTIME_CONTAINER_SOCKET_DIR: &str = "/data/managed-runtime-bridge";
+const RNN_RUNTIME_CONTAINER_SOCKET_PATH: &str = "/data/managed-runtime-bridge/runtime.sock";
+const RNN_RUNTIME_CONTAINER_PROXY_URL: &str = "http://127.0.0.1:11445/v1";
+const MANAGED_RUNTIME_DIR_NAME: &str = "managed-runtime";
+const LEGACY_RNN_RUNTIME_DIR_NAME: &str = "rnn-runtime";
+const RNN_RUNTIME_CONFIG_FILE_NAME: &str = "runtime-config.json";
+const RNN_RUNTIME_SERVER_RELATIVE_PATH: &str = "share/rnn-runtime/server.py";
+const RNN_RUNTIME_REQUIREMENTS_BASE_RELATIVE_PATH: &str = "share/rnn-runtime/requirements-base.txt";
+const RNN_RUNTIME_REQUIREMENTS_VLLM_LINUX_RELATIVE_PATH: &str =
+    "share/rnn-runtime/requirements-vllm-linux.txt";
+const RNN_RUNTIME_REQUIREMENTS_LLAMA_CPP_RELATIVE_PATH: &str =
+    "share/rnn-runtime/requirements-llama-cpp.txt";
+const RNN_RUNTIME_PRISM_LLAMA_REPO_URL: &str = "https://github.com/PrismML-Eng/llama.cpp";
+const RNN_RUNTIME_PRISM_LLAMA_DIR_NAME: &str = "prism-llama.cpp";
+const RNN_RUNTIME_PRISM_LLAMA_COMMIT: &str = "1179bfc8295ed54e25f5cafa57dfecca373c61b8";
+const RNN_RUNTIME_EXISTING_PROCESS_GRACE_MS: u64 = 20_000;
+const RNN_RUNTIME_STARTUP_TIMEOUT_MS: u64 = 60_000;
+const RNN_RUNTIME_LOW_MEMORY_HOST_BYTES_THRESHOLD: u64 = 9 * 1024 * 1024 * 1024;
+const RNN_RUNTIME_LOW_MEMORY_SAFE_N_CTX: u64 = 8_192;
 
 static BROWSER_SERVICE_TOKEN_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static EMBEDDED_PREVIEW_STATE_CACHE: OnceLock<Mutex<Option<EmbeddedPreviewStatePayload>>> =
     OnceLock::new();
 static DESKTOP_TERMINAL_MANAGER: OnceLock<DesktopTerminalManager> = OnceLock::new();
+static RNN_RUNTIME_START_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+
+fn rnn_runtime_start_lock() -> &'static AsyncMutex<()> {
+    RNN_RUNTIME_START_LOCK.get_or_init(|| AsyncMutex::new(()))
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -124,6 +160,25 @@ pub struct ChatImageGenerationAttachment {
     #[serde(alias = "mimeType")]
     pub mime_type: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectLocalChatDebugMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectLocalChatDebugResponsePayload {
+    pub text: String,
+    pub provider: String,
+    pub model: String,
+    pub base_url: String,
+    pub duration_ms: u64,
+    pub history_messages: usize,
+    pub input_chars: usize,
+    pub response_chars: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -638,6 +693,10 @@ fn normalize_local_gateway_model(
         .map(str::trim)
         .filter(|model| !model.is_empty())
     {
+        if requested_model.starts_with("local/") {
+            return requested_model.to_string();
+        }
+
         if let Some((provider, raw_model)) = requested_model.split_once('/') {
             let provider = provider.trim();
             let raw_model = raw_model.trim();
@@ -680,6 +739,22 @@ fn normalize_local_gateway_model(
 
     let fallback_provider = choose_local_gateway_provider(active_provider, api_keys);
     default_local_gateway_model_for_provider(fallback_provider).to_string()
+}
+
+#[cfg(test)]
+mod local_gateway_model_tests {
+    use super::normalize_local_gateway_model;
+    use std::collections::HashMap;
+
+    #[test]
+    fn preserves_local_model_ids_without_provider_keys() {
+        let api_keys = HashMap::new();
+
+        let model =
+            normalize_local_gateway_model(Some("local/qwen3:14b"), Some("anthropic"), &api_keys);
+
+        assert_eq!(model, "local/qwen3:14b");
+    }
 }
 
 fn local_image_generation_provider_name(provider: &str) -> &str {
@@ -1277,18 +1352,27 @@ fn get_docker_host() -> Option<String> {
             if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
                 let socket = format!("{}/docker.sock", runtime_dir);
                 if std::path::Path::new(&socket).exists() {
-                    return Some(format!("unix://{}", socket));
+                    let host = format!("unix://{}", socket);
+                    if docker_host_usable(&host) {
+                        return Some(host);
+                    }
                 }
             }
 
             if let Some(home) = dirs::home_dir() {
-                let desktop_socket = home.join(".docker/desktop/docker.sock");
-                if desktop_socket.exists() {
-                    return Some(format!("unix://{}", desktop_socket.display()));
-                }
                 let run_socket = home.join(".docker/run/docker.sock");
                 if run_socket.exists() {
-                    return Some(format!("unix://{}", run_socket.display()));
+                    let host = format!("unix://{}", run_socket.display());
+                    if docker_host_usable(&host) {
+                        return Some(host);
+                    }
+                }
+                let desktop_socket = home.join(".docker/desktop/docker.sock");
+                if desktop_socket.exists() {
+                    let host = format!("unix://{}", desktop_socket.display());
+                    if docker_host_usable(&host) {
+                        return Some(host);
+                    }
                 }
             }
 
@@ -1417,6 +1501,17 @@ fn windows_path_to_wsl(path: &Path) -> String {
     }
 
     normalized
+}
+
+fn docker_host_usable(host: &str) -> bool {
+    let docker_bin = find_docker_binary();
+    let mut cmd = Command::new(&docker_bin);
+    cmd.arg("info")
+        .env("DOCKER_HOST", host)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    apply_windows_no_window(&mut cmd);
+    cmd.status().map(|status| status.success()).unwrap_or(false)
 }
 
 fn docker_host_path_for_command(path: &Path) -> String {
@@ -2911,11 +3006,24 @@ fn resolve_applied_runtime_from_cache(image_id: &str) -> Option<(String, Option<
     Some((manifest.version, commit))
 }
 
+fn existing_nonempty_file(path: PathBuf) -> Option<PathBuf> {
+    let metadata = fs::metadata(&path).ok()?;
+    if metadata.is_file() && metadata.len() > 0 {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 fn find_local_runtime_tar() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
 
     let mut search_dirs = Vec::new();
+
+    if cfg!(debug_assertions) {
+        search_dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"));
+    }
 
     // Release bundle: .../Contents/MacOS/Entropic → .../Contents/Resources/
     if let Some(contents_dir) = exe_dir.parent() {
@@ -2937,8 +3045,8 @@ fn find_local_runtime_tar() -> Option<PathBuf> {
     for dir in search_dirs {
         for name in &names {
             let tar_path = dir.join(name);
-            if tar_path.is_file() {
-                return Some(tar_path);
+            if let Some(valid_path) = existing_nonempty_file(tar_path) {
+                return Some(valid_path);
             }
         }
     }
@@ -2946,43 +3054,15 @@ fn find_local_runtime_tar() -> Option<PathBuf> {
     None
 }
 
-fn should_prefer_cached_runtime_tar() -> bool {
-    if cfg!(debug_assertions) || !runtime_cached_tar_valid() {
-        return false;
-    }
-
-    let Some(manifest) = read_cached_runtime_manifest() else {
-        return false;
-    };
-
-    let cached_version = manifest.version.trim();
-    !cached_version.is_empty() && cached_version != runtime_release_tag()
-}
-
-fn find_runtime_tar() -> Option<PathBuf> {
-    if should_prefer_cached_runtime_tar() {
-        if let Some(cached_path) = runtime_cached_tar_path() {
-            if cached_path.is_file() {
-                return Some(cached_path);
-            }
-        }
-    }
-    if let Some(local_path) = find_local_runtime_tar() {
-        return Some(local_path);
-    }
-    if let Some(cached_path) = runtime_cached_tar_path() {
-        if cached_path.is_file() {
-            return Some(cached_path);
-        }
-    }
-    None
-}
-
-fn find_scanner_tar() -> Option<PathBuf> {
+fn find_local_scanner_tar() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
 
     let mut search_dirs = Vec::new();
+
+    if cfg!(debug_assertions) {
+        search_dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"));
+    }
 
     // Release bundle: .../Contents/MacOS/Entropic → .../Contents/Resources/
     if let Some(contents_dir) = exe_dir.parent() {
@@ -3006,12 +3086,51 @@ fn find_scanner_tar() -> Option<PathBuf> {
     for dir in search_dirs {
         for name in &names {
             let tar_path = dir.join(name);
-            if tar_path.exists() {
-                return Some(tar_path);
+            if let Some(valid_path) = existing_nonempty_file(tar_path) {
+                return Some(valid_path);
             }
         }
     }
 
+    None
+}
+
+fn find_scanner_tar() -> Option<PathBuf> {
+    if let Some(local_path) = find_local_scanner_tar() {
+        return Some(local_path);
+    }
+    None
+}
+
+fn should_prefer_cached_runtime_tar() -> bool {
+    if cfg!(debug_assertions) || !runtime_cached_tar_valid() {
+        return false;
+    }
+
+    let Some(manifest) = read_cached_runtime_manifest() else {
+        return false;
+    };
+
+    let cached_version = manifest.version.trim();
+    !cached_version.is_empty() && cached_version != runtime_release_tag()
+}
+
+fn find_runtime_tar() -> Option<PathBuf> {
+    if should_prefer_cached_runtime_tar() {
+        if let Some(cached_path) = runtime_cached_tar_path() {
+            if let Some(valid_path) = existing_nonempty_file(cached_path) {
+                return Some(valid_path);
+            }
+        }
+    }
+    if let Some(local_path) = find_local_runtime_tar() {
+        return Some(local_path);
+    }
+    if let Some(cached_path) = runtime_cached_tar_path() {
+        if let Some(valid_path) = existing_nonempty_file(cached_path) {
+            return Some(valid_path);
+        }
+    }
     None
 }
 
@@ -3806,6 +3925,10 @@ pub struct DesktopSettingsSnapshot {
     pub code_model: Option<String>,
     pub image_model: Option<String>,
     pub image_generation_model: Option<String>,
+    pub show_reasoning: Option<bool>,
+    pub local_disable_tools: Option<bool>,
+    pub local_lightweight_bootstrap: Option<bool>,
+    pub local_light_runtime_defaults: Option<bool>,
     pub desktop_wallpaper: Option<String>,
     pub desktop_custom_wallpaper: Option<String>,
 }
@@ -4818,7 +4941,7 @@ fn state_file(path: &str) -> String {
 
 fn container_dir_exists(path: &str) -> Result<bool, String> {
     Ok(docker_command()
-        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", path])
+        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", "--", path])
         .output()
         .map_err(|e| format!("Failed to inspect container path: {}", e))?
         .status
@@ -6484,6 +6607,52 @@ fn get_embedded_preview_webview(app: &AppHandle) -> Result<Webview, String> {
         .ok_or_else(|| "Embedded preview is not active.".to_string())
 }
 
+fn main_agent_auth_profile_paths() -> [&'static str; 2] {
+    [
+        "/home/node/.openclaw/agents/main/agent/auth-profiles.json",
+        "/data/.openclaw/agents/main/agent/auth-profiles.json",
+    ]
+}
+
+fn read_main_agent_auth_profiles() -> serde_json::Value {
+    for path in main_agent_auth_profile_paths() {
+        if let Some(existing) = read_container_file(path) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&existing) {
+                return parsed;
+            }
+        }
+    }
+    serde_json::json!({ "version": 1, "profiles": {} })
+}
+
+fn write_main_agent_auth_profiles(payload: &str) {
+    for path in main_agent_auth_profile_paths() {
+        if let Err(e) = write_container_file(path, payload) {
+            println!(
+                "[Entropic] Failed to write auth-profiles.json at {}: {}",
+                path, e
+            );
+        }
+    }
+}
+
+fn write_main_agent_auth_profiles_if_changed(payload: &str) -> bool {
+    let desired = match serde_json::from_str::<serde_json::Value>(payload) {
+        Ok(value) => value,
+        Err(_) => {
+            write_main_agent_auth_profiles(payload);
+            return true;
+        }
+    };
+
+    if read_main_agent_auth_profiles() == desired {
+        return false;
+    }
+
+    write_main_agent_auth_profiles(payload);
+    true
+}
+
 struct ContainerFileWrite<'a> {
     path: &'a str,
     content: &'a str,
@@ -6641,17 +6810,7 @@ fn read_container_env(key: &str) -> Option<String> {
 }
 
 fn container_path_exists(path: &str) -> bool {
-    docker_command()
-        .args([
-            "exec",
-            OPENCLAW_CONTAINER,
-            "sh",
-            "-c",
-            &format!("test -e \"{}\"", path),
-        ])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    container_dir_exists(path).unwrap_or(false)
 }
 
 fn container_plugin_exists(plugin_id: &str) -> bool {
@@ -6756,6 +6915,27 @@ async fn wait_for_gateway_after_config_reload(app: &AppHandle, context: &str, at
             ),
         }
     }
+}
+
+async fn wait_for_applied_gateway_settings(
+    app: &AppHandle,
+    context: &str,
+    outcome: ApplyAgentSettingsOutcome,
+    attempts: usize,
+) {
+    if !outcome.reload_required() {
+        return;
+    }
+
+    // Give OpenClaw's config watcher a moment to notice fresh file writes on
+    // startup before we start polling for the post-reload health state.
+    if outcome.config_changed {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    } else if outcome.auth_profiles_changed {
+        signal_gateway_config_reload();
+    }
+
+    wait_for_gateway_after_config_reload(app, context, attempts).await;
 }
 
 fn apply_channels_mutation_to_settings(
@@ -6895,114 +7075,6 @@ process.stdout.write('ok');
     }
 }
 
-fn desired_auth_profiles_payload(
-    app: &AppHandle,
-    desired_selection: &DesiredGatewaySelection,
-) -> serde_json::Value {
-    let mut stored = load_auth(app);
-    sync_oauth_tokens_from_container(app, &mut stored);
-    if let (Some("1"), Some(key)) = (
-        read_container_env("ENTROPIC_PROXY_MODE").as_deref(),
-        read_container_env("OPENROUTER_API_KEY"),
-    ) {
-        build_proxy_auth_profiles(
-            &key,
-            desired_selection.alias_model.as_deref(),
-            desired_selection.alias_image_model.as_deref(),
-        )
-    } else {
-        build_oauth_auth_profiles(&stored)
-    }
-}
-
-fn gateway_post_start_reconcile_reasons(
-    app: &AppHandle,
-    state: &AppState,
-) -> Result<Vec<String>, String> {
-    let desired_selection = desired_gateway_selection(app, state)?;
-    let settings = load_agent_settings(app);
-    let mut cfg = read_openclaw_config();
-    normalize_openclaw_config(&mut cfg);
-    let mut reasons = Vec::new();
-
-    let current_model = config_string_at_path(&cfg, "/agents/defaults/model/primary");
-    if current_model != desired_selection.config_model {
-        reasons.push("model default mismatch".to_string());
-    }
-
-    let current_image_model = config_string_at_path(&cfg, "/agents/defaults/imageModel/primary");
-    if current_image_model != desired_selection.config_image_model {
-        reasons.push("image model default mismatch".to_string());
-    }
-
-    let current_thinking = config_string_at_path(&cfg, "/agents/defaults/thinkingDefault")
-        .unwrap_or_else(|| "off".to_string());
-    if current_thinking != desired_selection.thinking_level {
-        reasons.push("thinking default mismatch".to_string());
-    }
-
-    let current_heartbeat = config_string_at_path(&cfg, "/agents/defaults/heartbeat/every");
-    if current_heartbeat.as_deref() != Some(settings.heartbeat_every.as_str()) {
-        reasons.push("heartbeat config mismatch".to_string());
-    }
-
-    let current_telegram_enabled = cfg
-        .pointer("/channels/telegram/enabled")
-        .and_then(|value| value.as_bool());
-    if current_telegram_enabled != Some(settings.telegram_enabled) {
-        reasons.push("telegram enabled mismatch".to_string());
-    }
-
-    let current_telegram_token =
-        config_string_at_path(&cfg, "/channels/telegram/botToken").unwrap_or_default();
-    if current_telegram_token != settings.telegram_token {
-        reasons.push("telegram token mismatch".to_string());
-    }
-
-    if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
-        let current_base_url = config_string_at_path(&cfg, "/models/providers/openrouter/baseUrl");
-        let expected_base_url = read_container_env("ENTROPIC_PROXY_BASE_URL");
-        if current_base_url != expected_base_url {
-            reasons.push("proxy base URL mismatch".to_string());
-        }
-    }
-
-    let current_auth_profiles =
-        read_container_file("/home/node/.openclaw/agents/main/agent/auth-profiles.json")
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-    if current_auth_profiles != Some(desired_auth_profiles_payload(app, &desired_selection)) {
-        reasons.push("auth profiles mismatch".to_string());
-    }
-
-    Ok(reasons)
-}
-
-async fn reconcile_gateway_after_start_if_needed(
-    app: &AppHandle,
-    state: &AppState,
-    context: &str,
-) -> Result<(), String> {
-    let reasons = gateway_post_start_reconcile_reasons(app, state)?;
-    if reasons.is_empty() {
-        println!(
-            "[Entropic] {}: startup reconcile skipped; gateway config already matches persisted state",
-            context
-        );
-        return Ok(());
-    }
-
-    println!(
-        "[Entropic] {}: startup reconcile needed ({})",
-        context,
-        reasons.join(", ")
-    );
-    clear_applied_agent_settings_fingerprint()?;
-    apply_agent_settings(app, state)?;
-    signal_gateway_config_reload();
-    wait_for_gateway_after_config_reload(app, context, 20).await;
-    Ok(())
-}
-
 fn classify_gateway_mutation(
     before: &GatewayLifecycleSnapshot,
     request: &GatewayMutationRequest,
@@ -7109,13 +7181,16 @@ async fn apply_gateway_mutation_inner(
             }
             let _ = app.emit("gateway-restarting", ());
             let config_started = Instant::now();
-            apply_agent_settings(app, state)?;
+            let outcome = apply_agent_settings_inner(app, state)?;
             timings.config_write_ms = config_started.elapsed().as_millis();
 
-            let reload_started = Instant::now();
-            wait_for_gateway_after_config_reload(app, "apply_gateway_mutation", 12).await;
-            timings.reload_wait_ms = reload_started.elapsed().as_millis();
-            timings.health_wait_ms = timings.reload_wait_ms;
+            if outcome.reload_required() {
+                let reload_started = Instant::now();
+                wait_for_applied_gateway_settings(app, "apply_gateway_mutation", outcome, 12)
+                    .await;
+                timings.reload_wait_ms = reload_started.elapsed().as_millis();
+                timings.health_wait_ms = timings.reload_wait_ms;
+            }
             applied = true;
         }
         GatewayMutationPlan::ContainerRestart => {
@@ -8045,16 +8120,22 @@ fn write_gateway_auth_profiles_if_changed(
     Ok(true)
 }
 
-fn write_gateway_auth_profiles(
-    app: &AppHandle,
-    alias_model: Option<&str>,
-    alias_image_model: Option<&str>,
-) -> Result<(), String> {
-    let _ = write_gateway_auth_profiles_if_changed(app, alias_model, alias_image_model)?;
-    Ok(())
+#[derive(Debug, Default, Clone, Copy)]
+struct ApplyAgentSettingsOutcome {
+    config_changed: bool,
+    auth_profiles_changed: bool,
 }
 
-fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String> {
+impl ApplyAgentSettingsOutcome {
+    fn reload_required(self) -> bool {
+        self.config_changed || self.auth_profiles_changed
+    }
+}
+
+fn apply_agent_settings_inner(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<ApplyAgentSettingsOutcome, String> {
     let settings = load_agent_settings(app);
     let desired_selection = desired_gateway_selection(app, state)?;
     let installed_skill_paths = collect_workspace_skill_paths().unwrap_or_default();
@@ -8125,6 +8206,8 @@ Use it for durable decisions, preferences, and facts that should persist across 
     let identity_path = workspace_file("IDENTITY.md");
     let memory_path = workspace_file("MEMORY.md");
     let soul_path = workspace_file("SOUL.md");
+    let desktop_settings = load_desktop_settings_snapshot(app);
+    let show_reasoning = desktop_settings.show_reasoning.unwrap_or(true);
     let thinking_level_env = Some(desired_selection.thinking_level.clone());
     let fingerprint_payload = serde_json::json!({
         "container_id": container_id,
@@ -8135,6 +8218,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
         "web_base_url": &web_base_url,
         "openai_key_for_lancedb": &openai_key_for_lancedb,
         "thinking_level": &thinking_level_env,
+        "show_reasoning": show_reasoning,
         "installed_workspace_skills": &installed_workspace_skill_ids,
         "installed_workspace_skill_paths": &installed_workspace_skill_paths,
         "settings": &settings,
@@ -8154,7 +8238,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
             .lock()
             .map_err(|e| e.to_string())?;
         if cache.as_deref() == Some(settings_fingerprint.as_str()) {
-            return Ok(());
+            return Ok(ApplyAgentSettingsOutcome::default());
         }
     }
 
@@ -8245,7 +8329,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
                     "id": model_id,
                     "name": model_id,
                     "input": ["text", "image"],
-                    "reasoning": false,
+                    "reasoning": show_reasoning,
                     "contextWindow": 200000,
                     "maxTokens": 8192,
                     "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
@@ -8256,7 +8340,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
                     "id": image_model_id,
                     "name": image_model_id,
                     "input": ["text", "image"],
-                    "reasoning": false,
+                    "reasoning": show_reasoning,
                     "contextWindow": 200000,
                     "maxTokens": 8192,
                     "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
@@ -8288,11 +8372,43 @@ Use it for durable decisions, preferences, and facts that should persist across 
             );
         }
     } else {
-        // Non-proxy mode: remove openrouter config to avoid validation errors
-        // (an empty models.providers.openrouter object causes "baseUrl required" validation failure)
-        remove_openclaw_config_value(&mut cfg, &["models", "providers", "openrouter"]);
+        clear_local_model_provider_configs(&mut cfg);
+        if let Some(local_model_config) = read_container_local_model_config() {
+            let provider_id = local_model_config.provider_id();
+            let base_url = local_model_config.gateway_base_url();
+            let api_key = local_model_config.api_key.clone();
+            let api = local_model_config.provider_api();
+            let model_name = local_model_config.model_name.clone();
+            let context_window = local_model_context_window_from_container_env();
+            set_openclaw_config_value(
+                &mut cfg,
+                &["models", "providers", provider_id],
+                serde_json::json!({
+                    "baseUrl": base_url,
+                    "apiKey": api_key,
+                    "api": api,
+                    "models": [{
+                        "id": model_name,
+                        "name": model_name,
+                        "input": ["text"],
+                        "reasoning": show_reasoning,
+                        "contextWindow": context_window,
+                        "maxTokens": 8192,
+                        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+                    }]
+                }),
+            );
+        }
     }
-    let memory_enabled = settings.memory_enabled;
+
+    let local_model_active = read_container_local_model_config().is_some();
+    let use_local_light_defaults =
+        local_model_active && local_model_prefers_light_defaults(&settings, &desktop_settings);
+    let memory_enabled = if use_local_light_defaults {
+        false
+    } else {
+        settings.memory_enabled
+    };
     let memory_slot = if !memory_enabled {
         "none"
     } else if settings.memory_long_term {
@@ -8300,14 +8416,24 @@ Use it for durable decisions, preferences, and facts that should persist across 
     } else {
         "memory-core"
     };
-    let memory_sessions_enabled = settings.memory_sessions_enabled;
+    let memory_sessions_enabled = if use_local_light_defaults {
+        false
+    } else {
+        settings.memory_sessions_enabled
+    };
     set_openclaw_config_value(
         &mut cfg,
         &["plugins", "slots", "memory"],
         serde_json::json!(memory_slot),
     );
     remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "lossless-claw"]);
-    if container_plugin_exists("lossless-claw") {
+    if local_model_active && use_local_light_defaults {
+        set_openclaw_config_value(
+            &mut cfg,
+            &["plugins", "slots", "contextEngine"],
+            serde_json::json!("legacy"),
+        );
+    } else if container_plugin_exists("lossless-claw") {
         set_openclaw_config_value(
             &mut cfg,
             &["plugins", "slots", "contextEngine"],
@@ -8332,7 +8458,11 @@ Use it for durable decisions, preferences, and facts that should persist across 
         &mut cfg,
         memory_slot,
         memory_sessions_enabled,
-        settings.memory_qmd_enabled,
+        if use_local_light_defaults {
+            false
+        } else {
+            settings.memory_qmd_enabled
+        },
     );
     set_openclaw_config_value(
         &mut cfg,
@@ -8691,15 +8821,268 @@ Use it for durable decisions, preferences, and facts that should persist across 
             .and_then(|a| a.get("defaults"))
             .and_then(|d| d.get("model"))
     );
-    write_gateway_auth_profiles(app, alias_model.as_deref(), alias_image_model.as_deref())?;
-    write_openclaw_config(&cfg)?;
+    let mut outcome = ApplyAgentSettingsOutcome {
+        config_changed: write_openclaw_config_if_changed(&cfg)?,
+        auth_profiles_changed: write_gateway_auth_profiles_if_changed(
+            app,
+            alias_model.as_deref(),
+            alias_image_model.as_deref(),
+        )?,
+    };
+    // Write OpenAI Codex OAuth credentials to auth-profiles.json if available
+    // (env vars don't work for Codex OAuth — OpenClaw needs auth-profiles.json)
+    // OpenClaw reads auth-profiles.json from: $STATE_DIR/agents/main/agent/auth-profiles.json
+    //
+    // IMPORTANT: Before writing, read the container's current auth-profiles.json.
+    // OpenClaw may have refreshed tokens (Anthropic uses refresh-token rotation),
+    // in which case the container has newer tokens than our stored copy. Sync those
+    // back to the app's auth store so we don't clobber them.
+    {
+        let mut stored = load_auth(app);
 
+        // Read current container auth-profiles.json to detect refreshed tokens
+        let container_profiles: Option<serde_json::Value> =
+            read_container_file("/home/node/.openclaw/agents/main/agent/auth-profiles.json")
+                .and_then(|raw| serde_json::from_str(&raw).ok());
+
+        // Sync refreshed tokens from container → app store, but ONLY if the
+        // container's tokens are newer (later expiry).  After a fresh re-auth the
+        // app store has the newest tokens and the container may still hold stale
+        // ones; blindly syncing the container's tokens back would clobber the
+        // fresh re-auth tokens.
+        if let Some(ref container) = container_profiles {
+            if let Some(container_cred) = container.pointer("/profiles/anthropic:entropic") {
+                let container_refresh = container_cred
+                    .get("refresh")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let container_access = container_cred
+                    .get("access")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let container_expires_ms = container_cred
+                    .get("expires")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if let Some(meta) = stored.oauth_metadata.get("anthropic") {
+                    if !container_refresh.is_empty()
+                        && container_refresh != meta.refresh_token
+                        && container_expires_ms > meta.expires_at
+                    {
+                        println!(
+                            "[Entropic] Syncing refreshed Anthropic tokens from container (container expiry {} > stored {})",
+                            container_expires_ms, meta.expires_at
+                        );
+                        stored.oauth_metadata.insert(
+                            "anthropic".to_string(),
+                            OAuthKeyMeta {
+                                refresh_token: container_refresh.to_string(),
+                                expires_at: container_expires_ms,
+                                source: meta.source.clone(),
+                            },
+                        );
+                        if !container_access.is_empty() {
+                            stored
+                                .keys
+                                .insert("anthropic".to_string(), container_access.to_string());
+                        }
+                        let _ = save_auth(app, &stored);
+                    }
+                }
+            }
+
+            // Sync refreshed OpenAI Codex tokens from container → app store
+            if let Some(container_cred) = container.pointer("/profiles/openai-codex:entropic") {
+                let container_refresh = container_cred
+                    .get("refresh")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let container_access = container_cred
+                    .get("access")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let container_expires_ms = container_cred
+                    .get("expires")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if let Some(meta) = stored.oauth_metadata.get("openai") {
+                    if !container_refresh.is_empty()
+                        && container_refresh != meta.refresh_token
+                        && container_expires_ms > meta.expires_at
+                    {
+                        println!(
+                            "[Entropic] Syncing refreshed OpenAI Codex tokens from container (container expiry {} > stored {})",
+                            container_expires_ms, meta.expires_at
+                        );
+                        stored.oauth_metadata.insert(
+                            "openai".to_string(),
+                            OAuthKeyMeta {
+                                refresh_token: container_refresh.to_string(),
+                                expires_at: container_expires_ms,
+                                source: meta.source.clone(),
+                            },
+                        );
+                        if !container_access.is_empty() {
+                            stored
+                                .keys
+                                .insert("openai".to_string(), container_access.to_string());
+                        }
+                        let _ = save_auth(app, &stored);
+                    }
+                }
+            }
+        }
+
+        let mut profiles = serde_json::Map::new();
+
+        // Anthropic OAuth (claude_code source → sk-ant-oat01-... tokens)
+        let anthropic_meta = stored.oauth_metadata.get("anthropic");
+        let anthropic_key = stored.keys.get("anthropic");
+        if let (Some(meta), Some(access_token)) = (anthropic_meta, anthropic_key) {
+            if meta.source == "claude_code" && !access_token.is_empty() {
+                println!(
+                    "[Entropic] Writing Anthropic OAuth credentials to auth-profiles.json (token len={})",
+                    access_token.len()
+                );
+                profiles.insert(
+                    "anthropic:entropic".to_string(),
+                    serde_json::json!({
+                        "type": "oauth",
+                        "provider": "anthropic",
+                        "access": access_token,
+                        "refresh": meta.refresh_token,
+                        "expires": meta.expires_at
+                    }),
+                );
+            }
+        }
+
+        // OpenAI Codex OAuth
+        let openai_meta = stored.oauth_metadata.get("openai");
+        let openai_key = stored.keys.get("openai");
+        if let (Some(meta), Some(access_token)) = (openai_meta, openai_key) {
+            if meta.source == "openai_codex" && !access_token.is_empty() {
+                println!(
+                    "[Entropic] Writing OpenAI Codex OAuth credentials to auth-profiles.json (token len={})",
+                    access_token.len()
+                );
+                profiles.insert(
+                    "openai-codex:entropic".to_string(),
+                    serde_json::json!({
+                        "type": "oauth",
+                        "provider": "openai-codex",
+                        "access": access_token,
+                        "refresh": meta.refresh_token,
+                        "expires": meta.expires_at
+                    }),
+                );
+            }
+        }
+
+        let auth_profiles = serde_json::json!({
+            "version": 1,
+            "profiles": serde_json::Value::Object(profiles)
+        });
+        let payload = serde_json::to_string_pretty(&auth_profiles).map_err(|e| e.to_string())?;
+        outcome.auth_profiles_changed |= write_main_agent_auth_profiles_if_changed(&payload);
+    }
+
+    // Write OpenRouter proxy credentials to auth-profiles.json if in proxy mode
+    // OpenClaw runtime expects auth-profiles.json even when OPENROUTER_API_KEY env is set
+    {
+        let openrouter_key = read_container_env("OPENROUTER_API_KEY");
+        let proxy_mode = read_container_env("ENTROPIC_PROXY_MODE");
+
+        if let (Some("1"), Some(key)) = (proxy_mode.as_deref(), openrouter_key) {
+            println!(
+                "[Entropic] Writing OpenRouter proxy credentials to auth-profiles.json (key len={})",
+                key.len()
+            );
+            let mut profiles = serde_json::Map::new();
+            profiles.insert(
+                "openrouter:default".to_string(),
+                serde_json::json!({
+                    "type": "api_key",
+                    "provider": "openrouter",
+                    "key": key
+                }),
+            );
+
+            let mut provider_aliases = vec!["openrouter"];
+            if let Some(model_id) = model.as_deref() {
+                provider_aliases.extend(proxy_auth_profile_providers_for_model(model_id));
+            }
+            if let Some(image_model_id) = image_model.as_deref() {
+                provider_aliases.extend(proxy_auth_profile_providers_for_model(image_model_id));
+            }
+            provider_aliases.sort_unstable();
+            provider_aliases.dedup();
+
+            for provider in provider_aliases {
+                let profile_id = format!("{}:default", provider);
+                if profiles.contains_key(&profile_id) {
+                    continue;
+                }
+                profiles.insert(
+                    profile_id,
+                    serde_json::json!({
+                        "type": "api_key",
+                        "provider": provider,
+                        "key": key
+                    }),
+                );
+            }
+
+            let auth_profiles = serde_json::json!({
+                "version": 1,
+                "profiles": serde_json::Value::Object(profiles)
+            });
+            let payload =
+                serde_json::to_string_pretty(&auth_profiles).map_err(|e| e.to_string())?;
+            outcome.auth_profiles_changed |= write_main_agent_auth_profiles_if_changed(&payload);
+        }
+    }
+
+    // Ensure local provider auth profile exists for local models.
+    // Previous blocks (Codex OAuth, proxy) may have overwritten auth-profiles.json.
+    {
+        if let Some(local_model_config) = read_container_local_model_config() {
+            let local_api_key = local_model_config.api_key.clone();
+            let auth_profile_id = local_model_config.auth_profile_id();
+            let mut auth_json = read_main_agent_auth_profiles();
+            if let Some(profiles) = auth_json
+                .get_mut("profiles")
+                .and_then(|p| p.as_object_mut())
+            {
+                profiles.insert(
+                    auth_profile_id.clone(),
+                    serde_json::json!({
+                        "type": "api_key",
+                        "provider": local_model_config.provider_id(),
+                        "key": local_api_key
+                    }),
+                );
+            }
+            let payload = serde_json::to_string_pretty(&auth_json).map_err(|e| e.to_string())?;
+            println!(
+                "[Entropic] Writing {} auth profile for local model (key len={})",
+                auth_profile_id,
+                local_api_key.len()
+            );
+            outcome.auth_profiles_changed |= write_main_agent_auth_profiles_if_changed(&payload);
+        }
+    }
     {
         let mut cache = applied_agent_settings_fingerprint()
             .lock()
             .map_err(|e| e.to_string())?;
         *cache = Some(settings_fingerprint);
     }
+    Ok(outcome)
+}
+
+fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    let _ = apply_agent_settings_inner(app, state)?;
     Ok(())
 }
 
@@ -9719,6 +10102,95 @@ fn append_colima_runtime_hint(message: String) -> String {
     }
 }
 
+fn format_clock_skew(ms: u128) -> String {
+    let total_minutes = ms / 1000 / 60;
+    if total_minutes == 0 {
+        return "less than a minute".to_string();
+    }
+
+    let days = total_minutes / (24 * 60);
+    let hours = (total_minutes % (24 * 60)) / 60;
+    let minutes = total_minutes % 60;
+    let mut parts = Vec::new();
+
+    if days > 0 {
+        parts.push(format!(
+            "{} day{}",
+            days,
+            if days == 1 { "" } else { "s" }
+        ));
+    }
+    if hours > 0 && parts.len() < 2 {
+        parts.push(format!(
+            "{} hour{}",
+            hours,
+            if hours == 1 { "" } else { "s" }
+        ));
+    }
+    if minutes > 0 && parts.len() < 2 {
+        parts.push(format!(
+            "{} minute{}",
+            minutes,
+            if minutes == 1 { "" } else { "s" }
+        ));
+    }
+
+    if parts.is_empty() {
+        "less than a minute".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn gateway_clock_drift_error(last_error: &str) -> Option<String> {
+    if !last_error
+        .to_ascii_lowercase()
+        .contains("device signature expired")
+    {
+        return None;
+    }
+
+    let container = running_gateway_container_name()?;
+    let output = docker_command()
+        .args([
+            "exec",
+            container,
+            "python3",
+            "-c",
+            "import time; print(int(time.time() * 1000))",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return Some(
+            "Sandbox clock drift detected: the runtime VM rejected operator auth because its clock is out of sync with this Mac. Reset the Entropic runtime to recreate the VM clock, then retry sandbox startup.".to_string(),
+        );
+    }
+
+    let sandbox_ms = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u128>()
+        .ok()?;
+    let host_ms = current_millis();
+    let skew_ms = sandbox_ms.abs_diff(host_ms);
+    if skew_ms <= 2 * 60 * 1000 {
+        return Some(
+            "Sandbox operator auth failed with `device signature expired`. Reset the Entropic runtime and retry sandbox startup.".to_string(),
+        );
+    }
+
+    let relation = if sandbox_ms > host_ms {
+        "ahead of"
+    } else {
+        "behind"
+    };
+    Some(format!(
+        "Sandbox clock drift detected: the runtime VM clock is {} this Mac by about {}. Reset the Entropic runtime to recreate the VM clock, then retry sandbox startup.",
+        relation,
+        format_clock_skew(skew_ms)
+    ))
+}
+
 fn gateway_health_error_is_startup_transient(err: &str) -> bool {
     err.contains("container health=starting")
         || err.contains("Handshake not finished")
@@ -10502,6 +10974,7 @@ async fn start_gateway_inner(
         .map_err(|e| e.to_string())?
         .clone();
     let settings = load_agent_settings(app);
+    let desktop_settings = load_desktop_settings_snapshot(app);
     let gateway_bind = "127.0.0.1:19789:18789";
     let mut memory_slot = if !settings.memory_enabled {
         "none"
@@ -10564,12 +11037,14 @@ async fn start_gateway_inner(
 
     let gateway_token = expected_gateway_token(app)?;
 
-    let has_any_local_api_key = has_configured_provider_key(&api_keys, "anthropic")
+    let is_local_model = model.as_deref().map_or(false, |m| m.starts_with("local/"));
+    let has_any_local_api_key = is_local_model
+        || has_configured_provider_key(&api_keys, "anthropic")
         || has_configured_provider_key(&api_keys, "openai")
         || has_configured_provider_key(&api_keys, "google");
     if !has_any_local_api_key {
         return Err(
-            "No local API key configured. Add an Anthropic/OpenAI/Google key in Settings, or sign in and disable 'Use Local Keys'."
+            "No provider key configured. Add an Anthropic/OpenAI/Google key in Settings, or switch to Managed Provider or Local Models."
                 .to_string(),
         );
     }
@@ -10590,9 +11065,11 @@ async fn start_gateway_inner(
         );
     }
 
-    // Parse model string: "provider/model-id:param" -> base model + optional params
-    // Supported suffixes: ":thinking" (Anthropic), ":reasoning=level" (OpenAI)
-    let (base_model, model_params) = if let Some(colon_pos) = model_full.find(':') {
+    // Parse model string while preserving colon tags for local models like
+    // llama3.2:3b. Suffix parsing only applies to non-local providers.
+    let (base_model, model_params) = if model_full.starts_with("local/") {
+        (model_full.as_str(), None)
+    } else if let Some(colon_pos) = model_full.find(':') {
         (&model_full[..colon_pos], Some(&model_full[colon_pos + 1..]))
     } else {
         (model_full.as_str(), None)
@@ -10603,6 +11080,48 @@ async fn start_gateway_inner(
     let reasoning_effort = model_params
         .and_then(|p| p.strip_prefix("reasoning="))
         .unwrap_or("");
+
+    let expected_local_model_config = if let Some(model_name) = base_model.strip_prefix("local/") {
+        let mut local_model_config = read_local_model_config(&app)?.ok_or_else(|| {
+            "Configure your local AI service in Settings before starting a local model.".to_string()
+        })?;
+        if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+            if local_model_config.model_name != model_name {
+                println!(
+                    "[Entropic] Managed local runtime requested stale model {:?}; using configured model {:?} instead.",
+                    model_name,
+                    local_model_config.model_name
+                );
+            }
+            ensure_rnn_runtime_ready(&app).await?;
+            let available = discover_local_model_ids_inner(&local_model_config, None).await?;
+            if !available
+                .iter()
+                .any(|value| value == &local_model_config.model_name)
+            {
+                return Err(format!(
+                    "Managed local runtime model '{}' is not available locally. Download it from Settings before starting the local connector.",
+                    local_model_config.model_name
+                ));
+            }
+        } else {
+            local_model_config.model_name = model_name.to_string();
+        }
+        Some(local_model_config)
+    } else {
+        None
+    };
+    let local_model_context_window =
+        if let Some(local_model_config) = expected_local_model_config.as_ref() {
+            Some(resolve_local_model_context_window(&app, local_model_config).await)
+        } else {
+            None
+        };
+    let openclaw_model = if let Some(local_model_config) = expected_local_model_config.as_ref() {
+        local_model_config.gateway_model_ref(None)
+    } else {
+        base_model.to_string()
+    };
 
     cleanup_legacy_gateway_artifacts();
 
@@ -10620,6 +11139,13 @@ async fn start_gateway_inner(
         let current_container_image_id = container_image_id(OPENCLAW_CONTAINER);
         let latest_runtime_image_id = image_id("openclaw-runtime:latest");
         let current_proxy_mode = read_container_env("ENTROPIC_PROXY_MODE");
+        let current_local_base_url = read_container_env("ENTROPIC_LOCAL_MODEL_BASE_URL");
+        let current_local_api_key = read_container_env("ENTROPIC_LOCAL_MODEL_API_KEY");
+        let current_local_model_name = read_container_env("ENTROPIC_LOCAL_MODEL_NAME");
+        let current_local_service_type = read_container_env("ENTROPIC_LOCAL_MODEL_SERVICE_TYPE");
+        let current_local_api = read_container_env("ENTROPIC_LOCAL_MODEL_API");
+        let current_local_context_window =
+            read_container_env("ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW");
         // Check legacy environment variable for backward compatibility during migration
         let legacy_proxy_mode = read_container_env("NOVA_PROXY_MODE");
         // Check if the Anthropic auth type matches (OAuth token vs API key)
@@ -10640,11 +11166,36 @@ async fn start_gateway_inner(
             (Some(current), Some(latest)) => current == latest,
             _ => true,
         };
+        let expected_local_context_window = local_model_context_window
+            .map(advertised_local_model_context_window)
+            .map(|value| value.to_string());
+        let local_config_matches = if let Some(expected_local_model_config) =
+            &expected_local_model_config
+        {
+            current_local_base_url.as_deref()
+                == Some(expected_local_model_config.gateway_base_url().as_str())
+                && current_local_model_name.as_deref()
+                    == Some(expected_local_model_config.model_name.as_str())
+                && current_local_api_key.as_deref()
+                    == Some(expected_local_model_config.api_key.as_str())
+                && current_local_service_type.as_deref()
+                    == Some(expected_local_model_config.service_type_name())
+                && current_local_api.as_deref() == Some(expected_local_model_config.api_mode_name())
+                && current_local_context_window.as_deref()
+                    == expected_local_context_window.as_deref()
+        } else {
+            current_local_base_url.is_none()
+                && current_local_api_key.is_none()
+                && current_local_model_name.is_none()
+                && current_local_service_type.is_none()
+                && current_local_api.is_none()
+                && current_local_context_window.is_none()
+        };
         if !is_proxy_container
             && auth_type_matches
             && current_gateway_token.as_deref() == Some(gateway_token.as_str())
             && current_schema.as_deref() == Some(ENTROPIC_GATEWAY_SCHEMA_VERSION)
-            && current_model.as_deref() == Some(base_model)
+            && current_model.as_deref() == Some(openclaw_model.as_str())
             && current_browser_host_port.as_deref() == Some(BROWSER_SERVICE_HOST_PORT)
             && current_browser_headful.as_deref() == Some("1")
             && current_browser_allow_unsafe_no_sandbox.as_deref()
@@ -10652,8 +11203,16 @@ async fn start_gateway_inner(
             && current_browser_allow_insecure_secure_contexts.as_deref()
                 == Some(BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS)
             && image_matches_latest
+            && local_config_matches
         {
-            apply_agent_settings(app, state)?;
+            let settings_outcome = apply_agent_settings_inner(app, state)?;
+            wait_for_applied_gateway_settings(
+                app,
+                "start_gateway reuse",
+                settings_outcome,
+                8,
+            )
+            .await;
             match wait_for_gateway_health_strict(&gateway_token, 6).await {
                 Ok(()) => {
                     summary.total_ms = startup_started.elapsed().as_millis();
@@ -10709,6 +11268,13 @@ async fn start_gateway_inner(
     } else {
         "off"
     };
+    let runtime_memory_slot = if expected_local_model_config.is_some()
+        && local_model_prefers_light_defaults(&settings, &desktop_settings)
+    {
+        "none"
+    } else {
+        memory_slot
+    };
 
     // Build docker run command - pass API keys as env vars
     let mut env_entries: Vec<(&str, &str)> = vec![
@@ -10719,8 +11285,8 @@ async fn start_gateway_inner(
         ),
         // OPENCLAW_MODEL is read by apply_agent_settings to write openclaw.json config.
         // Keep base model and pass reasoning/thinking separately.
-        ("OPENCLAW_MODEL", base_model),
-        ("OPENCLAW_MEMORY_SLOT", memory_slot),
+        ("OPENCLAW_MODEL", &openclaw_model),
+        ("OPENCLAW_MEMORY_SLOT", runtime_memory_slot),
         // ENTROPIC_THINKING_LEVEL is read by apply_agent_settings to set thinkingDefault in config
         ("ENTROPIC_THINKING_LEVEL", thinking_level),
         ("ENTROPIC_WORKSPACE_PATH", WORKSPACE_ROOT),
@@ -10778,6 +11344,54 @@ async fn start_gateway_inner(
         env_entries.push(("ENTROPIC_WEB_BASE_URL", base));
     }
 
+    // Local model support: pass service type, adapter, base URL, API key, and model name.
+    let local_model_config = expected_local_model_config.clone();
+    let rnn_runtime_paths = local_model_config
+        .as_ref()
+        .filter(|config| {
+            config.service_type == LocalModelServiceType::RnnLocal
+                && rnn_runtime_requires_container_unix_bridge()
+        })
+        .map(|_| rnn_runtime_paths(&app))
+        .transpose()?;
+    let local_base_url_docker: String;
+    let local_api_key: String;
+    let local_model_name_str: String;
+    let local_service_type_str: String;
+    let local_api_mode_str: String;
+    let local_context_window_str: String;
+    if let Some(local_model_config) = &local_model_config {
+        local_base_url_docker = local_model_config.gateway_base_url();
+        local_api_key = local_model_config.api_key.clone();
+        local_model_name_str = local_model_config.model_name.clone();
+        local_service_type_str = local_model_config.service_type_name().to_string();
+        local_api_mode_str = local_model_config.api_mode_name().to_string();
+        local_context_window_str = advertised_local_model_context_window(
+            local_model_context_window.unwrap_or(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK),
+        )
+        .to_string();
+        env_entries.push(("ENTROPIC_LOCAL_MODEL_BASE_URL", &local_base_url_docker));
+        env_entries.push(("ENTROPIC_LOCAL_MODEL_API_KEY", &local_api_key));
+        env_entries.push(("ENTROPIC_LOCAL_MODEL_NAME", &local_model_name_str));
+        env_entries.push(("ENTROPIC_LOCAL_MODEL_SERVICE_TYPE", &local_service_type_str));
+        env_entries.push(("ENTROPIC_LOCAL_MODEL_API", &local_api_mode_str));
+        env_entries.push((
+            "ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW",
+            &local_context_window_str,
+        ));
+        if local_model_config.service_type == LocalModelServiceType::RnnLocal
+            && rnn_runtime_requires_container_unix_bridge()
+        {
+            env_entries.push((
+                "ENTROPIC_MANAGED_RUNTIME_UNIX_SOCKET",
+                RNN_RUNTIME_CONTAINER_SOCKET_PATH,
+            ));
+        }
+        if local_model_config.provider_id() == "ollama" {
+            env_entries.push(("OLLAMA_API_KEY", &local_api_key));
+        }
+    }
+
     let env_file = gateway_env_file(&env_entries)?;
     let env_file_path = docker_host_path_for_command(&env_file.path);
 
@@ -10824,6 +11438,14 @@ async fn start_gateway_inner(
         "openclaw-runtime:latest".to_string(),
     ]);
 
+    if let Some(paths) = rnn_runtime_paths.as_ref() {
+        docker_args.insert(docker_args.len() - 1, "-v".to_string());
+        docker_args.insert(
+            docker_args.len() - 1,
+            openclaw_rnn_runtime_bridge_mount(paths),
+        );
+    }
+
     // Dev-only: bind-mount local OpenClaw dist/extensions to avoid image rebuilds
     if let Ok(source) = std::env::var("ENTROPIC_DEV_OPENCLAW_SOURCE") {
         let trimmed = source.trim();
@@ -10868,22 +11490,23 @@ async fn start_gateway_inner(
     );
     summary.container_launch_ms = container_launch_started.elapsed().as_millis();
 
-    // Apply persisted settings to the fresh container
+    let health_started = Instant::now();
+    recover_gateway_health(&gateway_token, &docker_args, "Gateway", app, state).await?;
+    summary.health_wait_ms = health_started.elapsed().as_millis();
+
+    // Apply persisted settings after the fresh gateway is healthy so file
+    // watcher reloads happen once, from a stable baseline.
     let settings_started = Instant::now();
-    apply_agent_settings(app, state)?;
+    let settings_outcome = apply_agent_settings_inner(app, state)?;
     println!(
         "[Entropic] Startup timing: post_launch_config={}ms",
         settings_started.elapsed().as_millis()
     );
     summary.post_launch_config_ms = settings_started.elapsed().as_millis();
 
-    let health_started = Instant::now();
-    recover_gateway_health(&gateway_token, &docker_args, "Gateway", app, state).await?;
-    summary.health_wait_ms = health_started.elapsed().as_millis();
-    let reconcile_started = Instant::now();
-    reconcile_gateway_after_start_if_needed(app, state, "start_gateway").await?;
-    summary.reconcile_ms = reconcile_started.elapsed().as_millis();
-    println!("[Entropic] Startup timing: post_health_reconcile complete");
+    let reload_started = Instant::now();
+    wait_for_applied_gateway_settings(app, "start_gateway", settings_outcome, 20).await;
+    summary.reconcile_ms = reload_started.elapsed().as_millis();
     println!(
         "[Entropic] Startup timing: health={}ms reconcile={}ms total={}ms",
         summary.health_wait_ms,
@@ -11159,12 +11782,19 @@ async fn start_gateway_with_proxy_inner(
         {
             println!("[Entropic] Proxy container already running with matching config. Reusing.");
             let reuse_prepare_started = Instant::now();
-            apply_agent_settings(app, state)?;
+            let settings_outcome = apply_agent_settings_inner(app, state)?;
             println!(
                 "[Entropic] Startup timing (proxy): reused_container_prepare={}ms",
                 reuse_prepare_started.elapsed().as_millis()
             );
             summary.post_launch_config_ms = reuse_prepare_started.elapsed().as_millis();
+            wait_for_applied_gateway_settings(
+                app,
+                "start_gateway_with_proxy reuse",
+                settings_outcome,
+                8,
+            )
+            .await;
             let health_started = Instant::now();
             let (reuse_docker_args, _reuse_env_file) = build_proxy_docker_args()?;
             recover_gateway_health(
@@ -11291,15 +11921,6 @@ async fn start_gateway_with_proxy_inner(
     );
     summary.container_launch_ms = container_launch_started.elapsed().as_millis();
 
-    // Apply persisted settings
-    let settings_started = Instant::now();
-    apply_agent_settings(app, state)?;
-    println!(
-        "[Entropic] Startup timing (proxy): post_launch_config={}ms",
-        settings_started.elapsed().as_millis()
-    );
-    summary.post_launch_config_ms = settings_started.elapsed().as_millis();
-
     let health_started = Instant::now();
     recover_gateway_health(
         &local_gateway_token,
@@ -11310,10 +11931,19 @@ async fn start_gateway_with_proxy_inner(
     )
     .await?;
     summary.health_wait_ms = health_started.elapsed().as_millis();
-    let reconcile_started = Instant::now();
-    reconcile_gateway_after_start_if_needed(app, state, "start_gateway_with_proxy").await?;
-    summary.reconcile_ms = reconcile_started.elapsed().as_millis();
-    println!("[Entropic] Startup timing (proxy): post_health_reconcile complete");
+
+    let settings_started = Instant::now();
+    let settings_outcome = apply_agent_settings_inner(app, state)?;
+    println!(
+        "[Entropic] Startup timing (proxy): post_launch_config={}ms",
+        settings_started.elapsed().as_millis()
+    );
+    summary.post_launch_config_ms = settings_started.elapsed().as_millis();
+
+    let reload_started = Instant::now();
+    wait_for_applied_gateway_settings(app, "start_gateway_with_proxy", settings_outcome, 20)
+        .await;
+    summary.reconcile_ms = reload_started.elapsed().as_millis();
     println!(
         "[Entropic] Startup timing (proxy): health={}ms reconcile={}ms total={}ms",
         summary.health_wait_ms,
@@ -11342,23 +11972,60 @@ pub async fn start_gateway_with_proxy(
 /// Hot-swap the model in openclaw.json without restarting the container.
 /// Only works for same-provider changes (API keys stay the same).
 #[tauri::command]
-pub fn update_gateway_model(model: String) -> Result<(), String> {
-    let base_model = model.split(':').next().unwrap_or(&model);
-    let thinking_enabled = model.contains(":thinking");
-    let reasoning_effort = model
-        .split(':')
-        .find_map(|s| s.strip_prefix("reasoning="))
-        .unwrap_or("");
+pub fn update_gateway_model(app: AppHandle, model: String) -> Result<(), String> {
+    let requested_local_model_name = model.strip_prefix("local/").map(str::to_string);
+    let (local_model_name, base_model, thinking_enabled, reasoning_effort) = if let Some(
+        model_name,
+    ) = requested_local_model_name.as_deref()
+    {
+        let local_model_config = read_local_model_config(&app)?.ok_or_else(|| {
+            "Configure your local AI service in Settings before using a local model.".to_string()
+        })?;
+        let effective_local_model_name = if local_model_config.service_type == LocalModelServiceType::RnnLocal
+            && local_model_config.model_name != model_name
+        {
+            println!(
+                "[Entropic] update_gateway_model: requested stale managed local model {:?}; using configured model {:?} instead.",
+                model_name,
+                local_model_config.model_name
+            );
+            local_model_config.model_name.clone()
+        } else {
+            model_name.to_string()
+        };
+        (
+            Some(effective_local_model_name.clone()),
+            local_model_config.gateway_model_ref(Some(&effective_local_model_name)),
+            false,
+            String::new(),
+        )
+    } else {
+        let base_model = model.split(':').next().unwrap_or(&model);
+        let thinking_enabled = model.contains(":thinking");
+        let reasoning_effort = model
+            .split(':')
+            .find_map(|s| s.strip_prefix("reasoning="))
+            .unwrap_or("");
+        (
+            None,
+            base_model.to_string(),
+            thinking_enabled,
+            reasoning_effort.to_string(),
+        )
+    };
 
     let thinking_level = if thinking_enabled {
         "high"
     } else if !reasoning_effort.is_empty() {
-        reasoning_effort
+        reasoning_effort.as_str()
     } else {
         "off"
     };
+    let show_reasoning = load_desktop_settings_snapshot(&app)
+        .show_reasoning
+        .unwrap_or(true);
     let config_model = if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
-        normalize_proxy_runtime_model_ref(base_model)
+        normalize_proxy_runtime_model_ref(&base_model)
     } else {
         base_model.to_string()
     };
@@ -11370,6 +12037,34 @@ pub fn update_gateway_model(model: String) -> Result<(), String> {
         &["agents", "defaults", "model", "primary"],
         serde_json::json!(config_model),
     );
+    if let Some(model_name) = local_model_name.as_deref() {
+        if let Some(local_model_config) = read_local_model_config(&app)? {
+            let provider_id = local_model_config.provider_id();
+            let base_url = local_model_config.gateway_base_url();
+            let api_key = local_model_config.api_key.clone();
+            let api = local_model_config.provider_api();
+            let context_window = local_model_context_window_from_container_env();
+            clear_local_model_provider_configs(&mut cfg);
+            set_openclaw_config_value(
+                &mut cfg,
+                &["models", "providers", provider_id],
+                serde_json::json!({
+                    "baseUrl": base_url,
+                    "apiKey": api_key,
+                    "api": api,
+                    "models": [{
+                        "id": model_name,
+                        "name": model_name,
+                        "input": ["text"],
+                        "reasoning": show_reasoning,
+                        "contextWindow": context_window,
+                        "maxTokens": 8192,
+                        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+                    }]
+                }),
+            );
+        }
+    }
 
     if thinking_level != "off" {
         set_openclaw_config_value(
@@ -11468,10 +12163,15 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
         }
     }
 
+    let last_error = last_error.unwrap_or_else(|| "unknown health failure".to_string());
     println!(
         "[Entropic] Gateway health check failed after retries: {}",
-        last_error.unwrap_or_else(|| "unknown health failure".to_string())
+        last_error
     );
+    if let Some(clock_drift_error) = gateway_clock_drift_error(&last_error) {
+        println!("[Entropic] {}", clock_drift_error);
+        return Err(clock_drift_error);
+    }
     if let Some(hint) = colima_daemon_killed_hint() {
         println!("[Entropic] {}", hint);
     }
@@ -11511,6 +12211,2985 @@ pub async fn get_gateway_auth(app: AppHandle) -> Result<GatewayAuthPayload, Stri
         ws_url: gateway_ws_url(),
         token: effective_gateway_token(&app)?,
     })
+}
+
+#[derive(Debug, Clone)]
+struct RnnRuntimePaths {
+    root: PathBuf,
+    models_dir: PathBuf,
+    state_dir: PathBuf,
+    admin_token_file: PathBuf,
+    bridge_dir: PathBuf,
+    socket_path: PathBuf,
+    venv_dir: PathBuf,
+    log_file: PathBuf,
+    pid_file: PathBuf,
+    requirements_stamp_file: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct PythonCommandSpec {
+    program: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RnnRuntimeStatusPayload {
+    pub running: bool,
+    pub base_url: String,
+    pub loaded_model: Option<String>,
+    pub last_error: Option<String>,
+    pub pid: Option<u32>,
+    pub models_dir: String,
+    pub state_dir: String,
+    pub log_file: String,
+    pub script_path: Option<String>,
+    pub runtime_name: Option<String>,
+    pub active_backend: Option<String>,
+    pub active_architecture: Option<String>,
+    pub active_model_info: Option<serde_json::Value>,
+    pub capabilities: Option<serde_json::Value>,
+    pub runtime_config: Option<serde_json::Value>,
+    pub python_command: Option<String>,
+}
+
+fn rnn_runtime_paths(app: &AppHandle) -> Result<RnnRuntimePaths, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data directory: {}", e))?;
+    let managed_root = app_data_dir.join(MANAGED_RUNTIME_DIR_NAME);
+    let legacy_root = app_data_dir.join(LEGACY_RNN_RUNTIME_DIR_NAME);
+    let root = if managed_root.exists() {
+        managed_root
+    } else if legacy_root.exists() {
+        match fs::rename(&legacy_root, &managed_root) {
+            Ok(_) => managed_root,
+            Err(_) => legacy_root,
+        }
+    } else {
+        managed_root
+    };
+    Ok(RnnRuntimePaths {
+        models_dir: root.join("models"),
+        state_dir: root.join("state"),
+        admin_token_file: root.join("state").join(RNN_RUNTIME_ADMIN_TOKEN_FILE_NAME),
+        bridge_dir: root.join("bridge"),
+        socket_path: root.join("bridge").join(RNN_RUNTIME_SOCKET_FILE_NAME),
+        venv_dir: root.join("venv"),
+        log_file: root.join("runtime.log"),
+        pid_file: root.join("runtime.pid"),
+        requirements_stamp_file: root.join("requirements.sha256"),
+        root,
+    })
+}
+
+fn ensure_rnn_runtime_dirs(paths: &RnnRuntimePaths) -> Result<(), String> {
+    fs::create_dir_all(&paths.root)
+        .map_err(|e| format!("Failed to create managed runtime directory: {}", e))?;
+    fs::create_dir_all(&paths.models_dir)
+        .map_err(|e| format!("Failed to create managed-runtime models directory: {}", e))?;
+    fs::create_dir_all(&paths.state_dir)
+        .map_err(|e| format!("Failed to create managed-runtime state directory: {}", e))?;
+    fs::create_dir_all(&paths.bridge_dir)
+        .map_err(|e| format!("Failed to create managed-runtime bridge directory: {}", e))?;
+    ensure_rnn_runtime_legacy_alias(paths)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_rnn_runtime_legacy_alias(paths: &RnnRuntimePaths) -> Result<(), String> {
+    if paths
+        .root
+        .file_name()
+        .and_then(|value| value.to_str())
+        != Some(MANAGED_RUNTIME_DIR_NAME)
+    {
+        return Ok(());
+    }
+    let Some(parent) = paths.root.parent() else {
+        return Ok(());
+    };
+    let legacy_root = parent.join(LEGACY_RNN_RUNTIME_DIR_NAME);
+    if legacy_root.exists() {
+        return Ok(());
+    }
+    std::os::unix::fs::symlink(&paths.root, &legacy_root).map_err(|e| {
+        format!(
+            "Failed to create legacy managed-runtime compatibility alias {} -> {}: {}",
+            legacy_root.display(),
+            paths.root.display(),
+            e
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_rnn_runtime_legacy_alias(_paths: &RnnRuntimePaths) -> Result<(), String> {
+    Ok(())
+}
+
+fn rnn_runtime_config_path(paths: &RnnRuntimePaths) -> PathBuf {
+    paths.state_dir.join(RNN_RUNTIME_CONFIG_FILE_NAME)
+}
+
+#[cfg(target_os = "macos")]
+fn detected_host_memory_total_bytes() -> Option<u64> {
+    let output = Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn detected_host_memory_total_bytes() -> Option<u64> {
+    let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if pages <= 0 || page_size <= 0 {
+        return None;
+    }
+    let pages = u64::try_from(pages).ok()?;
+    let page_size = u64::try_from(page_size).ok()?;
+    pages.checked_mul(page_size)
+}
+
+#[cfg(not(unix))]
+fn detected_host_memory_total_bytes() -> Option<u64> {
+    None
+}
+
+fn maybe_autotune_rnn_runtime_config(paths: &RnnRuntimePaths) -> Result<bool, String> {
+    let host_memory_total_bytes = match detected_host_memory_total_bytes() {
+        Some(value) if value <= RNN_RUNTIME_LOW_MEMORY_HOST_BYTES_THRESHOLD => value,
+        _ => return Ok(false),
+    };
+
+    let config_path = rnn_runtime_config_path(paths);
+    let mut config = if config_path.exists() {
+        let raw = fs::read_to_string(&config_path)
+            .map_err(|e| format!("Failed to read managed runtime config: {}", e))?;
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    let current_n_ctx = config
+        .get("llamaCpp")
+        .and_then(|value| value.get("nCtx"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(32_768);
+    if current_n_ctx <= RNN_RUNTIME_LOW_MEMORY_SAFE_N_CTX {
+        return Ok(false);
+    }
+
+    set_openclaw_config_value(
+        &mut config,
+        &["llamaCpp", "nCtx"],
+        serde_json::json!(RNN_RUNTIME_LOW_MEMORY_SAFE_N_CTX),
+    );
+
+    let payload = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize managed runtime config: {}", e))?;
+    fs::write(&config_path, payload)
+        .map_err(|e| format!("Failed to write managed runtime config: {}", e))?;
+
+    println!(
+        "[Entropic] Auto-tuned managed runtime GGUF context to {} for a low-memory host ({:.1} GB RAM).",
+        RNN_RUNTIME_LOW_MEMORY_SAFE_N_CTX,
+        host_memory_total_bytes as f64 / 1024.0_f64.powi(3)
+    );
+    Ok(true)
+}
+
+fn write_rnn_runtime_admin_token(paths: &RnnRuntimePaths, token: &str) -> Result<(), String> {
+    fs::write(&paths.admin_token_file, format!("{}\n", token))
+        .map_err(|e| format!("Failed to write managed runtime admin token: {}", e))?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&paths.admin_token_file, fs::Permissions::from_mode(0o600))
+            .map_err(|e| {
+                format!(
+                    "Failed to secure managed runtime admin token file permissions: {}",
+                    e
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn ensure_rnn_runtime_admin_token(paths: &RnnRuntimePaths) -> Result<String, String> {
+    ensure_rnn_runtime_dirs(paths)?;
+    if let Ok(existing) = fs::read_to_string(&paths.admin_token_file) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    let token = generate_gateway_token();
+    write_rnn_runtime_admin_token(paths, &token)?;
+    Ok(token)
+}
+
+fn clear_rnn_runtime_socket(paths: &RnnRuntimePaths) {
+    let _ = fs::remove_file(&paths.socket_path);
+}
+
+fn rnn_runtime_socket_ready(paths: &RnnRuntimePaths) -> bool {
+    fs::metadata(&paths.socket_path)
+        .map(|metadata| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                metadata.file_type().is_socket()
+            }
+            #[cfg(not(unix))]
+            {
+                metadata.is_file()
+            }
+        })
+        .unwrap_or(false)
+}
+
+fn openclaw_rnn_runtime_bridge_mount(paths: &RnnRuntimePaths) -> String {
+    let mount_source = docker_host_path_for_command(&paths.bridge_dir);
+    format!(
+        "{}:{}:rw",
+        mount_source, RNN_RUNTIME_CONTAINER_SOCKET_DIR
+    )
+}
+
+fn resolve_rnn_runtime_server_script(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(
+            resource_dir
+                .join("resources")
+                .join(RNN_RUNTIME_SERVER_RELATIVE_PATH),
+        );
+        candidates.push(resource_dir.join(RNN_RUNTIME_SERVER_RELATIVE_PATH));
+    }
+
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(RNN_RUNTIME_SERVER_RELATIVE_PATH),
+    );
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            candidates.push(
+                exe_dir
+                    .join("resources")
+                    .join(RNN_RUNTIME_SERVER_RELATIVE_PATH),
+            );
+            candidates.push(
+                exe_dir
+                    .join("..")
+                    .join("..")
+                    .join("resources")
+                    .join(RNN_RUNTIME_SERVER_RELATIVE_PATH),
+            );
+            if let Some(contents_dir) = exe_dir.parent() {
+                let resources_dir = contents_dir.join("Resources");
+                candidates.push(
+                    resources_dir
+                        .join("resources")
+                        .join(RNN_RUNTIME_SERVER_RELATIVE_PATH),
+                );
+                candidates.push(resources_dir.join(RNN_RUNTIME_SERVER_RELATIVE_PATH));
+            }
+        }
+    }
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err("Managed local runtime server script was not found in bundled resources.".to_string())
+}
+
+fn resolve_rnn_runtime_resource_path(
+    app: &AppHandle,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("resources").join(relative_path));
+        candidates.push(resource_dir.join(relative_path));
+    }
+
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(relative_path),
+    );
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            candidates.push(exe_dir.join("resources").join(relative_path));
+            candidates.push(
+                exe_dir
+                    .join("..")
+                    .join("..")
+                    .join("resources")
+                    .join(relative_path),
+            );
+            if let Some(contents_dir) = exe_dir.parent() {
+                let resources_dir = contents_dir.join("Resources");
+                candidates.push(resources_dir.join("resources").join(relative_path));
+                candidates.push(resources_dir.join(relative_path));
+            }
+        }
+    }
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "Managed local runtime resource '{}' was not found in bundled resources.",
+        relative_path
+    ))
+}
+
+fn rnn_runtime_venv_python_path(paths: &RnnRuntimePaths) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        return paths.venv_dir.join("Scripts").join("python.exe");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        paths.venv_dir.join("bin").join("python")
+    }
+}
+
+fn prism_llama_repo_dir(paths: &RnnRuntimePaths) -> PathBuf {
+    paths.state_dir.join(RNN_RUNTIME_PRISM_LLAMA_DIR_NAME)
+}
+
+fn prism_llama_build_dir(paths: &RnnRuntimePaths) -> PathBuf {
+    prism_llama_repo_dir(paths).join("build")
+}
+
+#[cfg(target_os = "windows")]
+fn prism_llama_binary_path(paths: &RnnRuntimePaths) -> PathBuf {
+    prism_llama_build_dir(paths)
+        .join("bin")
+        .join("Release")
+        .join("llama-server.exe")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn prism_llama_binary_path(paths: &RnnRuntimePaths) -> PathBuf {
+    prism_llama_build_dir(paths).join("bin").join("llama-server")
+}
+
+fn current_git_head(repo_dir: &Path) -> Result<Option<String>, String> {
+    if !repo_dir.exists() {
+        return Ok(None);
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| format!("Failed to inspect the Prism llama.cpp checkout: {}", e))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if head.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(head))
+}
+
+fn ensure_prism_llama_repo_checkout(repo_dir: &Path) -> Result<bool, String> {
+    let mut changed = false;
+    if !repo_dir.exists() {
+        let clone_output = Command::new("git")
+            .args(["clone", "--depth=1", RNN_RUNTIME_PRISM_LLAMA_REPO_URL])
+            .arg(repo_dir)
+            .output()
+            .map_err(|e| {
+                format!(
+                    "Failed to clone the Prism llama.cpp backend. Install git and retry: {}",
+                    e
+                )
+            })?;
+        if !clone_output.status.success() {
+            let stderr = String::from_utf8_lossy(&clone_output.stderr);
+            return Err(format!(
+                "Failed to clone the Prism llama.cpp backend from {}: {}",
+                RNN_RUNTIME_PRISM_LLAMA_REPO_URL,
+                stderr.trim()
+            ));
+        }
+        changed = true;
+    }
+
+    let current_head = current_git_head(repo_dir)?;
+    if current_head.as_deref() != Some(RNN_RUNTIME_PRISM_LLAMA_COMMIT) {
+        let fetch_output = Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["fetch", "--depth=1", "origin", RNN_RUNTIME_PRISM_LLAMA_COMMIT])
+            .output()
+            .map_err(|e| {
+                format!(
+                    "Failed to fetch the pinned Prism llama.cpp backend revision {}: {}",
+                    RNN_RUNTIME_PRISM_LLAMA_COMMIT, e
+                )
+            })?;
+        if !fetch_output.status.success() {
+            let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+            return Err(format!(
+                "Failed to fetch the pinned Prism llama.cpp backend revision {}: {}",
+                RNN_RUNTIME_PRISM_LLAMA_COMMIT,
+                stderr.trim()
+            ));
+        }
+
+        let checkout_output = Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["checkout", "--detach", RNN_RUNTIME_PRISM_LLAMA_COMMIT])
+            .output()
+            .map_err(|e| {
+                format!(
+                    "Failed to checkout the pinned Prism llama.cpp backend revision {}: {}",
+                    RNN_RUNTIME_PRISM_LLAMA_COMMIT, e
+                )
+            })?;
+        if !checkout_output.status.success() {
+            let stderr = String::from_utf8_lossy(&checkout_output.stderr);
+            return Err(format!(
+                "Failed to checkout the pinned Prism llama.cpp backend revision {}: {}",
+                RNN_RUNTIME_PRISM_LLAMA_COMMIT,
+                stderr.trim()
+            ));
+        }
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn install_prism_llama_backend(paths: &RnnRuntimePaths) -> Result<(), String> {
+    let repo_dir = prism_llama_repo_dir(paths);
+    let build_dir = prism_llama_build_dir(paths);
+    let binary_path = prism_llama_binary_path(paths);
+    let checkout_changed = ensure_prism_llama_repo_checkout(&repo_dir)?;
+
+    if binary_path.exists() && !checkout_changed {
+        return Ok(());
+    }
+
+    let mut configure = Command::new("cmake");
+    configure
+        .arg("-S")
+        .arg(&repo_dir)
+        .arg("-B")
+        .arg(&build_dir)
+        .arg("-DCMAKE_BUILD_TYPE=Release");
+
+    #[cfg(target_os = "macos")]
+    {
+        configure.arg("-DGGML_METAL=ON");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(nvcc_path) = resolve_rnn_runtime_nvcc_path() {
+            configure.arg("-DGGML_CUDA=on");
+            configure.env("CUDACXX", &nvcc_path);
+            if let Some(cuda_bin_dir) = Path::new(&nvcc_path).parent() {
+                if let Some(cuda_root) = cuda_bin_dir.parent() {
+                    configure.env("CUDA_HOME", cuda_root);
+                    configure.env("CUDA_PATH", cuda_root);
+                }
+            }
+        }
+    }
+
+    let configure_output = configure.output().map_err(|e| {
+        format!(
+            "Failed to configure the Prism llama.cpp backend. Install cmake and retry: {}",
+            e
+        )
+    })?;
+    if !configure_output.status.success() {
+        let stderr = String::from_utf8_lossy(&configure_output.stderr);
+        return Err(format!(
+            "Failed to configure the Prism llama.cpp backend build in {}: {}",
+            build_dir.display(),
+            stderr.trim()
+        ));
+    }
+
+    let jobs = std::thread::available_parallelism()
+        .map(|value| value.get().to_string())
+        .unwrap_or_else(|_| "4".to_string());
+    let build_output = Command::new("cmake")
+        .arg("--build")
+        .arg(&build_dir)
+        .arg("--config")
+        .arg("Release")
+        .arg("--target")
+        .arg("llama-server")
+        .arg("-j")
+        .arg(&jobs)
+        .output()
+        .map_err(|e| {
+            format!(
+                "Failed to build the Prism llama.cpp backend. Install cmake and retry: {}",
+                e
+            )
+        })?;
+    if !build_output.status.success() {
+        let stderr = String::from_utf8_lossy(&build_output.stderr);
+        return Err(format!(
+            "Failed to build the Prism llama.cpp backend in {}: {}",
+            build_dir.display(),
+            stderr.trim()
+        ));
+    }
+
+    if !binary_path.exists() {
+        return Err(format!(
+            "The Prism llama.cpp build completed but {} was not created.",
+            binary_path.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn requirements_fingerprint(paths: &[PathBuf]) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    for path in paths {
+        hasher.update(path.display().to_string().as_bytes());
+        hasher.update(b"\n");
+        hasher.update(
+            fs::read(path)
+                .map_err(|e| format!("Failed to read managed runtime requirements: {}", e))?,
+        );
+        hasher.update(b"\n");
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn resolve_system_python_command() -> Result<PythonCommandSpec, String> {
+    let mut candidates: Vec<PythonCommandSpec> = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        candidates.push(PythonCommandSpec {
+            program: "py".to_string(),
+            args: vec!["-3".to_string()],
+        });
+    }
+    candidates.push(PythonCommandSpec {
+        program: "python3".to_string(),
+        args: Vec::new(),
+    });
+    candidates.push(PythonCommandSpec {
+        program: "python".to_string(),
+        args: Vec::new(),
+    });
+
+    for candidate in candidates {
+        let status = Command::new(&candidate.program)
+            .args(&candidate.args)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if matches!(status, Ok(status) if status.success()) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(
+        "Python 3 is required to run the managed local runtime. Install python3 and retry."
+            .to_string(),
+    )
+}
+
+fn resolve_rnn_runtime_python(paths: &RnnRuntimePaths) -> Result<PythonCommandSpec, String> {
+    let venv_python = rnn_runtime_venv_python_path(paths);
+    if venv_python.exists() {
+        return Ok(PythonCommandSpec {
+            program: venv_python.display().to_string(),
+            args: Vec::new(),
+        });
+    }
+    resolve_system_python_command()
+}
+
+fn ensure_rnn_runtime_python_env(
+    app: &AppHandle,
+    paths: &RnnRuntimePaths,
+) -> Result<PythonCommandSpec, String> {
+    let base_requirements =
+        resolve_rnn_runtime_resource_path(app, RNN_RUNTIME_REQUIREMENTS_BASE_RELATIVE_PATH)?;
+    let requirement_paths = vec![base_requirements];
+    let expected_fingerprint = requirements_fingerprint(&requirement_paths)?;
+    let venv_python = rnn_runtime_venv_python_path(paths);
+    let current_fingerprint = fs::read_to_string(&paths.requirements_stamp_file)
+        .ok()
+        .map(|value| value.trim().to_string());
+
+    if venv_python.exists() && current_fingerprint.as_deref() == Some(expected_fingerprint.as_str())
+    {
+        return Ok(PythonCommandSpec {
+            program: venv_python.display().to_string(),
+            args: Vec::new(),
+        });
+    }
+
+    let system_python = resolve_system_python_command()?;
+
+    if !venv_python.exists() {
+        let status = Command::new(&system_python.program)
+            .args(&system_python.args)
+            .arg("-m")
+            .arg("venv")
+            .arg(&paths.venv_dir)
+            .status()
+            .map_err(|e| format!("Failed to create managed runtime virtualenv: {}", e))?;
+        if !status.success() {
+            return Err("Failed to create the managed runtime virtualenv.".to_string());
+        }
+    }
+
+    let bootstrap_output = Command::new(&venv_python)
+        .args([
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--upgrade",
+            "pip",
+            "setuptools",
+            "wheel",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to bootstrap managed runtime pip: {}", e))?;
+    if !bootstrap_output.status.success() {
+        let stderr = String::from_utf8_lossy(&bootstrap_output.stderr);
+        return Err(format!(
+            "Failed to bootstrap the managed local runtime environment: {}",
+            stderr.trim()
+        ));
+    }
+
+    for requirement_path in &requirement_paths {
+        let output = Command::new(&venv_python)
+            .args(["-m", "pip", "install", "--disable-pip-version-check", "-r"])
+            .arg(requirement_path)
+            .output()
+            .map_err(|e| format!("Failed to install managed runtime dependencies: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "Failed to install managed local runtime dependencies from {}: {}",
+                requirement_path.display(),
+                stderr.trim()
+            ));
+        }
+    }
+
+    fs::write(&paths.requirements_stamp_file, expected_fingerprint)
+        .map_err(|e| format!("Failed to persist managed runtime dependency state: {}", e))?;
+
+    Ok(PythonCommandSpec {
+        program: venv_python.display().to_string(),
+        args: Vec::new(),
+    })
+}
+
+fn install_rnn_runtime_backend_requirements(
+    app: &AppHandle,
+    paths: &RnnRuntimePaths,
+    backend: &str,
+) -> Result<PythonCommandSpec, String> {
+    let backend = backend.trim().to_lowercase();
+    if backend == "prism-llama" {
+        let python = ensure_rnn_runtime_python_env(app, paths)?;
+        install_prism_llama_backend(paths)?;
+        return Ok(python);
+    }
+    let requirement_path: PathBuf = match backend.as_str() {
+        "vllm" => {
+            if cfg!(target_os = "linux") {
+                resolve_rnn_runtime_resource_path(
+                    app,
+                    RNN_RUNTIME_REQUIREMENTS_VLLM_LINUX_RELATIVE_PATH,
+                )?
+            } else {
+                return Err(
+                    "The managed vLLM backend is currently only bootstrapped on Linux.".to_string(),
+                );
+            }
+        }
+        "llama-cpp" => {
+            if cfg!(any(target_os = "linux", target_os = "macos")) {
+                resolve_rnn_runtime_resource_path(
+                    app,
+                    RNN_RUNTIME_REQUIREMENTS_LLAMA_CPP_RELATIVE_PATH,
+                )?
+            } else {
+                return Err(
+                    "The managed llama.cpp backend is currently only bootstrapped on Linux and macOS."
+                        .to_string(),
+                );
+            }
+        }
+        _ => return Err(format!("Unknown managed runtime backend '{}'.", backend)),
+    };
+
+    let python = ensure_rnn_runtime_python_env(app, paths)?;
+    let mut command = Command::new(&python.program);
+    command
+        .args(["-m", "pip", "install", "--disable-pip-version-check", "-r"])
+        .arg(&requirement_path);
+    if backend == "llama-cpp" {
+        #[cfg(target_os = "linux")]
+        {
+            let mut cmake_args = String::from("-DGGML_CUDA=on");
+            if let Some(nvcc_path) = resolve_rnn_runtime_nvcc_path() {
+                cmake_args.push_str(" -DCMAKE_CUDA_COMPILER=");
+                cmake_args.push_str(&nvcc_path);
+                command.env("CUDACXX", &nvcc_path);
+                if let Some(cuda_bin_dir) = Path::new(&nvcc_path).parent() {
+                    if let Some(cuda_root) = cuda_bin_dir.parent() {
+                        command.env("CUDA_HOME", cuda_root);
+                        command.env("CUDA_PATH", cuda_root);
+                    }
+                }
+            }
+            command.env("CMAKE_ARGS", cmake_args);
+            command.env("FORCE_CMAKE", "1");
+        }
+    }
+    let output = command.output().map_err(|e| {
+        format!(
+            "Failed to install managed runtime backend '{}': {}",
+            backend, e
+        )
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Failed to install managed runtime backend '{}' from {}: {}",
+            backend,
+            requirement_path.display(),
+            stderr.trim()
+        ));
+    }
+    Ok(python)
+}
+
+fn managed_rnn_backend_module_name(backend: &str) -> Option<&'static str> {
+    match backend.trim().to_lowercase().as_str() {
+        "llama-cpp" => Some("llama_cpp"),
+        "vllm" => Some("vllm"),
+        _ => None,
+    }
+}
+
+fn rnn_runtime_python_module_available(
+    python: &PythonCommandSpec,
+    module_name: &str,
+) -> Result<bool, String> {
+    let output = Command::new(&python.program)
+        .args(&python.args)
+        .arg("-c")
+        .arg(
+            "import importlib.util, sys; raise SystemExit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)",
+        )
+        .arg(module_name)
+        .output()
+        .map_err(|e| {
+            format!(
+                "Failed to inspect managed runtime backend module '{}': {}",
+                module_name, e
+            )
+        })?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    Err(format!(
+        "Failed to inspect managed runtime backend module '{}': {}",
+        module_name,
+        if detail.is_empty() {
+            "python probe failed".to_string()
+        } else {
+            detail
+        }
+    ))
+}
+
+fn auto_install_rnn_runtime_backend_if_needed(
+    app: &AppHandle,
+    paths: &RnnRuntimePaths,
+    backend: &str,
+) -> Result<bool, String> {
+    let normalized = backend.trim().to_lowercase();
+    if normalized == "prism-llama" {
+        if prism_llama_binary_path(paths).exists() {
+            return Ok(false);
+        }
+        install_prism_llama_backend(paths)?;
+        if !prism_llama_binary_path(paths).exists() {
+            return Err(
+                "The managed local runtime Prism GGUF backend did not become available after installation."
+                    .to_string(),
+            );
+        }
+        return Ok(true);
+    }
+    if normalized != "llama-cpp" {
+        return Ok(false);
+    }
+    let Some(module_name) = managed_rnn_backend_module_name(&normalized) else {
+        return Ok(false);
+    };
+    let python = ensure_rnn_runtime_python_env(app, paths)?;
+    if rnn_runtime_python_module_available(&python, module_name)? {
+        return Ok(false);
+    }
+    let python = install_rnn_runtime_backend_requirements(app, paths, &normalized)?;
+    if !rnn_runtime_python_module_available(&python, module_name)? {
+        return Err(format!(
+            "The managed local runtime backend '{}' did not become available after installation.",
+            normalized
+        ));
+    }
+    Ok(true)
+}
+
+fn rnn_catalog_backend_for_catalog_id(
+    payload: &serde_json::Value,
+    catalog_id: &str,
+) -> Option<String> {
+    let trimmed_catalog_id = catalog_id.trim();
+    payload
+        .get("catalog")
+        .and_then(|value| value.as_array())
+        .and_then(|entries| {
+            entries.iter().find_map(|entry| {
+                let id = entry.get("id").and_then(|value| value.as_str())?;
+                if id.trim() != trimmed_catalog_id {
+                    return None;
+                }
+                entry.get("backend")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_lowercase)
+            })
+        })
+}
+
+fn rnn_catalog_backend_for_local_model(
+    payload: &serde_json::Value,
+    model_name: &str,
+) -> Option<String> {
+    let trimmed_model_name = model_name.trim();
+    payload
+        .get("local")
+        .and_then(|value| value.as_array())
+        .and_then(|entries| {
+            entries.iter().find_map(|entry| {
+                let matches = entry
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.trim() == trimmed_model_name)
+                    .unwrap_or(false)
+                    || entry
+                        .get("filename")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.trim() == trimmed_model_name)
+                        .unwrap_or(false)
+                    || entry
+                        .get("catalog_id")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.trim() == trimmed_model_name)
+                        .unwrap_or(false);
+                if !matches {
+                    return None;
+                }
+                entry.get("backend")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_lowercase)
+            })
+        })
+}
+
+fn rnn_json_number(value: Option<&serde_json::Value>) -> Option<f64> {
+    match value {
+        Some(serde_json::Value::Number(number)) => number.as_f64(),
+        Some(serde_json::Value::String(text)) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn rnn_json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
+    match value {
+        Some(serde_json::Value::Number(number)) => number
+            .as_u64()
+            .or_else(|| number.as_i64().and_then(|parsed| (parsed > 0).then_some(parsed as u64))),
+        Some(serde_json::Value::String(text)) => text.trim().parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn rnn_catalog_entry_for_catalog_id<'a>(
+    payload: &'a serde_json::Value,
+    catalog_id: &str,
+) -> Option<&'a serde_json::Value> {
+    let trimmed_catalog_id = catalog_id.trim();
+    payload
+        .get("catalog")
+        .and_then(|value| value.as_array())
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.trim() == trimmed_catalog_id)
+                    .unwrap_or(false)
+            })
+        })
+}
+
+fn rnn_entry_for_local_model<'a>(
+    payload: &'a serde_json::Value,
+    model_name: &str,
+) -> Option<&'a serde_json::Value> {
+    let trimmed_model_name = model_name.trim();
+    let local_entry = payload
+        .get("local")
+        .and_then(|value| value.as_array())
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.trim() == trimmed_model_name)
+                    .unwrap_or(false)
+                    || entry
+                        .get("filename")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.trim() == trimmed_model_name)
+                        .unwrap_or(false)
+                    || entry
+                        .get("catalog_id")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.trim() == trimmed_model_name)
+                        .unwrap_or(false)
+            })
+        });
+    let Some(local_entry) = local_entry else {
+        return None;
+    };
+    if let Some(catalog_id) = local_entry.get("catalog_id").and_then(|value| value.as_str()) {
+        if let Some(catalog_entry) = rnn_catalog_entry_for_catalog_id(payload, catalog_id) {
+            return Some(catalog_entry);
+        }
+    }
+    Some(local_entry)
+}
+
+fn rnn_resolved_context_window(
+    entry: &serde_json::Value,
+    runtime_config: Option<&serde_json::Value>,
+) -> f64 {
+    let backend = entry
+        .get("backend")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_lowercase())
+        .unwrap_or_default();
+    let model_context = rnn_json_u64(entry.get("context"))
+        .unwrap_or(if backend == "llama-cpp" || backend == "prism-llama" {
+            32_768
+        } else {
+            8_192
+        });
+    if backend != "llama-cpp" && backend != "prism-llama" {
+        return model_context as f64;
+    }
+    let configured_context = runtime_config
+        .and_then(|value| value.get("llamaCpp"))
+        .and_then(|value| value.get("nCtx"))
+        .and_then(|value| rnn_json_u64(Some(value)))
+        .unwrap_or(model_context);
+    std::cmp::max(512_u64, std::cmp::min(configured_context, model_context)) as f64
+}
+
+fn rnn_context_overhead_gb(context: f64) -> f64 {
+    if context >= 65_536.0 {
+        2.2
+    } else if context >= 32_768.0 {
+        1.4
+    } else if context >= 16_384.0 {
+        1.0
+    } else if context >= 8_192.0 {
+        0.8
+    } else {
+        0.5
+    }
+}
+
+fn rnn_estimated_runtime_footprint_gb(
+    entry: &serde_json::Value,
+    runtime_config: Option<&serde_json::Value>,
+) -> Option<f64> {
+    let size_gb = rnn_json_number(entry.get("size_gb"))?;
+    let backend = entry
+        .get("backend")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_lowercase())
+        .unwrap_or_default();
+    let context_memory_gb = rnn_context_overhead_gb(rnn_resolved_context_window(entry, runtime_config));
+    let estimate = if backend == "llama-cpp" || backend == "prism-llama" {
+        size_gb * 1.22 + context_memory_gb
+    } else if backend == "albatross" {
+        size_gb * 1.08 + 0.35
+    } else if backend == "vllm" {
+        size_gb * 1.55 + 1.75
+    } else if backend == "huggingface" {
+        size_gb * 1.45 + 1.5
+    } else {
+        size_gb * 1.3 + 0.75
+    };
+    Some(((estimate * 100.0).round()) / 100.0)
+}
+
+fn rnn_estimated_host_memory_gb(
+    entry: &serde_json::Value,
+    preferred_device: Option<&str>,
+    runtime_config: Option<&serde_json::Value>,
+) -> Option<f64> {
+    let base = rnn_estimated_runtime_footprint_gb(entry, runtime_config)?;
+    let estimate = match preferred_device.map(str::trim).unwrap_or_default() {
+        "cuda" => base * 0.72 + 0.6,
+        "mps" => base * 1.4 + 0.8,
+        _ => base * 1.46 + 0.9,
+    };
+    Some(((estimate * 100.0).round()) / 100.0)
+}
+
+fn ensure_rnn_local_model_hardware_safe(
+    payload: &serde_json::Value,
+    status: &RnnRuntimeStatusPayload,
+    model_name: &str,
+) -> Result<(), String> {
+    let Some(entry) = rnn_entry_for_local_model(payload, model_name) else {
+        return Ok(());
+    };
+
+    let label = entry
+        .get("display_name")
+        .and_then(|value| value.as_str())
+        .or_else(|| entry.get("name").and_then(|value| value.as_str()))
+        .unwrap_or(model_name.trim());
+    let backend = entry
+        .get("backend")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_lowercase())
+        .unwrap_or_default();
+    let preferred_device = status
+        .capabilities
+        .as_ref()
+        .and_then(|value| value.get("preferredDevice"))
+        .and_then(|value| value.as_str());
+    let runtime_config = status.runtime_config.as_ref();
+    let resolved_context = rnn_resolved_context_window(entry, runtime_config).round() as u64;
+    let estimated_runtime_gb = rnn_estimated_runtime_footprint_gb(entry, runtime_config);
+    let estimated_host_gb = rnn_estimated_host_memory_gb(entry, preferred_device, runtime_config);
+    let host_memory_total_gb = status
+        .capabilities
+        .as_ref()
+        .and_then(|value| rnn_json_number(value.get("hostMemoryTotalBytes")))
+        .map(|value| value / 1024_f64.powi(3));
+
+    if let (Some(estimated_host_gb), Some(host_memory_total_gb)) =
+        (estimated_host_gb, host_memory_total_gb)
+    {
+        let host_headroom_gb = host_memory_total_gb - estimated_host_gb;
+        if estimated_host_gb > host_memory_total_gb * 0.96 || host_headroom_gb < 0.4 {
+            let config_phrase = if backend == "llama-cpp" || backend == "prism-llama" {
+                format!("the current GGUF context ({})", resolved_context)
+            } else {
+                "the current runtime configuration".to_string()
+            };
+            return Err(format!(
+                "{} is blocked on this machine: {} is estimated to use about {:.1} GB of system memory, but the machine reports {:.1} GB total. Lower GGUF context in Settings or choose a smaller model.",
+                label, config_phrase, estimated_host_gb, host_memory_total_gb
+            ));
+        }
+    }
+
+    if preferred_device == Some("cuda") {
+        let gpu_memory_total_gb = status
+            .capabilities
+            .as_ref()
+            .and_then(|value| rnn_json_number(value.get("gpuMemoryTotalMiB")))
+            .map(|value| value / 1024.0);
+        if let (Some(estimated_runtime_gb), Some(gpu_memory_total_gb)) =
+            (estimated_runtime_gb, gpu_memory_total_gb)
+        {
+            let gpu_headroom_gb = gpu_memory_total_gb - estimated_runtime_gb;
+            if estimated_runtime_gb > gpu_memory_total_gb * 0.96 || gpu_headroom_gb < 0.4 {
+                return Err(format!(
+                    "{} is blocked on the detected GPU: the current configuration is estimated to use about {:.1} GB of GPU memory, but the GPU reports {:.1} GB total. Reduce GGUF context or choose a smaller model.",
+                    label, estimated_runtime_gb, gpu_memory_total_gb
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn auto_install_rnn_backend_for_catalog_id(
+    app: &AppHandle,
+    paths: &RnnRuntimePaths,
+    catalog_id: &str,
+) -> Result<(), String> {
+    let payload =
+        rnn_runtime_json_request(app, reqwest::Method::GET, "/api/rnn/catalog", None, 30).await?;
+    if let Some(backend) = rnn_catalog_backend_for_catalog_id(&payload, catalog_id) {
+        let _ = auto_install_rnn_runtime_backend_if_needed(app, paths, &backend)?;
+    }
+    Ok(())
+}
+
+async fn auto_install_rnn_backend_for_local_model(
+    app: &AppHandle,
+    paths: &RnnRuntimePaths,
+    model_name: &str,
+) -> Result<(), String> {
+    let payload =
+        rnn_runtime_json_request(app, reqwest::Method::GET, "/api/rnn/catalog", None, 30).await?;
+    if let Some(backend) = rnn_catalog_backend_for_local_model(&payload, model_name) {
+        let _ = auto_install_rnn_runtime_backend_if_needed(app, paths, &backend)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_rnn_runtime_nvcc_path() -> Option<String> {
+    if let Ok(cudacxx) = std::env::var("CUDACXX") {
+        let trimmed = cudacxx.trim();
+        if !trimmed.is_empty() && Path::new(trimmed).exists() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    for env_name in ["CUDA_HOME", "CUDA_PATH"] {
+        if let Ok(cuda_home) = std::env::var(env_name) {
+            let candidate = Path::new(&cuda_home).join("bin").join("nvcc");
+            if candidate.exists() {
+                return Some(candidate.display().to_string());
+            }
+        }
+    }
+
+    if let Ok(path) = which::which("nvcc") {
+        if path.exists() {
+            return Some(path.display().to_string());
+        }
+    }
+
+    let fallback = Path::new("/usr/local/cuda/bin/nvcc");
+    if fallback.exists() {
+        return Some(fallback.display().to_string());
+    }
+
+    None
+}
+
+fn split_csv_fields(line: &str) -> Vec<String> {
+    line.split(',')
+        .map(|part| part.trim().trim_matches('"').to_string())
+        .collect()
+}
+
+fn run_nvidia_smi(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("nvidia-smi")
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to execute nvidia-smi: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("nvidia-smi failed: {}", stderr.trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn rnn_runtime_gpu_memory_payload(pid: u32) -> Option<serde_json::Value> {
+    let apps_output = run_nvidia_smi(&[
+        "--query-compute-apps=gpu_uuid,pid,used_gpu_memory",
+        "--format=csv,noheader,nounits",
+    ])
+    .ok()?;
+
+    let mut usage_by_gpu_uuid: HashMap<String, u64> = HashMap::new();
+    for line in apps_output.lines() {
+        let fields = split_csv_fields(line);
+        if fields.len() < 3 {
+            continue;
+        }
+        let gpu_uuid = fields[0].trim();
+        let row_pid = match fields[1].trim().parse::<u32>() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let used_mib = match fields[2].trim().parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if row_pid != pid || gpu_uuid.is_empty() {
+            continue;
+        }
+        *usage_by_gpu_uuid.entry(gpu_uuid.to_string()).or_insert(0) += used_mib;
+    }
+
+    if usage_by_gpu_uuid.is_empty() {
+        return None;
+    }
+
+    let gpus_output = run_nvidia_smi(&[
+        "--query-gpu=gpu_uuid,name,memory.total",
+        "--format=csv,noheader,nounits",
+    ])
+    .ok();
+
+    let mut total_mib = 0_u64;
+    let mut total_found = false;
+    let mut gpu_names: Vec<String> = Vec::new();
+    if let Some(gpus_output) = gpus_output {
+        for line in gpus_output.lines() {
+            let fields = split_csv_fields(line);
+            if fields.len() < 3 {
+                continue;
+            }
+            let gpu_uuid = fields[0].trim();
+            if !usage_by_gpu_uuid.contains_key(gpu_uuid) {
+                continue;
+            }
+            if let Ok(parsed_total) = fields[2].trim().parse::<u64>() {
+                total_mib += parsed_total;
+                total_found = true;
+            }
+            let gpu_name = fields[1].trim();
+            if !gpu_name.is_empty() && !gpu_names.iter().any(|value| value == gpu_name) {
+                gpu_names.push(gpu_name.to_string());
+            }
+        }
+    }
+
+    let process_gpu_memory_mib = usage_by_gpu_uuid.values().copied().sum::<u64>();
+    let gpu_memory_total_mib = total_found.then_some(total_mib);
+    let gpu_memory_utilization_percent = gpu_memory_total_mib
+        .filter(|value| *value > 0)
+        .map(|value| ((process_gpu_memory_mib as f64 / value as f64) * 1000.0).round() / 10.0);
+    let gpu_memory_name = if gpu_names.is_empty() {
+        None
+    } else {
+        Some(gpu_names.join(", "))
+    };
+
+    Some(serde_json::json!({
+        "processGpuMemoryMiB": process_gpu_memory_mib,
+        "gpuMemoryTotalMiB": gpu_memory_total_mib,
+        "gpuMemoryUtilizationPercent": gpu_memory_utilization_percent,
+        "gpuMemoryName": gpu_memory_name,
+        "gpuMemorySource": "nvidia-smi",
+    }))
+}
+
+fn read_rnn_runtime_pid(paths: &RnnRuntimePaths) -> Option<u32> {
+    let raw = fs::read_to_string(&paths.pid_file).ok()?;
+    raw.trim().parse::<u32>().ok()
+}
+
+fn write_rnn_runtime_pid(paths: &RnnRuntimePaths, pid: u32) -> Result<(), String> {
+    fs::write(&paths.pid_file, format!("{}\n", pid))
+        .map_err(|e| format!("Failed to write RNN runtime pid file: {}", e))
+}
+
+fn clear_rnn_runtime_pid(paths: &RnnRuntimePaths) {
+    let _ = fs::remove_file(&paths.pid_file);
+}
+
+fn rnn_runtime_port_conflict() -> Option<String> {
+    let pids = listener_pids_for_port(RNN_RUNTIME_PORT);
+    if pids.is_empty() {
+        return None;
+    }
+
+    let details = pids
+        .iter()
+        .map(|pid| {
+            let command = process_command_line(*pid).unwrap_or_else(|| "unknown".to_string());
+            format!("{} ({})", pid, process_display_name(&command))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Port {} is already in use by {}. Stop that process or change the managed local runtime port.",
+        RNN_RUNTIME_PORT, details
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn rnn_process_is_running(pid: u32) -> bool {
+    let filter = format!("PID eq {}", pid);
+    let output = match Command::new("tasklist")
+        .args(["/FI", filter.as_str()])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .to_lowercase()
+        .contains(&pid.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn rnn_process_is_running(pid: u32) -> bool {
+    process_command_line(pid).is_some()
+}
+
+#[cfg(target_os = "windows")]
+fn stop_rnn_runtime_pid(pid: u32) -> Result<(), String> {
+    let output = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .output()
+        .map_err(|e| format!("Failed to stop RNN runtime: {}", e))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{}{}", stdout, stderr).to_lowercase();
+    if combined.contains("not found") || combined.contains("no running instance") {
+        return Ok(());
+    }
+    Err(format!("Failed to stop RNN runtime: {}", combined.trim()))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn stop_rnn_runtime_pid(pid: u32) -> Result<(), String> {
+    send_kill_signal(&[pid], "-TERM")?;
+    std::thread::sleep(Duration::from_millis(400));
+    if !rnn_process_is_running(pid) {
+        return Ok(());
+    }
+    send_kill_signal(&[pid], "-KILL")?;
+    std::thread::sleep(Duration::from_millis(250));
+    Ok(())
+}
+
+async fn rnn_runtime_json_request(
+    app: &AppHandle,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+    timeout_secs: u64,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| format!("Failed to create RNN runtime client: {}", e))?;
+
+    let mut request = client.request(method, format!("{}{}", RNN_RUNTIME_ROOT_URL, path));
+    if path.starts_with("/api/rnn/") {
+        let paths = rnn_runtime_paths(app)?;
+        let admin_token = ensure_rnn_runtime_admin_token(&paths)?;
+        request = request.bearer_auth(admin_token);
+    }
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("RNN runtime request failed: {}", e))?;
+    let status = response.status();
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Failed to parse RNN runtime response: {}", e))?;
+    if status.is_success() {
+        Ok(payload)
+    } else {
+        let message = payload
+            .get("error")
+            .and_then(|value| value.get("message").or(Some(value)))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                payload
+                    .get("error")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| format!("RNN runtime returned HTTP {}", status));
+        Err(message)
+    }
+}
+
+async fn rnn_runtime_health_payload() -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|e| format!("Failed to create RNN health client: {}", e))?;
+    let response = client
+        .get(RNN_RUNTIME_HEALTH_URL)
+        .send()
+        .await
+        .map_err(|e| format!("RNN runtime health check failed: {}", e))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "RNN runtime health check returned HTTP {}",
+            response.status()
+        ));
+    }
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Failed to parse RNN runtime health response: {}", e))
+}
+
+fn build_rnn_runtime_status(
+    app: &AppHandle,
+    health: Option<&serde_json::Value>,
+) -> Result<RnnRuntimeStatusPayload, String> {
+    let paths = rnn_runtime_paths(app)?;
+    ensure_rnn_runtime_dirs(&paths)?;
+
+    let mut pid = read_rnn_runtime_pid(&paths);
+    if let Some(current_pid) = pid {
+        if !rnn_process_is_running(current_pid) {
+            clear_rnn_runtime_pid(&paths);
+            pid = None;
+        }
+    }
+    if pid.is_none() {
+        pid = listener_pids_for_port(RNN_RUNTIME_PORT).into_iter().next();
+    }
+
+    let mut capabilities = health.and_then(|value| value.get("capabilities")).cloned();
+    if let Some(current_pid) = pid {
+        if let Some(gpu_payload) = rnn_runtime_gpu_memory_payload(current_pid) {
+            match (capabilities.as_mut(), gpu_payload) {
+                (Some(serde_json::Value::Object(capabilities_map)), serde_json::Value::Object(extra)) => {
+                    capabilities_map.extend(extra);
+                }
+                (_, payload) => {
+                    capabilities = Some(payload);
+                }
+            }
+        }
+    }
+
+    Ok(RnnRuntimeStatusPayload {
+        running: health.is_some(),
+        base_url: RNN_RUNTIME_BASE_URL.to_string(),
+        loaded_model: health
+            .and_then(|value| value.get("loadedModel"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        last_error: health
+            .and_then(|value| value.get("lastError"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        pid,
+        models_dir: paths.models_dir.display().to_string(),
+        state_dir: paths.state_dir.display().to_string(),
+        log_file: paths.log_file.display().to_string(),
+        script_path: resolve_rnn_runtime_server_script(app)
+            .ok()
+            .map(|path| path.display().to_string()),
+        runtime_name: health
+            .and_then(|value| value.get("runtimeName"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        active_backend: health
+            .and_then(|value| value.get("activeBackend"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        active_architecture: health
+            .and_then(|value| value.get("activeArchitecture"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        active_model_info: health
+            .and_then(|value| value.get("activeModelInfo"))
+            .cloned(),
+        capabilities,
+        runtime_config: health.and_then(|value| value.get("runtimeConfig")).cloned(),
+        python_command: resolve_rnn_runtime_python(&paths).ok().map(|spec| {
+            format!("{} {}", spec.program, spec.args.join(" "))
+                .trim()
+                .to_string()
+        }),
+    })
+}
+
+async fn wait_for_rnn_runtime_ready(
+    app: &AppHandle,
+    paths: &RnnRuntimePaths,
+    timeout_ms: u64,
+) -> Result<Option<RnnRuntimeStatusPayload>, String> {
+    let attempts = std::cmp::max(1, timeout_ms / 500);
+    for _ in 0..attempts {
+        if let Ok(health) = rnn_runtime_health_payload().await {
+            if rnn_runtime_socket_ready(paths) {
+                return Ok(Some(build_rnn_runtime_status(app, Some(&health))?));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    Ok(None)
+}
+
+async fn ensure_rnn_runtime_ready(app: &AppHandle) -> Result<RnnRuntimeStatusPayload, String> {
+    let paths = rnn_runtime_paths(app)?;
+    ensure_rnn_runtime_dirs(&paths)?;
+    let _guard = rnn_runtime_start_lock().lock().await;
+
+    let config_autotuned = maybe_autotune_rnn_runtime_config(&paths)?;
+    if config_autotuned {
+        if let Some(pid) = read_rnn_runtime_pid(&paths) {
+            if rnn_process_is_running(pid) {
+                stop_rnn_runtime_pid(pid)?;
+            } else {
+                clear_rnn_runtime_pid(&paths);
+            }
+        } else if let Some(pid) = listener_pids_for_port(RNN_RUNTIME_PORT).into_iter().next() {
+            stop_rnn_runtime_pid(pid)?;
+        }
+        clear_rnn_runtime_pid(&paths);
+        clear_rnn_runtime_socket(&paths);
+    }
+
+    if let Ok(health) = rnn_runtime_health_payload().await {
+        if rnn_runtime_socket_ready(&paths) {
+            return build_rnn_runtime_status(app, Some(&health));
+        }
+    }
+
+    if read_rnn_runtime_pid(&paths)
+        .filter(|pid| rnn_process_is_running(*pid))
+        .is_some()
+        || listener_pids_for_port(RNN_RUNTIME_PORT).into_iter().next().is_some()
+    {
+        if let Some(status) =
+            wait_for_rnn_runtime_ready(app, &paths, RNN_RUNTIME_EXISTING_PROCESS_GRACE_MS).await?
+        {
+            return Ok(status);
+        }
+    }
+
+    if let Some(pid) = read_rnn_runtime_pid(&paths) {
+        if rnn_process_is_running(pid) {
+            stop_rnn_runtime_pid(pid)?;
+        } else {
+            clear_rnn_runtime_pid(&paths);
+        }
+    } else if let Some(pid) = listener_pids_for_port(RNN_RUNTIME_PORT).into_iter().next() {
+        stop_rnn_runtime_pid(pid)?;
+    }
+    clear_rnn_runtime_pid(&paths);
+    clear_rnn_runtime_socket(&paths);
+
+    if let Some(conflict) = rnn_runtime_port_conflict() {
+        return Err(conflict);
+    }
+
+    let python = ensure_rnn_runtime_python_env(app, &paths)?;
+    let admin_token = ensure_rnn_runtime_admin_token(&paths)?;
+    let script_path = resolve_rnn_runtime_server_script(app)?;
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&paths.log_file)
+        .map_err(|e| format!("Failed to open RNN runtime log file: {}", e))?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|e| format!("Failed to open RNN runtime stderr log file: {}", e))?;
+
+    let mut cmd = Command::new(&python.program);
+    cmd.args(&python.args)
+        .arg(&script_path)
+        .arg("--host")
+        .arg(RNN_RUNTIME_BIND_HOST)
+        .arg("--port")
+        .arg(RNN_RUNTIME_PORT.to_string())
+        .arg("--unix-socket")
+        .arg(&paths.socket_path)
+        .arg("--models-dir")
+        .arg(&paths.models_dir)
+        .arg("--state-dir")
+        .arg(&paths.state_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .env("PYTHONUNBUFFERED", "1")
+        .env(
+            "TORCH_EXTENSIONS_DIR",
+            paths
+                .state_dir
+                .join("torch_extensions")
+                .display()
+                .to_string(),
+        )
+        .env(
+            "HF_HOME",
+            paths.state_dir.join("huggingface").display().to_string(),
+        )
+        .env(
+            "TRANSFORMERS_CACHE",
+            paths.state_dir.join("huggingface").display().to_string(),
+        )
+        .env(RNN_RUNTIME_ADMIN_TOKEN_ENV, &admin_token)
+        .env(RNN_RUNTIME_STATE_DIR_ENV, paths.state_dir.display().to_string())
+        .env(
+            RNN_RUNTIME_PRISM_LLAMA_SERVER_ENV,
+            prism_llama_binary_path(&paths).display().to_string(),
+        );
+    if let Some(parent) = script_path.parent() {
+        cmd.current_dir(parent);
+    }
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start managed local runtime: {}", e))?;
+    write_rnn_runtime_pid(&paths, child.id())?;
+    drop(child);
+
+    if let Some(status) =
+        wait_for_rnn_runtime_ready(app, &paths, RNN_RUNTIME_STARTUP_TIMEOUT_MS).await?
+    {
+        return Ok(status);
+    }
+
+    Err(format!(
+        "The managed local runtime did not become healthy. Check {} for details.",
+        paths.log_file.display()
+    ))
+}
+
+fn normalize_rnn_action_result(payload: serde_json::Value) -> Result<serde_json::Value, String> {
+    if payload.get("status").and_then(|value| value.as_str()) == Some("error") {
+        let message = payload
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("RNN runtime returned an error");
+        return Err(message.to_string());
+    }
+    Ok(payload)
+}
+
+#[tauri::command]
+pub async fn get_rnn_runtime_status(app: AppHandle) -> Result<RnnRuntimeStatusPayload, String> {
+    let health = rnn_runtime_health_payload().await.ok();
+    build_rnn_runtime_status(&app, health.as_ref())
+}
+
+#[tauri::command]
+pub async fn get_rnn_catalog(app: AppHandle) -> Result<serde_json::Value, String> {
+    ensure_rnn_runtime_ready(&app).await?;
+    rnn_runtime_json_request(&app, reqwest::Method::GET, "/api/rnn/catalog", None, 30).await
+}
+
+#[tauri::command]
+pub async fn download_rnn_model(
+    app: AppHandle,
+    catalog_id: String,
+    hf_token: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let trimmed_catalog_id = catalog_id.trim();
+    if trimmed_catalog_id.is_empty() {
+        return Err("Choose a catalog model before downloading.".to_string());
+    }
+    ensure_rnn_runtime_ready(&app).await?;
+    let paths = rnn_runtime_paths(&app)?;
+    auto_install_rnn_backend_for_catalog_id(&app, &paths, trimmed_catalog_id).await?;
+    normalize_rnn_action_result(
+        rnn_runtime_json_request(
+            &app,
+            reqwest::Method::POST,
+            "/api/rnn/models/download",
+            Some(serde_json::json!({
+                "catalogId": trimmed_catalog_id,
+                "hfToken": hf_token.unwrap_or_default().trim(),
+            })),
+            3600,
+        )
+        .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn load_rnn_model(
+    app: AppHandle,
+    model_name: String,
+) -> Result<serde_json::Value, String> {
+    let trimmed_model_name = model_name.trim();
+    if trimmed_model_name.is_empty() {
+        return Err("Choose a managed-runtime model before loading it.".to_string());
+    }
+    let status = ensure_rnn_runtime_ready(&app).await?;
+    let catalog_payload =
+        rnn_runtime_json_request(&app, reqwest::Method::GET, "/api/rnn/catalog", None, 30).await?;
+    ensure_rnn_local_model_hardware_safe(&catalog_payload, &status, trimmed_model_name)?;
+    let paths = rnn_runtime_paths(&app)?;
+    auto_install_rnn_backend_for_local_model(&app, &paths, trimmed_model_name).await?;
+    normalize_rnn_action_result(
+        rnn_runtime_json_request(
+            &app,
+            reqwest::Method::POST,
+            "/api/rnn/models/load",
+            Some(serde_json::json!({ "modelName": trimmed_model_name })),
+            1800,
+        )
+        .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn unload_rnn_model(app: AppHandle) -> Result<serde_json::Value, String> {
+    ensure_rnn_runtime_ready(&app).await?;
+    normalize_rnn_action_result(
+        rnn_runtime_json_request(
+            &app,
+            reqwest::Method::POST,
+            "/api/rnn/models/unload",
+            Some(serde_json::json!({})),
+            60,
+        )
+        .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn delete_rnn_model(
+    app: AppHandle,
+    model_name: String,
+) -> Result<serde_json::Value, String> {
+    let trimmed_model_name = model_name.trim();
+    if trimmed_model_name.is_empty() {
+        return Err("Choose a managed-runtime model before deleting it.".to_string());
+    }
+    ensure_rnn_runtime_ready(&app).await?;
+    normalize_rnn_action_result(
+        rnn_runtime_json_request(
+            &app,
+            reqwest::Method::POST,
+            "/api/rnn/models/delete",
+            Some(serde_json::json!({ "modelName": trimmed_model_name })),
+            300,
+        )
+        .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn warm_rnn_model(
+    app: AppHandle,
+    model_name: Option<String>,
+) -> Result<serde_json::Value, String> {
+    ensure_rnn_runtime_ready(&app).await?;
+    normalize_rnn_action_result(
+        rnn_runtime_json_request(
+            &app,
+            reqwest::Method::POST,
+            "/api/rnn/models/warm",
+            Some(serde_json::json!({
+                "modelName": model_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(""),
+            })),
+            1800,
+        )
+        .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn stop_rnn_runtime(app: AppHandle) -> Result<(), String> {
+    let paths = rnn_runtime_paths(&app)?;
+    if let Some(pid) = read_rnn_runtime_pid(&paths) {
+        stop_rnn_runtime_pid(pid)?;
+    } else if let Some(pid) = listener_pids_for_port(RNN_RUNTIME_PORT).into_iter().next() {
+        stop_rnn_runtime_pid(pid)?;
+    }
+    clear_rnn_runtime_pid(&paths);
+    clear_rnn_runtime_socket(&paths);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn install_rnn_runtime_backend(
+    app: AppHandle,
+    backend: String,
+) -> Result<serde_json::Value, String> {
+    let paths = rnn_runtime_paths(&app)?;
+    ensure_rnn_runtime_dirs(&paths)?;
+    let backend = backend.trim().to_lowercase();
+    let python = install_rnn_runtime_backend_requirements(&app, &paths, &backend)?;
+    Ok(serde_json::json!({
+        "status": "installed",
+        "backend": backend,
+        "pythonCommand": format!("{} {}", python.program, python.args.join(" ")).trim(),
+    }))
+}
+
+#[tauri::command]
+pub async fn update_rnn_runtime_config(
+    app: AppHandle,
+    config: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    ensure_rnn_runtime_ready(&app).await?;
+    let runtime_config = if config.is_object() {
+        config
+    } else {
+        return Err("Managed runtime config must be a JSON object.".to_string());
+    };
+    normalize_rnn_action_result(
+        rnn_runtime_json_request(
+            &app,
+            reqwest::Method::POST,
+            "/api/rnn/runtime/config",
+            Some(serde_json::json!({ "runtimeConfig": runtime_config })),
+            60,
+        )
+        .await?,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalModelServiceType {
+    Ollama,
+    LmStudio,
+    Vllm,
+    RnnLocal,
+    OpenAiCompatible,
+}
+
+impl LocalModelServiceType {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "ollama" => Some(Self::Ollama),
+            "lmstudio" => Some(Self::LmStudio),
+            "vllm" => Some(Self::Vllm),
+            "rnn-local" => Some(Self::RnnLocal),
+            "openai-compatible" => Some(Self::OpenAiCompatible),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::LmStudio => "lmstudio",
+            Self::Vllm => "vllm",
+            Self::RnnLocal => "rnn-local",
+            Self::OpenAiCompatible => "openai-compatible",
+        }
+    }
+
+    fn provider_id(self) -> &'static str {
+        match self {
+            Self::RnnLocal => "rnn",
+            Self::OpenAiCompatible => "local",
+            Self::Ollama => "ollama",
+            Self::LmStudio => "lmstudio",
+            Self::Vllm => "vllm",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalModelApiMode {
+    Ollama,
+    OpenAiResponses,
+    OpenAiCompletions,
+}
+
+impl LocalModelApiMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "ollama" => Some(Self::Ollama),
+            "openai-responses" => Some(Self::OpenAiResponses),
+            "openai-completions" => Some(Self::OpenAiCompletions),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::OpenAiResponses => "openai-responses",
+            Self::OpenAiCompletions => "openai-completions",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalModelRuntimeConfig {
+    service_type: LocalModelServiceType,
+    api_mode: LocalModelApiMode,
+    base_url: String,
+    api_key: String,
+    model_name: String,
+}
+
+impl LocalModelRuntimeConfig {
+    fn from_endpoint_parts(
+        service_type: Option<LocalModelServiceType>,
+        api_mode: Option<LocalModelApiMode>,
+        base_url: Option<String>,
+        api_key: Option<String>,
+    ) -> Option<Self> {
+        let mut base_url = base_url
+            .unwrap_or_default()
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
+        if base_url.is_empty() {
+            return None;
+        }
+        let service_type =
+            service_type.unwrap_or_else(|| infer_local_model_service_type(base_url.as_str()));
+        if service_type == LocalModelServiceType::RnnLocal {
+            base_url = RNN_RUNTIME_BASE_URL.to_string();
+        }
+        let api_mode = normalize_local_model_api_mode(service_type, api_mode);
+        let api_key = if service_type == LocalModelServiceType::RnnLocal {
+            "local-placeholder".to_string()
+        } else {
+            api_key.unwrap_or_default().trim().to_string()
+        };
+        Some(Self {
+            service_type,
+            api_mode,
+            base_url,
+            api_key: if api_key.is_empty() {
+                "local-placeholder".to_string()
+            } else {
+                api_key
+            },
+            model_name: String::new(),
+        })
+    }
+
+    fn from_parts(
+        enabled: bool,
+        service_type: Option<LocalModelServiceType>,
+        api_mode: Option<LocalModelApiMode>,
+        base_url: Option<String>,
+        api_key: Option<String>,
+        model_name: Option<String>,
+    ) -> Option<Self> {
+        if !enabled {
+            return None;
+        }
+        let mut base_url = base_url
+            .unwrap_or_default()
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
+        let model_name = model_name.unwrap_or_default().trim().to_string();
+        if base_url.is_empty() || model_name.is_empty() {
+            return None;
+        }
+        let service_type =
+            service_type.unwrap_or_else(|| infer_local_model_service_type(base_url.as_str()));
+        if service_type == LocalModelServiceType::RnnLocal {
+            base_url = RNN_RUNTIME_BASE_URL.to_string();
+        }
+        let api_mode = normalize_local_model_api_mode(service_type, api_mode);
+        let api_key = if service_type == LocalModelServiceType::RnnLocal {
+            "local-placeholder".to_string()
+        } else {
+            api_key.unwrap_or_default().trim().to_string()
+        };
+        Some(Self {
+            service_type,
+            api_mode,
+            base_url,
+            api_key: if api_key.is_empty() {
+                "local-placeholder".to_string()
+            } else {
+                api_key
+            },
+            model_name,
+        })
+    }
+
+    fn provider_id(&self) -> &'static str {
+        self.service_type.provider_id()
+    }
+
+    fn provider_api(&self) -> &'static str {
+        self.api_mode.as_str()
+    }
+
+    fn service_type_name(&self) -> &'static str {
+        self.service_type.as_str()
+    }
+
+    fn api_mode_name(&self) -> &'static str {
+        self.api_mode.as_str()
+    }
+
+    fn gateway_base_url(&self) -> String {
+        if self.service_type == LocalModelServiceType::RnnLocal {
+            return rnn_runtime_gateway_base_url_for_container();
+        }
+        let rewritten = rewrite_localhost_for_docker(&self.base_url);
+        let trimmed = rewritten.trim().trim_end_matches('/').to_string();
+        if self.api_mode == LocalModelApiMode::Ollama {
+            trimmed.trim_end_matches("/v1").to_string()
+        } else {
+            trimmed
+        }
+    }
+
+    fn gateway_model_ref(&self, model_name_override: Option<&str>) -> String {
+        let model_name = model_name_override.unwrap_or(self.model_name.as_str());
+        format!("{}/{}", self.provider_id(), model_name)
+    }
+
+    fn auth_profile_id(&self) -> String {
+        format!("{}:default", self.provider_id())
+    }
+
+    fn discovery_url(&self) -> String {
+        if self.api_mode == LocalModelApiMode::Ollama {
+            build_ollama_models_url(&self.base_url)
+        } else {
+            build_openai_models_url(&self.base_url)
+        }
+    }
+}
+
+fn infer_local_model_service_type(base_url: &str) -> LocalModelServiceType {
+    let normalized = base_url.trim().to_lowercase();
+    if normalized.contains("11434") || normalized.contains("ollama") {
+        return LocalModelServiceType::Ollama;
+    }
+    if normalized.contains("11445") || normalized.contains("rnn") {
+        return LocalModelServiceType::RnnLocal;
+    }
+    if normalized.contains("1234") || normalized.contains("lmstudio") {
+        return LocalModelServiceType::LmStudio;
+    }
+    if normalized.contains("8000") || normalized.contains("vllm") {
+        return LocalModelServiceType::Vllm;
+    }
+    LocalModelServiceType::OpenAiCompatible
+}
+
+fn default_local_model_api_mode(service_type: LocalModelServiceType) -> LocalModelApiMode {
+    match service_type {
+        LocalModelServiceType::Ollama => LocalModelApiMode::Ollama,
+        LocalModelServiceType::LmStudio => LocalModelApiMode::OpenAiResponses,
+        LocalModelServiceType::Vllm
+        | LocalModelServiceType::RnnLocal
+        | LocalModelServiceType::OpenAiCompatible => LocalModelApiMode::OpenAiCompletions,
+    }
+}
+
+fn normalize_local_model_api_mode(
+    service_type: LocalModelServiceType,
+    api_mode: Option<LocalModelApiMode>,
+) -> LocalModelApiMode {
+    if service_type == LocalModelServiceType::Ollama {
+        return LocalModelApiMode::Ollama;
+    }
+    match api_mode {
+        Some(LocalModelApiMode::Ollama) | None => default_local_model_api_mode(service_type),
+        Some(mode) => mode,
+    }
+}
+
+// External local providers still default to a 16k effective context window,
+// while the managed runtime can use model-specific contexts from its catalog.
+const LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK: usize = 16384;
+const EXTERNAL_LOCAL_MODEL_CONTEXT_WINDOW_CAP: usize = 16384;
+const OPENCLAW_LOCAL_MODEL_CONTEXT_WINDOW_MIN: usize = 16000;
+
+fn normalize_local_model_context_window(value: usize) -> usize {
+    value.max(1)
+}
+
+fn cap_external_local_model_context_window(value: usize) -> usize {
+    normalize_local_model_context_window(value).min(EXTERNAL_LOCAL_MODEL_CONTEXT_WINDOW_CAP)
+}
+
+fn advertised_local_model_context_window(value: usize) -> usize {
+    normalize_local_model_context_window(value).max(OPENCLAW_LOCAL_MODEL_CONTEXT_WINDOW_MIN)
+}
+
+fn local_model_context_window_from_container_env() -> usize {
+    read_container_env("ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW")
+        .as_deref()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(advertised_local_model_context_window)
+        .unwrap_or_else(|| advertised_local_model_context_window(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK))
+}
+
+fn local_model_prefers_light_defaults(
+    settings: &StoredAgentSettings,
+    desktop_settings: &DesktopSettingsSnapshot,
+) -> bool {
+    desktop_settings.local_light_runtime_defaults.unwrap_or(
+        settings.memory_enabled
+            && !settings.memory_long_term
+            && !settings.memory_qmd_enabled
+            && settings.memory_sessions_enabled,
+    )
+}
+
+async fn query_ollama_context_window(
+    base_url: &str,
+    model_name: &str,
+) -> Result<Option<usize>, String> {
+    let api_base = base_url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches("/v1")
+        .to_string();
+    if api_base.is_empty() || model_name.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let response = client
+        .post(format!("{}/api/show", api_base))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "name": model_name.trim() }))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to inspect Ollama model metadata: {}", e))?;
+
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Failed to parse Ollama model metadata: {}", e))?;
+    let Some(model_info) = body.get("model_info").and_then(|value| value.as_object()) else {
+        return Ok(None);
+    };
+
+    for (key, value) in model_info {
+        if !key.ends_with(".context_length") {
+            continue;
+        }
+        if let Some(context_window) = value.as_u64() {
+            let parsed = usize::try_from(context_window).ok().filter(|v| *v > 0);
+            if let Some(parsed) = parsed {
+                return Ok(Some(cap_external_local_model_context_window(parsed)));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn parse_context_window_from_model_name(model_name: &str) -> Option<usize> {
+    let trimmed = model_name
+        .trim()
+        .trim_end_matches(".pth")
+        .trim_end_matches(".safetensors")
+        .trim_end_matches(".gguf");
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lowered = trimmed.to_lowercase();
+    let ctx_index = lowered.rfind("ctx")?;
+    let suffix = lowered.get(ctx_index + 3..)?;
+    let digits: String = suffix.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    digits
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .map(normalize_local_model_context_window)
+}
+
+fn model_name_matches_rnn_catalog_entry(model_name: &str, entry: &serde_json::Value) -> bool {
+    let trimmed = model_name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let hf_file_matches = entry
+        .get("hf_file")
+        .and_then(|value| value.as_str())
+        .map(|value| {
+            value.trim_end_matches(".pth")
+                .trim_end_matches(".safetensors")
+                .trim_end_matches(".gguf")
+                == trimmed
+        })
+        .unwrap_or(false);
+
+    hf_file_matches
+        || entry.get("id").and_then(|value| value.as_str()) == Some(trimmed)
+        || entry.get("name").and_then(|value| value.as_str()) == Some(trimmed)
+        || entry.get("display_name").and_then(|value| value.as_str()) == Some(trimmed)
+}
+
+fn extract_rnn_catalog_context_window(
+    payload: &serde_json::Value,
+    model_name: &str,
+) -> Option<usize> {
+    let trimmed = model_name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let catalog = payload.get("catalog").and_then(|value| value.as_array())?;
+    let local_catalog_id = payload
+        .get("local")
+        .and_then(|value| value.as_array())
+        .and_then(|entries| {
+            entries.iter().find_map(|entry| {
+                let local_name_matches =
+                    entry.get("name").and_then(|value| value.as_str()) == Some(trimmed)
+                        || entry.get("filename").and_then(|value| value.as_str()).map(|value| {
+                            value.trim_end_matches(".pth")
+                                .trim_end_matches(".safetensors")
+                                .trim_end_matches(".gguf")
+                                == trimmed
+                        }) == Some(true);
+                if local_name_matches {
+                    entry.get("catalog_id").and_then(|value| value.as_str())
+                } else {
+                    None
+                }
+            })
+        });
+
+    let matching_catalog_entry = if let Some(catalog_id) = local_catalog_id {
+        catalog
+            .iter()
+            .find(|entry| entry.get("id").and_then(|value| value.as_str()) == Some(catalog_id))
+    } else {
+        catalog
+            .iter()
+            .find(|entry| model_name_matches_rnn_catalog_entry(trimmed, entry))
+    }?;
+
+    matching_catalog_entry
+        .get("context")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .map(normalize_local_model_context_window)
+}
+
+async fn query_rnn_runtime_context_window(
+    app: &AppHandle,
+    model_name: &str,
+) -> Result<Option<usize>, String> {
+    if model_name.trim().is_empty() {
+        return Ok(None);
+    }
+    let payload =
+        rnn_runtime_json_request(app, reqwest::Method::GET, "/api/rnn/catalog", None, 30).await?;
+    Ok(extract_rnn_catalog_context_window(&payload, model_name)
+        .or_else(|| parse_context_window_from_model_name(model_name)))
+}
+
+async fn resolve_local_model_context_window(
+    _app: &AppHandle,
+    local_model_config: &LocalModelRuntimeConfig,
+) -> usize {
+    if local_model_config.service_type == LocalModelServiceType::Ollama {
+        match query_ollama_context_window(
+            &local_model_config.base_url,
+            &local_model_config.model_name,
+        )
+        .await
+        {
+            Ok(Some(context_window)) => return context_window,
+            Ok(None) => {}
+            Err(err) => {
+                println!(
+                    "[Entropic] Failed to inspect Ollama context window for {}: {}",
+                    local_model_config.model_name, err
+                );
+            }
+        }
+    } else if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        match query_rnn_runtime_context_window(_app, &local_model_config.model_name).await {
+            Ok(Some(context_window)) => return context_window,
+            Ok(None) => {}
+            Err(err) => {
+                println!(
+                    "[Entropic] Failed to inspect managed runtime context window for {}: {}",
+                    local_model_config.model_name, err
+                );
+            }
+        }
+        if let Some(context_window) = parse_context_window_from_model_name(&local_model_config.model_name)
+        {
+            return context_window;
+        }
+    }
+    LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK
+}
+
+fn build_openai_models_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.ends_with("/models") {
+        trimmed.to_string()
+    } else if trimmed.ends_with("/v1") {
+        format!("{}/models", trimmed)
+    } else {
+        format!("{}/v1/models", trimmed)
+    }
+}
+
+fn build_ollama_models_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.ends_with("/api/tags") {
+        trimmed.to_string()
+    } else {
+        format!("{}/api/tags", trimmed.trim_end_matches("/v1"))
+    }
+}
+
+const LOCAL_MODEL_PROVIDER_IDS: &[&str] = &["ollama", "lmstudio", "vllm", "rnn", "local"];
+
+fn clear_local_model_provider_configs(cfg: &mut serde_json::Value) {
+    for provider_id in LOCAL_MODEL_PROVIDER_IDS {
+        remove_openclaw_config_value(cfg, &["models", "providers", provider_id]);
+    }
+}
+
+fn read_container_local_model_config() -> Option<LocalModelRuntimeConfig> {
+    let base_url = read_container_env("ENTROPIC_LOCAL_MODEL_BASE_URL");
+    let model_name = read_container_env("ENTROPIC_LOCAL_MODEL_NAME");
+    let service_type = read_container_env("ENTROPIC_LOCAL_MODEL_SERVICE_TYPE")
+        .and_then(|value| LocalModelServiceType::parse(value.as_str()));
+    let api_mode = read_container_env("ENTROPIC_LOCAL_MODEL_API")
+        .and_then(|value| LocalModelApiMode::parse(value.as_str()));
+    LocalModelRuntimeConfig::from_parts(
+        base_url.is_some() || model_name.is_some(),
+        service_type,
+        api_mode,
+        base_url,
+        read_container_env("ENTROPIC_LOCAL_MODEL_API_KEY"),
+        model_name,
+    )
+}
+
+fn read_local_model_config(app: &AppHandle) -> Result<Option<LocalModelRuntimeConfig>, String> {
+    let store_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data directory: {}", e))?
+        .join("entropic-settings.json");
+    let content = match fs::read_to_string(&store_path) {
+        Ok(content) => content,
+        Err(_) => return Ok(None),
+    };
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse local model settings: {}", e))?;
+    let Some(config) = json.get("localModelConfig") else {
+        return Ok(None);
+    };
+    let allow_non_local = config
+        .get("allowNonLocal")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let local_model_config = LocalModelRuntimeConfig::from_parts(
+        config
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        config
+            .get("serviceType")
+            .and_then(|value| value.as_str())
+            .and_then(LocalModelServiceType::parse),
+        config
+            .get("apiMode")
+            .and_then(|value| value.as_str())
+            .and_then(LocalModelApiMode::parse),
+        config
+            .get("baseUrl")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        config
+            .get("apiKey")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        config
+            .get("modelName")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+    );
+    if let Some(local_model_config) = local_model_config.as_ref() {
+        validate_local_model_endpoint(&local_model_config.base_url, allow_non_local)?;
+    }
+    Ok(local_model_config)
+}
+
+fn local_model_endpoint_is_loopback_host(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|addr| addr.is_loopback())
+            .unwrap_or(false)
+}
+
+fn local_model_endpoint_is_local(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("host.docker.internal")
+        || host
+            .parse::<IpAddr>()
+            .map(|addr| addr.is_loopback())
+            .unwrap_or(false)
+}
+
+fn validate_local_model_endpoint(base_url: &str, allow_non_local: bool) -> Result<(), String> {
+    let parsed = Url::parse(base_url.trim())
+        .map_err(|_| "Enter a valid http:// or https:// base URL.".to_string())?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err("Only http:// and https:// model endpoints are supported.".to_string());
+        }
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(
+            "Do not embed credentials in the local model URL. Use the API Key field instead."
+                .to_string(),
+        );
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("Base URL must not include a query string or fragment.".to_string());
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Base URL must include a hostname.".to_string())?;
+    if host.eq_ignore_ascii_case("0.0.0.0") || host == "::" {
+        return Err(
+            "Use localhost instead of 0.0.0.0 or :: for a local model service.".to_string(),
+        );
+    }
+
+    if !allow_non_local && !local_model_endpoint_is_local(&parsed) {
+        return Err(format!(
+            "Non-local model endpoints are blocked by default. '{}' is not loopback-only. Enable 'Allow non-local endpoint' in Settings if you trust this server.",
+            host
+        ));
+    }
+
+    Ok(())
+}
+
+fn rewrite_localhost_for_docker(url: &str) -> String {
+    let Ok(mut parsed) = Url::parse(url) else {
+        return url.to_string();
+    };
+    if local_model_endpoint_is_loopback_host(&parsed) {
+        let _ = parsed.set_host(Some("host.docker.internal"));
+        return parsed.to_string();
+    }
+    url.to_string()
+}
+
+fn rnn_runtime_requires_container_unix_bridge() -> bool {
+    cfg!(target_os = "linux")
+}
+
+fn rnn_runtime_gateway_base_url_for_container() -> String {
+    if rnn_runtime_requires_container_unix_bridge() {
+        return RNN_RUNTIME_CONTAINER_PROXY_URL.to_string();
+    }
+    rewrite_localhost_for_docker(RNN_RUNTIME_BASE_URL)
+}
+
+#[cfg(test)]
+mod local_model_endpoint_security_tests {
+    use super::{
+        rewrite_localhost_for_docker, rnn_runtime_gateway_base_url_for_container,
+        rnn_runtime_requires_container_unix_bridge, validate_local_model_endpoint,
+        RNN_RUNTIME_BASE_URL, RNN_RUNTIME_CONTAINER_PROXY_URL,
+    };
+
+    #[test]
+    fn loopback_endpoints_are_allowed_by_default() {
+        assert!(validate_local_model_endpoint("http://localhost:11434/v1", false).is_ok());
+        assert!(validate_local_model_endpoint("http://127.0.0.1:1234/v1", false).is_ok());
+    }
+
+    #[test]
+    fn non_local_endpoints_require_explicit_opt_in() {
+        let err = validate_local_model_endpoint("http://192.168.1.50:8000/v1", false)
+            .expect_err("expected non-local endpoint to be blocked");
+        assert!(err.contains("Non-local model endpoints are blocked by default"));
+        assert!(validate_local_model_endpoint("http://192.168.1.50:8000/v1", true).is_ok());
+    }
+
+    #[test]
+    fn rewrite_only_changes_loopback_hosts() {
+        assert_eq!(
+            rewrite_localhost_for_docker("http://localhost:11434/v1"),
+            "http://host.docker.internal:11434/v1"
+        );
+        assert_eq!(
+            rewrite_localhost_for_docker("http://192.168.1.50:11434/v1"),
+            "http://192.168.1.50:11434/v1"
+        );
+    }
+
+    #[test]
+    fn rnn_runtime_container_url_matches_platform_bridge_strategy() {
+        let expected = if rnn_runtime_requires_container_unix_bridge() {
+            RNN_RUNTIME_CONTAINER_PROXY_URL
+        } else {
+            "http://host.docker.internal:11445/v1"
+        };
+        assert_eq!(rnn_runtime_gateway_base_url_for_container(), expected);
+        if !rnn_runtime_requires_container_unix_bridge() {
+            assert_ne!(rnn_runtime_gateway_base_url_for_container(), RNN_RUNTIME_BASE_URL);
+        }
+    }
+}
+
+async fn discover_local_model_ids_inner(
+    local_model_config: &LocalModelRuntimeConfig,
+    request_api_key: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let url = local_model_config.discovery_url();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let mut req = client.get(&url);
+    if let Some(key) = request_api_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        req = req.header("Authorization", format!("Bearer {}", key));
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Connection failed: {}. Is your model server running?", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Server returned status {}", resp.status()));
+    }
+
+    let body = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Connected, but failed to parse the model list: {}", e))?;
+
+    let raw_models: Vec<String> = if local_model_config.api_mode == LocalModelApiMode::Ollama {
+        body.get("models")
+            .and_then(|value| value.as_array())
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|model| {
+                        model
+                            .get("name")
+                            .or_else(|| model.get("model"))
+                            .and_then(|value| value.as_str())
+                            .map(String::from)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        body.get("data")
+            .and_then(|value| value.as_array())
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|model| {
+                        model
+                            .get("id")
+                            .and_then(|value| value.as_str())
+                            .map(String::from)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut deduped = Vec::new();
+    for model in raw_models {
+        let trimmed = model.trim();
+        if trimmed.is_empty() || deduped.iter().any(|existing| existing == trimmed) {
+            continue;
+        }
+        deduped.push(trimmed.to_string());
+    }
+
+    Ok(deduped)
+}
+
+#[tauri::command]
+pub async fn discover_local_model_ids(
+    app: AppHandle,
+    service_type: Option<String>,
+    api_mode: Option<String>,
+    base_url: String,
+    api_key: Option<String>,
+    allow_non_local: Option<bool>,
+) -> Result<Vec<String>, String> {
+    let local_model_config = LocalModelRuntimeConfig::from_endpoint_parts(
+        service_type
+            .as_deref()
+            .and_then(LocalModelServiceType::parse),
+        api_mode.as_deref().and_then(LocalModelApiMode::parse),
+        Some(base_url),
+        api_key.clone(),
+    )
+    .ok_or_else(|| "Enter a base URL before discovering models.".to_string())?;
+    if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        ensure_rnn_runtime_ready(&app).await?;
+    }
+    validate_local_model_endpoint(
+        &local_model_config.base_url,
+        allow_non_local.unwrap_or(false),
+    )?;
+    let request_api_key = if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        None
+    } else {
+        api_key.as_deref()
+    };
+    discover_local_model_ids_inner(&local_model_config, request_api_key).await
+}
+
+#[tauri::command]
+pub async fn test_local_model_connection(
+    app: AppHandle,
+    service_type: Option<String>,
+    api_mode: Option<String>,
+    base_url: String,
+    api_key: Option<String>,
+    model_name: String,
+    allow_non_local: Option<bool>,
+) -> Result<(), String> {
+    let trimmed_model_name = model_name.trim().to_string();
+    if trimmed_model_name.is_empty() {
+        return Err("Enter a model id before testing the connection.".to_string());
+    }
+    let request_api_key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let local_model_config = LocalModelRuntimeConfig::from_endpoint_parts(
+        service_type
+            .as_deref()
+            .and_then(LocalModelServiceType::parse),
+        api_mode.as_deref().and_then(LocalModelApiMode::parse),
+        Some(base_url),
+        api_key,
+    )
+    .ok_or_else(|| "Enter a base URL and model id before testing the connection.".to_string())?;
+    if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        ensure_rnn_runtime_ready(&app).await?;
+    }
+    validate_local_model_endpoint(
+        &local_model_config.base_url,
+        allow_non_local.unwrap_or(false),
+    )?;
+    let available = discover_local_model_ids_inner(
+        &local_model_config,
+        if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+            None
+        } else {
+            request_api_key.as_deref()
+        },
+    )
+    .await?;
+    if !available.is_empty() && !available.iter().any(|value| value == &trimmed_model_name) {
+        return Err(format!(
+            "Model '{}' not found. Available: {}",
+            trimmed_model_name,
+            available
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    Ok(())
+}
+
+fn build_openai_chat_completions_url(base_url: &str) -> String {
+    format!("{}/chat/completions", base_url.trim().trim_end_matches('/'))
+}
+
+fn build_ollama_chat_url(base_url: &str) -> String {
+    format!(
+        "{}/api/chat",
+        base_url
+            .trim()
+            .trim_end_matches('/')
+            .trim_end_matches("/v1")
+    )
+}
+
+fn extract_openai_chat_text(body: &serde_json::Value) -> Option<String> {
+    if let Some(content) = body
+        .get("choices")
+        .and_then(|value| value.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+    {
+        if let Some(text) = content.as_str() {
+            return Some(text.to_string());
+        }
+        if let Some(parts) = content.as_array() {
+            let joined = parts
+                .iter()
+                .filter_map(|part| {
+                    part.get("text")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            if !joined.is_empty() {
+                return Some(joined);
+            }
+        }
+    }
+
+    body.get("choices")
+        .and_then(|value| value.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("text"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn extract_ollama_chat_text(body: &serde_json::Value) -> Option<String> {
+    body.get("message")
+        .and_then(|value| value.get("content"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            body.get("response")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+}
+
+#[tauri::command]
+pub async fn debug_local_model_chat(
+    app: AppHandle,
+    messages: Vec<DirectLocalChatDebugMessage>,
+) -> Result<DirectLocalChatDebugResponsePayload, String> {
+    let local_model_config = read_local_model_config(&app)?
+        .ok_or_else(|| "Configure Local Models before using direct local debug chat.".to_string())?;
+    if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        ensure_rnn_runtime_ready(&app).await?;
+    }
+
+    let normalized_messages = messages
+        .into_iter()
+        .filter_map(|message| {
+            let role = message.role.trim().to_lowercase();
+            let content = message.content.trim().to_string();
+            if content.is_empty() {
+                return None;
+            }
+            match role.as_str() {
+                "user" | "assistant" | "system" => {
+                    Some(serde_json::json!({ "role": role, "content": content }))
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if normalized_messages.is_empty() {
+        return Err("Add a message before running direct local debug chat.".to_string());
+    }
+
+    let request_api_key = if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        None
+    } else {
+        let trimmed = local_model_config.api_key.trim();
+        if trimmed.is_empty() || trimmed == "local-placeholder" {
+            None
+        } else {
+            Some(trimmed)
+        }
+    };
+
+    let input_chars = normalized_messages
+        .iter()
+        .filter_map(|message| message.get("content").and_then(|value| value.as_str()))
+        .map(str::len)
+        .sum::<usize>();
+    let history_messages = normalized_messages.len();
+    let duration_started = Instant::now();
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let body = if local_model_config.api_mode == LocalModelApiMode::Ollama {
+        let context_window = resolve_local_model_context_window(&app, &local_model_config).await;
+        serde_json::json!({
+            "model": local_model_config.model_name,
+            "messages": normalized_messages,
+            "stream": false,
+            "options": {
+                "num_ctx": context_window,
+            }
+        })
+    } else {
+        serde_json::json!({
+            "model": local_model_config.model_name,
+            "messages": normalized_messages,
+            "stream": false,
+        })
+    };
+
+    let url = if local_model_config.api_mode == LocalModelApiMode::Ollama {
+        build_ollama_chat_url(&local_model_config.base_url)
+    } else {
+        build_openai_chat_completions_url(&local_model_config.base_url)
+    };
+
+    let mut req = client.post(&url).json(&body);
+    if let Some(api_key) = request_api_key {
+        req = req.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Direct local debug request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let error_body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Direct local debug request failed with {}{}",
+            status,
+            if error_body.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", error_body.trim())
+            }
+        ));
+    }
+
+    let body = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Direct local debug response parse failed: {}", e))?;
+
+    let text = if local_model_config.api_mode == LocalModelApiMode::Ollama {
+        extract_ollama_chat_text(&body)
+    } else {
+        extract_openai_chat_text(&body)
+    }
+    .unwrap_or_default();
+
+    Ok(DirectLocalChatDebugResponsePayload {
+        text: text.clone(),
+        provider: local_model_config.provider_id().to_string(),
+        model: local_model_config.model_name.clone(),
+        base_url: local_model_config.base_url.clone(),
+        duration_ms: duration_started.elapsed().as_millis() as u64,
+        history_messages,
+        input_chars,
+        response_chars: text.chars().count(),
+    })
+}
+
+#[tauri::command]
+pub fn get_gateway_config() -> Result<String, String> {
+    let cfg = read_openclaw_config();
+    serde_json::to_string_pretty(&cfg).map_err(|e| format!("Failed to serialize config: {}", e))
+}
+
+#[tauri::command]
+pub fn get_gateway_logs(tail: Option<u32>) -> Result<String, String> {
+    let n = tail.unwrap_or(100).to_string();
+    let output = docker_command()
+        .args(["logs", "--tail", &n, OPENCLAW_CONTAINER])
+        .output()
+        .map_err(|e| format!("Failed to get logs: {}", e))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Ok(format!("{}{}", stdout, stderr))
 }
 
 #[tauri::command]

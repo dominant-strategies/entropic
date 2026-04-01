@@ -52,7 +52,11 @@ import {
 } from "lucide-react";
 import { loadOnboardingData } from "../lib/profile";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
-import { loadDesktopSettings, updateDesktopSettings } from "../lib/settingsStore";
+import {
+  loadDesktopSettings,
+  updateDesktopSettings,
+  type LocalModePerformanceSettings,
+} from "../lib/settingsStore";
 const PluginStore = lazy(() => import("./Store").then((m) => ({ default: m.Store })));
 const SkillsStore = lazy(() => import("./Store").then((m) => ({ default: m.Store })));
 const Channels = lazy(() => import("./Channels").then((m) => ({ default: m.Channels })));
@@ -77,6 +81,7 @@ import {
   syncEmbeddedPreviewWebview,
 } from "../lib/nativePreview";
 import { hostedFeaturesEnabled } from "../lib/buildProfile";
+import type { ConnectionMode, LocalModelConfig, Model } from "../lib/auth";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -98,13 +103,23 @@ type Props = {
   selectedModel: string;
   onModelChange: (model: string) => void;
   useLocalKeys: boolean;
-  onUseLocalKeysChange: (value: boolean) => void;
+  connectionMode: ConnectionMode;
+  onConnectionModeChange: (value: ConnectionMode) => void | Promise<void>;
   codeModel: string;
   imageModel: string;
   imageGenerationModel: string;
+  showReasoning: boolean;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onImageModelChange: (model: string) => void;
+  onShowReasoningChange: (value: boolean) => void | Promise<void>;
+  localModelConfig: LocalModelConfig;
+  localModePerformanceSettings: LocalModePerformanceSettings;
+  onLocalModelConfigChange: (config: LocalModelConfig) => void;
+  onLocalModePerformanceSettingsChange: (
+    patch: Partial<LocalModePerformanceSettings>,
+  ) => void | Promise<void>;
+  localModel?: Model | null;
 };
 type ViewMode = "grid" | "list";
 type DesktopIcon = { id: string; x: number; y: number };
@@ -802,13 +817,21 @@ export function Files({
   selectedModel,
   onModelChange,
   useLocalKeys,
-  onUseLocalKeysChange,
+  connectionMode,
+  onConnectionModeChange,
   codeModel,
   imageModel,
   imageGenerationModel,
+  showReasoning,
   onCodeModelChange,
   onImageGenerationModelChange,
   onImageModelChange,
+  onShowReasoningChange,
+  localModelConfig,
+  localModePerformanceSettings,
+  onLocalModelConfigChange,
+  onLocalModePerformanceSettingsChange,
+  localModel,
 }: Props) {
   const { balance, isAuthenticated, isAuthConfigured } = useAuth();
   const billingEnabled = hostedFeaturesEnabled;
@@ -3841,11 +3864,15 @@ export function Files({
                       gatewayLifecycleLabel={null}
                       onStartGateway={onGatewayToggle}
                       onRecoverProxyAuth={onRecoverProxyAuth}
-                      useLocalKeys={useLocalKeys}
+                      connectionMode={connectionMode}
+                      onConnectionModeChange={onConnectionModeChange}
+                      localModelConfig={localModelConfig}
+                      onLocalModelConfigChange={onLocalModelConfigChange}
                       selectedModel={selectedModel}
                       onModelChange={onModelChange}
                       imageModel={imageModel}
                       imageGenerationModel={imageGenerationModel}
+                      showReasoning={showReasoning}
                       integrationsSyncing={integrationsSyncing}
                       integrationsMissing={integrationsMissing}
                       onNavigate={handleDesktopChatNavigate}
@@ -4405,14 +4432,21 @@ export function Files({
                   isTogglingGateway={isTogglingGateway}
                   selectedModel={selectedModel}
                   onModelChange={onModelChange}
-                  useLocalKeys={useLocalKeys}
-                  onUseLocalKeysChange={onUseLocalKeysChange}
+                  connectionMode={connectionMode}
+                  onConnectionModeChange={onConnectionModeChange}
                   codeModel={codeModel}
                   imageModel={imageModel}
                   imageGenerationModel={imageGenerationModel}
+                  showReasoning={showReasoning}
+                  onShowReasoningChange={onShowReasoningChange}
                   onCodeModelChange={onCodeModelChange}
                   onImageGenerationModelChange={onImageGenerationModelChange}
                   onImageModelChange={onImageModelChange}
+                  localModelConfig={localModelConfig}
+                  localModePerformanceSettings={localModePerformanceSettings}
+                  onLocalModelConfigChange={onLocalModelConfigChange}
+                  onLocalModePerformanceSettingsChange={onLocalModePerformanceSettingsChange}
+                  localModel={localModel}
                 />
               </Suspense>
             </AppWindow>
