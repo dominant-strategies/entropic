@@ -83,12 +83,16 @@ import { entropicSitePath } from "../lib/buildProfile";
 import {
   workspaceBrowserUrl,
 } from "../lib/nativePreview";
-import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { getLocalCreditBalance } from "../lib/localCredits";
 import {
   DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS,
   type LocalModePerformanceSettings,
 } from "../lib/settingsStore";
+import {
+  CHAT_HISTORY_CLEARED_EVENT,
+  getChatHistoryStore,
+  clearPersistedChatHistory,
+} from "../lib/chatHistoryStore";
 import {
   signInWithDiscord,
   signInWithEmail,
@@ -946,7 +950,6 @@ function XLogo({ className }: { className?: string }) {
 }
 
 // ── Local chat persistence ─────────────────────────────────────
-const CHAT_STORE_FILE = "entropic-chat-history.json";
 const MAX_PERSISTED_SESSIONS = 50;
 const MAX_PERSISTED_MESSAGES = 1000;
 const MAX_PERSISTED_OUTBOX = 16;
@@ -1028,14 +1031,6 @@ function overlaySessionMetadata(next: ChatSession[], metadataSources: ChatSessio
   return normalizeSessionsList(merged);
 }
 
-let _chatStore: TauriStore | null = null;
-async function getChatStore(): Promise<TauriStore> {
-  if (!_chatStore) {
-    _chatStore = await TauriStore.load(CHAT_STORE_FILE);
-  }
-  return _chatStore;
-}
-
 function normalizePersistedPendingSend(raw: unknown): PersistedPendingSend | null {
   if (!raw || typeof raw !== "object") {
     return null;
@@ -1098,7 +1093,7 @@ function normalizePersistedPendingSend(raw: unknown): PersistedPendingSend | nul
 
 async function persistChatData(data: PersistedChatData): Promise<void> {
   try {
-    const store = await getChatStore();
+    const store = await getChatHistoryStore();
     const protectedSessionKeys = new Set<string>();
     if (typeof data.currentSession === "string" && data.currentSession.trim()) {
       protectedSessionKeys.add(data.currentSession);
@@ -1198,7 +1193,7 @@ async function persistChatData(data: PersistedChatData): Promise<void> {
 
 async function loadPersistedChatData(): Promise<PersistedChatData | null> {
   try {
-    const store = await getChatStore();
+    const store = await getChatHistoryStore();
     const data = await store.get("chatData") as PersistedChatData | null;
     if (!data) return null;
     const now = Date.now();
@@ -2703,7 +2698,7 @@ export function Chat({
 
     addDiag(`session remap ${from} -> ${to}`);
     schedulePersist();
-  }, [applySessionTitles, schedulePersist]);
+  }, [schedulePersist]);
 
   // Keep a ref to sessions for persistence
   const sessionsRef = useRef<ChatSession[]>([]);
@@ -2934,6 +2929,60 @@ export function Chat({
       activeRunSettleTimerRef.current = null;
     }
   }
+
+  const resetAllChatsState = useCallback(() => {
+    clearActiveRunTracking();
+    assistantTraceByRunIdRef.current = {};
+    runTimingsRef.current = {};
+    sessionModelRef.current = {};
+    runRevertModelRef.current = {};
+    lastEventByRunIdRef.current = {};
+    gatewaySessionKeysRef.current = new Set();
+    visibleMessagesSessionRef.current = null;
+    currentSessionRef.current = null;
+    sessionMessagesRef.current = {};
+    draftsRef.current = {};
+    shellDraftsRef.current = {};
+    imageDraftsRef.current = {};
+    outboxEntriesRef.current = [];
+    composerModeBySessionRef.current = {};
+    terminalStateBySessionRef.current = {};
+    runSessionKeyRef.current = {};
+    runOptimizationTraceRef.current = {};
+    runHistoryRecoveryRef.current = {};
+    autoSettledRunIdsRef.current = new Set();
+    supersededRunIdsRef.current = new Set();
+    outboxDispatchInFlightRef.current = new Set();
+    outboxReplayInFlightRef.current = false;
+    if (outboxWakeTimerRef.current !== null) {
+      window.clearTimeout(outboxWakeTimerRef.current);
+      outboxWakeTimerRef.current = null;
+    }
+
+    sessionsRef.current = [];
+    setSessions([]);
+    setCurrentSession(null);
+    setMessages([]);
+    setDraftsBySession({});
+    setShellDraftsBySession({});
+    setImageDraftsBySession({});
+    setComposerModeBySession({});
+    setTerminalStateBySession({});
+    setIntegrationSetupBySession({});
+    setQuickSuggestionBySession({});
+    setBuilderChecklistBySession({});
+    setPendingAttachments([]);
+    setSavingWorkspaceImageKeys({});
+    setSavedWorkspaceImagePaths({});
+    setOutboxEntries([]);
+    setShowWelcome(true);
+    setThinkingStatus(null);
+    setError(null);
+    setLastGatewayError(null);
+    setIsLoading(false);
+    setCopiedMessageId(null);
+    schedulePersist();
+  }, [schedulePersist]);
 
   function isRenderableAssistantMessage(message: Message | null | undefined): boolean {
     if (!message || message.role !== "assistant") return false;
@@ -3300,6 +3349,17 @@ export function Chat({
     window.addEventListener("entropic-auth-changed", onAuthChanged);
     return () => window.removeEventListener("entropic-auth-changed", onAuthChanged);
   }, []);
+
+  useEffect(() => {
+    const onChatsCleared = () => {
+      void clearPersistedChatHistory().catch((err) => {
+        console.warn("[Entropic] Failed to clear persisted chat history after bulk delete:", err);
+      });
+      resetAllChatsState();
+    };
+    window.addEventListener(CHAT_HISTORY_CLEARED_EVENT, onChatsCleared);
+    return () => window.removeEventListener(CHAT_HISTORY_CLEARED_EVENT, onChatsCleared);
+  }, [resetAllChatsState]);
 
   // If authenticated via proxy, treat as connected even without local API keys
   useEffect(() => {

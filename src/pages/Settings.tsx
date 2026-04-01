@@ -61,6 +61,12 @@ import {
   type UpdaterStatus,
 } from "../lib/updater";
 import { updaterEnabled } from "../lib/buildProfile";
+import { createGatewayClient } from "../lib/gateway";
+import { resolveGatewayAuth } from "../lib/gateway-auth";
+import {
+  CHAT_HISTORY_CLEARED_EVENT,
+  clearPersistedChatHistory,
+} from "../lib/chatHistoryStore";
 type Props = {
   gatewayRunning: boolean;
   onGatewayToggle: () => void;
@@ -397,6 +403,7 @@ export function Settings({
   const [anthropicCodePending, setAnthropicCodePending] = useState(false);
   const [anthropicCodeInput, setAnthropicCodeInput] = useState("");
   const [resetLoading, setResetLoading] = useState(false);
+  const [deleteChatsLoading, setDeleteChatsLoading] = useState(false);
   const [uninstallLoading, setUninstallLoading] = useState(false);
   const [legacyMigrationLoading, setLegacyMigrationLoading] = useState(false);
   const [legacyUpgradeLoading, setLegacyUpgradeLoading] = useState(false);
@@ -2675,6 +2682,77 @@ export function Settings({
       </SettingsGroup>
 
       <SettingsGroup title="Danger Zone">
+        <SettingsRow
+          label="Delete All Chats"
+          icon={Trash2}
+          description="Remove all saved chats and drafts without touching settings or runtime state."
+        >
+          <button
+            onClick={async () => {
+              const confirmed = await ask(
+                "Delete all saved chats and drafts? This removes every conversation from Entropic and the connected gateway.",
+                {
+                  title: "Delete All Chats",
+                  kind: "warning",
+                  okLabel: "Delete Chats",
+                  cancelLabel: "Cancel",
+                },
+              );
+              if (!confirmed) return;
+
+              setDeleteChatsLoading(true);
+              let client = null;
+              try {
+                const auth = await resolveGatewayAuth();
+                client = createGatewayClient(auth.wsUrl, auth.token);
+                await client.connect();
+                const sessions = (await client.listSessions()).filter(
+                  (session) => typeof session?.key === "string" && session.key.trim().length > 0,
+                );
+                const deletions = await Promise.allSettled(
+                  sessions.map(async (session) => {
+                    const deleted = await client!.deleteSession(session.key, true);
+                    if (!deleted) {
+                      throw new Error(`Session ${session.key} was not deleted.`);
+                    }
+                  }),
+                );
+                const failures = deletions.filter(
+                  (result): result is PromiseRejectedResult => result.status === "rejected",
+                );
+                if (failures.length > 0) {
+                  const firstFailure = failures[0]?.reason;
+                  const detail =
+                    firstFailure instanceof Error ? firstFailure.message : String(firstFailure);
+                  throw new Error(
+                    `Failed to delete ${failures.length} chat${failures.length === 1 ? "" : "s"}. ${detail}`,
+                  );
+                }
+
+                await clearPersistedChatHistory();
+                window.dispatchEvent(new Event(CHAT_HISTORY_CLEARED_EVENT));
+                alert(
+                  sessions.length > 0
+                    ? `Deleted ${sessions.length} chat${sessions.length === 1 ? "" : "s"}.`
+                    : "Deleted all chats.",
+                );
+              } catch (err) {
+                alert(
+                  "Delete chats failed: " +
+                    (err instanceof Error ? err.message : String(err)),
+                );
+              } finally {
+                client?.disconnect();
+                setDeleteChatsLoading(false);
+              }
+            }}
+            disabled={deleteChatsLoading || resetLoading || uninstallLoading}
+            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-red-500/30 text-red-500 hover:bg-red-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+          >
+            {deleteChatsLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+            {deleteChatsLoading ? "Deleting..." : "Delete Chats"}
+          </button>
+        </SettingsRow>
         <SettingsRow
           label="Reset Application"
           icon={Trash2}
