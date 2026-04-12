@@ -1557,10 +1557,24 @@ fn resolve_host_proxy_base(proxy_base: &str) -> Result<String, String> {
 }
 
 /// Find the docker binary.
-/// On macOS, prefer bundled docker but only if it can execute.
-/// On Linux/Windows, prefer system docker to avoid packaged binaries from other platforms.
+/// On macOS, prefer system docker first. The bundled CLI can report a valid
+/// `--version` but still hang when talking to the local Colima socket during
+/// dev/runtime checks.
+/// On Linux/Windows, prefer system docker to avoid packaged binaries from
+/// other platforms.
 fn find_docker_binary() -> String {
-    // 1. macOS bundled docker candidates (release + dev)
+    // 1. Well-known system locations
+    for candidate in &[
+        "/usr/local/bin/docker",
+        "/opt/homebrew/bin/docker",
+        "/usr/bin/docker",
+    ] {
+        if std::path::Path::new(candidate).exists() && docker_binary_usable(candidate) {
+            return candidate.to_string();
+        }
+    }
+
+    // 2. macOS bundled docker candidates (release + dev)
     if matches!(Platform::detect(), Platform::MacOS) {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
@@ -1583,17 +1597,6 @@ fn find_docker_binary() -> String {
                     return candidate;
                 }
             }
-        }
-    }
-
-    // 2. Well-known system locations
-    for candidate in &[
-        "/usr/local/bin/docker",
-        "/opt/homebrew/bin/docker",
-        "/usr/bin/docker",
-    ] {
-        if std::path::Path::new(candidate).exists() && docker_binary_usable(candidate) {
-            return candidate.to_string();
         }
     }
 
@@ -8271,26 +8274,22 @@ Use it for durable decisions, preferences, and facts that should persist across 
                     "models": models
                 }),
             );
-            set_openclaw_config_value(
-                &mut cfg,
-                &["tools", "web", "search", "provider"],
-                serde_json::json!("perplexity"),
-            );
-            let web_search_base_url = if let Some(web_base_url) = &web_base_url {
+            // Latest OpenClaw rejects the legacy `tools.web.search` shape and
+            // expects provider-owned web search config instead. Until this app
+            // writes the new plugin config format, avoid emitting the legacy
+            // keys so the runtime can boot cleanly.
+            let _web_search_base_url = if let Some(web_base_url) = &web_base_url {
                 resolve_container_openai_base(web_base_url)
             } else {
                 base_url.clone()
             };
-            set_openclaw_config_value(
-                &mut cfg,
-                &["tools", "web", "search", "perplexity", "baseUrl"],
-                serde_json::json!(web_search_base_url),
-            );
+            remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
         }
     } else {
         // Non-proxy mode: remove openrouter config to avoid validation errors
         // (an empty models.providers.openrouter object causes "baseUrl required" validation failure)
         remove_openclaw_config_value(&mut cfg, &["models", "providers", "openrouter"]);
+        remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
     }
     let memory_enabled = settings.memory_enabled;
     let memory_slot = if !memory_enabled {
@@ -8594,53 +8593,59 @@ Use it for durable decisions, preferences, and facts that should persist across 
         settings.memory_qmd_enabled,
     );
 
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "enabled"],
-        serde_json::json!(settings.telegram_enabled),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "botToken"],
-        serde_json::json!(settings.telegram_token.clone()),
-    );
-    let telegram_dm_policy = match settings.telegram_dm_policy.trim() {
-        "allowlist" => "allowlist",
-        "open" => "open",
-        "disabled" => "disabled",
-        _ => "pairing",
-    };
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "dmPolicy"],
-        serde_json::json!(telegram_dm_policy),
-    );
-    normalize_telegram_allow_from_for_dm_policy(&mut cfg, telegram_dm_policy);
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "groupPolicy"],
-        serde_json::json!(settings.telegram_group_policy.clone()),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "configWrites"],
-        serde_json::json!(settings.telegram_config_writes),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "groups", "*", "requireMention"],
-        serde_json::json!(settings.telegram_require_mention),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "replyToMode"],
-        serde_json::json!(settings.telegram_reply_to_mode.clone()),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "linkPreview"],
-        serde_json::json!(settings.telegram_link_preview),
-    );
+    let telegram_token = settings.telegram_token.trim().to_string();
+    let telegram_configured = settings.telegram_enabled || !telegram_token.is_empty();
+    if telegram_configured {
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "enabled"],
+            serde_json::json!(settings.telegram_enabled),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "botToken"],
+            serde_json::json!(telegram_token.clone()),
+        );
+        let telegram_dm_policy = match settings.telegram_dm_policy.trim() {
+            "allowlist" => "allowlist",
+            "open" => "open",
+            "disabled" => "disabled",
+            _ => "pairing",
+        };
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "dmPolicy"],
+            serde_json::json!(telegram_dm_policy),
+        );
+        normalize_telegram_allow_from_for_dm_policy(&mut cfg, telegram_dm_policy);
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "groupPolicy"],
+            serde_json::json!(settings.telegram_group_policy.clone()),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "configWrites"],
+            serde_json::json!(settings.telegram_config_writes),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "groups", "*", "requireMention"],
+            serde_json::json!(settings.telegram_require_mention),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "replyToMode"],
+            serde_json::json!(settings.telegram_reply_to_mode.clone()),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "linkPreview"],
+            serde_json::json!(settings.telegram_link_preview),
+        );
+    } else {
+        remove_openclaw_config_value(&mut cfg, &["channels", "telegram"]);
+    }
     remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "telegram"]);
     if container_plugin_exists("telegram") && bundled_plugin_entry_exists("telegram") {
         remove_bundled_plugin_load_paths(&mut cfg, "telegram");
@@ -8650,7 +8655,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
             &["plugins", "entries", "telegram", "enabled"],
             serde_json::json!(settings.telegram_enabled),
         );
-        if settings.telegram_enabled {
+        if telegram_configured {
             if let Some(path) = resolve_managed_plugin_path("telegram") {
                 ensure_plugin_load_path(&mut cfg, path);
             }
@@ -9104,14 +9109,10 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
     let paths: &[&[&str]] = &[
         &["agents", "defaults"],
         &["tools", "fs"],
-        &["tools", "web", "search", "perplexity"],
         &["gateway", "controlUi"],
         &["gateway", "reload"],
         &["plugins", "slots"],
         &["plugins", "load", "paths"],
-        &["plugins", "entries", "memory-lancedb"],
-        &["plugins", "entries", "telegram"],
-        &["channels", "telegram", "groups", "*"],
         &["cron"],
     ];
 
@@ -9212,6 +9213,30 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         remove_bundled_plugin_load_paths(cfg, "telegram");
         remove_openclaw_config_value(cfg, &["plugins", "entries", "telegram"]);
     }
+
+    let telegram_enabled = cfg
+        .get("channels")
+        .and_then(|v| v.get("telegram"))
+        .and_then(|v| v.get("enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let telegram_token = cfg
+        .get("channels")
+        .and_then(|v| v.get("telegram"))
+        .and_then(|v| v.get("botToken"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let telegram_configured = telegram_enabled || !telegram_token.is_empty();
+
+    if !telegram_configured {
+        remove_openclaw_config_value(cfg, &["channels", "telegram"]);
+        remove_openclaw_config_value(cfg, &["plugins", "entries", "telegram"]);
+        return;
+    }
+
+    ensure_config_path(cfg, &["channels", "telegram", "groups", "*"]);
 
     let telegram_dm_policy = cfg
         .get("channels")
@@ -12241,47 +12266,52 @@ pub async fn set_channels_config(
     };
     let whatsapp_allow_from = whatsapp_allow_from.trim().to_string();
 
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "enabled"],
-        serde_json::json!(telegram_enabled),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "botToken"],
-        serde_json::json!(telegram_token),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "dmPolicy"],
-        serde_json::json!(telegram_dm_policy),
-    );
-    normalize_telegram_allow_from_for_dm_policy(&mut cfg, &telegram_dm_policy);
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "groupPolicy"],
-        serde_json::json!(telegram_group_policy),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "configWrites"],
-        serde_json::json!(telegram_config_writes),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "groups", "*", "requireMention"],
-        serde_json::json!(telegram_require_mention),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "replyToMode"],
-        serde_json::json!(telegram_reply_to_mode),
-    );
-    set_openclaw_config_value(
-        &mut cfg,
-        &["channels", "telegram", "linkPreview"],
-        serde_json::json!(telegram_link_preview),
-    );
+    let telegram_configured = telegram_enabled || !telegram_token.is_empty();
+    if telegram_configured {
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "enabled"],
+            serde_json::json!(telegram_enabled),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "botToken"],
+            serde_json::json!(telegram_token),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "dmPolicy"],
+            serde_json::json!(telegram_dm_policy),
+        );
+        normalize_telegram_allow_from_for_dm_policy(&mut cfg, &telegram_dm_policy);
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "groupPolicy"],
+            serde_json::json!(telegram_group_policy),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "configWrites"],
+            serde_json::json!(telegram_config_writes),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "groups", "*", "requireMention"],
+            serde_json::json!(telegram_require_mention),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "replyToMode"],
+            serde_json::json!(telegram_reply_to_mode),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["channels", "telegram", "linkPreview"],
+            serde_json::json!(telegram_link_preview),
+        );
+    } else {
+        remove_openclaw_config_value(&mut cfg, &["channels", "telegram"]);
+    }
     if bundled_plugin_entry_exists("telegram") {
         remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "telegram"]);
         remove_bundled_plugin_load_paths(&mut cfg, "telegram");

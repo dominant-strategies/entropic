@@ -226,8 +226,26 @@ entropic_run_colima() {
     "$colima_bin" "$@"
 }
 
+entropic_qemu_system_binary() {
+    local arch
+    arch="$(uname -m 2>/dev/null || true)"
+    case "$arch" in
+        arm64|aarch64)
+            printf '%s\n' "qemu-system-aarch64"
+            ;;
+        x86_64|amd64)
+            printf '%s\n' "qemu-system-x86_64"
+            ;;
+        *)
+            printf '%s\n' "qemu-system-$arch"
+            ;;
+    esac
+}
+
 entropic_qemu_available() {
-    command -v qemu-img >/dev/null 2>&1
+    local qemu_system_bin
+    qemu_system_bin="$(entropic_qemu_system_binary)"
+    command -v qemu-img >/dev/null 2>&1 && command -v "$qemu_system_bin" >/dev/null 2>&1
 }
 
 entropic_cleanup_stale_colima_profile() {
@@ -298,7 +316,7 @@ entropic_start_colima_for_mode() {
         fi
 
         if [ "$vm_type" = "qemu" ] && ! entropic_qemu_available; then
-            echo "WARNING: Skipping Colima qemu fallback for profile $profile because qemu-img is not installed." >&2
+            echo "WARNING: Skipping Colima qemu fallback for profile $profile because $(entropic_qemu_system_binary) and qemu-img are both required." >&2
             continue
         fi
 

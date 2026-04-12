@@ -632,6 +632,20 @@ impl Runtime {
                 }
                 None
             }
+            Platform::MacOS => {
+                // Prefer the system Docker CLI on macOS. The bundled CLI can
+                // pass a basic existence check but hang on real daemon calls in
+                // dev environments, which leaves the app stuck on the loading
+                // screen while runtime detection waits on `docker info`.
+                if let Ok(system) = which::which("docker") {
+                    return Some(system);
+                }
+                let bundled = self.bundled_docker_path();
+                if bundled.exists() {
+                    return Some(bundled);
+                }
+                None
+            }
             _ => {
                 let bundled = self.bundled_docker_path();
                 if bundled.exists() {
