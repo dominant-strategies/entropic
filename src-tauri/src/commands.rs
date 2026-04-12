@@ -6687,6 +6687,15 @@ fn build_tools_markdown(capabilities: &[CapabilityState]) -> String {
         let mark = if cap.enabled { "x" } else { " " };
         body.push_str(&format!("- [{}] {}\n", mark, cap.label));
     }
+    if capability_enabled(capabilities, "web", true) {
+        body.push_str("\n## Web Search\n");
+        body.push_str(
+            "- Use `web_search` for live or current information such as weather, news, prices, scores, and web lookups.\n",
+        );
+        body.push_str(
+            "- If a user asks for current information, call `web_search` before saying no live source is available.\n",
+        );
+    }
     if container_plugin_exists("lossless-claw") {
         body.push_str("\n## LCM\n");
         body.push_str(
@@ -6700,6 +6709,14 @@ fn build_tools_markdown(capabilities: &[CapabilityState]) -> String {
         );
     }
     body
+}
+
+fn capability_enabled(capabilities: &[CapabilityState], id: &str, default: bool) -> bool {
+    capabilities
+        .iter()
+        .find(|cap| cap.id == id)
+        .map(|cap| cap.enabled)
+        .unwrap_or(default)
 }
 
 fn write_openclaw_config_if_changed(value: &serde_json::Value) -> Result<bool, String> {
@@ -8075,6 +8092,7 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
     let alias_model = desired_selection.alias_model.clone();
     let image_model = desired_selection.config_image_model.clone();
     let alias_image_model = desired_selection.alias_image_model.clone();
+    let web_search_enabled = capability_enabled(&settings.capabilities, "web", true);
     let web_base_url = read_container_env("ENTROPIC_WEB_BASE_URL");
     let container_id = container_instance_id();
     let openai_key_for_lancedb = {
@@ -8274,22 +8292,79 @@ Use it for durable decisions, preferences, and facts that should persist across 
                     "models": models
                 }),
             );
-            // Latest OpenClaw rejects the legacy `tools.web.search` shape and
-            // expects provider-owned web search config instead. Until this app
-            // writes the new plugin config format, avoid emitting the legacy
-            // keys so the runtime can boot cleanly.
-            let _web_search_base_url = if let Some(web_base_url) = &web_base_url {
+            let web_search_base_url = if let Some(web_base_url) = &web_base_url {
                 resolve_container_openai_base(web_base_url)
             } else {
                 base_url.clone()
             };
-            remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
+            if web_search_enabled {
+                set_openclaw_config_value(
+                    &mut cfg,
+                    &["tools", "web", "search", "enabled"],
+                    serde_json::json!(true),
+                );
+                set_openclaw_config_value(
+                    &mut cfg,
+                    &["tools", "web", "search", "provider"],
+                    serde_json::json!("perplexity"),
+                );
+                set_openclaw_config_value(
+                    &mut cfg,
+                    &["plugins", "entries", "perplexity", "enabled"],
+                    serde_json::json!(true),
+                );
+                set_openclaw_config_value(
+                    &mut cfg,
+                    &["plugins", "entries", "perplexity", "config", "webSearch", "baseUrl"],
+                    serde_json::json!(web_search_base_url),
+                );
+                remove_openclaw_config_value(
+                    &mut cfg,
+                    &["plugins", "entries", "duckduckgo", "config", "webSearch"],
+                );
+            } else {
+                remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
+                remove_openclaw_config_value(
+                    &mut cfg,
+                    &["plugins", "entries", "perplexity", "config", "webSearch"],
+                );
+                remove_openclaw_config_value(
+                    &mut cfg,
+                    &["plugins", "entries", "duckduckgo", "config", "webSearch"],
+                );
+            }
         }
     } else {
         // Non-proxy mode: remove openrouter config to avoid validation errors
         // (an empty models.providers.openrouter object causes "baseUrl required" validation failure)
         remove_openclaw_config_value(&mut cfg, &["models", "providers", "openrouter"]);
-        remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
+        if web_search_enabled {
+            set_openclaw_config_value(
+                &mut cfg,
+                &["tools", "web", "search", "enabled"],
+                serde_json::json!(true),
+            );
+            set_openclaw_config_value(
+                &mut cfg,
+                &["tools", "web", "search", "provider"],
+                serde_json::json!("duckduckgo"),
+            );
+            set_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "entries", "duckduckgo", "enabled"],
+                serde_json::json!(true),
+            );
+            remove_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "entries", "perplexity", "config", "webSearch"],
+            );
+        } else {
+            remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
+            remove_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "entries", "duckduckgo", "config", "webSearch"],
+            );
+        }
     }
     let memory_enabled = settings.memory_enabled;
     let memory_slot = if !memory_enabled {
