@@ -219,6 +219,7 @@ mkdir -p "$STAGING_DIR/docs/reference"
 rsync -a --delete "$OPENCLAW_SOURCE/docs/reference/templates/" "$STAGING_DIR/docs/reference/templates/"
 
 # Copy bundled plugins (curated set for the store)
+rm -rf "$STAGING_DIR/extensions" "$STAGING_DIR/bundled-skills"
 mkdir -p "$STAGING_DIR/extensions"
 mkdir -p "$STAGING_DIR/bundled-skills"
 
@@ -227,8 +228,12 @@ PLUGINS_TO_BUNDLE=(
     "memory-lancedb"
     "lossless-claw"
     "entropic-integrations"
-    "telegram"
 )
+
+# Telegram ships with the upstream OpenClaw runtime image as a bundled dist
+# plugin. Copying the raw source extension from the adjacent OpenClaw checkout
+# can drift ahead of the SDK/runtime version baked into the image and break
+# channel startup on reload, so prefer the image-bundled Telegram plugin.
 
 for plugin in "${PLUGINS_TO_BUNDLE[@]}"; do
     if [ -d "$OPENCLAW_SOURCE/extensions/$plugin" ]; then
