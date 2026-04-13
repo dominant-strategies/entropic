@@ -581,6 +581,15 @@ impl Platform {
     }
 }
 
+fn macos_system_docker_paths() -> &'static [&'static str] {
+    &[
+        "/usr/local/bin/docker",
+        "/opt/homebrew/bin/docker",
+        "/opt/local/bin/docker",
+        "/usr/bin/docker",
+    ]
+}
+
 impl Runtime {
     pub fn new(resources_dir: PathBuf, vm_config: RuntimeVmConfig) -> Self {
         debug_log("=== Runtime::new() called ===");
@@ -619,7 +628,7 @@ impl Runtime {
             .join("docker")
     }
 
-    /// Find docker - prefer system on Linux, bundled on macOS
+    /// Find docker - prefer system on Linux/macOS, bundled as a fallback.
     fn docker_path(&self) -> Option<PathBuf> {
         match Platform::detect() {
             Platform::Linux => {
@@ -637,6 +646,12 @@ impl Runtime {
                 // pass a basic existence check but hang on real daemon calls in
                 // dev environments, which leaves the app stuck on the loading
                 // screen while runtime detection waits on `docker info`.
+                for candidate in macos_system_docker_paths() {
+                    let path = PathBuf::from(candidate);
+                    if path.exists() {
+                        return Some(path);
+                    }
+                }
                 if let Ok(system) = which::which("docker") {
                     return Some(system);
                 }
