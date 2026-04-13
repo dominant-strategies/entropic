@@ -75,64 +75,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm.cmd tauri build --bundles nsis
 
-      # Windows Authenticode signing is temporarily disabled.
-      # Re-enable these steps once Azure Trusted Signing is configured for releases.
-      #
-      # - name: Sign Windows app executable
-      #   uses: azure/trusted-signing-action@v0.5.10
-      #   with:
-      #     azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-      #     azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-      #     azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-      #     endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-      #     signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
-      #     certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE_NAME }}
-      #     files: |
-      #       ${{ github.workspace }}\src-tauri\target\release\entropic.exe
-      #     file-digest: SHA256
-      #     timestamp-rfc3161: http://timestamp.acs.microsoft.com
-      #     timestamp-digest: SHA256
-      #
-      # - name: Sign Windows installer
-      #   uses: azure/trusted-signing-action@v0.5.10
-      #   with:
-      #     azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-      #     azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-      #     azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-      #     endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-      #     signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
-      #     certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE_NAME }}
-      #     files-folder: ${{ github.workspace }}\src-tauri\target\release\bundle\nsis
-      #     files-folder-filter: exe
-      #     files-folder-recurse: false
-      #     file-digest: SHA256
-      #     timestamp-rfc3161: http://timestamp.acs.microsoft.com
-      #     timestamp-digest: SHA256
-      #
-      # - name: Verify Authenticode signatures
-      #   shell: pwsh
-      #   run: |
-      #     $targets = @(
-      #       Join-Path $PWD 'src-tauri\target\release\entropic.exe'
-      #     )
-      #     $installerDir = Join-Path $PWD 'src-tauri\target\release\bundle\nsis'
-      #     $targets += Get-ChildItem -Path $installerDir -Filter '*.exe' -File | ForEach-Object { $_.FullName }
-      #     foreach ($target in $targets) {
-      #       if (-not (Test-Path $target)) {
-      #         throw "Missing signed target: $target"
-      #       }
-      #       $sig = Get-AuthenticodeSignature $target
-      #       Write-Host "$target => $($sig.Status)"
-      #       if ($sig.Status -ne 'Valid') {
-      #         throw "Authenticode signature verification failed for $target: $($sig.StatusMessage)"
-      #       }
-      #     }
-
-      - name: Prepare artifacts
-        id: artifacts
+      - name: Prepare unsigned Windows installer artifact
+        id: unsigned_artifacts
         shell: pwsh
         run: |
-          $version = '${{ steps.version.outputs.tag }}'
           $bundleDir = Join-Path $PWD 'src-tauri\target\release\bundle\nsis'
           if (-not (Test-Path $bundleDir)) {
             throw "NSIS bundle directory not found: $bundleDir"
@@ -145,28 +91,133 @@ jobs:
             throw "No NSIS installer found in $bundleDir"
           }
 
-          $signature = Get-ChildItem -Path $bundleDir -Filter '*.sig' -File |
-            Where-Object { $_.BaseName -eq $installer.Name } |
-            Select-Object -First 1
-          if (-not $signature) {
-            throw "No updater signature found for $($installer.Name). Configure TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD in GitHub Actions secrets."
-          }
+          $unsignedInstaller = 'Entropic-unsigned-windows-x86_64-setup.exe'
+          Copy-Item -Path $installer.FullName -Destination $unsignedInstaller -Force
+          "installer_name=$unsignedInstaller" >> $env:GITHUB_OUTPUT
 
-          $releaseInstaller = "Entropic-$version-windows-x86_64-setup.exe"
-          $releaseSignature = "$releaseInstaller.sig"
-          Copy-Item -Path $installer.FullName -Destination $releaseInstaller -Force
-          Copy-Item -Path $signature.FullName -Destination $releaseSignature -Force
+      - name: Upload unsigned installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-windows-installer
+          path: ${{ steps.unsigned_artifacts.outputs.installer_name }}
 
-          $signatureValue = (Get-Content -Path $releaseSignature -Raw).Trim()
-          if ([string]::IsNullOrWhiteSpace($signatureValue)) {
-            throw "Updater signature file is empty: $releaseSignature"
-          }
+  sign-windows:
+    needs: [build-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
 
-          "installer_name=$releaseInstaller" >> $env:GITHUB_OUTPUT
-          "installer_sig_name=$releaseSignature" >> $env:GITHUB_OUTPUT
-          "installer_sig_value=$signatureValue" >> $env:GITHUB_OUTPUT
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Upload artifact
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Validate SSL.com signing secrets
+        env:
+          SSLCOM_ESIGNER_USERNAME: ${{ secrets.SSLCOM_ESIGNER_USERNAME }}
+          SSLCOM_ESIGNER_PASSWORD: ${{ secrets.SSLCOM_ESIGNER_PASSWORD }}
+          SSLCOM_ESIGNER_CREDENTIAL_ID: ${{ secrets.SSLCOM_ESIGNER_CREDENTIAL_ID }}
+          SSLCOM_ESIGNER_TOTP_SECRET: ${{ secrets.SSLCOM_ESIGNER_TOTP_SECRET }}
+        run: |
+          missing=()
+          for name in \
+            SSLCOM_ESIGNER_USERNAME \
+            SSLCOM_ESIGNER_PASSWORD \
+            SSLCOM_ESIGNER_CREDENTIAL_ID \
+            SSLCOM_ESIGNER_TOTP_SECRET; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Missing required GitHub Actions secrets for SSL.com eSigner signing: ${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Download unsigned installer
+        uses: actions/download-artifact@v4
+        with:
+          name: unsigned-windows-installer
+          path: artifacts/unsigned-windows
+
+      - name: List unsigned installer artifacts
+        run: find artifacts/unsigned-windows -type f | sort
+
+      - name: Sign Windows installer with SSL.com eSigner
+        uses: SSLcom/esigner-codesign@v1.3.2
+        with:
+          command: sign
+          username: ${{ secrets.SSLCOM_ESIGNER_USERNAME }}
+          password: ${{ secrets.SSLCOM_ESIGNER_PASSWORD }}
+          credential_id: ${{ secrets.SSLCOM_ESIGNER_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.SSLCOM_ESIGNER_TOTP_SECRET }}
+          file_path: artifacts/unsigned-windows/Entropic-unsigned-windows-x86_64-setup.exe
+          output_path: artifacts/signed-windows
+          clean_logs: true
+          environment_name: PROD
+
+      - name: Regenerate Tauri updater signature from signed installer
+        id: artifacts
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          echo "Signed artifact layout:"
+          find artifacts/signed-windows -type f | sort
+
+          INSTALLER_PATH="$(find artifacts/signed-windows -type f -name '*.exe' | sort | head -n 1)"
+          if [ -z "$INSTALLER_PATH" ]; then
+            echo "Signed installer not found in artifacts/signed-windows" >&2
+            exit 1
+          fi
+
+          KEY_PATH="$RUNNER_TEMP/tauri.key"
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+
+          pnpm tauri signer sign -f "$KEY_PATH" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$INSTALLER_PATH"
+
+          SIG_PATH="${INSTALLER_PATH}.sig"
+          if [ ! -s "$SIG_PATH" ]; then
+            echo "Missing or empty updater signature after signing: $SIG_PATH" >&2
+            exit 1
+          fi
+
+          VERSION="${{ steps.version.outputs.tag }}"
+          RELEASE_INSTALLER="Entropic-${VERSION}-windows-x86_64-setup.exe"
+          RELEASE_SIGNATURE="${RELEASE_INSTALLER}.sig"
+          cp "$INSTALLER_PATH" "$RELEASE_INSTALLER"
+          cp "$SIG_PATH" "$RELEASE_SIGNATURE"
+
+          SIGNATURE_VALUE="$(tr -d '\r\n' < "$RELEASE_SIGNATURE")"
+          if [ -z "$SIGNATURE_VALUE" ]; then
+            echo "Updater signature file is empty: $RELEASE_SIGNATURE" >&2
+            exit 1
+          fi
+
+          echo "installer_name=$RELEASE_INSTALLER" >> "$GITHUB_OUTPUT"
+          echo "installer_sig_name=$RELEASE_SIGNATURE" >> "$GITHUB_OUTPUT"
+          echo "installer_sig_value=$SIGNATURE_VALUE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed Windows release artifact
         uses: actions/upload-artifact@v4
         with:
           name: entropic-windows-x86_64
@@ -175,16 +226,15 @@ jobs:
             ${{ steps.artifacts.outputs.installer_sig_name }}
 
       - name: Save updater metadata
-        shell: pwsh
         run: |
-          $version = '${{ steps.version.outputs.tag }}'
-          @"
+          VERSION="${{ steps.version.outputs.tag }}"
+          cat > updater-windows.json <<EOF
           {
             "platform": "windows-x86_64",
-            "url": "https://github.com/dominant-strategies/entropic-releases/releases/download/$version/Entropic-$version-windows-x86_64-setup.exe",
+            "url": "https://github.com/dominant-strategies/entropic-releases/releases/download/${VERSION}/Entropic-${VERSION}-windows-x86_64-setup.exe",
             "signature": "${{ steps.artifacts.outputs.installer_sig_value }}"
           }
-          "@ | Set-Content -Path updater-windows.json -Encoding UTF8
+          EOF
 
       - name: Upload updater metadata
         uses: actions/upload-artifact@v4
@@ -192,8 +242,37 @@ jobs:
           name: updater-windows
           path: updater-windows.json
 
+  verify-windows-installer:
+    needs: [sign-windows]
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download signed Windows installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: entropic-windows-x86_64
+          path: artifacts\entropic-windows-x86_64
+
+      - name: Verify Authenticode signature on signed installer
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path (Join-Path $PWD 'artifacts\entropic-windows-x86_64') -Filter '*.exe' -File |
+            Select-Object -First 1
+          if (-not $installer) {
+            throw 'Signed installer artifact not found.'
+          }
+
+          $sig = Get-AuthenticodeSignature $installer.FullName
+          Write-Host "$($installer.FullName) => $($sig.Status)"
+          if ($sig.Status -ne 'Valid') {
+            throw "Authenticode signature verification failed for $($installer.FullName): $($sig.StatusMessage)"
+          }
+
   publish-windows:
-    needs: [build-windows]
+    needs: [sign-windows, verify-windows-installer]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
