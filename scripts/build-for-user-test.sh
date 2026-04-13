@@ -65,6 +65,9 @@ ensure_prod_docker_ready() {
     fi
 
     ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
+    if [ -z "$ACTIVE_DOCKER_HOST" ]; then
+        ACTIVE_DOCKER_HOST="$(entropic_native_linux_docker_host "$DOCKER_BIN" || true)"
+    fi
     if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "$COLIMA_BIN" ]; then
         echo "🐳 Starting production Colima runtime..."
         ACTIVE_DOCKER_HOST="$(entropic_start_colima_for_mode "$DOCKER_BIN" "$COLIMA_BIN" "$PROJECT_ROOT" || true)"
@@ -80,9 +83,13 @@ ensure_prod_docker_ready() {
         return 0
     fi
 
-    echo "ERROR: Production Colima daemon is not reachable."
+    echo "ERROR: Production Docker daemon is not reachable."
     echo "Colima home: $ENTROPIC_COLIMA_HOME"
-    echo "Set ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 only for one-off Desktop fallback."
+    if entropic_is_native_linux_runtime; then
+        echo "Start Docker Engine and retry."
+    else
+        echo "Set ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 only for one-off Desktop fallback."
+    fi
     return 1
 }
 

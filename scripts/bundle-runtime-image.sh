@@ -38,6 +38,9 @@ elif [ -n "${WSL_DISTRO_NAME:-}" ] && env -u DOCKER_CONTEXT DOCKER_HOST=unix:///
     ACTIVE_DOCKER_HOST="unix:///var/run/docker.sock"
 else
     ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
+    if [ -z "$ACTIVE_DOCKER_HOST" ]; then
+        ACTIVE_DOCKER_HOST="$(entropic_native_linux_docker_host "$DOCKER_BIN" || true)"
+    fi
 fi
 
 if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "$COLIMA_BIN" ]; then
@@ -45,8 +48,12 @@ if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "$COLIMA_BIN" ]; then
 fi
 
 if [ -z "$ACTIVE_DOCKER_HOST" ] && ! entropic_default_context_allowed; then
-    echo "ERROR: No $(entropic_mode_label) Colima Docker host is available for bundling."
-    echo "Set ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 for one-off Docker Desktop fallback."
+    echo "ERROR: No $(entropic_mode_label) Docker host is available for bundling."
+    if entropic_is_native_linux_runtime; then
+        echo "Start Docker Engine and retry."
+    else
+        echo "Set ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 for one-off Docker Desktop fallback."
+    fi
     exit 1
 fi
 

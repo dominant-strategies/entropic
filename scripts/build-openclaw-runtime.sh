@@ -73,6 +73,9 @@ ensure_docker_ready_for_mode() {
     fi
 
     ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
+    if [ -z "$ACTIVE_DOCKER_HOST" ]; then
+        ACTIVE_DOCKER_HOST="$(entropic_native_linux_docker_host "$DOCKER_BIN" || true)"
+    fi
     if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "$COLIMA_BIN" ]; then
         echo "Starting Colima for $(entropic_mode_label) runtime build..."
         ACTIVE_DOCKER_HOST="$(entropic_start_colima_for_mode "$DOCKER_BIN" "$COLIMA_BIN" "$PROJECT_ROOT" || true)"
@@ -87,19 +90,24 @@ ensure_docker_ready_for_mode() {
         return 0
     fi
 
-    echo "ERROR: No $(entropic_mode_label) Colima Docker socket is reachable."
+    echo "ERROR: No $(entropic_mode_label) Docker host is reachable."
     echo "Mode: $(entropic_runtime_mode)"
     echo "Colima home: $ENTROPIC_COLIMA_HOME"
     echo ""
     echo "Fix options:"
-    echo "  1. Start mode runtime first:"
-    if [ "$(entropic_runtime_mode)" = "dev" ]; then
+    echo "  1. Start the required Docker runtime first:"
+    if entropic_is_native_linux_runtime; then
+        echo "     sudo systemctl start docker"
+        echo "     sudo usermod -aG docker \$USER   # if permissions fail"
+    elif [ "$(entropic_runtime_mode)" = "dev" ]; then
         echo "     pnpm dev:runtime:start"
     else
         echo "     ENTROPIC_RUNTIME_MODE=prod ./scripts/build-for-user-test.sh"
     fi
-    echo "  2. For one-off Desktop fallback (build scripts only):"
-    echo "     ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 $0"
+    if ! entropic_is_native_linux_runtime; then
+        echo "  2. For one-off Desktop fallback (build scripts only):"
+        echo "     ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 $0"
+    fi
     return 1
 }
 
