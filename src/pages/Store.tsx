@@ -1168,8 +1168,10 @@ export function Store({
           </div>
         </div>
 
-        <div className="mb-4 flex-1">
-          <p className="text-sm text-[var(--text-secondary)] leading-relaxed line-clamp-3 mb-2">{skill.summary || "No description available."}</p>
+        <div className="mb-4 flex-1 min-h-0">
+          <p className="max-h-28 overflow-auto pr-1 text-sm text-[var(--text-secondary)] leading-relaxed mb-2">
+            {skill.summary || "No description available."}
+          </p>
         </div>
 
         <button
@@ -1262,7 +1264,9 @@ export function Store({
                             </div>
                           </div>
                         </div>
-                        <p className="text-sm text-[var(--text-secondary)] leading-relaxed line-clamp-3 mb-4 flex-1">{skill.description}</p>
+                        <p className="max-h-28 overflow-auto pr-1 text-sm text-[var(--text-secondary)] leading-relaxed mb-4 flex-1">
+                          {skill.description}
+                        </p>
 
                         <div className="flex flex-col gap-2 mt-auto">
                           {!skill.managed && (
