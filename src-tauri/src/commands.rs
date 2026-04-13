@@ -22,7 +22,7 @@ use std::io::Read;
 #[cfg(target_os = "macos")]
 use std::os::raw::c_uchar;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -32,6 +32,7 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Webview, WebviewBuilder,
     WebviewUrl,
 };
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -7961,6 +7962,9 @@ fn sanitize_filename(name: &str) -> String {
     if trimmed.is_empty() {
         return "file".to_string();
     }
+    if trimmed == "." || trimmed == ".." {
+        return "file".to_string();
+    }
     let mut out = String::with_capacity(trimmed.len());
     for ch in trimmed.chars() {
         if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
@@ -7969,7 +7973,7 @@ fn sanitize_filename(name: &str) -> String {
             out.push('_');
         }
     }
-    if out.is_empty() {
+    if out.is_empty() || out == "." || out == ".." {
         "file".to_string()
     } else {
         out
@@ -8179,18 +8183,85 @@ fn validate_host_output_path(raw: &str) -> Result<PathBuf, String> {
     }
 
     if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!(
-                    "Failed to prepare export directory {}: {}",
-                    parent.display(),
-                    e
-                )
-            })?;
+        if !parent.as_os_str().is_empty() && !parent.is_dir() {
+            return Err(format!(
+                "Export directory does not exist: {}",
+                parent.display()
+            ));
         }
     }
 
     Ok(path)
+}
+
+fn resolve_workspace_regular_file_path(
+    container: &str,
+    full_path: &str,
+    not_found_message: &str,
+) -> Result<String, String> {
+    let script = r#"resolved="$(readlink -f "$1")" || exit 1
+workspace="$(readlink -f "$2")" || exit 1
+case "$resolved" in
+  "$workspace"|"$workspace"/*) ;;
+  *) exit 1 ;;
+esac
+[ -f "$resolved" ] || exit 1
+printf '%s' "$resolved"
+"#;
+    let resolved = docker_exec_output(&["exec", container, "sh", "-lc", script, "sh", full_path, WORKSPACE_ROOT])
+        .map_err(|_| not_found_message.to_string())?;
+    let trimmed = resolved.trim();
+    if trimmed.is_empty() {
+        return Err(not_found_message.to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn choose_workspace_export_path(
+    app: &AppHandle,
+    suggested_name: &str,
+) -> Result<Option<PathBuf>, String> {
+    let mut builder = app
+        .dialog()
+        .file()
+        .set_title(format!("Export {}", suggested_name))
+        .set_file_name(suggested_name.to_string());
+    if let Some(window) = app.get_webview_window("main") {
+        builder = builder.set_parent(&window);
+    }
+    let ext = suggested_name
+        .rsplit('.')
+        .next()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .filter(|ext| !ext.is_empty() && ext != &suggested_name.to_ascii_lowercase());
+    if let Some(ext) = ext.as_deref() {
+        builder = builder.add_filter(format!(".{} file", ext), &[ext]);
+    }
+    let Some(file_path) = builder.blocking_save_file() else {
+        return Ok(None);
+    };
+    let path = file_path
+        .into_path()
+        .map_err(|e| format!("Failed to resolve export path: {}", e))?;
+    Ok(Some(validate_host_output_path(
+        path.to_string_lossy().as_ref(),
+    )?))
+}
+
+#[cfg(unix)]
+fn open_host_drop_source_file(path: &Path) -> Result<fs::File, String> {
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| format!("Failed to read dropped file {}: {}", path.display(), e))
+}
+
+#[cfg(not(unix))]
+fn open_host_drop_source_file(path: &Path) -> Result<fs::File, String> {
+    fs::File::open(path)
+        .map_err(|e| format!("Failed to read dropped file {}: {}", path.display(), e))
 }
 
 fn container_path_exists_for(container: &str, path: &str) -> bool {
@@ -15213,7 +15284,9 @@ pub async fn read_workspace_file(path: String) -> Result<String, String> {
         return Err("Invalid path".to_string());
     }
     let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
-    read_container_file_from(container, &full_path)
+    let resolved_path =
+        resolve_workspace_regular_file_path(container, &full_path, "File not found or unreadable")?;
+    read_container_file_from(container, &resolved_path)
         .ok_or_else(|| "File not found or unreadable".to_string())
 }
 
@@ -15226,7 +15299,9 @@ pub async fn read_workspace_file_base64(path: String) -> Result<String, String> 
         return Err("Invalid path".to_string());
     }
     let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
-    let raw = docker_exec_output(&["exec", container, "base64", "--", &full_path])
+    let resolved_path =
+        resolve_workspace_regular_file_path(container, &full_path, "File not found or unreadable")?;
+    let raw = docker_exec_output(&["exec", container, "base64", "--", &resolved_path])
         .map_err(|_| "File not found or unreadable".to_string())?;
     Ok(raw.chars().filter(|c| *c != '\n' && *c != '\r').collect())
 }
@@ -15319,23 +15394,6 @@ pub async fn upload_host_dropped_files(
 
         let canonical = fs::canonicalize(trimmed)
             .map_err(|_| format!("Dropped file is no longer available: {}", trimmed))?;
-        let metadata = fs::metadata(&canonical)
-            .map_err(|e| format!("Failed to inspect dropped file {}: {}", trimmed, e))?;
-        if !metadata.is_file() {
-            continue;
-        }
-        if metadata.len() > HOST_DROP_FILE_MAX_BYTES {
-            let file_name = canonical
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("file");
-            return Err(format!(
-                "{} is too large to import (limit: {} MB).",
-                file_name,
-                HOST_DROP_FILE_MAX_BYTES / (1024 * 1024)
-            ));
-        }
-
         let canonical_key = canonical.to_string_lossy().to_string();
         let mut authorized_record: Option<RecentHostDropRecord> = None;
         for attempt in 0..6 {
@@ -15369,6 +15427,20 @@ pub async fn upload_host_dropped_files(
             .file_name()
             .and_then(|value| value.to_str())
             .ok_or_else(|| "Dropped file name is invalid".to_string())?;
+        let source = open_host_drop_source_file(&canonical)?;
+        let metadata = source
+            .metadata()
+            .map_err(|e| format!("Failed to inspect dropped file {}: {}", source_name, e))?;
+        if !metadata.is_file() {
+            continue;
+        }
+        if metadata.len() > HOST_DROP_FILE_MAX_BYTES {
+            return Err(format!(
+                "{} is too large to import (limit: {} MB).",
+                source_name,
+                HOST_DROP_FILE_MAX_BYTES / (1024 * 1024)
+            ));
+        }
         let sanitized_name = sanitize_filename(source_name);
         let stem = Path::new(&sanitized_name)
             .file_stem()
@@ -15404,8 +15476,7 @@ pub async fn upload_host_dropped_files(
             }
         }
 
-        let mut source = fs::File::open(&canonical)
-            .map_err(|e| format!("Failed to read dropped file {}: {}", source_name, e))?;
+        let mut source = source;
         let mut child = docker_command()
             .args(["exec", "-i", container, "tee", "--", &full_path])
             .stdin(Stdio::piped())
@@ -15447,7 +15518,11 @@ pub async fn upload_host_dropped_files(
 }
 
 #[tauri::command]
-pub async fn export_workspace_file(path: String, destination_path: String) -> Result<(), String> {
+pub async fn export_workspace_file(
+    app: AppHandle,
+    path: String,
+    suggested_name: Option<String>,
+) -> Result<(), String> {
     let container = running_gateway_container_name()
         .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
     let sanitized = sanitize_workspace_path(&path)?;
@@ -15455,13 +15530,21 @@ pub async fn export_workspace_file(path: String, destination_path: String) -> Re
         return Err("Invalid path".to_string());
     }
     let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
-    let output_path = validate_host_output_path(&destination_path)?;
+    let export_name = suggested_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| sanitized.rsplit('/').next().unwrap_or("export"));
+    let Some(output_path) = choose_workspace_export_path(&app, export_name)? else {
+        return Ok(());
+    };
+    let resolved_path = resolve_workspace_regular_file_path(
+        container,
+        &full_path,
+        "Only files can be exported from the workspace.",
+    )?;
 
-    if docker_exec_output(&["exec", container, "test", "-f", &full_path]).is_err() {
-        return Err("Only files can be exported from the workspace.".to_string());
-    }
-
-    let raw = docker_exec_output(&["exec", container, "base64", "--", &full_path])
+    let raw = docker_exec_output(&["exec", container, "base64", "--", &resolved_path])
         .map_err(|e| format!("Failed to read workspace file for export: {}", e))?;
     let payload: String = raw.chars().filter(|c| *c != '\n' && *c != '\r').collect();
     let bytes = STANDARD
