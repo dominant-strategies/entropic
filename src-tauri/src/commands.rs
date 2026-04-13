@@ -4564,6 +4564,225 @@ fn existing_gateway_container_name() -> Option<&'static str> {
     }
 }
 
+fn ensure_openclaw_network_exists() -> Result<(), String> {
+    let output = docker_command()
+        .args(["network", "create", OPENCLAW_NETWORK])
+        .output()
+        .map_err(|e| {
+            format!(
+                "Failed to create Docker network {}: {}",
+                OPENCLAW_NETWORK, e
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let trimmed = stderr.trim();
+    if trimmed.to_ascii_lowercase().contains("already exists") {
+        Ok(())
+    } else {
+        Err(format!(
+            "Failed to create Docker network {}: {}",
+            OPENCLAW_NETWORK, trimmed
+        ))
+    }
+}
+
+fn remove_container_if_present(name: &str) -> Result<(), String> {
+    let output = docker_command()
+        .args(["rm", "-f", name])
+        .output()
+        .map_err(|e| format!("Failed to remove container {}: {}", name, e))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let trimmed = stderr.trim();
+    if trimmed.contains("No such container") {
+        Ok(())
+    } else {
+        Err(format!("Failed to remove container {}: {}", name, trimmed))
+    }
+}
+
+fn network_container_ids(name: &str) -> Result<Vec<String>, String> {
+    let output = docker_command()
+        .args([
+            "network",
+            "inspect",
+            "--format",
+            "{{range $id, $_ := .Containers}}{{println $id}}{{end}}",
+            name,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to inspect Docker network {}: {}", name, e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let trimmed = stderr.trim();
+        if trimmed.contains("No such network") {
+            return Ok(Vec::new());
+        }
+        return Err(format!(
+            "Failed to inspect Docker network {}: {}",
+            name, trimmed
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn disconnect_all_containers_from_network(name: &str) -> Result<(), String> {
+    for container_id in network_container_ids(name)? {
+        let output = docker_command()
+            .args(["network", "disconnect", "-f", name, container_id.as_str()])
+            .output()
+            .map_err(|e| {
+                format!(
+                    "Failed to disconnect container {} from Docker network {}: {}",
+                    container_id, name, e
+                )
+            })?;
+        if output.status.success() {
+            continue;
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let trimmed = stderr.trim();
+        if trimmed.contains("is not connected")
+            || trimmed.contains("No such container")
+            || trimmed.contains("No such network")
+        {
+            continue;
+        }
+        return Err(format!(
+            "Failed to disconnect container {} from Docker network {}: {}",
+            container_id, name, trimmed
+        ));
+    }
+
+    Ok(())
+}
+
+fn remove_network_if_present(name: &str) -> Result<(), String> {
+    let output = docker_command()
+        .args(["network", "rm", name])
+        .output()
+        .map_err(|e| format!("Failed to remove Docker network {}: {}", name, e))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let trimmed = stderr.trim();
+    if trimmed.contains("No such network") {
+        Ok(())
+    } else {
+        Err(format!(
+            "Failed to remove Docker network {}: {}",
+            name, trimmed
+        ))
+    }
+}
+
+fn proxy_backend_models_probe_url(proxy_base: &str) -> Result<String, String> {
+    let trimmed = proxy_base.trim();
+    if trimmed.is_empty() {
+        return Err("Proxy sandbox is missing ENTROPIC_PROXY_BASE_URL".to_string());
+    }
+
+    let normalized = if trimmed.ends_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("{}/", trimmed)
+    };
+    Url::parse(&normalized)
+        .and_then(|url| url.join("models"))
+        .map(|url| url.to_string())
+        .map_err(|e| {
+            format!(
+                "Failed to build proxy backend probe URL from {}: {}",
+                trimmed, e
+            )
+        })
+}
+
+fn probe_proxy_backend_from_gateway_container() -> Result<(), String> {
+    let proxy_base = read_container_env("ENTROPIC_PROXY_BASE_URL")
+        .ok_or_else(|| "Proxy sandbox is missing ENTROPIC_PROXY_BASE_URL".to_string())?;
+    let url = proxy_backend_models_probe_url(&proxy_base)?;
+    let script = format!(
+        "url={}; code=$(curl -sS -L -m 12 -o /dev/null -w '%{{http_code}}' \"$url\") || exit $?; case \"$code\" in 2*|3*) printf '%s' \"$code\" ;; *) echo \"HTTP $code\" >&2; exit 1 ;; esac",
+        sh_single_quote(&url)
+    );
+    let output = docker_command()
+        .args(["exec", OPENCLAW_CONTAINER, "sh", "-lc", &script])
+        .output()
+        .map_err(|e| {
+            format!(
+                "Failed to probe proxy backend from sandbox container: {}",
+                e
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        "unknown probe failure".to_string()
+    };
+    Err(format!(
+        "Sandbox container could not reach {}: {}",
+        url, detail
+    ))
+}
+
+fn recreate_gateway_container_on_fresh_network(
+    docker_args: &[String],
+    label: &str,
+) -> Result<(), String> {
+    println!(
+        "[Entropic] {}: rebuilding managed Docker network {}",
+        label, OPENCLAW_NETWORK
+    );
+
+    stop_scanner_sidecar();
+    for name in [SCANNER_CONTAINER, OPENCLAW_CONTAINER] {
+        remove_container_if_present(name)?;
+    }
+    disconnect_all_containers_from_network(OPENCLAW_NETWORK)?;
+    remove_network_if_present(OPENCLAW_NETWORK)?;
+    ensure_openclaw_network_exists()?;
+
+    let rerun = docker_command()
+        .args(docker_args)
+        .output()
+        .map_err(|e| append_colima_runtime_hint(format!("Failed to rerun container: {}", e)))?;
+    if !rerun.status.success() {
+        let stderr = String::from_utf8_lossy(&rerun.stderr);
+        return Err(append_colima_runtime_hint(format!(
+            "{} automatic network repair failed to recreate the sandbox container: {}",
+            label,
+            stderr.trim()
+        )));
+    }
+
+    Ok(())
+}
+
 fn cleanup_legacy_gateway_artifacts() {
     let check = docker_command()
         .args([
@@ -6568,6 +6787,23 @@ mod gateway_health_tolerance_tests {
     }
 }
 
+#[cfg(test)]
+mod proxy_backend_probe_url_tests {
+    use super::proxy_backend_models_probe_url;
+
+    #[test]
+    fn appends_models_without_dropping_api_version_path() {
+        assert_eq!(
+            proxy_backend_models_probe_url("https://entropic.qu.ai/api/v1").unwrap(),
+            "https://entropic.qu.ai/api/v1/models"
+        );
+        assert_eq!(
+            proxy_backend_models_probe_url("https://entropic.qu.ai/api/v1/").unwrap(),
+            "https://entropic.qu.ai/api/v1/models"
+        );
+    }
+}
+
 fn current_local_date() -> String {
     let days_since_epoch = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(elapsed) => elapsed.as_secs() / 86_400,
@@ -8310,24 +8546,17 @@ Use it for durable decisions, preferences, and facts that should persist across 
                 );
                 set_openclaw_config_value(
                     &mut cfg,
-                    &["plugins", "entries", "perplexity", "enabled"],
-                    serde_json::json!(true),
-                );
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &["plugins", "entries", "perplexity", "config", "webSearch", "baseUrl"],
+                    &["tools", "web", "search", "perplexity", "baseUrl"],
                     serde_json::json!(web_search_base_url),
                 );
+                remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "perplexity"]);
                 remove_openclaw_config_value(
                     &mut cfg,
                     &["plugins", "entries", "duckduckgo", "config", "webSearch"],
                 );
             } else {
                 remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
-                remove_openclaw_config_value(
-                    &mut cfg,
-                    &["plugins", "entries", "perplexity", "config", "webSearch"],
-                );
+                remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "perplexity"]);
                 remove_openclaw_config_value(
                     &mut cfg,
                     &["plugins", "entries", "duckduckgo", "config", "webSearch"],
@@ -8354,12 +8583,11 @@ Use it for durable decisions, preferences, and facts that should persist across 
                 &["plugins", "entries", "duckduckgo", "enabled"],
                 serde_json::json!(true),
             );
-            remove_openclaw_config_value(
-                &mut cfg,
-                &["plugins", "entries", "perplexity", "config", "webSearch"],
-            );
+            remove_openclaw_config_value(&mut cfg, &["tools", "web", "search", "perplexity"]);
+            remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "perplexity"]);
         } else {
             remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
+            remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "perplexity"]);
             remove_openclaw_config_value(
                 &mut cfg,
                 &["plugins", "entries", "duckduckgo", "config", "webSearch"],
@@ -8381,12 +8609,11 @@ Use it for durable decisions, preferences, and facts that should persist across 
         serde_json::json!(memory_slot),
     );
     remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "lossless-claw"]);
+    // Some local OpenClaw runtimes still reject plugins.slots.contextEngine.
+    // "legacy" is already the implicit default, so keep the config compatible
+    // by removing the explicit slot selection entirely.
+    remove_openclaw_config_value(&mut cfg, &["plugins", "slots", "contextEngine"]);
     if container_plugin_exists("lossless-claw") {
-        set_openclaw_config_value(
-            &mut cfg,
-            &["plugins", "slots", "contextEngine"],
-            serde_json::json!("lossless-claw"),
-        );
         set_openclaw_config_value(
             &mut cfg,
             &["plugins", "entries", "lossless-claw", "enabled"],
@@ -8395,12 +8622,6 @@ Use it for durable decisions, preferences, and facts that should persist across 
         if bundled_plugin_entry_exists("lossless-claw") {
             remove_bundled_plugin_load_paths(&mut cfg, "lossless-claw");
         }
-    } else {
-        set_openclaw_config_value(
-            &mut cfg,
-            &["plugins", "slots", "contextEngine"],
-            serde_json::json!("legacy"),
-        );
     }
     apply_default_qmd_memory_config(
         &mut cfg,
@@ -9866,13 +10087,60 @@ fn finish_health_wait_or_tolerate_starting(err: String, context: &str) -> Result
     Err(append_colima_runtime_hint(format!("{}: {}", context, err)))
 }
 
-async fn recover_gateway_health(
+async fn ensure_proxy_backend_reachable(
     token: &str,
     docker_args: &[String],
     label: &str,
     app: &AppHandle,
     state: &AppState,
 ) -> Result<(), String> {
+    let initial_error = match probe_proxy_backend_from_gateway_container() {
+        Ok(()) => return Ok(()),
+        Err(err) => err,
+    };
+
+    println!(
+        "[Entropic] {} proxy backend probe failed; attempting automatic network repair: {}",
+        label, initial_error
+    );
+    recreate_gateway_container_on_fresh_network(docker_args, label)?;
+    clear_applied_agent_settings_fingerprint()?;
+    apply_agent_settings(app, state)?;
+    Box::pin(recover_gateway_health_inner(
+        token,
+        docker_args,
+        label,
+        app,
+        state,
+        false,
+    ))
+    .await?;
+
+    match probe_proxy_backend_from_gateway_container() {
+        Ok(()) => {
+            println!(
+                "[Entropic] {} proxy backend probe succeeded after automatic network repair.",
+                label
+            );
+            Ok(())
+        }
+        Err(final_error) => Err(append_colima_runtime_hint(format!(
+            "{} sandbox container is healthy but still cannot reach the Entropic backend from inside the managed Docker network after automatic repair. Initial probe failure: {}. Final probe failure: {}",
+            label, initial_error, final_error
+        ))),
+    }
+}
+
+async fn recover_gateway_health_inner(
+    token: &str,
+    docker_args: &[String],
+    label: &str,
+    app: &AppHandle,
+    state: &AppState,
+    allow_proxy_network_repair: bool,
+) -> Result<(), String> {
+    let mut gateway_healthy = false;
+
     if let Err(initial) = wait_for_gateway_health_strict(token, 12).await {
         let mut initial_error = initial;
 
@@ -9891,7 +10159,9 @@ async fn recover_gateway_health(
                 );
             } else {
                 match wait_for_gateway_health_strict(token, 8).await {
-                    Ok(()) => return Ok(()),
+                    Ok(()) => {
+                        gateway_healthy = true;
+                    }
                     Err(err) => {
                         println!(
                             "[Entropic] {} config self-heal retry still failing: {}",
@@ -9914,99 +10184,121 @@ async fn recover_gateway_health(
             }
         }
 
-        let health_status = container_health_status();
-        if matches!(health_status.as_deref(), Some("starting")) {
-            println!(
-                "[Entropic] {} health check failed while health=starting; extending wait: {}",
-                label, initial_error
-            );
-            if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
-                finish_health_wait_or_tolerate_starting(
-                    e,
-                    &format!("{} failed strict health check after extended wait", label),
-                )?;
-            }
-        } else if matches!(health_status.as_deref(), Some("healthy")) {
-            println!(
-                "[Entropic] {} health check failed but container health=healthy; extending wait without restart: {}",
-                label, initial_error
-            );
-            if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
-                finish_health_wait_or_tolerate_starting(
-                    e,
-                    &format!("{} failed strict health check after extended wait", label),
-                )?;
-            }
-        } else if matches!(health_status.as_deref(), Some("unhealthy")) || !container_running() {
-            println!(
-                "[Entropic] {} health check failed with container state {:?}; attempting restart: {}",
-                label, health_status, initial_error
-            );
-            let restart = docker_command()
-                .args(["restart", OPENCLAW_CONTAINER])
-                .output()
-                .map_err(|e| {
-                    append_colima_runtime_hint(format!("Failed to restart container: {}", e))
-                })?;
-            if !restart.status.success() {
-                let stderr = String::from_utf8_lossy(&restart.stderr);
-                if stderr.contains("is not running") || stderr.contains("no such container") {
-                    println!(
-                        "[Entropic] {} container is not running; removing and recreating...",
-                        label
-                    );
-                    let cleanup = docker_command()
-                        .args(["rm", "-f", OPENCLAW_CONTAINER])
-                        .output()
-                        .map_err(|e| format!("Failed to cleanup stale container: {}", e))?;
-                    if !cleanup.status.success() {
-                        println!(
-                            "[Entropic] Container cleanup warning after restart failure: {}",
-                            String::from_utf8_lossy(&cleanup.stderr)
-                        );
-                    }
-                    let rerun = docker_command().args(docker_args).output().map_err(|e| {
-                        append_colima_runtime_hint(format!("Failed to rerun container: {}", e))
+        if !gateway_healthy {
+            let health_status = container_health_status();
+            if matches!(health_status.as_deref(), Some("starting")) {
+                println!(
+                    "[Entropic] {} health check failed while health=starting; extending wait: {}",
+                    label, initial_error
+                );
+                if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
+                    finish_health_wait_or_tolerate_starting(
+                        e,
+                        &format!("{} failed strict health check after extended wait", label),
+                    )?;
+                }
+            } else if matches!(health_status.as_deref(), Some("healthy")) {
+                println!(
+                    "[Entropic] {} health check failed but container health=healthy; extending wait without restart: {}",
+                    label, initial_error
+                );
+                if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
+                    finish_health_wait_or_tolerate_starting(
+                        e,
+                        &format!("{} failed strict health check after extended wait", label),
+                    )?;
+                }
+            } else if matches!(health_status.as_deref(), Some("unhealthy")) || !container_running()
+            {
+                println!(
+                    "[Entropic] {} health check failed with container state {:?}; attempting restart: {}",
+                    label, health_status, initial_error
+                );
+                let restart = docker_command()
+                    .args(["restart", OPENCLAW_CONTAINER])
+                    .output()
+                    .map_err(|e| {
+                        append_colima_runtime_hint(format!("Failed to restart container: {}", e))
                     })?;
-                    if !rerun.status.success() {
-                        let rerun_stderr = String::from_utf8_lossy(&rerun.stderr);
+                if !restart.status.success() {
+                    let stderr = String::from_utf8_lossy(&restart.stderr);
+                    if stderr.contains("is not running") || stderr.contains("no such container") {
+                        println!(
+                            "[Entropic] {} container is not running; removing and recreating...",
+                            label
+                        );
+                        let cleanup = docker_command()
+                            .args(["rm", "-f", OPENCLAW_CONTAINER])
+                            .output()
+                            .map_err(|e| format!("Failed to cleanup stale container: {}", e))?;
+                        if !cleanup.status.success() {
+                            println!(
+                                "[Entropic] Container cleanup warning after restart failure: {}",
+                                String::from_utf8_lossy(&cleanup.stderr)
+                            );
+                        }
+                        let rerun = docker_command().args(docker_args).output().map_err(|e| {
+                            append_colima_runtime_hint(format!("Failed to rerun container: {}", e))
+                        })?;
+                        if !rerun.status.success() {
+                            let rerun_stderr = String::from_utf8_lossy(&rerun.stderr);
+                            return Err(append_colima_runtime_hint(format!(
+                                "{} failed health check ({}) and recreate failed: {}",
+                                label,
+                                initial_error,
+                                rerun_stderr.trim()
+                            )));
+                        }
+                    } else {
                         return Err(append_colima_runtime_hint(format!(
-                            "{} failed health check ({}) and recreate failed: {}",
+                            "{} failed health check ({}) and restart failed: {}",
                             label,
                             initial_error,
-                            rerun_stderr.trim()
+                            stderr.trim()
                         )));
                     }
-                } else {
-                    return Err(append_colima_runtime_hint(format!(
-                        "{} failed health check ({}) and restart failed: {}",
-                        label,
-                        initial_error,
-                        stderr.trim()
-                    )));
                 }
-            }
-            apply_agent_settings(app, state)?;
-            if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
-                finish_health_wait_or_tolerate_starting(
-                    e,
-                    &format!("{} failed strict health check after recovery", label),
-                )?;
-            }
-        } else {
-            println!(
-                "[Entropic] {} health check failed with container state {:?}; extending wait without restart: {}",
-                label, health_status, initial_error
-            );
-            if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
-                finish_health_wait_or_tolerate_starting(
-                    e,
-                    &format!("{} failed strict health check after extended wait", label),
-                )?;
+                clear_applied_agent_settings_fingerprint()?;
+                apply_agent_settings(app, state)?;
+                if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
+                    finish_health_wait_or_tolerate_starting(
+                        e,
+                        &format!("{} failed strict health check after recovery", label),
+                    )?;
+                }
+            } else {
+                println!(
+                    "[Entropic] {} health check failed with container state {:?}; extending wait without restart: {}",
+                    label, health_status, initial_error
+                );
+                if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
+                    finish_health_wait_or_tolerate_starting(
+                        e,
+                        &format!("{} failed strict health check after extended wait", label),
+                    )?;
+                }
             }
         }
     }
+
+    if allow_proxy_network_repair
+        && container_running()
+        && read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1")
+    {
+        ensure_proxy_backend_reachable(token, docker_args, label, app, state).await?;
+    }
+
     Ok(())
+}
+
+async fn recover_gateway_health(
+    token: &str,
+    docker_args: &[String],
+    label: &str,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    recover_gateway_health_inner(token, docker_args, label, app, state, true).await
 }
 
 fn default_agent_settings() -> StoredAgentSettings {
@@ -10787,10 +11079,7 @@ async fn start_gateway_inner(
             .output();
     }
 
-    // Create network if it doesn't exist
-    let _ = docker_command()
-        .args(["network", "create", OPENCLAW_NETWORK])
-        .output();
+    ensure_openclaw_network_exists()?;
 
     // Ensure runtime image is available
     let image_started = Instant::now();
@@ -11309,10 +11598,7 @@ async fn start_gateway_with_proxy_inner(
             .output();
     }
 
-    // Create network if it doesn't exist
-    let _ = docker_command()
-        .args(["network", "create", OPENCLAW_NETWORK])
-        .output();
+    ensure_openclaw_network_exists()?;
 
     // Ensure runtime image is available (load from bundle or pull from registry)
     let image_started = Instant::now();

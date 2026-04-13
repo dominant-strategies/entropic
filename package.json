@@ -43,6 +43,7 @@
     "dev:wsl:shell:dev": "powershell -ExecutionPolicy Bypass -File ./scripts/dev-wsl-runtime.ps1 shell dev",
     "dev:wsl:shell:prod": "powershell -ExecutionPolicy Bypass -File ./scripts/dev-wsl-runtime.ps1 shell prod",
     "dev:wsl:up": "powershell -ExecutionPolicy Bypass -File ./scripts/run-windows-wsl-app.ps1 -Mode dev",
+    "dev:wsl:up:managed": "powershell -ExecutionPolicy Bypass -Command \"$env:ENTROPIC_BUILD_PROFILE='managed'; & ./scripts/run-windows-wsl-app.ps1 -Mode dev\"",
     "tauri:build": "tauri build",
     "tauri:build:dev": "tauri build --debug --config src-tauri/tauri.conf.dev.json",
     "dev:protocol": "bash ./scripts/register-dev-protocol.sh",

@@ -12,6 +12,8 @@ src-tauri/gen/
 # Bundled runtime binaries (populated by scripts/bundle-runtime.sh).
 # Placeholder READMEs are tracked so Tauri's resource globs resolve on
 # fresh checkouts and CI without running bundle-runtime.sh first.
+src-tauri/resources/openclaw-runtime.tar.gz
+src-tauri/resources/runtime/
 src-tauri/resources/bin/*
 !src-tauri/resources/bin/README.txt
 src-tauri/resources/share/*
