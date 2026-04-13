@@ -14,7 +14,6 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
 import { open } from "@tauri-apps/plugin-shell";
 import { Store } from "@tauri-apps/plugin-store";
 import {
@@ -550,17 +549,6 @@ function firstMeaningfulLine(value: string): string {
     .map((entry) => entry.trim())
     .find(Boolean);
   return line || value.trim();
-}
-
-function previewExportFilters(name: string) {
-  const ext = name.split(".").pop()?.trim().toLowerCase();
-  if (!ext || ext === name.toLowerCase()) return undefined;
-  return [
-    {
-      name: `.${ext} file`,
-      extensions: [ext],
-    },
-  ];
 }
 
 function sleep(ms: number) {
@@ -3402,15 +3390,9 @@ export function Files({
 
   async function exportWorkspaceEntry(entry: Pick<WorkspaceFileEntry, "name" | "path">) {
     try {
-      const destination = await save({
-        title: `Export ${entry.name}`,
-        defaultPath: entry.name,
-        filters: previewExportFilters(entry.name),
-      });
-      if (!destination || Array.isArray(destination)) return;
       await invoke("export_workspace_file", {
         path: entry.path,
-        destinationPath: destination,
+        suggestedName: entry.name,
       });
     } catch (e) {
       setError(`Export failed: ${describeError(e)}`);
