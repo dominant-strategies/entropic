@@ -213,9 +213,11 @@ jobs:
             exit 1
           fi
 
-          echo "installer_name=$RELEASE_INSTALLER" >> "$GITHUB_OUTPUT"
-          echo "installer_sig_name=$RELEASE_SIGNATURE" >> "$GITHUB_OUTPUT"
-          echo "installer_sig_value=$SIGNATURE_VALUE" >> "$GITHUB_OUTPUT"
+          {
+            echo "installer_name=$RELEASE_INSTALLER"
+            echo "installer_sig_name=$RELEASE_SIGNATURE"
+            echo "installer_sig_value=$SIGNATURE_VALUE"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Upload signed Windows release artifact
         uses: actions/upload-artifact@v4
