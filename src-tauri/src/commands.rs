@@ -1556,6 +1556,15 @@ fn resolve_host_proxy_base(proxy_base: &str) -> Result<String, String> {
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
+fn macos_system_docker_candidates() -> &'static [&'static str] {
+    &[
+        "/usr/local/bin/docker",
+        "/opt/homebrew/bin/docker",
+        "/opt/local/bin/docker",
+        "/usr/bin/docker",
+    ]
+}
+
 /// Find the docker binary.
 /// On macOS, prefer system docker first. The bundled CLI can report a valid
 /// `--version` but still hang when talking to the local Colima socket during
@@ -1564,17 +1573,21 @@ fn resolve_host_proxy_base(proxy_base: &str) -> Result<String, String> {
 /// other platforms.
 fn find_docker_binary() -> String {
     // 1. Well-known system locations
-    for candidate in &[
-        "/usr/local/bin/docker",
-        "/opt/homebrew/bin/docker",
-        "/usr/bin/docker",
-    ] {
+    for candidate in macos_system_docker_candidates() {
         if std::path::Path::new(candidate).exists() && docker_binary_usable(candidate) {
             return candidate.to_string();
         }
     }
 
-    // 2. macOS bundled docker candidates (release + dev)
+    // 2. PATH-resolved system docker
+    if let Ok(system) = which::which("docker") {
+        let candidate = system.display().to_string();
+        if docker_binary_usable(&candidate) {
+            return candidate;
+        }
+    }
+
+    // 3. macOS bundled docker candidates (release + dev)
     if matches!(Platform::detect(), Platform::MacOS) {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
@@ -1600,7 +1613,7 @@ fn find_docker_binary() -> String {
         }
     }
 
-    // 3. Fall back to bare name (relies on PATH)
+    // 4. Fall back to bare name (relies on PATH)
     "docker".to_string()
 }
 
