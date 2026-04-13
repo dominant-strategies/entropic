@@ -14,6 +14,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { save } from "@tauri-apps/plugin-dialog";
 import { open } from "@tauri-apps/plugin-shell";
 import { Store } from "@tauri-apps/plugin-store";
 import {
@@ -210,6 +211,7 @@ const HTML_EXTS = new Set(["html", "htm"]);
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
 const DESKTOP_SESSION_STORAGE_KEY = "entropic.desktop.session.v1";
 const DEFAULT_DESKTOP_CHAT_TITLE = "New chat";
+const DESKTOP_WORKSPACE_PATH = "Desktop";
 const CHAT_WORKSPACE_PREFIXES = [
   "/data/.openclaw/workspace",
   "/data/workspace",
@@ -219,14 +221,21 @@ const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/n
 const DEFAULT_BROWSER_URL = "https://www.google.com";
 const DEFAULT_BROWSER_LIVE_WS_BASE = "ws://127.0.0.1:19792/live";
 const CONTAINER_LOCAL_BROWSER_BASE = "http://container.localhost:19791";
-const WORKSPACE_FOLDER_REFRESH_MS = 1500;
-const BROWSER_DETAILS_PANEL_HEIGHT = 0;
+const WORKSPACE_FOLDER_REFRESH_MS = 4000;
+const DESKTOP_CACHE_STALE_MS = 12000;
 const BROWSER_APP_WINDOW_TITLEBAR_HEIGHT = 34;
 const BROWSER_TOOLBAR_HEIGHT = 49;
 const CHAT_WINDOW_MIN_SIZE_EXPANDED = { w: 560, h: 420 };
 const CHAT_WINDOW_MIN_SIZE_COLLAPSED = { w: 420, h: 360 };
 const DESKTOP_CONTEXT_MENU_Z = 2000;
 const DESKTOP_MODAL_Z = 2100;
+const DESKTOP_ICON_WIDTH = 84;
+const DESKTOP_ICON_HEIGHT = 110;
+const DESKTOP_ICON_GRID_START_X = 28;
+const DESKTOP_ICON_GRID_START_Y = 192;
+const DESKTOP_ICON_GRID_STEP_X = 96;
+const DESKTOP_ICON_GRID_STEP_Y = 108;
+const WORKSPACE_ICON_GRID_Y = 72;
 const LOCAL_BROWSER_INPUT_RE = /^(?:container\.localhost|runtime\.localhost|localhost|127\.0\.0\.1)(?::\d+)?(?:[/?#].*)?$/i;
 const BROWSER_DESKTOP_MIN_VIEWPORT_WIDTH = 1180;
 const BROWSER_DESKTOP_MIN_VIEWPORT_HEIGHT = 760;
@@ -238,9 +247,9 @@ const PANEL_FALLBACK = (
 );
 
 type PreviewState =
-  | { kind: "text"; name: string; content: string }
-  | { kind: "image"; name: string; dataUrl: string }
-  | { kind: "binary"; name: string; size: number };
+  | { kind: "text"; name: string; path: string; content: string }
+  | { kind: "image"; name: string; path: string; dataUrl: string }
+  | { kind: "binary"; name: string; path: string; size: number };
 
 type WindowResizeDirection = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 type WindowResizeState = { sx: number; sy: number; ox: number; oy: number; ow: number; oh: number };
@@ -260,6 +269,14 @@ type DesktopHandoff = {
 type WindowPoint = { x: number; y: number };
 type WindowSize = { w: number; h: number };
 type WindowRect = { x: number; y: number; w: number; h: number };
+type DesktopDropTarget = string | null;
+type NativeDragDropPayload = {
+  paths?: string[] | null;
+  position?: {
+    x: number;
+    y: number;
+  } | null;
+};
 type DesktopSessionState = {
   finderOpen: boolean;
   chatOpen: boolean;
@@ -284,6 +301,7 @@ type DesktopSessionState = {
   terminalSize: WindowSize;
   pluginsPos: WindowPoint;
   skillsPos: WindowPoint;
+  skillsSize: WindowSize;
   channelsPos: WindowPoint;
   tasksPos: WindowPoint;
   jobsPos: WindowPoint;
@@ -306,6 +324,18 @@ type DesktopSessionState = {
   terminalSessionId: string | null;
   terminalInput: string;
   desktopIcons: Record<string, DesktopIcon>;
+};
+
+type DesktopWarmCache = {
+  entries: WorkspaceFileEntry[];
+  imagePreviews: Record<string, string>;
+  lastLoadedAt: number;
+};
+
+const desktopWarmCache: DesktopWarmCache = {
+  entries: [],
+  imagePreviews: {},
+  lastLoadedAt: 0,
 };
 
 function makeBrowserTabId(): string {
@@ -468,6 +498,190 @@ function asDesktopIcons(value: unknown): Record<string, DesktopIcon> | null {
   return Object.keys(next).length > 0 ? next : null;
 }
 
+function nativeDragDropClientPoint(payload: NativeDragDropPayload | null | undefined): WindowPoint | null {
+  if (!payload?.position) return null;
+  const rawX = Number(payload.position.x);
+  const rawY = Number(payload.position.y);
+  if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) return null;
+  const scale = typeof window !== "undefined" && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
+  return {
+    x: rawX / scale,
+    y: rawY / scale,
+  };
+}
+
+function dropTargetFromClientPoint(point: WindowPoint | null): DesktopDropTarget {
+  if (!point || typeof document === "undefined" || typeof document.elementsFromPoint !== "function") {
+    return null;
+  }
+  const elements = document.elementsFromPoint(point.x, point.y);
+  for (const element of elements) {
+    if (!(element instanceof HTMLElement) || !element.hasAttribute("data-desktop-drop-target")) {
+      continue;
+    }
+    const target = element.getAttribute("data-desktop-drop-target");
+    if (target !== null) {
+      return target;
+    }
+  }
+  return null;
+}
+
+function describeDesktopDropTarget(target: DesktopDropTarget): string {
+  if (target === null) return "your workspace";
+  if (target === "") return "Workspace";
+  if (target === DESKTOP_WORKSPACE_PATH) return "Desktop";
+  return target;
+}
+
+function describeError(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function firstMeaningfulLine(value: string): string {
+  const line = value
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .find(Boolean);
+  return line || value.trim();
+}
+
+function previewExportFilters(name: string) {
+  const ext = name.split(".").pop()?.trim().toLowerCase();
+  if (!ext || ext === name.toLowerCase()) return undefined;
+  return [
+    {
+      name: `.${ext} file`,
+      extensions: [ext],
+    },
+  ];
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function desktopIconGridKey(point: WindowPoint) {
+  return `${point.x}:${point.y}`;
+}
+
+function desktopIconIdForPath(path: string) {
+  return `desktop:${path}`;
+}
+
+function desktopIconGridConfig(id: string) {
+  if (id === "workspace") {
+    return {
+      startY: WORKSPACE_ICON_GRID_Y,
+      fixedRow: true,
+    };
+  }
+  return {
+    startY: DESKTOP_ICON_GRID_START_Y,
+    fixedRow: false,
+  };
+}
+
+function desktopIconGridPoint(id: string, col: number, row: number): WindowPoint {
+  const config = desktopIconGridConfig(id);
+  return {
+    x: DESKTOP_ICON_GRID_START_X + col * DESKTOP_ICON_GRID_STEP_X,
+    y: config.fixedRow ? config.startY : config.startY + row * DESKTOP_ICON_GRID_STEP_Y,
+  };
+}
+
+function desktopIconGridLimits(bounds: { width: number; height: number }, id: string) {
+  const config = desktopIconGridConfig(id);
+  const maxX = Math.max(DESKTOP_ICON_GRID_START_X, Math.floor(bounds.width - DESKTOP_ICON_WIDTH));
+  const maxY = config.fixedRow
+    ? config.startY
+    : Math.max(config.startY, Math.floor(bounds.height - DESKTOP_ICON_HEIGHT));
+  return {
+    maxCol: Math.max(0, Math.floor((maxX - DESKTOP_ICON_GRID_START_X) / DESKTOP_ICON_GRID_STEP_X)),
+    maxRow: config.fixedRow ? 0 : Math.max(0, Math.floor((maxY - config.startY) / DESKTOP_ICON_GRID_STEP_Y)),
+  };
+}
+
+function nearestDesktopIconGridPoint(
+  bounds: { width: number; height: number },
+  target: WindowPoint,
+  id: string,
+): WindowPoint {
+  const config = desktopIconGridConfig(id);
+  const limits = desktopIconGridLimits(bounds, id);
+  const rawCol = Math.round((target.x - DESKTOP_ICON_GRID_START_X) / DESKTOP_ICON_GRID_STEP_X);
+  const rawRow = config.fixedRow ? 0 : Math.round((target.y - config.startY) / DESKTOP_ICON_GRID_STEP_Y);
+  const col = Math.min(Math.max(0, rawCol), limits.maxCol);
+  const row = config.fixedRow ? 0 : Math.min(Math.max(0, rawRow), limits.maxRow);
+  return desktopIconGridPoint(id, col, row);
+}
+
+function snapDesktopIconPosition(
+  bounds: { width: number; height: number },
+  target: WindowPoint,
+  occupied: Set<string>,
+  id: string,
+): WindowPoint {
+  const preferred = nearestDesktopIconGridPoint(bounds, target, id);
+  if (!occupied.has(desktopIconGridKey(preferred))) {
+    return preferred;
+  }
+
+  const limits = desktopIconGridLimits(bounds, id);
+  let best: WindowPoint | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let col = 0; col <= limits.maxCol; col += 1) {
+    for (let row = 0; row <= limits.maxRow; row += 1) {
+      const candidate = desktopIconGridPoint(id, col, row);
+      if (occupied.has(desktopIconGridKey(candidate))) continue;
+      const distance = ((candidate.x - target.x) ** 2) + ((candidate.y - target.y) ** 2);
+      if (distance < bestDistance) {
+        best = candidate;
+        bestDistance = distance;
+      }
+    }
+  }
+  return best ?? preferred;
+}
+
+function nextDesktopIconPosition(
+  occupied: Set<string>,
+  bounds?: { width: number; height: number },
+) {
+  if (bounds && bounds.width > 0 && bounds.height > 0) {
+    const limits = desktopIconGridLimits(bounds, "desktop:new");
+    for (let col = 0; col <= limits.maxCol; col += 1) {
+      for (let row = 0; row <= limits.maxRow; row += 1) {
+        const point = desktopIconGridPoint("desktop:new", col, row);
+        const key = desktopIconGridKey(point);
+        if (!occupied.has(key)) {
+          occupied.add(key);
+          return point;
+        }
+      }
+    }
+  }
+  for (let col = 0; col < 12; col += 1) {
+    for (let row = 0; row < 20; row += 1) {
+      const point = desktopIconGridPoint("desktop:new", col, row);
+      const key = desktopIconGridKey(point);
+      if (!occupied.has(key)) {
+        occupied.add(key);
+        return point;
+      }
+    }
+  }
+  return desktopIconGridPoint("desktop:new", 0, 0);
+}
+
 function formatSize(bytes: number): string {
   if (bytes === 0) return "Zero bytes";
   if (bytes < 1024) return `${bytes} bytes`;
@@ -512,6 +726,19 @@ function getFileColor(name: string, isDir: boolean): string {
   if (["json","yaml","yml","toml"].includes(ext)) return "#a78bfa";
   if (["md","txt"].includes(ext)) return "#8c8c8c";
   return "#8c8c8c";
+}
+
+function imageMimeTypeForName(name: string): string {
+  const ext = name.split(".").pop()?.toLowerCase() || "";
+  if (ext === "svg") return "image/svg+xml";
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  return `image/${ext || "png"}`;
+}
+
+function isImageWorkspaceEntry(entry: WorkspaceFileEntry): boolean {
+  if (entry.is_directory) return false;
+  const ext = entry.name.split(".").pop()?.toLowerCase() || "";
+  return IMAGE_EXTS.has(ext);
 }
 
 function normalizeBrowserUrl(raw: string): string {
@@ -647,6 +874,66 @@ function FolderIcon({ size = 64, selected = false }: { size?: number; selected?:
   );
 }
 
+function DesktopFileIcon({
+  icon: Icon,
+  color,
+  active = false,
+}: {
+  icon: typeof File;
+  color: string;
+  active?: boolean;
+}) {
+  return (
+    <div className="relative h-14 w-12" aria-hidden="true">
+      <div
+        className="absolute inset-x-0 bottom-0 top-1 rounded-[12px] border"
+        style={{
+          background: active ? "rgba(244,248,255,0.98)" : "rgba(248,250,253,0.95)",
+          borderColor: active ? "rgba(118,176,247,0.75)" : "rgba(207,215,226,0.92)",
+          boxShadow: "0 12px 26px rgba(0,0,0,0.18)",
+        }}
+      />
+      <div
+        className="absolute right-0 top-1 h-4 w-4 rounded-bl-[10px] rounded-tr-[12px]"
+        style={{
+          background: active ? "rgba(214,231,255,0.95)" : "rgba(229,235,243,0.98)",
+          borderLeft: "1px solid rgba(207,215,226,0.92)",
+          borderBottom: "1px solid rgba(207,215,226,0.92)",
+        }}
+      />
+      <Icon
+        className="absolute left-1/2 top-[55%] h-6 w-6 -translate-x-1/2 -translate-y-1/2"
+        style={{ color }}
+        strokeWidth={1.9}
+      />
+    </div>
+  );
+}
+
+function DesktopImagePreviewIcon({
+  src,
+  active = false,
+}: {
+  src: string;
+  active?: boolean;
+}) {
+  return (
+    <div className="relative h-14 w-14" aria-hidden="true">
+      <img
+        src={src}
+        alt=""
+        draggable={false}
+        className="absolute inset-0 h-full w-full rounded-[16px] object-cover"
+        style={{
+          boxShadow: active
+            ? "0 0 0 1px rgba(122,184,245,0.8), 0 14px 28px rgba(0,0,0,0.24)"
+            : "0 14px 28px rgba(0,0,0,0.2)",
+        }}
+      />
+    </div>
+  );
+}
+
 function AppWindow({
   title,
   icon: Icon,
@@ -704,7 +991,7 @@ function AppWindow({
       onClick={(e) => e.stopPropagation()}
     >
       <div
-        className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing bg-[var(--bg-secondary)]"
+        className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing bg-[var(--bg-secondary)] select-none"
         style={{
           borderBottom: "1px solid var(--border-subtle)",
         }}
@@ -866,7 +1153,7 @@ export function Files({
   const [billingPos, setBillingPos] = useState({ x: 260, y: 110 });
   const [settingsPos, setSettingsPos] = useState({ x: 200, y: 70 });
   const [pluginsSize] = useState({ w: 520, h: 540 });
-  const [skillsSize] = useState({ w: 520, h: 560 });
+  const [skillsSize, setSkillsSize] = useState({ w: 520, h: 560 });
   const [channelsSize] = useState({ w: 520, h: 520 });
   const [tasksSize] = useState({ w: 760, h: 560 });
   const [jobsSize] = useState({ w: 620, h: 560 });
@@ -875,6 +1162,7 @@ export function Files({
   const [settingsSize] = useState({ w: 740, h: 560 });
   const pluginsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
   const skillsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const skillsResizeRef = useRef<WindowResizeState | null>(null);
   const channelsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
   const tasksDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
   const jobsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
@@ -886,6 +1174,8 @@ export function Files({
 
   // File browser
   const [entries, setEntries] = useState<WorkspaceFileEntry[]>([]);
+  const [desktopEntries, setDesktopEntries] = useState<WorkspaceFileEntry[]>(() => desktopWarmCache.entries);
+  const [desktopImagePreviews, setDesktopImagePreviews] = useState<Record<string, string>>(() => desktopWarmCache.imagePreviews);
   const [currentPath, setCurrentPath] = useState("");
   const [history, setHistory] = useState<string[]>([""]);
   const [historyIndex, setHistoryIndex] = useState(0);
@@ -896,16 +1186,25 @@ export function Files({
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [selected, setSelected] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [dragDropTarget, setDragDropTarget] = useState<DesktopDropTarget>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry?: WorkspaceFileEntry } | null>(null);
   const [createFolderOpen, setCreateFolderOpen] = useState(false);
   const [createFolderName, setCreateFolderName] = useState("");
   const [createFolderBasePath, setCreateFolderBasePath] = useState("");
   const [creatingFolder, setCreatingFolder] = useState(false);
+  const [createFileOpen, setCreateFileOpen] = useState(false);
+  const [createFileName, setCreateFileName] = useState("");
+  const [createFileBasePath, setCreateFileBasePath] = useState("");
+  const [creatingFile, setCreatingFile] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const createFolderInputRef = useRef<HTMLInputElement>(null);
+  const createFileInputRef = useRef<HTMLInputElement>(null);
   const filesFetchSeqRef = useRef(0);
   const filesLoadingSeqRef = useRef(0);
+  const desktopEntriesFetchSeqRef = useRef(0);
+  const desktopImagePreviewSeqRef = useRef(0);
+  const desktopLoadedAtRef = useRef(desktopWarmCache.lastLoadedAt);
 
   // Chat
   const [chatSessions, setChatSessions] = useState<SharedChatSession[]>([]);
@@ -1010,6 +1309,8 @@ export function Files({
       if (nextPluginsPos) setPluginsPos(nextPluginsPos);
       const nextSkillsPos = asWindowPoint(saved.skillsPos);
       if (nextSkillsPos) setSkillsPos(nextSkillsPos);
+      const nextSkillsSize = asWindowSize(saved.skillsSize);
+      if (nextSkillsSize) setSkillsSize(nextSkillsSize);
       const nextChannelsPos = asWindowPoint(saved.channelsPos);
       if (nextChannelsPos) setChannelsPos(nextChannelsPos);
       const nextTasksPos = asWindowPoint(saved.tasksPos);
@@ -1177,8 +1478,8 @@ export function Files({
         iconClickGuardRef.current = true;
       }
       const bounds = containerRef.current?.getBoundingClientRect();
-      const maxX = bounds ? Math.max(0, bounds.width - 84) : undefined;
-      const maxY = bounds ? Math.max(0, bounds.height - 110) : undefined;
+      const maxX = bounds ? Math.max(0, bounds.width - DESKTOP_ICON_WIDTH) : undefined;
+      const maxY = bounds ? Math.max(0, bounds.height - DESKTOP_ICON_HEIGHT) : undefined;
       const nextX = iconDragRef.current.ox + dx;
       const nextY = iconDragRef.current.oy + dy;
       setDesktopIcons((prev) => ({
@@ -1193,6 +1494,34 @@ export function Files({
     function onUp() {
       if (iconDragRef.current?.moved) {
         iconClickGuardRef.current = true;
+        const boundsRect = containerRef.current?.getBoundingClientRect();
+        if (boundsRect) {
+          const bounds = {
+            width: Math.max(0, Math.floor(boundsRect.width)),
+            height: Math.max(0, Math.floor(boundsRect.height)),
+          };
+          setDesktopIcons((prev) => {
+            const current = prev[id];
+            if (!current) return prev;
+            const occupied = new Set<string>();
+            for (const [key, value] of Object.entries(prev)) {
+              if (key === id) continue;
+              occupied.add(desktopIconGridKey(nearestDesktopIconGridPoint(bounds, value, key)));
+            }
+            const snapped = snapDesktopIconPosition(bounds, current, occupied, id);
+            if (current.x === snapped.x && current.y === snapped.y) {
+              return prev;
+            }
+            return {
+              ...prev,
+              [id]: {
+                ...current,
+                x: snapped.x,
+                y: snapped.y,
+              },
+            };
+          });
+        }
         setTimeout(() => {
           iconClickGuardRef.current = false;
         }, 0);
@@ -1271,7 +1600,7 @@ export function Files({
     clampResizableWindow(browserPos, browserSize, { w: 640, h: 420 }, setBrowserPos, setBrowserSize);
     clampResizableWindow(terminalPos, terminalSize, { w: 680, h: 360 }, setTerminalPos, setTerminalSize);
     clampFixedWindow(pluginsPos, pluginsSize, setPluginsPos);
-    clampFixedWindow(skillsPos, skillsSize, setSkillsPos);
+    clampResizableWindow(skillsPos, skillsSize, { w: 420, h: 360 }, setSkillsPos, setSkillsSize);
     clampFixedWindow(channelsPos, channelsSize, setChannelsPos);
     clampFixedWindow(tasksPos, tasksSize, setTasksPos);
     clampFixedWindow(jobsPos, jobsSize, setJobsPos);
@@ -1352,6 +1681,7 @@ export function Files({
       terminalSize,
       pluginsPos,
       skillsPos,
+      skillsSize,
       channelsPos,
       tasksPos,
       jobsPos,
@@ -1409,6 +1739,7 @@ export function Files({
     terminalSize,
     pluginsPos,
     skillsPos,
+    skillsSize,
     channelsPos,
     tasksPos,
     jobsPos,
@@ -1851,7 +2182,7 @@ export function Files({
     setBrowserLoadError(null);
     focusWindow("browser");
     if (!isTrustedLocalPreviewUrl(normalizedTarget)) {
-      void navigateBrowser(normalizedTarget);
+      void navigateBrowser(normalizedTarget, { sessionId: null });
     }
   }
 
@@ -2337,12 +2668,13 @@ export function Files({
     if (liveViewport && liveViewport.width > 0 && liveViewport.height > 0) {
       return requestedBrowserViewportSize(liveViewport.width, liveViewport.height);
     }
+    const detailsPanelHeight = browserLoadError ? 116 : 0;
     return requestedBrowserViewportSize(
       browserSize.w,
       browserSize.h
         - BROWSER_APP_WINDOW_TITLEBAR_HEIGHT
         - BROWSER_TOOLBAR_HEIGHT
-        - BROWSER_DETAILS_PANEL_HEIGHT,
+        - detailsPanelHeight,
     );
   }
 
@@ -2404,9 +2736,62 @@ export function Files({
     browserSize.h,
   ]);
 
-  async function navigateBrowser(input: string) {
+  async function closeBrowserSession(sessionId: string | null) {
+    if (!sessionId) return;
+    try {
+      await invoke("browser_session_close", { sessionId });
+    } catch {
+      // Ignore best-effort browser session cleanup failures.
+    }
+  }
+
+  async function createBrowserSessionSnapshot(targetUrl: string) {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const viewport = browserRequestedViewportSize();
+        return await invoke<BrowserSnapshot>("browser_session_create", {
+          url: targetUrl,
+          viewportWidth: viewport.width,
+          viewportHeight: viewport.height,
+        });
+      } catch (error) {
+        lastError = error;
+        if (attempt === 0) {
+          await sleep(250);
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  async function retryCurrentBrowserTarget() {
+    if (browserUsingEmbeddedPreview) {
+      await reloadBrowser();
+      return;
+    }
+    const target = normalizeBrowserUrl(browserCurrentUrl || browserUrlInput || DEFAULT_BROWSER_URL);
+    if (!target) return;
+    const sessionId = browserSessionId;
+    closeBrowserLiveSocket();
+    resetBrowserLiveFrame();
+    setBrowserLiveState(null);
+    setBrowserLiveConnected(false);
+    setBrowserLiveError(null);
+    setBrowserSnapshot(null);
+    setBrowserSessionId(null);
+    setBrowserLoadError(null);
+    await closeBrowserSession(sessionId);
+    await navigateBrowser(target, { sessionId: null });
+  }
+
+  async function navigateBrowser(input: string, options?: { sessionId?: string | null }) {
     const next = normalizeBrowserUrl(input);
     if (!next) return;
+    const activeSessionId =
+      options && Object.prototype.hasOwnProperty.call(options, "sessionId")
+        ? options.sessionId ?? null
+        : browserSessionId;
     if (isTrustedLocalPreviewUrl(next)) {
       setBrowserEmbeddedPreview((prev) => ({
         url: next,
@@ -2423,21 +2808,33 @@ export function Files({
     setBrowserLoading(true);
     try {
       let snapshot: BrowserSnapshot;
-      if (!browserSessionId) {
-        const viewport = browserRequestedViewportSize();
-        snapshot = await invoke<BrowserSnapshot>("browser_session_create", {
-          url: next,
-          viewportWidth: viewport.width,
-          viewportHeight: viewport.height,
-        });
-        setBrowserSessionId(snapshot.session_id);
+      if (!activeSessionId) {
+        snapshot = await createBrowserSessionSnapshot(next);
       } else {
-        snapshot = await invoke<BrowserSnapshot>("browser_navigate", { sessionId: browserSessionId, url: next });
+        try {
+          snapshot = await invoke<BrowserSnapshot>("browser_navigate", { sessionId: activeSessionId, url: next });
+        } catch (error) {
+          const initialMessage = describeError(error);
+          closeBrowserLiveSocket();
+          resetBrowserLiveFrame();
+          setBrowserLiveState(null);
+          setBrowserLiveConnected(false);
+          setBrowserLiveError(null);
+          setBrowserSnapshot(null);
+          await closeBrowserSession(activeSessionId);
+          setBrowserSessionId(null);
+          try {
+            snapshot = await createBrowserSessionSnapshot(next);
+          } catch (retryError) {
+            throw new Error(`${describeError(retryError)}\n\nInitial navigation error: ${initialMessage}`);
+          }
+        }
       }
+      setBrowserSessionId(snapshot.session_id);
       setBrowserSnapshot(snapshot);
       setBrowserUrlInput(presentBrowserUrl(snapshot.url));
     } catch (e) {
-      setBrowserLoadError(e instanceof Error ? e.message : String(e));
+      setBrowserLoadError(describeError(e));
     } finally {
       setBrowserLoading(false);
     }
@@ -2596,7 +2993,7 @@ export function Files({
     try {
       await open(url);
     } catch (e) {
-      setBrowserLoadError(`Failed to open browser externally: ${e instanceof Error ? e.message : String(e)}`);
+      setBrowserLoadError(`Failed to open browser externally: ${describeError(e)}`);
     }
   }
 
@@ -2636,7 +3033,46 @@ export function Files({
     }
   }, [selected]);
 
+  const fetchDesktopEntries = useCallback(async () => {
+    const requestSeq = desktopEntriesFetchSeqRef.current + 1;
+    desktopEntriesFetchSeqRef.current = requestSeq;
+    try {
+      const result = await invoke<WorkspaceFileEntry[]>("list_workspace_files", { path: DESKTOP_WORKSPACE_PATH });
+      if (requestSeq !== desktopEntriesFetchSeqRef.current) return;
+      const filtered = result
+        .filter((entry) => !HIDDEN_FILES.has(entry.name))
+        .sort((a, b) => (
+          a.is_directory !== b.is_directory
+            ? (a.is_directory ? -1 : 1)
+            : a.name.localeCompare(b.name)
+        ));
+      const loadedAt = Date.now();
+      desktopWarmCache.entries = filtered;
+      desktopWarmCache.lastLoadedAt = loadedAt;
+      desktopLoadedAtRef.current = loadedAt;
+      setDesktopEntries((prev) => (workspaceEntriesEqual(prev, filtered) ? prev : filtered));
+    } catch {
+      if (requestSeq !== desktopEntriesFetchSeqRef.current) return;
+      // Keep the current desktop visible on transient refresh failures instead of
+      // clearing and repopulating every icon on the next successful poll.
+    }
+  }, []);
+
   useEffect(() => { if (finderOpen) fetchFiles(currentPath); }, [currentPath, fetchFiles, finderOpen]);
+  useEffect(() => {
+    if (desktopWarmCache.entries.length === 0) {
+      void fetchDesktopEntries();
+    }
+    const refreshRootFolder = () => {
+      if (document.hidden) return;
+      if (Date.now() - desktopLoadedAtRef.current < DESKTOP_CACHE_STALE_MS) return;
+      void fetchDesktopEntries();
+    };
+    const intervalId = window.setInterval(refreshRootFolder, WORKSPACE_FOLDER_REFRESH_MS);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [fetchDesktopEntries]);
   useEffect(() => {
     if (!finderOpen) return;
     const refreshCurrentFolder = () => {
@@ -2659,6 +3095,99 @@ export function Files({
   }, [currentPath, fetchFiles, finderOpen]);
   useEffect(() => { const h = () => setContextMenu(null); window.addEventListener("click", h); return () => window.removeEventListener("click", h); }, []);
 
+  useEffect(() => {
+    setDesktopIcons((prev) => {
+      const next: Record<string, DesktopIcon> = {};
+      const hasBounds = desktopBounds.width > 0 && desktopBounds.height > 0;
+      const bounds = hasBounds ? desktopBounds : null;
+      const workspaceBase = prev.workspace ?? { id: "workspace", x: DESKTOP_ICON_GRID_START_X, y: WORKSPACE_ICON_GRID_Y };
+      next.workspace = bounds
+        ? { id: "workspace", ...snapDesktopIconPosition(bounds, workspaceBase, new Set(), "workspace") }
+        : workspaceBase;
+      const occupied = new Set<string>([desktopIconGridKey(next.workspace)]);
+      for (const entry of desktopEntries) {
+        const key = desktopIconIdForPath(entry.path);
+        const existing = prev[key];
+        if (existing) {
+          const normalized = bounds ? snapDesktopIconPosition(bounds, existing, occupied, key) : existing;
+          next[key] = { id: key, x: normalized.x, y: normalized.y };
+          occupied.add(desktopIconGridKey(next[key]));
+        }
+      }
+      for (const entry of desktopEntries) {
+        const key = desktopIconIdForPath(entry.path);
+        if (next[key]) continue;
+        const point = nextDesktopIconPosition(occupied, bounds ?? undefined);
+        next[key] = { id: key, x: point.x, y: point.y };
+      }
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(next);
+      if (
+        prevKeys.length === nextKeys.length &&
+        nextKeys.every((key) => (
+          prev[key]?.x === next[key]?.x &&
+          prev[key]?.y === next[key]?.y
+        ))
+      ) {
+        return prev;
+      }
+      return next;
+    });
+  }, [desktopBounds.height, desktopBounds.width, desktopEntries]);
+
+  useEffect(() => {
+    const requestSeq = desktopImagePreviewSeqRef.current + 1;
+    desktopImagePreviewSeqRef.current = requestSeq;
+    const imageEntries = desktopEntries.filter(isImageWorkspaceEntry);
+    const imagePaths = new Set(imageEntries.map((entry) => entry.path));
+    setDesktopImagePreviews((prev) => {
+      const nextEntries = Object.entries(prev).filter(([path]) => imagePaths.has(path));
+      if (nextEntries.length === Object.keys(prev).length) {
+        return prev;
+      }
+      return Object.fromEntries(nextEntries);
+    });
+    const missingEntries = imageEntries.filter((entry) => !desktopImagePreviews[entry.path]);
+    if (missingEntries.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    void Promise.all(
+      missingEntries.map(async (entry) => {
+        const base64 = await invoke<string>("read_workspace_file_base64", { path: entry.path });
+        return [
+          entry.path,
+          `data:${imageMimeTypeForName(entry.name)};base64,${base64}`,
+        ] as const;
+      }),
+    )
+      .then((loadedEntries) => {
+        if (cancelled || requestSeq !== desktopImagePreviewSeqRef.current) return;
+        setDesktopImagePreviews((prev) => {
+          const next = { ...prev };
+          for (const [path, dataUrl] of loadedEntries) {
+            next[path] = dataUrl;
+          }
+          desktopWarmCache.imagePreviews = next;
+          return next;
+        });
+      })
+      .catch(() => {
+        // Keep the generic icon if preview loading fails.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [desktopEntries, desktopImagePreviews]);
+
+  useEffect(() => {
+    desktopWarmCache.entries = desktopEntries;
+  }, [desktopEntries]);
+
+  useEffect(() => {
+    desktopWarmCache.imagePreviews = desktopImagePreviews;
+  }, [desktopImagePreviews]);
+
   function openFolder(path: string) { setCurrentPath(path); setHistory([path]); setHistoryIndex(0); setFinderOpen(true); setSelected(null); }
   function navigateTo(path: string) { const h = history.slice(0, historyIndex + 1); h.push(path); setHistory(h); setHistoryIndex(h.length - 1); setCurrentPath(path); setSelected(null); }
   function goBack() { if (historyIndex > 0) { setHistoryIndex(historyIndex - 1); setCurrentPath(history[historyIndex - 1]); setSelected(null); } }
@@ -2677,7 +3206,59 @@ export function Files({
     }
     handleView(entry);
   }
+  function handleDesktopEntryOpen(entry: WorkspaceFileEntry) {
+    if (entry.is_directory) {
+      openFolder(entry.path);
+      return;
+    }
+    handleEntryDoubleClick(entry);
+  }
   function handleContextMenuEntry(entry: WorkspaceFileEntry, e: React.MouseEvent) { e.preventDefault(); e.stopPropagation(); setSelected(entry.path); setContextMenu({ x: e.clientX, y: e.clientY, entry }); }
+
+  function dragEventHasFiles(e: React.DragEvent) {
+    return Array.from(e.dataTransfer?.types ?? []).includes("Files");
+  }
+
+  function handleUploadDragOver(e: React.DragEvent, destPath: string) {
+    if (!dragEventHasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "copy";
+    setDragOver(true);
+    setDragDropTarget(destPath);
+  }
+
+  function handleUploadDragLeave(e: React.DragEvent, destPath?: DesktopDropTarget) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (destPath !== undefined && dragDropTarget === destPath) {
+      setDragDropTarget(null);
+    }
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (rect) {
+      const { clientX: cx, clientY: cy } = e;
+      if (cx < rect.left || cx > rect.right || cy < rect.top || cy > rect.bottom) {
+        setDragOver(false);
+        setDragDropTarget(null);
+      }
+    }
+  }
+
+  async function handleUploadDropToPath(e: React.DragEvent, destPath: string) {
+    if (!dragEventHasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    setDragDropTarget(null);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) {
+      await uploadFiles(files, destPath);
+    }
+  }
+
+  function resolveNativeDropTarget(payload: NativeDragDropPayload | null | undefined): DesktopDropTarget {
+    return dropTargetFromClientPoint(nativeDragDropClientPoint(payload));
+  }
 
   async function openWorkspaceFileInBrowser(entry: WorkspaceFileEntry) {
     if (entry.is_directory) return;
@@ -2815,7 +3396,38 @@ export function Files({
     try {
       await navigator.clipboard?.writeText?.(path);
     } catch (e) {
-      setError(`Copy failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(`Copy failed: ${describeError(e)}`);
+    }
+  }
+
+  async function exportWorkspaceEntry(entry: Pick<WorkspaceFileEntry, "name" | "path">) {
+    try {
+      const destination = await save({
+        title: `Export ${entry.name}`,
+        defaultPath: entry.name,
+        filters: previewExportFilters(entry.name),
+      });
+      if (!destination || Array.isArray(destination)) return;
+      await invoke("export_workspace_file", {
+        path: entry.path,
+        destinationPath: destination,
+      });
+    } catch (e) {
+      setError(`Export failed: ${describeError(e)}`);
+    }
+  }
+
+  async function exportPreviewFile() {
+    if (!preview) return;
+    await exportWorkspaceEntry(preview);
+  }
+
+  async function copyPreviewText() {
+    if (!preview || preview.kind !== "text") return;
+    try {
+      await navigator.clipboard?.writeText?.(preview.content);
+    } catch (e) {
+      setError(`Copy failed: ${describeError(e)}`);
     }
   }
 
@@ -2830,23 +3442,28 @@ export function Files({
             : ext === "jpg" || ext === "jpeg"
               ? "image/jpeg"
               : `image/${ext}`;
-        setPreview({ kind: "image", name: entry.name, dataUrl: `data:${mime};base64,${base64}` });
+        setPreview({ kind: "image", name: entry.name, path: entry.path, dataUrl: `data:${mime};base64,${base64}` });
         return;
       }
       if (BINARY_EXTS.has(ext)) {
-        setPreview({ kind: "binary", name: entry.name, size: entry.size });
+        setPreview({ kind: "binary", name: entry.name, path: entry.path, size: entry.size });
         return;
       }
       const c = await invoke<string>("read_workspace_file", { path: entry.path });
-      setPreview({ kind: "text", name: entry.name, content: c });
+      setPreview({ kind: "text", name: entry.name, path: entry.path, content: c });
     } catch (e) {
-      setError(`Failed to read: ${e instanceof Error ? e.message : String(e)}`);
+      setError(`Failed to read: ${describeError(e)}`);
     }
   }
 
   async function handleDelete(entry: WorkspaceFileEntry) {
     if (!confirm(`Move "${entry.name}" to Trash?`)) return;
-    try { await invoke("delete_workspace_file", { path: entry.path }); setSelected(null); fetchFiles(currentPath); }
+    try {
+      await invoke("delete_workspace_file", { path: entry.path });
+      setSelected(null);
+      void fetchDesktopEntries();
+      fetchFiles(currentPath);
+    }
     catch (e) { setError(`Delete failed: ${e instanceof Error ? e.message : String(e)}`); }
   }
 
@@ -2858,11 +3475,25 @@ export function Files({
     setContextMenu(null);
   }
 
+  function handleCreateFile(basePath?: string) {
+    const root = typeof basePath === "string" ? basePath : currentPath;
+    setCreateFileBasePath(root);
+    setCreateFileName("");
+    setCreateFileOpen(true);
+    setContextMenu(null);
+  }
+
   useEffect(() => {
     if (!createFolderOpen) return;
     const id = window.setTimeout(() => createFolderInputRef.current?.focus(), 0);
     return () => window.clearTimeout(id);
   }, [createFolderOpen]);
+
+  useEffect(() => {
+    if (!createFileOpen) return;
+    const id = window.setTimeout(() => createFileInputRef.current?.focus(), 0);
+    return () => window.clearTimeout(id);
+  }, [createFileOpen]);
 
   async function submitCreateFolder() {
     const trimmedName = createFolderName.trim();
@@ -2879,20 +3510,38 @@ export function Files({
       }
       setCreateFolderOpen(false);
       setCreateFolderName("");
+      void fetchDesktopEntries();
       if (finderOpen) await fetchFiles(currentPath);
     }
-    catch (e) { setError(`Failed to create folder: ${e instanceof Error ? e.message : String(e)}`); }
+    catch (e) { setError(`Failed to create folder: ${describeError(e)}`); }
     finally { setCreatingFolder(false); }
   }
 
-  // ── Drag & Drop files ───────────────────────────────────────────────
-
-  function handleDragOver(e: React.DragEvent) { e.preventDefault(); e.stopPropagation(); if (e.dataTransfer.types.includes("Files")) { setDragOver(true); e.dataTransfer.dropEffect = "copy"; } }
-  function handleDragLeave(e: React.DragEvent) {
-    e.preventDefault(); e.stopPropagation();
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (rect) { const { clientX: cx, clientY: cy } = e; if (cx < rect.left || cx > rect.right || cy < rect.top || cy > rect.bottom) setDragOver(false); }
+  async function submitCreateFile() {
+    const trimmedName = createFileName.trim();
+    if (!trimmedName || creatingFile) return;
+    const root = createFileBasePath;
+    setCreatingFile(true);
+    setError(null);
+    try {
+      const created = await invoke<WorkspaceFileEntry>("create_workspace_file", {
+        parentPath: root,
+        name: trimmedName,
+        content: "",
+      });
+      setCreateFileOpen(false);
+      setCreateFileName("");
+      setSelected(created.path);
+      void fetchDesktopEntries();
+      if (finderOpen) await fetchFiles(currentPath);
+    } catch (e) {
+      setError(`Failed to create file: ${describeError(e)}`);
+    } finally {
+      setCreatingFile(false);
+    }
   }
+
+  // ── Drag & Drop files ───────────────────────────────────────────────
 
   async function uploadFiles(files: globalThis.File[], destPath: string) {
     setUploading(true); setError(null);
@@ -2902,13 +3551,96 @@ export function Files({
         let binary = ""; for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
         await invoke("upload_workspace_file", { fileName: file.name, base64: btoa(binary), destPath });
       }
+      void fetchDesktopEntries();
       if (finderOpen) fetchFiles(currentPath);
     } catch (err) { setError(`Upload failed: ${err instanceof Error ? err.message : String(err)}`); }
     finally { setUploading(false); }
   }
 
-  async function handleDrop(e: React.DragEvent) { e.preventDefault(); e.stopPropagation(); setDragOver(false); const f = Array.from(e.dataTransfer.files); if (f.length > 0) uploadFiles(f, finderOpen ? currentPath : ""); }
-  async function handleFileInputChange(e: React.ChangeEvent<HTMLInputElement>) { const f = e.target.files?.[0]; if (!f) return; e.target.value = ""; uploadFiles([f], finderOpen ? currentPath : ""); }
+  async function uploadHostDroppedFiles(paths: string[], destPath: string) {
+    const sanitizedPaths = paths
+      .filter((value): value is string => typeof value === "string")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (sanitizedPaths.length === 0) return;
+    setUploading(true);
+    setError(null);
+    try {
+      await invoke<WorkspaceFileEntry[]>("upload_host_dropped_files", {
+        paths: sanitizedPaths,
+        destPath,
+      });
+      void fetchDesktopEntries();
+      if (finderOpen) void fetchFiles(currentPath);
+    } catch (err) {
+      setError(`Upload failed: ${describeError(err)}`);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function handleFileInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    if (files.length === 0) return;
+    e.target.value = "";
+    uploadFiles(files, finderOpen ? currentPath : DESKTOP_WORKSPACE_PATH);
+  }
+
+  useEffect(() => {
+    let disposed = false;
+    const unlistenFns: Array<() => void> = [];
+
+    const register = async () => {
+      const attach = async (
+        eventName: string,
+        handler: (payload: NativeDragDropPayload | null | undefined) => void | Promise<void>,
+      ) => {
+        const unlisten = await listen<NativeDragDropPayload>(eventName, (event) => {
+          if (disposed) return;
+          void handler(event.payload);
+        });
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        unlistenFns.push(unlisten);
+      };
+
+      await attach("tauri://drag-enter", (payload) => {
+        const target = resolveNativeDropTarget(payload);
+        setDragOver(target !== null);
+        setDragDropTarget(target);
+      });
+      await attach("tauri://drag-over", (payload) => {
+        const target = resolveNativeDropTarget(payload);
+        setDragOver(target !== null);
+        setDragDropTarget(target);
+      });
+      await attach("tauri://drag-leave", () => {
+        setDragOver(false);
+        setDragDropTarget(null);
+      });
+      await attach("tauri://drag-drop", async (payload) => {
+        const target = resolveNativeDropTarget(payload);
+        setDragOver(false);
+        setDragDropTarget(null);
+        if (target === null) return;
+        const droppedPaths = Array.isArray(payload?.paths)
+          ? payload.paths.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+          : [];
+        if (droppedPaths.length === 0) return;
+        await uploadHostDroppedFiles(droppedPaths, target);
+      });
+    };
+
+    void register();
+    return () => {
+      disposed = true;
+      for (const unlisten of unlistenFns) {
+        unlisten();
+      }
+    };
+  }, [currentPath, fetchDesktopEntries, fetchFiles, finderOpen]);
 
   // ── Chat ────────────────────────────────────────────────────────────
 
@@ -3259,7 +3991,7 @@ export function Files({
   // ═══════════════════════════════════════════════════════════════════
 
   return (
-    <div className="h-full w-full min-w-0 flex flex-col select-none relative overflow-hidden">
+    <div className="h-full w-full min-w-0 flex flex-col relative overflow-hidden">
       {/* Main area */}
       <div className="flex-1 min-w-0 flex overflow-hidden">
 
@@ -3267,11 +3999,12 @@ export function Files({
         <div
           ref={containerRef}
           className="flex-1 min-w-0 relative overflow-hidden"
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
+          data-desktop-drop-target={DESKTOP_WORKSPACE_PATH}
+          onDragOver={(e) => handleUploadDragOver(e, DESKTOP_WORKSPACE_PATH)}
+          onDragLeave={(e) => handleUploadDragLeave(e)}
+          onDrop={(e) => { void handleUploadDropToPath(e, DESKTOP_WORKSPACE_PATH); }}
           onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY }); }}
-          onClick={() => { setSelected(null); setContextMenu(null); setShowWallpaperPicker(false); }}
+          onClick={() => { setSelected(null); setContextMenu(null); setShowWallpaperPicker(false); setDragDropTarget(null); }}
         >
           {/* Wallpaper */}
           <div className="absolute inset-0" style={isWpImage ? { backgroundImage: wallpaperCss, backgroundSize: "cover", backgroundPosition: "center" } : { background: wallpaperCss }} />
@@ -3282,13 +4015,22 @@ export function Files({
               const icon = desktopIcons.workspace;
               return (
                 <div
-                  className="absolute flex flex-col items-center w-20 p-2 rounded-xl cursor-grab active:cursor-grabbing transition-all"
+                  className="absolute flex flex-col items-center w-20 p-2 rounded-xl cursor-grab active:cursor-grabbing transition-colors duration-100 select-none"
+                  data-desktop-drop-target=""
                   style={{
                     left: icon?.x ?? 28,
                     top: icon?.y ?? 72,
-                    background: selected === "__user_folder" ? "rgba(255,255,255,0.18)" : "transparent",
+                    background: selected === "__user_folder"
+                      ? "rgba(255,255,255,0.18)"
+                      : dragDropTarget === ""
+                        ? "rgba(84,163,247,0.18)"
+                        : "transparent",
+                    outline: dragDropTarget === "" ? "1px solid rgba(122,184,245,0.6)" : "none",
                   }}
                   onMouseDown={(e) => handleIconMouseDown("workspace", e)}
+                  onDragOver={(e) => handleUploadDragOver(e, "")}
+                  onDragLeave={(e) => handleUploadDragLeave(e, "")}
+                  onDrop={(e) => { void handleUploadDropToPath(e, ""); }}
                   onClick={(e) => {
                     if (iconClickGuardRef.current) return;
                     e.stopPropagation();
@@ -3316,6 +4058,73 @@ export function Files({
                 </div>
               );
             })()}
+            {desktopEntries.map((entry) => {
+              const iconKey = desktopIconIdForPath(entry.path);
+              const icon = desktopIcons[iconKey];
+              const Icon = getFileIcon(entry.name, entry.is_directory);
+              const iconColor = getFileColor(entry.name, entry.is_directory);
+              const imagePreview = isImageWorkspaceEntry(entry) ? desktopImagePreviews[entry.path] : undefined;
+              const isSelected = selected === entry.path;
+              const isDropTarget = dragDropTarget === entry.path;
+              return (
+                <div
+                  key={entry.path}
+                  className="absolute flex flex-col items-center w-20 p-2 rounded-xl cursor-grab active:cursor-grabbing transition-colors duration-100 select-none"
+                  data-desktop-drop-target={entry.is_directory ? entry.path : undefined}
+                  style={{
+                    left: icon?.x ?? 28,
+                    top: icon?.y ?? 192,
+                    background: isSelected
+                      ? "rgba(255,255,255,0.18)"
+                      : isDropTarget
+                        ? "rgba(84,163,247,0.18)"
+                        : "transparent",
+                    outline: isDropTarget ? "1px solid rgba(122,184,245,0.6)" : "none",
+                  }}
+                  onMouseDown={(e) => handleIconMouseDown(iconKey, e)}
+                  onDragOver={entry.is_directory ? (e) => handleUploadDragOver(e, entry.path) : undefined}
+                  onDragLeave={entry.is_directory ? (e) => handleUploadDragLeave(e, entry.path) : undefined}
+                  onDrop={entry.is_directory ? ((e) => { void handleUploadDropToPath(e, entry.path); }) : undefined}
+                  onClick={(e) => {
+                    if (iconClickGuardRef.current) return;
+                    e.stopPropagation();
+                    setSelected(entry.path);
+                  }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setSelected(entry.path);
+                    setContextMenu({ x: e.clientX, y: e.clientY, entry });
+                  }}
+                  onDoubleClick={() => handleDesktopEntryOpen(entry)}
+                >
+                  {entry.is_directory ? (
+                    <FolderIcon size={56} selected={isSelected || isDropTarget} />
+                  ) : imagePreview ? (
+                    <DesktopImagePreviewIcon src={imagePreview} active={isSelected || isDropTarget} />
+                  ) : (
+                    <div className="w-14 h-14 flex items-center justify-center">
+                      <DesktopFileIcon icon={Icon} color={iconColor} active={isSelected || isDropTarget} />
+                    </div>
+                  )}
+                  <span
+                    className="text-[11px] text-center leading-tight mt-1 w-full"
+                    style={{
+                      color: "white",
+                      textShadow: "0 1px 3px rgba(0,0,0,0.6)",
+                      fontWeight: isSelected ? 600 : 400,
+                      display: "-webkit-box",
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: "vertical",
+                      overflow: "hidden",
+                      wordBreak: "break-word",
+                    }}
+                  >
+                    {entry.name}
+                  </span>
+                </div>
+              );
+            })}
           </div>
 
           {/* Drag overlay */}
@@ -3326,7 +4135,9 @@ export function Files({
                   <ArrowUp className="w-10 h-10 animate-bounce" style={{ color: "white" }} />
                 </div>
                 <p className="text-xl font-semibold" style={{ color: "white", textShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>Drop files to upload</p>
-                <p className="text-sm mt-2" style={{ color: "rgba(255,255,255,0.7)" }}>Files will be added to your workspace</p>
+                <p className="text-sm mt-2" style={{ color: "rgba(255,255,255,0.7)" }}>
+                  {`Files will be added to ${describeDesktopDropTarget(dragDropTarget)}`}
+                </p>
               </div>
             </div>
           )}
@@ -3345,6 +4156,7 @@ export function Files({
           {finderOpen && (
             <div
               className="absolute flex flex-col rounded-xl overflow-hidden animate-scale-in"
+              data-desktop-drop-target={currentPath}
               style={{
                 top: finderPos.y, left: finderPos.x,
                 width: finderSize.w, height: finderSize.h,
@@ -3357,7 +4169,7 @@ export function Files({
             >
               {/* Title bar — drag handle */}
               <div
-                className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing"
+                className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing select-none"
                 style={{ background: "#2d2d2d", borderBottom: "1px solid #1a1a1a" }}
                 onMouseDown={handleFinderDragStart}
               >
@@ -3383,7 +4195,8 @@ export function Files({
                   <button onClick={() => setViewMode("grid")} className="p-1 rounded" style={{ color: viewMode === "grid" ? "#fff" : "#666", background: viewMode === "grid" ? "rgba(255,255,255,0.1)" : "transparent" }}><LayoutGrid className="w-3.5 h-3.5" /></button>
                   <button onClick={() => setViewMode("list")} className="p-1 rounded" style={{ color: viewMode === "list" ? "#fff" : "#666", background: viewMode === "list" ? "rgba(255,255,255,0.1)" : "transparent" }}><List className="w-3.5 h-3.5" /></button>
                   <div className="w-px h-3.5 mx-1" style={{ background: "rgba(255,255,255,0.1)" }} />
-                  <button onClick={() => handleCreateFolder(finderOpen ? currentPath : "")} className="p-1 rounded hover:bg-white/10"><Plus className="w-3.5 h-3.5" style={{ color: "#aaa" }} /></button>
+                  <button onClick={() => handleCreateFile(finderOpen ? currentPath : DESKTOP_WORKSPACE_PATH)} className="p-1 rounded hover:bg-white/10" title="New file"><FileText className="w-3.5 h-3.5" style={{ color: "#aaa" }} /></button>
+                  <button onClick={() => handleCreateFolder(finderOpen ? currentPath : DESKTOP_WORKSPACE_PATH)} className="p-1 rounded hover:bg-white/10"><Plus className="w-3.5 h-3.5" style={{ color: "#aaa" }} /></button>
                 </div>
               </div>
 
@@ -3404,9 +4217,10 @@ export function Files({
               {/* File area */}
               <div
                 className="flex-1 overflow-auto relative"
-                onClick={() => { setSelected(null); setContextMenu(null); }}
-                onDragOver={handleDragOver}
-                onDrop={handleDrop}
+                onClick={() => { setSelected(null); setContextMenu(null); setDragDropTarget(null); }}
+                onDragOver={(e) => handleUploadDragOver(e, currentPath)}
+                onDragLeave={(e) => handleUploadDragLeave(e, currentPath)}
+                onDrop={(e) => { void handleUploadDropToPath(e, currentPath); }}
                 style={{ background: "#1e1e1e" }}
               >
                 {loading && entries.length === 0 ? (
@@ -3419,9 +4233,28 @@ export function Files({
                       const Icon = getFileIcon(entry.name, entry.is_directory);
                       const iconColor = getFileColor(entry.name, entry.is_directory);
                       const isSel = selected === entry.path;
+                      const isDropTarget = dragDropTarget === entry.path;
                       return (
-                        <div key={entry.path} className="flex flex-col items-center p-2 rounded-lg cursor-default" style={{ background: isSel ? "rgba(59,130,246,0.2)" : "transparent" }} onClick={(e) => handleEntryClick(entry, e)} onDoubleClick={() => handleEntryDoubleClick(entry)} onContextMenu={(e) => handleContextMenuEntry(entry, e)}>
-                          {entry.is_directory ? <div className="w-11 h-11 flex items-center justify-center mb-1"><FolderIcon size={44} selected={isSel} /></div> : <div className="w-11 h-11 flex items-center justify-center mb-1"><Icon className="w-8 h-8" style={{ color: iconColor }} strokeWidth={1.2} /></div>}
+                        <div
+                          key={entry.path}
+                          className="flex flex-col items-center p-2 rounded-lg cursor-default"
+                          data-desktop-drop-target={entry.is_directory ? entry.path : undefined}
+                          style={{
+                            background: isSel
+                              ? "rgba(59,130,246,0.2)"
+                              : isDropTarget
+                                ? "rgba(84,163,247,0.18)"
+                                : "transparent",
+                            outline: isDropTarget ? "1px solid rgba(122,184,245,0.55)" : "none",
+                          }}
+                          onClick={(e) => handleEntryClick(entry, e)}
+                          onDoubleClick={() => handleEntryDoubleClick(entry)}
+                          onContextMenu={(e) => handleContextMenuEntry(entry, e)}
+                          onDragOver={entry.is_directory ? (e) => handleUploadDragOver(e, entry.path) : undefined}
+                          onDragLeave={entry.is_directory ? (e) => handleUploadDragLeave(e, entry.path) : undefined}
+                          onDrop={entry.is_directory ? ((e) => { void handleUploadDropToPath(e, entry.path); }) : undefined}
+                        >
+                          {entry.is_directory ? <div className="w-11 h-11 flex items-center justify-center mb-1"><FolderIcon size={44} selected={isSel || isDropTarget} /></div> : <div className="w-11 h-11 flex items-center justify-center mb-1"><Icon className="w-8 h-8" style={{ color: iconColor }} strokeWidth={1.2} /></div>}
                           <span className="text-[10px] text-center leading-tight w-full px-0.5" style={{ color: isSel ? "#fff" : "#ccc", fontWeight: isSel ? 500 : 400, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", wordBreak: "break-all" }}>{entry.name}</span>
                         </div>
                       );
@@ -3434,8 +4267,28 @@ export function Files({
                       const Icon = getFileIcon(entry.name, entry.is_directory);
                       const iconColor = getFileColor(entry.name, entry.is_directory);
                       const isSel = selected === entry.path;
+                      const isDropTarget = dragDropTarget === entry.path;
                       return (
-                        <div key={entry.path} className="flex items-center gap-3 px-4 py-1.5 cursor-default" style={{ background: isSel ? "rgba(59,130,246,0.15)" : "transparent", borderBottom: "1px solid #2a2a2a" }} onClick={(e) => handleEntryClick(entry, e)} onDoubleClick={() => handleEntryDoubleClick(entry)} onContextMenu={(e) => handleContextMenuEntry(entry, e)}>
+                        <div
+                          key={entry.path}
+                          className="flex items-center gap-3 px-4 py-1.5 cursor-default"
+                          data-desktop-drop-target={entry.is_directory ? entry.path : undefined}
+                          style={{
+                            background: isSel
+                              ? "rgba(59,130,246,0.15)"
+                              : isDropTarget
+                                ? "rgba(84,163,247,0.18)"
+                                : "transparent",
+                            borderBottom: "1px solid #2a2a2a",
+                            outline: isDropTarget ? "1px solid rgba(122,184,245,0.55)" : "none",
+                          }}
+                          onClick={(e) => handleEntryClick(entry, e)}
+                          onDoubleClick={() => handleEntryDoubleClick(entry)}
+                          onContextMenu={(e) => handleContextMenuEntry(entry, e)}
+                          onDragOver={entry.is_directory ? (e) => handleUploadDragOver(e, entry.path) : undefined}
+                          onDragLeave={entry.is_directory ? (e) => handleUploadDragLeave(e, entry.path) : undefined}
+                          onDrop={entry.is_directory ? ((e) => { void handleUploadDropToPath(e, entry.path); }) : undefined}
+                        >
                           <Icon className="w-4 h-4 flex-shrink-0" style={{ color: iconColor }} />
                           <span className="flex-1 text-xs truncate" style={{ color: isSel ? "#fff" : "#ccc", fontWeight: isSel ? 500 : 400 }}>{entry.name}</span>
                           <span className="w-28 text-right text-[11px]" style={{ color: "#666" }}>{formatDate(entry.modified_at)}</span>
@@ -3458,7 +4311,8 @@ export function Files({
           {/* Context menus */}
           {contextMenu && !contextMenu.entry && (
             <div className="fixed py-1 rounded-lg min-w-[180px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, zIndex: DESKTOP_CONTEXT_MENU_Z, background: "rgba(30,30,30,0.9)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.4)" }} onClick={(e) => e.stopPropagation()}>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFolder(finderOpen ? currentPath : ""); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" />New Folder</button>
+              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFile(finderOpen ? currentPath : DESKTOP_WORKSPACE_PATH); setContextMenu(null); }}><FileText className="w-3.5 h-3.5" />New File</button>
+              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFolder(finderOpen ? currentPath : DESKTOP_WORKSPACE_PATH); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" />New Folder</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openBrowserWindow(); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" />Open Browser</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openTerminalWindow(); setContextMenu(null); }}><Terminal className="w-3.5 h-3.5" />Open Terminal</button>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { setShowWallpaperPicker(true); setContextMenu(null); }}><Image className="w-3.5 h-3.5" />Change Wallpaper</button>
@@ -3469,10 +4323,17 @@ export function Files({
           {contextMenu && contextMenu.entry && (
             <div className="fixed py-1 rounded-lg min-w-[160px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, zIndex: DESKTOP_CONTEXT_MENU_Z + 1, background: "rgba(30,30,30,0.95)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }} onClick={(e) => e.stopPropagation()}>
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleEntryDoubleClick(contextMenu.entry!); setContextMenu(null); }}><Folder className="w-3.5 h-3.5" style={{ color: "#888" }} />Open</button>
+              {contextMenu.entry.is_directory && (
+                <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFile(contextMenu.entry!.path); setContextMenu(null); }}><FileText className="w-3.5 h-3.5" style={{ color: "#888" }} />New File Here</button>
+              )}
+              {contextMenu.entry.is_directory && (
+                <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFolder(contextMenu.entry!.path); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" style={{ color: "#888" }} />New Folder Here</button>
+              )}
               {!contextMenu.entry.is_directory && HTML_EXTS.has(contextMenu.entry.name.split(".").pop()?.toLowerCase() || "") && (
                 <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void openWorkspaceFileInBrowser(contextMenu.entry!); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" style={{ color: "#888" }} />Open in Browser</button>
               )}
               {!contextMenu.entry.is_directory && <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleView(contextMenu.entry!); setContextMenu(null); }}><Eye className="w-3.5 h-3.5" style={{ color: "#888" }} />Quick Look</button>}
+              {!contextMenu.entry.is_directory && <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void exportWorkspaceEntry(contextMenu.entry!); setContextMenu(null); }}><ArrowUp className="w-3.5 h-3.5 rotate-45" style={{ color: "#888" }} />Export...</button>}
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void copyDesktopPath(contextMenu.entry!.path); setContextMenu(null); }}><FileText className="w-3.5 h-3.5" style={{ color: "#888" }} />Copy Path</button>
               <div className="my-1" style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }} />
               <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left" style={{ color: "#ff5f57" }} onClick={() => { handleDelete(contextMenu.entry!); setContextMenu(null); }}><Trash2 className="w-3.5 h-3.5" />Move to Trash</button>
@@ -3524,6 +4385,26 @@ export function Files({
                       <button onClick={() => setPreview(null)} className="w-3 h-3 rounded-full hover:opacity-80 group relative" style={{ background: "#ff5f57" }}><X className="w-2 h-2 absolute inset-0.5 opacity-0 group-hover:opacity-100 text-black/60" /></button>
                       <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} /><div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
                     </div>
+                    <div className="ml-auto flex items-center gap-2 z-10">
+                      {preview.kind === "text" && (
+                        <button
+                          type="button"
+                          onClick={() => { void copyPreviewText(); }}
+                          className="px-2.5 py-1 rounded-lg text-[11px] font-medium"
+                          style={{ background: "rgba(255,255,255,0.08)", color: "#d7d7d7" }}
+                        >
+                          Copy Text
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => { void exportPreviewFile(); }}
+                        className="px-2.5 py-1 rounded-lg text-[11px] font-medium"
+                        style={{ background: "rgba(84,163,247,0.18)", color: "#e9f3ff" }}
+                      >
+                        Export...
+                      </button>
+                    </div>
                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none"><div className="flex items-center gap-2"><Icon className="w-3.5 h-3.5" style={{ color: iconColor }} /><span className="text-xs font-medium" style={{ color: "#ccc" }}>{preview.name}</span></div></div>
                   </div>
                   <div className="flex-1 min-h-0 overflow-auto" style={{ background: preview.kind === "text" && (isCode || isMd) ? "#1e1e1e" : "#252526" }}>
@@ -3547,12 +4428,12 @@ export function Files({
                     )}
                     {preview.kind === "text" && (
                       (isCode || isMd) ? (
-                        <div className="flex text-[13px] font-mono leading-[1.6]">
+                        <div className="flex text-[13px] font-mono leading-[1.6] select-text">
                           <div className="flex-shrink-0 text-right select-none py-3 pr-3 sticky left-0" style={{ color: "#858585", background: "#1e1e1e", paddingLeft: "12px", minWidth: `${lnw * 0.65 + 1.8}em`, borderRight: "1px solid #2d2d2d" }}>{lines.map((_, i) => <div key={i}>{i + 1}</div>)}</div>
-                          <pre className="flex-1 py-3 px-4 whitespace-pre-wrap break-words" style={{ color: "#d4d4d4", tabSize: 4 }}>{preview.content}</pre>
+                          <pre className="flex-1 py-3 px-4 whitespace-pre-wrap break-words select-text cursor-text" style={{ color: "#d4d4d4", tabSize: 4 }}>{preview.content}</pre>
                         </div>
                       ) : (
-                        <pre className="p-5 text-[13px] font-mono whitespace-pre-wrap break-words leading-relaxed" style={{ color: "#d4d4d4" }}>{preview.content}</pre>
+                        <pre className="p-5 text-[13px] font-mono whitespace-pre-wrap break-words leading-relaxed select-text cursor-text" style={{ color: "#d4d4d4" }}>{preview.content}</pre>
                       )
                     )}
                   </div>
@@ -3639,6 +4520,75 @@ export function Files({
                     style={{ background: "#54a3f7", color: "#fff" }}
                   >
                     {creatingFolder ? "Creating..." : "Create"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {createFileOpen && (
+            <div
+              className="absolute inset-0 flex items-center justify-center"
+              style={{ zIndex: DESKTOP_MODAL_Z, background: "rgba(0,0,0,0.34)", backdropFilter: "blur(6px)" }}
+              onClick={() => { if (!creatingFile) setCreateFileOpen(false); }}
+            >
+              <div
+                className="w-full max-w-sm rounded-2xl p-4"
+                style={{
+                  background: "rgba(28,28,30,0.92)",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  boxShadow: "0 24px 60px rgba(0,0,0,0.45)",
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="mb-3">
+                  <p className="text-sm font-semibold" style={{ color: "#fff" }}>New File</p>
+                  <p className="text-xs mt-1" style={{ color: "#9a9a9a" }}>
+                    {createFileBasePath ? `Create inside ${createFileBasePath}` : "Create in Workspace"}
+                  </p>
+                </div>
+                <input
+                  ref={createFileInputRef}
+                  type="text"
+                  value={createFileName}
+                  disabled={creatingFile}
+                  onChange={(e) => setCreateFileName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void submitCreateFile();
+                    }
+                    if (e.key === "Escape" && !creatingFile) {
+                      setCreateFileOpen(false);
+                    }
+                  }}
+                  className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+                  style={{
+                    background: "rgba(255,255,255,0.08)",
+                    color: "#fff",
+                    border: "1px solid rgba(255,255,255,0.12)",
+                  }}
+                  placeholder="notes.md"
+                />
+                <p className="mt-2 text-[11px]" style={{ color: "#8f8f8f" }}>
+                  Markdown and text files can be copied directly from Quick Look after creation.
+                </p>
+                <div className="mt-4 flex items-center justify-end gap-2">
+                  <button
+                    onClick={() => setCreateFileOpen(false)}
+                    disabled={creatingFile}
+                    className="px-3 py-1.5 rounded-lg text-xs"
+                    style={{ background: "rgba(255,255,255,0.08)", color: "#d0d0d0" }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => { void submitCreateFile(); }}
+                    disabled={!createFileName.trim() || creatingFile}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
+                    style={{ background: "#54a3f7", color: "#fff" }}
+                  >
+                    {creatingFile ? "Creating..." : "Create"}
                   </button>
                 </div>
               </div>
@@ -4008,6 +4958,53 @@ export function Files({
                     </button>
                   </form>
                 </div>
+                {browserLoadError && (
+                  <div className="px-3 py-3 border-b border-[var(--border-subtle)] bg-red-500/5">
+                    <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-semibold text-red-200">Browser unavailable</p>
+                          <p className="mt-1 text-xs leading-relaxed text-red-100/90 break-words">
+                            {firstMeaningfulLine(browserLoadError)}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => { void retryCurrentBrowserTarget(); }}
+                            className="h-8 px-3 rounded-lg bg-red-100 text-[11px] font-semibold text-red-900"
+                          >
+                            Retry
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { void openBrowserExternally(browserUrlInput); }}
+                            className="h-8 px-3 rounded-lg border border-white/15 bg-black/10 text-[11px] font-medium text-white/90"
+                          >
+                            Open externally
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setBrowserLoadError(null)}
+                            className="h-8 px-3 rounded-lg border border-white/15 bg-transparent text-[11px] font-medium text-white/70"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      </div>
+                      {browserLoadError.includes("\n") && (
+                        <details className="mt-3">
+                          <summary className="cursor-pointer text-[11px] font-medium text-red-100/80">
+                            Error details
+                          </summary>
+                          <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-black/20 px-3 py-2 text-[11px] leading-relaxed text-red-50 select-text">
+                            {browserLoadError}
+                          </pre>
+                        </details>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div className="relative flex-1 bg-[var(--bg-card)]">
                   {browserLoading && !browserSnapshot && !browserLiveState && !browserUsingEmbeddedPreview ? (
                     <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
@@ -4272,6 +5269,19 @@ export function Files({
               onFocus={() => focusWindow("skills")}
               onDragStart={(e) =>
                 startWindowDrag(e, skillsDragRef, skillsPos, skillsSize, setSkillsPos, "skills")
+              }
+              onResizeStart={(direction, e) =>
+                startWindowResize(
+                  e,
+                  direction,
+                  skillsResizeRef,
+                  skillsPos,
+                  skillsSize,
+                  setSkillsPos,
+                  setSkillsSize,
+                  "skills",
+                  { w: 420, h: 360 },
+                )
               }
             >
               <Suspense fallback={PANEL_FALLBACK}>
