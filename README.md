@@ -144,11 +144,11 @@ Unsigned preview builds are currently acceptable for local and user-test use.
 macOS and Linux:
 
 ```bash
-pnpm dev:runtime:status   # Check if the runtime VM and Docker are ready
-pnpm dev:runtime:start    # Start the runtime (Colima VM + Docker)
+pnpm dev:runtime:status   # Check if the runtime Docker backend is ready
+pnpm dev:runtime:start    # Start the runtime (Colima on macOS, native Docker on Linux)
 pnpm dev:runtime:up       # Start runtime and launch the OpenClaw container
 pnpm dev:runtime:stop     # Stop the runtime
-pnpm dev:runtime:prune    # Remove the runtime VM and reclaim disk space
+pnpm dev:runtime:prune    # Remove runtime state and reclaim disk space
 pnpm dev:runtime:logs     # Tail the OpenClaw container logs
 ```
 

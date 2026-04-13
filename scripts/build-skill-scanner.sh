@@ -24,6 +24,9 @@ if [ -z "$DOCKER_BIN" ]; then
 fi
 
 ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
+if [ -z "$ACTIVE_DOCKER_HOST" ]; then
+    ACTIVE_DOCKER_HOST="$(entropic_native_linux_docker_host "$DOCKER_BIN" || true)"
+fi
 
 if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "$COLIMA_BIN" ]; then
     echo "Starting Colima for $(entropic_mode_label) scanner build..."
@@ -31,8 +34,12 @@ if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "$COLIMA_BIN" ]; then
 fi
 
 if [ -z "$ACTIVE_DOCKER_HOST" ] && ! entropic_default_context_allowed; then
-    echo "ERROR: No $(entropic_mode_label) Colima Docker host is available."
-    echo "Set ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 for one-off Docker Desktop fallback."
+    echo "ERROR: No $(entropic_mode_label) Docker host is available."
+    if entropic_is_native_linux_runtime; then
+        echo "Start Docker Engine and retry."
+    else
+        echo "Set ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 for one-off Docker Desktop fallback."
+    fi
     exit 1
 fi
 

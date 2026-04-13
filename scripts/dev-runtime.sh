@@ -23,16 +23,16 @@ usage() {
   cat <<USAGE
 Usage: ./scripts/dev-runtime.sh <command>
 
-This helper is dev-only and uses isolated Colima state:
+This helper is dev-only and uses the platform runtime backend:
   ENTROPIC_RUNTIME_MODE=dev
   ENTROPIC_COLIMA_HOME=${ENTROPIC_COLIMA_HOME}
 
 Commands:
   status       Print current dev Docker/Colima/container status
-  start        Ensure bundled runtime tools and start dev Colima if needed
+  start        Ensure bundled runtime tools and start the dev runtime if needed
   up           Start runtime, bundle/build missing assets, launch pnpm tauri:dev
-  stop         Stop dev runtime containers (keeps Colima + images)
-  prune        Remove dev containers/networks/volumes and reset dev Colima homes
+  stop         Stop dev runtime containers (keeps runtime state + images)
+  prune        Remove dev containers/networks/volumes and reset dev runtime state
   logs [name]  Tail logs for entropic-openclaw (or provided container)
   help         Show this help
 USAGE
@@ -44,6 +44,11 @@ refresh_binaries() {
 }
 
 bundled_runtime_ready() {
+  if entropic_is_native_linux_runtime; then
+    [ -x "$PROJECT_ROOT/src-tauri/resources/bin/check-docker.sh" ] || return 1
+    return 0
+  fi
+
   [ -x "$PROJECT_ROOT/src-tauri/resources/bin/colima" ] || return 1
   [ -x "$PROJECT_ROOT/src-tauri/resources/bin/limactl" ] || return 1
   [ -x "$PROJECT_ROOT/src-tauri/resources/bin/docker" ] || return 1
@@ -79,6 +84,11 @@ resolve_docker_host_without_start() {
     return 1
   fi
   ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
+  if [ -n "$ACTIVE_DOCKER_HOST" ]; then
+    return 0
+  fi
+
+  ACTIVE_DOCKER_HOST="$(entropic_native_linux_docker_host "$DOCKER_BIN" || true)"
   [ -n "$ACTIVE_DOCKER_HOST" ]
 }
 
@@ -96,8 +106,18 @@ resolve_or_start_docker_host() {
     return 0
   fi
 
+  ACTIVE_DOCKER_HOST="$(entropic_native_linux_docker_host "$DOCKER_BIN" || true)"
+  if [ -n "$ACTIVE_DOCKER_HOST" ]; then
+    return 0
+  fi
+
   if [ -z "$COLIMA_BIN" ]; then
-    echo "[dev] ERROR: Colima binary not found. Cannot start isolated dev runtime." >&2
+    if entropic_is_native_linux_runtime; then
+      echo "[dev] ERROR: Native Docker daemon not reachable on Linux." >&2
+      echo "[dev] Install/start Docker Engine, then retry." >&2
+    else
+      echo "[dev] ERROR: Colima binary not found. Cannot start isolated dev runtime." >&2
+    fi
     return 1
   fi
 
@@ -155,6 +175,9 @@ ensure_runtime_tars() {
 status() {
   refresh_binaries
   ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "${DOCKER_BIN:-docker}" || true)"
+  if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "${DOCKER_BIN:-}" ]; then
+    ACTIVE_DOCKER_HOST="$(entropic_native_linux_docker_host "$DOCKER_BIN" || true)"
+  fi
 
   echo "[dev] Mode: $(entropic_runtime_mode)"
   echo "[dev] Colima home: $ENTROPIC_COLIMA_HOME"
@@ -205,7 +228,7 @@ start_stack() {
 
 stop_stack() {
   if ! resolve_docker_host_without_start; then
-    echo "[dev] No dev Colima Docker socket found. Nothing to stop."
+    echo "[dev] No dev Docker host found. Nothing to stop."
     return 0
   fi
 
@@ -226,7 +249,7 @@ prune_stack() {
     run_docker network rm entropic-net nova-net 2>/dev/null || true
     run_docker volume rm entropic-openclaw-data entropic-skill-scanner-data nova-openclaw-data nova-skill-scanner-data 2>/dev/null || true
   else
-    echo "[dev] No dev Colima Docker socket found. Skipping container prune."
+    echo "[dev] No dev Docker host found. Skipping container prune."
   fi
 
   refresh_binaries
@@ -273,7 +296,7 @@ up_stack() {
 tail_logs() {
   local target="${1:-entropic-openclaw}"
   if ! resolve_docker_host_without_start; then
-    echo "[dev] ERROR: No dev Colima Docker host available for logs." >&2
+    echo "[dev] ERROR: No dev Docker host available for logs." >&2
     return 1
   fi
   run_docker logs --tail 200 -f "$target"
