@@ -15,6 +15,7 @@ import {
 const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL || "";
 const SUPABASE_ANON_KEY = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || "";
 const API_URL = managedApiUrl;
+const API_PROXY_TARGET = String((import.meta as any).env?.VITE_API_PROXY_TARGET || "").trim();
 const APP_SCHEME = (import.meta as any).env?.DEV ? "entropic-dev" : "entropic";
 const AUTH_REDIRECT_URL =
   (import.meta as any).env?.VITE_AUTH_REDIRECT_URL || `${APP_SCHEME}://auth/callback`;
@@ -775,6 +776,12 @@ export function getProxyUrl(): string {
   if (API_URL.startsWith("/")) {
     if (API_ORIGIN) {
       return API_ORIGIN.replace(/\/$/, "") + API_URL;
+    }
+    if (API_PROXY_TARGET) {
+      return API_PROXY_TARGET.replace(/\/$/, "") + API_URL;
+    }
+    if (hostedFeaturesEnabled) {
+      return `https://entropic.qu.ai${API_URL}`;
     }
     // No origin configured — return relative path and let Rust fallback handle it
     return API_URL;
