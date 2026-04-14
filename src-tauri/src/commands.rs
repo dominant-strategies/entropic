@@ -1486,6 +1486,25 @@ fn resolve_container_proxy_base(proxy_url: &str) -> Result<String, String> {
 
     if trimmed.starts_with('/') {
         let path = trimmed.trim_start_matches('/');
+        let managed_target = std::env::var("VITE_API_PROXY_TARGET")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                let profile = std::env::var("ENTROPIC_BUILD_PROFILE").ok()?;
+                if profile.trim().eq_ignore_ascii_case("managed") {
+                    Some("https://entropic.qu.ai".to_string())
+                } else {
+                    None
+                }
+            });
+        if let Some(target) = managed_target {
+            return Ok(if path.is_empty() {
+                target
+            } else {
+                format!("{}/{}", target, path)
+            });
+        }
         return Ok(if path.is_empty() {
             ENTROPIC_PROXY_DEV_ORIGIN.trim_end_matches('/').to_string()
         } else {
@@ -4776,6 +4795,29 @@ fn probe_proxy_backend_from_gateway_container() -> Result<(), String> {
     Err(format!(
         "Sandbox container could not reach {}: {}",
         url, detail
+    ))
+}
+
+fn probe_proxy_backend_from_host() -> Result<(), String> {
+    let proxy_base = read_container_env("ENTROPIC_PROXY_BASE_URL")
+        .ok_or_else(|| "Proxy sandbox is missing ENTROPIC_PROXY_BASE_URL".to_string())?;
+    let host_base = resolve_host_proxy_base(&proxy_base)?;
+    let url = proxy_backend_models_probe_url(&host_base)?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|e| format!("Failed to build host proxy probe client: {}", e))?;
+    let response = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("Host could not reach {}: {}", url, e))?;
+    if response.status().is_success() || response.status().is_redirection() {
+        return Ok(());
+    }
+    Err(format!(
+        "Host could not reach {}: HTTP {}",
+        url,
+        response.status()
     ))
 }
 
@@ -8847,16 +8889,29 @@ Use it for durable decisions, preferences, and facts that should persist across 
                 );
                 set_openclaw_config_value(
                     &mut cfg,
-                    &["tools", "web", "search", "perplexity", "baseUrl"],
+                    &["plugins", "entries", "perplexity", "enabled"],
+                    serde_json::json!(true),
+                );
+                set_openclaw_config_value(
+                    &mut cfg,
+                    &[
+                        "plugins",
+                        "entries",
+                        "perplexity",
+                        "config",
+                        "webSearch",
+                        "baseUrl",
+                    ],
                     serde_json::json!(web_search_base_url),
                 );
-                remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "perplexity"]);
+                remove_openclaw_config_value(&mut cfg, &["tools", "web", "search", "perplexity"]);
                 remove_openclaw_config_value(
                     &mut cfg,
                     &["plugins", "entries", "duckduckgo", "config", "webSearch"],
                 );
             } else {
                 remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
+                remove_openclaw_config_value(&mut cfg, &["tools", "web", "search", "perplexity"]);
                 remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "perplexity"]);
                 remove_openclaw_config_value(
                     &mut cfg,
@@ -10421,6 +10476,13 @@ async fn ensure_proxy_backend_reachable(
         Err(err) => err,
     };
 
+    if let Err(host_error) = probe_proxy_backend_from_host() {
+        return Err(append_colima_runtime_hint(format!(
+            "{} host proxy backend is not reachable. {}. The sandbox probe also failed: {}. Ensure the managed dev server is still running on localhost:5174 (for example via `pnpm dev:runtime:up:managed`).",
+            label, host_error, initial_error
+        )));
+    }
+
     println!(
         "[Entropic] {} proxy backend probe failed; attempting automatic network repair: {}",
         label, initial_error
@@ -10446,10 +10508,19 @@ async fn ensure_proxy_backend_reachable(
             );
             Ok(())
         }
-        Err(final_error) => Err(append_colima_runtime_hint(format!(
-            "{} sandbox container is healthy but still cannot reach the Entropic backend from inside the managed Docker network after automatic repair. Initial probe failure: {}. Final probe failure: {}",
-            label, initial_error, final_error
-        ))),
+        Err(final_error) => {
+            if let Err(host_error) = probe_proxy_backend_from_host() {
+                return Err(append_colima_runtime_hint(format!(
+                    "{} host proxy backend became unreachable after automatic network repair. {}. Initial sandbox probe failure: {}. Final sandbox probe failure: {}. Ensure the managed dev server is still running on localhost:5174 (for example via `pnpm dev:runtime:up:managed`).",
+                    label, host_error, initial_error, final_error
+                )));
+            }
+
+            Err(append_colima_runtime_hint(format!(
+                "{} sandbox container is healthy but still cannot reach the Entropic backend from inside the managed Docker network after automatic repair. The host proxy backend is reachable, so this points to a Docker networking issue. Initial probe failure: {}. Final probe failure: {}",
+                label, initial_error, final_error
+            )))
+        }
     }
 }
 
