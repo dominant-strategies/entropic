@@ -4579,6 +4579,10 @@ fn running_gateway_container_name() -> Option<&'static str> {
     }
 }
 
+fn preferred_existing_gateway_container_name() -> &'static str {
+    existing_gateway_container_name().unwrap_or(OPENCLAW_CONTAINER)
+}
+
 fn existing_gateway_container_name() -> Option<&'static str> {
     if named_gateway_container_exists(OPENCLAW_CONTAINER, false) {
         Some(OPENCLAW_CONTAINER)
@@ -5064,8 +5068,9 @@ fn state_file(path: &str) -> String {
 }
 
 fn container_dir_exists(path: &str) -> Result<bool, String> {
+    let container = preferred_existing_gateway_container_name();
     Ok(docker_command()
-        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", path])
+        .args(["exec", container, "test", "-d", path])
         .output()
         .map_err(|e| format!("Failed to inspect container path: {}", e))?
         .status
@@ -5073,8 +5078,9 @@ fn container_dir_exists(path: &str) -> Result<bool, String> {
 }
 
 fn container_path_exists_checked(path: &str) -> Result<bool, String> {
+    let container = preferred_existing_gateway_container_name();
     Ok(docker_command()
-        .args(["exec", OPENCLAW_CONTAINER, "test", "-e", path])
+        .args(["exec", container, "test", "-e", path])
         .output()
         .map_err(|e| format!("Failed to inspect container path: {}", e))?
         .status
@@ -5161,7 +5167,8 @@ fn list_container_subdirs(path: &str) -> Result<Vec<String>, String> {
         return Ok(vec![]);
     }
 
-    let listing = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "ls", "-1", "--", path])?;
+    let container = preferred_existing_gateway_container_name();
+    let listing = docker_exec_output(&["exec", container, "ls", "-1", "--", path])?;
     let mut out = Vec::new();
     for line in listing.lines() {
         let id = line.trim();
@@ -5177,16 +5184,15 @@ fn list_container_subdirs(path: &str) -> Result<Vec<String>, String> {
 }
 
 fn resolve_versioned_skill_dir(skill_id: &str) -> Result<Option<String>, String> {
+    let container = preferred_existing_gateway_container_name();
     let skill_root = format!("{}/{}", SKILLS_ROOT, skill_id);
     if !container_dir_exists(&skill_root)? {
         return Ok(None);
     }
 
     let current = format!("{}/current", skill_root);
-    if container_path_exists(&current) {
-        if let Some(path) =
-            resolve_skill_root_in_container(OPENCLAW_CONTAINER, &current, Some(skill_id))?
-        {
+    if container_path_exists_for(container, &current) {
+        if let Some(path) = resolve_skill_root_in_container(container, &current, Some(skill_id))? {
             return Ok(Some(path));
         }
         return Ok(Some(current));
@@ -5199,9 +5205,7 @@ fn resolve_versioned_skill_dir(skill_id: &str) -> Result<Option<String>, String>
     versions.sort();
     let version = versions.pop().unwrap_or_else(|| "latest".to_string());
     let version_root = format!("{}/{}", skill_root, version);
-    if let Some(path) =
-        resolve_skill_root_in_container(OPENCLAW_CONTAINER, &version_root, Some(skill_id))?
-    {
+    if let Some(path) = resolve_skill_root_in_container(container, &version_root, Some(skill_id))? {
         return Ok(Some(path));
     }
     Ok(Some(version_root))
@@ -8208,8 +8212,17 @@ esac
 [ -f "$resolved" ] || exit 1
 printf '%s' "$resolved"
 "#;
-    let resolved = docker_exec_output(&["exec", container, "sh", "-lc", script, "sh", full_path, WORKSPACE_ROOT])
-        .map_err(|_| not_found_message.to_string())?;
+    let resolved = docker_exec_output(&[
+        "exec",
+        container,
+        "sh",
+        "-lc",
+        script,
+        "sh",
+        full_path,
+        WORKSPACE_ROOT,
+    ])
+    .map_err(|_| not_found_message.to_string())?;
     let trimmed = resolved.trim();
     if trimmed.is_empty() {
         return Err(not_found_message.to_string());
@@ -8262,6 +8275,46 @@ fn open_host_drop_source_file(path: &Path) -> Result<fs::File, String> {
 fn open_host_drop_source_file(path: &Path) -> Result<fs::File, String> {
     fs::File::open(path)
         .map_err(|e| format!("Failed to read dropped file {}: {}", path.display(), e))
+}
+
+fn stream_reader_to_container_file<R: Read>(
+    container: &str,
+    full_path: &str,
+    mut reader: R,
+    spawn_error: String,
+    stream_error: String,
+    finalize_error: String,
+    failure_error: String,
+) -> Result<(), String> {
+    let mut child = docker_command()
+        .args(["exec", "-i", container, "tee", "--", full_path])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{}: {}", spawn_error, e))?;
+
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(spawn_error);
+    };
+
+    if let Err(e) = std::io::copy(&mut reader, &mut stdin) {
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("{}: {}", stream_error, e));
+    }
+    drop(stdin);
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("{}: {}", finalize_error, e))?;
+    if !status.success() {
+        return Err(failure_error);
+    }
+
+    Ok(())
 }
 
 fn container_path_exists_for(container: &str, path: &str) -> bool {
@@ -9044,9 +9097,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
             list.retain(|v| {
                 v.as_str()
                     .map(|s| {
-                        s != "browser"
-                            && s != "entropic-integrations"
-                            && s != "nova-integrations"
+                        s != "browser" && s != "entropic-integrations" && s != "nova-integrations"
                     })
                     .unwrap_or(true)
             });
@@ -13628,6 +13679,8 @@ pub async fn upload_attachment(
     base64: String,
     state: State<'_, AppState>,
 ) -> Result<AttachmentInfo, String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
     let sanitized = sanitize_filename(&file_name);
     let id = {
         let mut pending = state
@@ -13650,37 +13703,27 @@ pub async fn upload_attachment(
     if size_estimate > 25 * 1024 * 1024 {
         return Err("Attachment too large (max 25MB)".to_string());
     }
-    docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "mkdir",
-        "-p",
-        "--",
-        ATTACHMENT_TMP_ROOT,
-    ])?;
+    docker_exec_output(&["exec", container, "mkdir", "-p", "--", ATTACHMENT_TMP_ROOT])?;
     let decoded = decode_base64_payload(&base64)?;
     let size_bytes = decoded.len() as u64;
     if size_bytes > 25 * 1024 * 1024 {
         return Err("Attachment too large (max 25MB)".to_string());
     }
-    let mut child = docker_command()
-        .args(["exec", "-i", OPENCLAW_CONTAINER, "tee", "--", &temp_path])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to upload file: {}", e))?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        stdin
-            .write_all(&decoded)
-            .map_err(|e| format!("Failed to upload file: {}", e))?;
-    }
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to finalize upload: {}", e))?;
-    if !status.success() {
-        return Err("Failed to upload file in container".to_string());
-    }
+    let temp_path_for_upload = temp_path.clone();
+    let container_name = container.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        stream_reader_to_container_file(
+            &container_name,
+            &temp_path_for_upload,
+            std::io::Cursor::new(decoded),
+            "Failed to upload file".to_string(),
+            "Failed to upload file".to_string(),
+            "Failed to finalize upload".to_string(),
+            "Failed to upload file in container".to_string(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Failed to run attachment upload task: {}", e))??;
     {
         let mut pending = state
             .pending_attachments
@@ -13688,7 +13731,7 @@ pub async fn upload_attachment(
             .map_err(|e| e.to_string())?;
         prune_pending_attachments(&mut pending);
         if pending.contains_key(&id) {
-            let _ = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-f", "--", &temp_path]);
+            let _ = docker_exec_output(&["exec", container, "rm", "-f", "--", &temp_path]);
             return Err("Failed to store attachment metadata; retry upload".to_string());
         }
         pending.insert(
@@ -13715,6 +13758,8 @@ pub async fn save_attachment(
     attachment_id: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
     let attachment_id = normalize_attachment_id(&attachment_id)?;
     let pending = {
         let mut attachments = state
@@ -13731,22 +13776,15 @@ pub async fn save_attachment(
 
     let file_name = sanitize_filename(&pending.file_name);
     let mut dest_path = format!("{}/{}", ATTACHMENT_SAVE_ROOT, file_name);
-    docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "mkdir",
-        "-p",
-        "--",
-        ATTACHMENT_SAVE_ROOT,
-    ])?;
+    docker_exec_output(&["exec", container, "mkdir", "-p", "--", ATTACHMENT_SAVE_ROOT])?;
     // Avoid overwrite: add suffix if exists
-    if docker_exec_output(&["exec", OPENCLAW_CONTAINER, "test", "-e", &dest_path]).is_ok() {
+    if docker_exec_output(&["exec", container, "test", "-e", &dest_path]).is_ok() {
         let ts = unique_id();
         dest_path = format!("{}/{}_{}", ATTACHMENT_SAVE_ROOT, ts, file_name);
     }
     docker_exec_output(&[
         "exec",
-        OPENCLAW_CONTAINER,
+        container,
         "mv",
         "--",
         &pending.temp_path,
@@ -13767,6 +13805,8 @@ pub async fn delete_attachment(
     attachment_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
     let attachment_id = normalize_attachment_id(&attachment_id)?;
     let pending = {
         let mut attachments = state
@@ -13780,14 +13820,7 @@ pub async fn delete_attachment(
             .ok_or_else(|| "Attachment not found or expired".to_string())?
     };
     validate_attachment_temp_path(&attachment_id, &pending.temp_path)?;
-    docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "rm",
-        "-f",
-        "--",
-        &pending.temp_path,
-    ])?;
+    docker_exec_output(&["exec", container, "rm", "-f", "--", &pending.temp_path])?;
     {
         let mut attachments = state
             .pending_attachments
@@ -13923,6 +13956,7 @@ pub async fn remove_workspace_skill(id: String) -> Result<(), String> {
     if let Ok(Some(path)) = resolve_installed_skill_dir(&skill_id) {
         config_removal_paths.push(path);
     }
+    let container = preferred_existing_gateway_container_name();
 
     let observed_skill = collect_skill_ids()?.iter().any(|value| value == &skill_id)
         || container_dir_exists(&format!("{}/{}", SKILL_MANIFESTS_ROOT, skill_id)).unwrap_or(false)
@@ -13945,7 +13979,7 @@ pub async fn remove_workspace_skill(id: String) -> Result<(), String> {
         if container_path_exists_checked(&full_path).unwrap_or(false) {
             removed_any = true;
         }
-        docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-rf", "--", &full_path])?;
+        docker_exec_output(&["exec", container, "rm", "-rf", "--", &full_path])?;
         if !config_removal_paths.contains(&full_path) {
             config_removal_paths.push(full_path);
         }
@@ -15247,30 +15281,28 @@ pub async fn create_workspace_file(
     docker_exec_output(&["exec", container, "mkdir", "-p", "--", &parent_dir])?;
 
     let bytes = content.unwrap_or_default().into_bytes();
-    let mut child = docker_command()
-        .args(["exec", "-i", container, "tee", "--", &full_path])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to create file: {}", e))?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        stdin
-            .write_all(&bytes)
-            .map_err(|e| format!("Failed to write file data: {}", e))?;
-    }
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to finalize file creation: {}", e))?;
-    if !status.success() {
-        return Err("Failed to create file in container".to_string());
-    }
+    let size_bytes = bytes.len() as u64;
+    let container_name = container.to_string();
+    let full_path_for_write = full_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        stream_reader_to_container_file(
+            &container_name,
+            &full_path_for_write,
+            std::io::Cursor::new(bytes),
+            "Failed to create file".to_string(),
+            "Failed to write file data".to_string(),
+            "Failed to finalize file creation".to_string(),
+            "Failed to create file in container".to_string(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Failed to run file creation task: {}", e))??;
 
     Ok(WorkspaceFileEntry {
         name: sanitized_name,
         path: relative_path,
         is_directory: false,
-        size: bytes.len() as u64,
+        size: size_bytes,
         modified_at: 0,
     })
 }
@@ -15339,24 +15371,21 @@ pub async fn upload_workspace_file(
     docker_exec_output(&["exec", container, "mkdir", "-p", "--", &dir])?;
     let decoded = decode_base64_payload(&base64)?;
 
-    let mut child = docker_command()
-        .args(["exec", "-i", container, "tee", "--", &full_path])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to upload file: {}", e))?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        stdin
-            .write_all(&decoded)
-            .map_err(|e| format!("Failed to write file data: {}", e))?;
-    }
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to finalize upload: {}", e))?;
-    if !status.success() {
-        return Err("Failed to upload file to container".to_string());
-    }
+    let container_name = container.to_string();
+    let full_path_for_upload = full_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        stream_reader_to_container_file(
+            &container_name,
+            &full_path_for_upload,
+            std::io::Cursor::new(decoded),
+            "Failed to upload file".to_string(),
+            "Failed to write file data".to_string(),
+            "Failed to finalize upload".to_string(),
+            "Failed to upload file to container".to_string(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Failed to run workspace upload task: {}", e))??;
     Ok(())
 }
 
@@ -15415,8 +15444,7 @@ pub async fn upload_host_dropped_files(
         }
         let Some(allowed) = authorized_record else {
             return Err(
-                "Dropped file is no longer authorized. Drag it into Entropic again."
-                    .to_string(),
+                "Dropped file is no longer authorized. Drag it into Entropic again.".to_string(),
             );
         };
         if allowed.path != canonical {
@@ -15476,25 +15504,25 @@ pub async fn upload_host_dropped_files(
             }
         }
 
-        let mut source = source;
-        let mut child = docker_command()
-            .args(["exec", "-i", container, "tee", "--", &full_path])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("Failed to import dropped file {}: {}", source_name, e))?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            std::io::copy(&mut source, &mut stdin)
-                .map_err(|e| format!("Failed to stream dropped file {}: {}", source_name, e))?;
-        }
-
-        let status = child
-            .wait()
-            .map_err(|e| format!("Failed to finalize dropped file import {}: {}", source_name, e))?;
-        if !status.success() {
-            return Err(format!("Failed to import dropped file {}.", source_name));
-        }
+        let container_name = container.to_string();
+        let full_path_for_import = full_path.clone();
+        let source_name_for_import = source_name.to_string();
+        tauri::async_runtime::spawn_blocking(move || {
+            stream_reader_to_container_file(
+                &container_name,
+                &full_path_for_import,
+                source,
+                format!("Failed to import dropped file {}", source_name_for_import),
+                format!("Failed to stream dropped file {}", source_name_for_import),
+                format!(
+                    "Failed to finalize dropped file import {}",
+                    source_name_for_import
+                ),
+                format!("Failed to import dropped file {}.", source_name_for_import),
+            )
+        })
+        .await
+        .map_err(|e| format!("Failed to run dropped file import task: {}", e))??;
 
         let relative_path = if sanitized_dest.is_empty() {
             chosen_name.clone()

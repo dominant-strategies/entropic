@@ -222,6 +222,10 @@ const DEFAULT_BROWSER_LIVE_WS_BASE = "ws://127.0.0.1:19792/live";
 const CONTAINER_LOCAL_BROWSER_BASE = "http://container.localhost:19791";
 const WORKSPACE_FOLDER_REFRESH_MS = 4000;
 const DESKTOP_CACHE_STALE_MS = 12000;
+const DESKTOP_WARM_CACHE_TTL_MS = 5 * 60 * 1000;
+const DESKTOP_IMAGE_PREVIEW_MAX_BYTES = 8 * 1024 * 1024;
+const DESKTOP_IMAGE_PREVIEW_MAX_ITEMS = 48;
+const DESKTOP_IMAGE_PREVIEW_MAX_CONCURRENT = 4;
 const BROWSER_APP_WINDOW_TITLEBAR_HEIGHT = 34;
 const BROWSER_TOOLBAR_HEIGHT = 49;
 const CHAT_WINDOW_MIN_SIZE_EXPANDED = { w: 560, h: 420 };
@@ -336,6 +340,57 @@ const desktopWarmCache: DesktopWarmCache = {
   imagePreviews: {},
   lastLoadedAt: 0,
 };
+
+function clearDesktopWarmCache() {
+  desktopWarmCache.entries = [];
+  desktopWarmCache.imagePreviews = {};
+  desktopWarmCache.lastLoadedAt = 0;
+}
+
+function readDesktopWarmCache(): DesktopWarmCache {
+  if (Date.now() - desktopWarmCache.lastLoadedAt > DESKTOP_WARM_CACHE_TTL_MS) {
+    clearDesktopWarmCache();
+  }
+  return {
+    entries: desktopWarmCache.entries,
+    imagePreviews: desktopWarmCache.imagePreviews,
+    lastLoadedAt: desktopWarmCache.lastLoadedAt,
+  };
+}
+
+function shouldLoadDesktopImagePreview(entry: WorkspaceFileEntry): boolean {
+  if (!isImageWorkspaceEntry(entry)) return false;
+  if (entry.size <= 0) return true;
+  return entry.size <= DESKTOP_IMAGE_PREVIEW_MAX_BYTES;
+}
+
+function pruneDesktopImagePreviewCache(
+  entries: WorkspaceFileEntry[],
+  previews: Record<string, string>,
+): Record<string, string> {
+  const allowedPaths = new Set(
+    entries
+      .filter(shouldLoadDesktopImagePreview)
+      .slice(0, DESKTOP_IMAGE_PREVIEW_MAX_ITEMS)
+      .map((entry) => entry.path),
+  );
+  const nextEntries = Object.entries(previews).filter(([path]) => allowedPaths.has(path));
+  return Object.fromEntries(nextEntries);
+}
+
+function writeDesktopWarmCache(
+  entries: WorkspaceFileEntry[],
+  previews: Record<string, string>,
+  lastLoadedAt: number,
+) {
+  if (entries.length === 0 || Date.now() - lastLoadedAt > DESKTOP_WARM_CACHE_TTL_MS) {
+    clearDesktopWarmCache();
+    return;
+  }
+  desktopWarmCache.entries = entries;
+  desktopWarmCache.imagePreviews = pruneDesktopImagePreviewCache(entries, previews);
+  desktopWarmCache.lastLoadedAt = lastLoadedAt;
+}
 
 function makeBrowserTabId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -1085,6 +1140,7 @@ export function Files({
   onImageGenerationModelChange,
   onImageModelChange,
 }: Props) {
+  const initialDesktopWarmCache = useMemo(() => readDesktopWarmCache(), []);
   const { balance, isAuthenticated, isAuthConfigured } = useAuth();
   const billingEnabled = hostedFeaturesEnabled;
   const [agentName, setAgentName] = useState("Joulie");
@@ -1162,8 +1218,10 @@ export function Files({
 
   // File browser
   const [entries, setEntries] = useState<WorkspaceFileEntry[]>([]);
-  const [desktopEntries, setDesktopEntries] = useState<WorkspaceFileEntry[]>(() => desktopWarmCache.entries);
-  const [desktopImagePreviews, setDesktopImagePreviews] = useState<Record<string, string>>(() => desktopWarmCache.imagePreviews);
+  const [desktopEntries, setDesktopEntries] = useState<WorkspaceFileEntry[]>(() => initialDesktopWarmCache.entries);
+  const [desktopImagePreviews, setDesktopImagePreviews] = useState<Record<string, string>>(
+    () => initialDesktopWarmCache.imagePreviews,
+  );
   const [currentPath, setCurrentPath] = useState("");
   const [history, setHistory] = useState<string[]>([""]);
   const [historyIndex, setHistoryIndex] = useState(0);
@@ -1192,7 +1250,7 @@ export function Files({
   const filesLoadingSeqRef = useRef(0);
   const desktopEntriesFetchSeqRef = useRef(0);
   const desktopImagePreviewSeqRef = useRef(0);
-  const desktopLoadedAtRef = useRef(desktopWarmCache.lastLoadedAt);
+  const desktopLoadedAtRef = useRef(initialDesktopWarmCache.lastLoadedAt);
 
   // Chat
   const [chatSessions, setChatSessions] = useState<SharedChatSession[]>([]);
@@ -3035,8 +3093,7 @@ export function Files({
             : a.name.localeCompare(b.name)
         ));
       const loadedAt = Date.now();
-      desktopWarmCache.entries = filtered;
-      desktopWarmCache.lastLoadedAt = loadedAt;
+      writeDesktopWarmCache(filtered, desktopWarmCache.imagePreviews, loadedAt);
       desktopLoadedAtRef.current = loadedAt;
       setDesktopEntries((prev) => (workspaceEntriesEqual(prev, filtered) ? prev : filtered));
     } catch {
@@ -3126,8 +3183,10 @@ export function Files({
   useEffect(() => {
     const requestSeq = desktopImagePreviewSeqRef.current + 1;
     desktopImagePreviewSeqRef.current = requestSeq;
-    const imageEntries = desktopEntries.filter(isImageWorkspaceEntry);
-    const imagePaths = new Set(imageEntries.map((entry) => entry.path));
+    const previewableImageEntries = desktopEntries
+      .filter(shouldLoadDesktopImagePreview)
+      .slice(0, DESKTOP_IMAGE_PREVIEW_MAX_ITEMS);
+    const imagePaths = new Set(previewableImageEntries.map((entry) => entry.path));
     setDesktopImagePreviews((prev) => {
       const nextEntries = Object.entries(prev).filter(([path]) => imagePaths.has(path));
       if (nextEntries.length === Object.keys(prev).length) {
@@ -3135,46 +3194,50 @@ export function Files({
       }
       return Object.fromEntries(nextEntries);
     });
-    const missingEntries = imageEntries.filter((entry) => !desktopImagePreviews[entry.path]);
+    const missingEntries = previewableImageEntries.filter((entry) => !desktopImagePreviews[entry.path]);
     if (missingEntries.length === 0) {
       return;
     }
     let cancelled = false;
-    void Promise.all(
-      missingEntries.map(async (entry) => {
-        const base64 = await invoke<string>("read_workspace_file_base64", { path: entry.path });
-        return [
-          entry.path,
-          `data:${imageMimeTypeForName(entry.name)};base64,${base64}`,
-        ] as const;
-      }),
-    )
-      .then((loadedEntries) => {
+    void (async () => {
+      const loadedEntries: Array<readonly [string, string]> = [];
+      for (let index = 0; index < missingEntries.length; index += DESKTOP_IMAGE_PREVIEW_MAX_CONCURRENT) {
+        const batch = missingEntries.slice(index, index + DESKTOP_IMAGE_PREVIEW_MAX_CONCURRENT);
+        const batchResults: Array<[string, string] | null> = await Promise.all(
+          batch.map(async (entry) => {
+            try {
+              const base64 = await invoke<string>("read_workspace_file_base64", { path: entry.path });
+              return [
+                entry.path,
+                `data:${imageMimeTypeForName(entry.name)};base64,${base64}`,
+              ];
+            } catch {
+              return null;
+            }
+          }),
+        );
         if (cancelled || requestSeq !== desktopImagePreviewSeqRef.current) return;
-        setDesktopImagePreviews((prev) => {
-          const next = { ...prev };
-          for (const [path, dataUrl] of loadedEntries) {
-            next[path] = dataUrl;
-          }
-          desktopWarmCache.imagePreviews = next;
-          return next;
-        });
-      })
-      .catch(() => {
-        // Keep the generic icon if preview loading fails.
+        loadedEntries.push(
+          ...batchResults.filter((entry): entry is [string, string] => entry !== null),
+        );
+      }
+      if (cancelled || requestSeq !== desktopImagePreviewSeqRef.current || loadedEntries.length === 0) return;
+      setDesktopImagePreviews((prev) => {
+        const next = { ...prev };
+        for (const [path, dataUrl] of loadedEntries) {
+          next[path] = dataUrl;
+        }
+        return next;
       });
+    })();
     return () => {
       cancelled = true;
     };
   }, [desktopEntries, desktopImagePreviews]);
 
   useEffect(() => {
-    desktopWarmCache.entries = desktopEntries;
-  }, [desktopEntries]);
-
-  useEffect(() => {
-    desktopWarmCache.imagePreviews = desktopImagePreviews;
-  }, [desktopImagePreviews]);
+    writeDesktopWarmCache(desktopEntries, desktopImagePreviews, desktopLoadedAtRef.current);
+  }, [desktopEntries, desktopImagePreviews]);
 
   function openFolder(path: string) { setCurrentPath(path); setHistory([path]); setHistoryIndex(0); setFinderOpen(true); setSelected(null); }
   function navigateTo(path: string) { const h = history.slice(0, historyIndex + 1); h.push(path); setHistory(h); setHistoryIndex(h.length - 1); setCurrentPath(path); setSelected(null); }
