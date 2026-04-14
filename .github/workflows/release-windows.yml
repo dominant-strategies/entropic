@@ -316,6 +316,7 @@ jobs:
           REPO="dominant-strategies/entropic-releases"
           REPO_URL="https://github.com/${REPO}/releases/download/${VERSION}"
           LATEST_PATH="artifacts/latest.json"
+          NOTES_FILE="release-notes/${VERSION}.md"
 
           WINDOWS_SIG=""
           if [ -f artifacts/updater-windows/updater-windows.json ]; then
@@ -330,7 +331,7 @@ jobs:
             rm -rf "$TMP_DIR"
           fi
 
-          VERSION="$VERSION" SEMVER="$SEMVER" PUB_DATE="$PUB_DATE" REPO_URL="$REPO_URL" WINDOWS_SIG="$WINDOWS_SIG" \
+          VERSION="$VERSION" SEMVER="$SEMVER" PUB_DATE="$PUB_DATE" REPO_URL="$REPO_URL" WINDOWS_SIG="$WINDOWS_SIG" NOTES_FILE="$NOTES_FILE" \
           python3 - <<'PY'
           import json
           import os
@@ -342,8 +343,10 @@ jobs:
           else:
               data = {}
 
+          notes_path = Path(os.environ["NOTES_FILE"])
+          notes = notes_path.read_text().strip() if notes_path.exists() else f"Entropic {os.environ['VERSION']}"
           data["version"] = os.environ["SEMVER"]
-          data["notes"] = f"Entropic {os.environ['VERSION']}"
+          data["notes"] = notes
           data["pub_date"] = os.environ["PUB_DATE"]
           platforms = data.get("platforms") or {}
           platforms["windows-x86_64"] = {
@@ -362,6 +365,7 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.tag }}"
           REPO="dominant-strategies/entropic-releases"
+          NOTES_FILE="release-notes/${VERSION}.md"
 
           FILES=()
           for f in artifacts/entropic-windows-x86_64/*; do
@@ -372,12 +376,25 @@ jobs:
 
           if gh release view "$VERSION" --repo "$REPO" &>/dev/null; then
             gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
+            if [ -f "$NOTES_FILE" ]; then
+              gh release edit "$VERSION" --repo "$REPO" --notes-file "$NOTES_FILE"
+            fi
           else
-            if ! gh release create "$VERSION" "${FILES[@]}" \
-              --repo "$REPO" \
-              --title "Entropic $VERSION" \
-              --notes "Windows assets uploaded by Release Windows workflow."; then
-              gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
+            if [ -f "$NOTES_FILE" ]; then
+              if ! gh release create "$VERSION" "${FILES[@]}" \
+                --repo "$REPO" \
+                --title "Entropic $VERSION" \
+                --notes-file "$NOTES_FILE"; then
+                gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
+                gh release edit "$VERSION" --repo "$REPO" --notes-file "$NOTES_FILE"
+              fi
+            else
+              if ! gh release create "$VERSION" "${FILES[@]}" \
+                --repo "$REPO" \
+                --title "Entropic $VERSION" \
+                --notes "Windows assets uploaded by Release Windows workflow."; then
+                gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
+              fi
             fi
           fi
 
