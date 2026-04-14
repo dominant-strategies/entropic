@@ -316,3 +316,32 @@ button:focus-visible,
     animation-duration: 0.01ms !important;
   }
 }
+
+/* Settings row container-query layout */
+.settings-group-card {
+  container-type: inline-size;
+}
+
+.settings-row {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.settings-row-dropdown {
+  width: 100%;
+}
+
+@container (min-width: 480px) {
+  .settings-row {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .settings-row-right {
+    justify-content: flex-end;
+    flex-shrink: 0;
+  }
+  .settings-row-dropdown {
+    width: 256px;
+  }
+}

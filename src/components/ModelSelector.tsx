@@ -283,22 +283,17 @@ export function ModelSelector({
     <div className="relative" ref={wrapperRef}>
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between gap-3 px-4 py-3
+        className="w-full flex items-center justify-between gap-2 px-3 py-2
                  bg-[var(--bg-card)] hover:bg-[var(--system-gray-6)]
-                 rounded-xl border border-[var(--border-subtle)] shadow-sm transition-all"
+                 rounded-lg border border-[var(--border-subtle)] shadow-sm transition-all"
       >
-        <div className="flex min-w-0 items-center gap-3">
-          <TierIcon className={`w-5 h-5 shrink-0 ${TIER_COLORS[currentModel?.tier || "recommended"]}`} />
-          <div className="min-w-0 text-left">
-            <div className="truncate text-[14px] font-semibold text-[var(--text-primary)]">
-              {currentModel?.name || "Select model"}
-            </div>
-            <div className="truncate text-[12px] text-[var(--text-secondary)]">
-              {currentModel?.provider} · {currentModel?.tier}
-            </div>
-          </div>
+        <div className="flex min-w-0 items-center gap-2">
+          <TierIcon className={`w-3.5 h-3.5 shrink-0 ${TIER_COLORS[currentModel?.tier || "recommended"]}`} />
+          <span className="truncate text-[13px] font-medium text-[var(--text-primary)]">
+            {currentModel?.name || "Select model"}
+          </span>
         </div>
-        <ChevronDown className={`w-5 h-5 shrink-0 text-[var(--text-tertiary)] transition-transform ${isOpen ? "rotate-180" : ""}`} />
+        <ChevronDown className={`w-3.5 h-3.5 shrink-0 text-[var(--text-tertiary)] transition-transform ${isOpen ? "rotate-180" : ""}`} />
       </button>
 
       {isOpen && (
@@ -306,11 +301,11 @@ export function ModelSelector({
           <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
           <div
             style={menuStyle ?? undefined}
-            className="overflow-y-auto bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl shadow-2xl animate-scale-in"
+            className="overflow-y-auto bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-lg shadow-2xl animate-scale-in"
           >
             {Object.entries(groupedModels).map(([provider, providerModels]) => (
               <div key={provider}>
-                <div className="sticky top-0 px-4 py-2 text-[11px] font-bold text-[var(--text-tertiary)]
+                <div className="sticky top-0 px-3 py-1.5 text-[10px] font-bold text-[var(--text-tertiary)]
                               bg-[var(--system-gray-6)]/80 backdrop-blur-md border-b border-[var(--border-subtle)] uppercase tracking-wider">
                   {provider}
                 </div>
@@ -320,16 +315,16 @@ export function ModelSelector({
                     <button
                       key={model.id}
                       onClick={() => handleModelChange(model.id)}
-                      className={`w-full flex items-center gap-4 px-4 py-4
+                      className={`w-full flex items-center gap-3 px-3 py-2.5
                                 hover:bg-[var(--system-gray-6)] transition-colors
                                 ${model.id === selectedModel ? "bg-[var(--system-blue)]/5" : ""}`}
                     >
-                      <Icon className={`w-5 h-5 ${TIER_COLORS[model.tier]}`} />
+                      <Icon className={`w-4 h-4 shrink-0 ${TIER_COLORS[model.tier]}`} />
                       <div className="flex-1 text-left min-w-0">
-                        <div className="text-[14px] font-semibold text-[var(--text-primary)] truncate">
+                        <div className="text-[13px] font-medium text-[var(--text-primary)] truncate leading-tight">
                           {model.name}
                         </div>
-                        <div className="text-[12px] text-[var(--text-secondary)]">
+                        <div className="text-[11px] text-[var(--text-secondary)] leading-tight mt-px">
                           {model.tier === "fast" && "Fast & affordable response"}
                           {model.tier === "recommended" && "Optimized for most tasks"}
                           {model.tier === "premium" && "Maximum intelligence & reasoning"}
@@ -337,7 +332,7 @@ export function ModelSelector({
                         </div>
                       </div>
                       {model.id === selectedModel && (
-                        <div className="w-2 h-2 rounded-full bg-[var(--system-blue)] shadow-[0_0_8px_rgba(0,122,255,0.4)]" />
+                        <div className="w-1.5 h-1.5 rounded-full bg-[var(--system-blue)] shadow-[0_0_6px_rgba(0,122,255,0.4)]" />
                       )}
                     </button>
                   );

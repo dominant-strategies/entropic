@@ -136,7 +136,7 @@ function SettingsGroup({ title, children }: { title?: string, children: React.Re
           {title}
         </h3>
       )}
-      <div className="bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl overflow-hidden shadow-sm divide-y divide-[var(--border-subtle)]">
+      <div className="settings-group-card bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl overflow-hidden shadow-sm divide-y divide-[var(--border-subtle)]">
         {children}
       </div>
     </div>
@@ -159,23 +159,23 @@ function SettingsRow({
   return (
     <div
       className={clsx(
-        "p-4 flex flex-col items-stretch gap-4 transition-colors sm:flex-row sm:items-center sm:justify-between",
+        "settings-row px-4 py-3 flex flex-col items-stretch gap-2 transition-colors",
         onClick && "cursor-pointer hover:bg-[var(--system-gray-6)]",
       )}
       onClick={onClick}
     >
-      <div className="flex min-w-0 items-center gap-3 overflow-hidden">
+      <div className="flex items-center gap-3 flex-shrink-0">
         {Icon && (
           <div className="w-7 h-7 rounded-md bg-[var(--system-blue)]/10 text-[var(--system-blue)] flex items-center justify-center flex-shrink-0">
             <Icon className="w-4 h-4" />
           </div>
         )}
-        <div className="min-w-0">
-          <div className="text-[14px] font-medium text-[var(--text-primary)] break-words">{label}</div>
-          {description && <div className="text-[12px] text-[var(--text-secondary)] truncate">{description}</div>}
+        <div>
+          <div className="text-[13px] font-medium text-[var(--text-primary)] whitespace-nowrap">{label}</div>
+          {description && <div className="text-[11px] text-[var(--text-secondary)]">{description}</div>}
         </div>
       </div>
-      <div className="flex min-w-0 items-center gap-2 sm:flex-shrink-0 sm:justify-end">
+      <div className="settings-row-right flex min-w-0 items-center gap-2">
         {children}
       </div>
     </div>
@@ -1356,28 +1356,24 @@ export function Settings({
       <div className="relative">
         <SettingsGroup title="Intelligence">
           <SettingsRow label="Primary Model" icon={Cpu}>
-            <div className="w-80">
+            <div className="settings-row-dropdown">
               <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
             </div>
           </SettingsRow>
           {!useLocalKeys && (
             <>
               <SettingsRow label="Coding Model" icon={Cpu}>
-                <div className="w-80">
+                <div className="settings-row-dropdown">
                   <ModelSelector selectedModel={codeModel} onModelChange={onCodeModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
                 </div>
               </SettingsRow>
               <SettingsRow label="Vision Model" icon={Image}>
-                <div className="w-80">
+                <div className="settings-row-dropdown">
                   <ModelSelector selectedModel={imageModel} onModelChange={onImageModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
                 </div>
               </SettingsRow>
-              <SettingsRow
-                label="Image Generation Model"
-                icon={Sparkles}
-                description="Used for Image mode in Chat and generated images."
-              >
-                <div className="w-80">
+              <SettingsRow label="Image Generation Model" icon={Sparkles}>
+                <div className="settings-row-dropdown">
                   <ModelSelector
                     selectedModel={imageGenerationModel}
                     onModelChange={onImageGenerationModelChange}
@@ -1389,12 +1385,8 @@ export function Settings({
           )}
           {useLocalKeys && !authMetaLoading && localImageGenerationProviders.length > 0 && (
             <>
-              <SettingsRow
-                label="Image Generation Model"
-                icon={Sparkles}
-                description="Used for Image mode in Chat and generated images."
-              >
-                <div className="w-80">
+              <SettingsRow label="Image Generation Model" icon={Sparkles}>
+                <div className="settings-row-dropdown">
                   <ModelSelector
                     selectedModel={imageGenerationModel}
                     onModelChange={onImageGenerationModelChange}
