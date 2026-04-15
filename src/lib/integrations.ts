@@ -21,6 +21,38 @@ const INTEGRATIONS_REDIRECT_URL =
   (import.meta as any).env?.VITE_INTEGRATIONS_REDIRECT_URL ||
   DEFAULT_INTEGRATIONS_REDIRECT_URL;
 
+export const HOSTED_OAUTH_INTEGRATION_PROVIDERS = [
+  "asana",
+  "google_sheets",
+  "microsoft_teams",
+  "google_drive",
+  "google_docs",
+  "outlook",
+  "slack",
+  "github",
+  "notion",
+  "linear",
+  "jira",
+  "salesforce",
+  "hubspot",
+  "airtable",
+  "pipedrive",
+  "supabase",
+  "google_tasks",
+] as const;
+
+export type LocalSecretIntegrationProvider = "google_calendar" | "google_email";
+export type HostedOAuthIntegrationProvider =
+  typeof HOSTED_OAUTH_INTEGRATION_PROVIDERS[number];
+export type IntegrationProvider =
+  | LocalSecretIntegrationProvider
+  | HostedOAuthIntegrationProvider
+  | "x";
+
+const HOSTED_OAUTH_PROVIDER_SET = new Set<IntegrationProvider>(
+  HOSTED_OAUTH_INTEGRATION_PROVIDERS
+);
+
 const OPENCLAW_SYNC_PROVIDERS = new Set<IntegrationProvider>([
   "google_calendar",
   "google_email",
@@ -36,7 +68,15 @@ export function resetIntegrationState(): void {
   window.dispatchEvent(new Event("entropic-integration-updated"));
 }
 
-export type IntegrationProvider = "google_calendar" | "google_email" | "x";
+export function isHostedOAuthIntegrationProvider(
+  provider: string
+): provider is HostedOAuthIntegrationProvider {
+  return HOSTED_OAUTH_PROVIDER_SET.has(provider as IntegrationProvider);
+}
+
+export function usesBrowserOAuthLaunch(provider: IntegrationProvider): boolean {
+  return provider === "x" || isHostedOAuthIntegrationProvider(provider);
+}
 
 export interface Integration {
   provider: IntegrationProvider;
@@ -44,10 +84,13 @@ export interface Integration {
   email?: string;
   scopes: string[];
   stale?: boolean;
+  backend?: "local" | "hosted";
+  status?: string;
+  configured?: boolean;
 }
 
 type StoredIntegration = {
-  provider: IntegrationProvider;
+  provider: LocalSecretIntegrationProvider;
   access_token: string;
   refresh_token?: string | null;
   token_type?: string | null;
@@ -59,7 +102,7 @@ type StoredIntegration = {
 };
 
 export type IntegrationTokenBundle = {
-  provider: IntegrationProvider;
+  provider: LocalSecretIntegrationProvider;
   access_token: string;
   token_type?: string | null;
   expires_at?: number | null;
@@ -84,6 +127,31 @@ type RefreshResponse = {
   access_token: string;
   expires_at: number;
   token_type?: string;
+};
+
+type HostedIntegrationRecord = {
+  provider: HostedOAuthIntegrationProvider;
+  backend: "composio";
+  status: "pending" | "connected" | "needs_reauth" | "failed";
+  connected: boolean;
+  needs_reauth: boolean;
+  account_label?: string | null;
+  connected_account_id?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type HostedIntegrationCatalogRecord = {
+  provider: HostedOAuthIntegrationProvider;
+  backend: "composio";
+  configured: boolean;
+  status: "available" | "unconfigured";
+  name: string;
+  description: string;
+};
+
+type HostedIntegrationListResponse = {
+  integrations: HostedIntegrationRecord[];
+  providers?: HostedIntegrationCatalogRecord[];
 };
 
 function isExpiringSoon(expiresAt?: number | null): boolean {
@@ -120,29 +188,76 @@ export async function clearPendingImport(provider: IntegrationProvider) {
   }
 }
 
+async function getHostedIntegrationStatuses(): Promise<Integration[]> {
+  const data = await apiRequest<HostedIntegrationListResponse>("/integrations");
+  const merged = new Map<HostedOAuthIntegrationProvider, Integration>();
+
+  for (const provider of data.providers || []) {
+    merged.set(provider.provider, {
+      provider: provider.provider,
+      connected: false,
+      stale: false,
+      email: undefined,
+      scopes: [],
+      backend: "hosted",
+      status: provider.status,
+      configured: provider.configured,
+    });
+  }
+
+  for (const integration of data.integrations || []) {
+    const existing = merged.get(integration.provider);
+    merged.set(integration.provider, {
+      provider: integration.provider,
+      connected: Boolean(integration.connected),
+      stale: Boolean(integration.needs_reauth || integration.status === "failed"),
+      email: integration.account_label ?? undefined,
+      scopes: [],
+      backend: "hosted",
+      status: integration.status,
+      configured: existing?.configured ?? true,
+    });
+  }
+
+  return Array.from(merged.values());
+}
+
 export async function getIntegrations(opts?: { force?: boolean }): Promise<Integration[]> {
   const now = Date.now();
   if (!opts?.force && integrationsCache && now - integrationsCache.ts < INTEGRATIONS_CACHE_TTL_MS) {
     return integrationsCache.data;
   }
   const records = await listIntegrationSecrets<StoredIntegration>();
-  const local: Integration[] = records.map((record) => ({
-    provider: record.provider,
-    connected: Boolean(record.access_token),
-    stale: !record.access_token,
-    email: record.email ?? undefined,
-    scopes: record.scopes ?? [],
-  }));
+  const merged = new Map<IntegrationProvider, Integration>();
+  for (const record of records) {
+    merged.set(record.provider, {
+      provider: record.provider,
+      connected: Boolean(record.access_token),
+      stale: !record.access_token,
+      email: record.email ?? undefined,
+      scopes: record.scopes ?? [],
+      backend: "local",
+    });
+  }
   try {
     const xStatus = await getXIntegrationStatus();
     if (xStatus) {
-      local.push({ ...xStatus, stale: xStatus.stale ?? false });
+      merged.set(xStatus.provider, { ...xStatus, stale: xStatus.stale ?? false });
     }
   } catch (err) {
     console.warn("Failed to load X integration status:", err);
   }
-  integrationsCache = { ts: now, data: local };
-  return local;
+  try {
+    const hosted = await getHostedIntegrationStatuses();
+    for (const integration of hosted) {
+      merged.set(integration.provider, integration);
+    }
+  } catch (err) {
+    console.warn("Failed to load hosted integrations:", err);
+  }
+  const list = Array.from(merged.values());
+  integrationsCache = { ts: now, data: list };
+  return list;
 }
 
 export async function getIntegrationsCached(opts?: { force?: boolean }): Promise<Integration[]> {
@@ -157,12 +272,19 @@ export async function getIntegrationsCached(opts?: { force?: boolean }): Promise
     stale: true,
     email: record.email ?? undefined,
     scopes: record.scopes ?? [],
+    backend: "local" as const,
   }));
   integrationsCachedIndex = { ts: now, data: mapped };
   return mapped;
 }
 
 export async function isIntegrationConnected(provider: IntegrationProvider): Promise<boolean> {
+  if (isHostedOAuthIntegrationProvider(provider) || provider === "x") {
+    const integrations = await getIntegrations({ force: true });
+    return Boolean(
+      integrations.find((integration) => integration.provider === provider && integration.connected && !integration.stale)
+    );
+  }
   const record = await loadIntegrationSecret<StoredIntegration>(provider);
   return Boolean(record?.access_token);
 }
@@ -176,11 +298,29 @@ export async function connectIntegration(
       body: JSON.stringify({ redirect_uri: INTEGRATIONS_REDIRECT_URL }),
     });
     if (result?.url) {
-      // Try to open browser but always return the URL so the retry button works
       try {
         await open(result.url);
       } catch (err) {
         console.warn("Failed to open browser for X auth:", err);
+      }
+      return { oauthUrl: result.url };
+    }
+    return {};
+  }
+
+  if (isHostedOAuthIntegrationProvider(provider)) {
+    const result = await apiRequest<{ url: string }>("/integrations/connect", {
+      method: "POST",
+      body: JSON.stringify({
+        provider,
+        redirect_uri: INTEGRATIONS_REDIRECT_URL,
+      }),
+    });
+    if (result?.url) {
+      try {
+        await open(result.url);
+      } catch (err) {
+        console.warn(`Failed to open browser for ${provider} auth:`, err);
       }
       return { oauthUrl: result.url };
     }
@@ -203,7 +343,6 @@ export async function connectIntegration(
   integrationsCache = null;
   integrationsCachedIndex = null;
   window.dispatchEvent(new Event("entropic-integration-updated"));
-  // Sync in the background so the UI can update immediately.
   syncIntegrationToGateway(provider).catch((err) => {
     console.warn(`Failed to sync ${provider} after connect:`, err);
   });
@@ -213,6 +352,16 @@ export async function connectIntegration(
 export async function disconnectIntegration(provider: IntegrationProvider): Promise<void> {
   if (provider === "x") {
     await apiRequest("/x/oauth/disconnect", { method: "POST" });
+    integrationsCache = null;
+    integrationsCachedIndex = null;
+    window.dispatchEvent(new Event("entropic-integration-updated"));
+    return;
+  }
+  if (isHostedOAuthIntegrationProvider(provider)) {
+    await apiRequest("/integrations/disconnect", {
+      method: "POST",
+      body: JSON.stringify({ provider }),
+    });
     integrationsCache = null;
     integrationsCachedIndex = null;
     window.dispatchEvent(new Event("entropic-integration-updated"));
@@ -240,6 +389,8 @@ async function getXIntegrationStatus(): Promise<Integration | null> {
     stale: false,
     email: data.username ? `@${data.username}` : undefined,
     scopes: data.scopes ?? [],
+    backend: "hosted",
+    status: "connected",
   };
 }
 
@@ -261,7 +412,7 @@ async function refreshIntegration(record: StoredIntegration): Promise<StoredInte
   return updated;
 }
 
-export async function getIntegrationAccessToken(provider: IntegrationProvider): Promise<string> {
+export async function getIntegrationAccessToken(provider: LocalSecretIntegrationProvider): Promise<string> {
   const record = await loadIntegrationSecret<StoredIntegration>(provider);
   if (!record?.access_token) {
     throw new Error("Integration not connected");
@@ -273,7 +424,7 @@ export async function getIntegrationAccessToken(provider: IntegrationProvider): 
 }
 
 export async function exportIntegrationTokenBundle(
-  provider: IntegrationProvider
+  provider: LocalSecretIntegrationProvider
 ): Promise<IntegrationTokenBundle> {
   const record = await loadIntegrationSecret<StoredIntegration>(provider);
   if (!record?.access_token) {
@@ -320,10 +471,11 @@ export async function syncIntegrationToGateway(provider: IntegrationProvider): P
   if (!OPENCLAW_SYNC_PROVIDERS.has(provider)) {
     return;
   }
-  const bundle = await exportIntegrationTokenBundle(provider);
+  const localProvider = provider as LocalSecretIntegrationProvider;
+  const bundle = await exportIntegrationTokenBundle(localProvider);
   try {
     await importIntegrationBundle(bundle);
-    await clearPendingImport(provider);
+    await clearPendingImport(localProvider);
   } catch (err) {
     await queueIntegrationImport(bundle);
     throw err;

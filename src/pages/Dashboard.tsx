@@ -2315,9 +2315,19 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       case "chat":
         return null;
       case "store":
+      case "integrations":
+        return (
+          <Store
+            view="integrations"
+            integrationsSyncing={integrationsSyncing}
+            integrationsMissing={integrationsMissing}
+            onNavigate={(page) => setCurrentPage(page)}
+          />
+        );
       case "skills":
         return (
           <Store
+            view="skills"
             integrationsSyncing={integrationsSyncing}
             integrationsMissing={integrationsMissing}
             onNavigate={(page) => setCurrentPage(page)}

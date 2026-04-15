@@ -3,8 +3,37 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import clsx from "clsx";
-import { CheckCircle2, Loader2, Search, ShieldCheck, Download, Star, ExternalLink, Box, Puzzle, Sparkles, ChevronRight, Info, X } from "lucide-react";
+import {
+  CheckCircle2,
+  ChevronRight,
+  Download,
+  ExternalLink,
+  Info,
+  Loader2,
+  Search,
+  ShieldCheck,
+  Star,
+  X,
+} from "lucide-react";
 import quaiLogo from "../assets/quai-logo.png";
+import googleSheetsLogo from "../assets/integrations/google-sheets.svg";
+import googleDriveLogo from "../assets/integrations/google-drive.svg";
+import googleDocsLogo from "../assets/integrations/google-docs.svg";
+import googleTasksLogo from "../assets/integrations/google-tasks.svg";
+import asanaLogo from "../assets/integrations/asana.svg";
+import slackLogo from "../assets/integrations/slack.svg";
+import githubLogo from "../assets/integrations/github.svg";
+import notionLogo from "../assets/integrations/notion.svg";
+import linearLogo from "../assets/integrations/linear.svg";
+import jiraLogo from "../assets/integrations/jira.svg";
+import salesforceLogo from "../assets/integrations/salesforce.svg";
+import hubspotLogo from "../assets/integrations/hubspot.svg";
+import airtableLogo from "../assets/integrations/airtable.svg";
+import xBrandLogo from "../assets/integrations/x.svg";
+import supabaseLogo from "../assets/integrations/supabase.svg";
+import microsoftTeamsLogo from "../assets/integrations/microsoft-teams.svg";
+import outlookLogo from "../assets/integrations/outlook.svg";
+import pipedriveLogo from "../assets/integrations/pipedrive.svg";
 import {
   getIntegrations,
   getIntegrationsCached,
@@ -12,6 +41,7 @@ import {
   disconnectIntegration,
   syncIntegrationToGateway,
   removeIntegrationFromGateway,
+  usesBrowserOAuthLaunch,
   Integration,
   IntegrationProvider,
 } from "../lib/integrations";
@@ -49,6 +79,22 @@ type GoogleIntegration = {
   description: string;
   icon: ComponentType<{ className?: string }>;
   connected: boolean;
+  stale?: boolean;
+  email?: string;
+};
+
+type StoreView = "skills" | "integrations";
+
+type OAuthCatalogItem = {
+  id: string;
+  name: string;
+  description: string;
+  icon: ComponentType<{ className?: string }>;
+  provider?: IntegrationProvider;
+  status: "available" | "planned";
+  sourceLabel: string;
+  configured?: boolean;
+  connected?: boolean;
   stale?: boolean;
   email?: string;
 };
@@ -277,10 +323,223 @@ const GOOGLE_INTEGRATIONS: Omit<GoogleIntegration, "connected" | "email">[] = [
   },
 ];
 
+function brandLogo(src: string, alt: string): ComponentType<{ className?: string }> {
+  const Logo = ({ className }: { className?: string }) => (
+    <img src={src} alt={alt} className={className} draggable={false} />
+  );
+  Logo.displayName = `BrandLogo(${alt})`;
+  return Logo;
+}
+
+const GoogleSheetsBrand = brandLogo(googleSheetsLogo, "Google Sheets");
+const GoogleDriveBrand = brandLogo(googleDriveLogo, "Google Drive");
+const GoogleDocsBrand = brandLogo(googleDocsLogo, "Google Docs");
+const GoogleTasksBrand = brandLogo(googleTasksLogo, "Google Tasks");
+const AsanaBrand = brandLogo(asanaLogo, "Asana");
+const MicrosoftTeamsBrand = brandLogo(microsoftTeamsLogo, "Microsoft Teams");
+const OutlookBrand = brandLogo(outlookLogo, "Outlook");
+const SlackBrand = brandLogo(slackLogo, "Slack");
+const NotionBrand = brandLogo(notionLogo, "Notion");
+const GitHubBrand = brandLogo(githubLogo, "GitHub");
+const LinearBrand = brandLogo(linearLogo, "Linear");
+const JiraBrand = brandLogo(jiraLogo, "Jira");
+const SalesforceBrand = brandLogo(salesforceLogo, "Salesforce");
+const HubSpotBrand = brandLogo(hubspotLogo, "HubSpot");
+const AirtableBrand = brandLogo(airtableLogo, "Airtable");
+const XBrand = brandLogo(xBrandLogo, "X");
+const SupabaseBrand = brandLogo(supabaseLogo, "Supabase");
+const PipedriveBrand = brandLogo(pipedriveLogo, "Pipedrive");
+
+const COMPOSIO_SOURCE = "Composio";
+
+// Ordered: user-priority providers first (Gmail, Google Calendar, Google Sheets,
+// Asana, Microsoft Teams), then other productivity/workspace essentials, then
+// CRM / sales / data tooling.
+const COMPOSIO_INTEGRATION_CANDIDATES: OAuthCatalogItem[] = [
+  {
+    id: "google_sheets",
+    name: "Google Sheets",
+    description: "Read and write spreadsheet rows and ranges via hosted auth.",
+    icon: GoogleSheetsBrand,
+    provider: "google_sheets",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "asana",
+    name: "Asana",
+    description: "Manage tasks, projects, and assignments with server-side OAuth.",
+    icon: AsanaBrand,
+    provider: "asana",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "microsoft_teams",
+    name: "Microsoft Teams",
+    description: "Post messages, read channels, and manage meetings via hosted auth.",
+    icon: MicrosoftTeamsBrand,
+    provider: "microsoft_teams",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "google_drive",
+    name: "Google Drive",
+    description: "Search files, fetch contents, and manage Drive items through Composio.",
+    icon: GoogleDriveBrand,
+    provider: "google_drive",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "google_docs",
+    name: "Google Docs",
+    description: "Create, edit, and extract structured content from Docs.",
+    icon: GoogleDocsBrand,
+    provider: "google_docs",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "outlook",
+    name: "Outlook",
+    description: "Mail and calendar access through a hosted OAuth broker.",
+    icon: OutlookBrand,
+    provider: "outlook",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "slack_oauth",
+    name: "Slack",
+    description: "Workspace OAuth for channels, search, and message actions.",
+    icon: SlackBrand,
+    provider: "slack",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "notion",
+    name: "Notion",
+    description: "OAuth-backed document and database actions.",
+    icon: NotionBrand,
+    provider: "notion",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "github",
+    name: "GitHub",
+    description: "Repository, issue, and pull request actions via hosted auth.",
+    icon: GitHubBrand,
+    provider: "github",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "linear",
+    name: "Linear",
+    description: "Project and issue management with hosted account linking.",
+    icon: LinearBrand,
+    provider: "linear",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "jira",
+    name: "Jira",
+    description: "Track issues, sprints, and boards through server-side OAuth.",
+    icon: JiraBrand,
+    provider: "jira",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "salesforce",
+    name: "Salesforce",
+    description: "Query and update CRM records without desktop-held credentials.",
+    icon: SalesforceBrand,
+    provider: "salesforce",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "hubspot",
+    name: "HubSpot",
+    description: "CRM access without storing provider refresh tokens on-device.",
+    icon: HubSpotBrand,
+    provider: "hubspot",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "airtable",
+    name: "Airtable",
+    description: "Read and mutate base records with hosted OAuth.",
+    icon: AirtableBrand,
+    provider: "airtable",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "pipedrive",
+    name: "Pipedrive",
+    description: "Sales pipeline and deal management through a hosted broker.",
+    icon: PipedriveBrand,
+    provider: "pipedrive",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "supabase",
+    name: "Supabase",
+    description: "Query databases and manage projects with a server-side token.",
+    icon: SupabaseBrand,
+    provider: "supabase",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "google_tasks",
+    name: "Google Tasks",
+    description: "Create and track task lists alongside Calendar and Gmail.",
+    icon: GoogleTasksBrand,
+    provider: "google_tasks",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "twitter_composio",
+    name: "X (Twitter)",
+    description: "Post, search, and read timelines via the Composio broker.",
+    icon: XBrand,
+    status: "planned",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+];
+
 const INTEGRATION_NAMES: Record<IntegrationProvider, string> = {
+  asana: "Asana",
   google_calendar: "Google Calendar",
+  google_docs: "Google Docs",
+  google_drive: "Google Drive",
   google_email: "Gmail",
+  google_sheets: "Google Sheets",
+  google_tasks: "Google Tasks",
   x: "X (Twitter)",
+  microsoft_teams: "Microsoft Teams",
+  outlook: "Outlook",
+  slack: "Slack",
+  github: "GitHub",
+  notion: "Notion",
+  linear: "Linear",
+  jira: "Jira",
+  salesforce: "Salesforce",
+  hubspot: "HubSpot",
+  airtable: "Airtable",
+  pipedrive: "Pipedrive",
+  supabase: "Supabase",
 };
 
 const SYNC_REQUIRED = new Set<IntegrationProvider>(["google_calendar", "google_email"]);
@@ -333,15 +592,18 @@ function scanBadge(result: PluginScanResult | null) {
 }
 
 export function Store({
+  view = "skills",
   integrationsSyncing,
   integrationsMissing,
   onNavigate,
 }: {
+  view?: StoreView;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
   onNavigate?: (page: "channels") => void;
 }) {
   const { isAuthenticated, isAuthConfigured } = useAuth();
+  const isIntegrationsView = view === "integrations";
   const [plugins, setPlugins] = useState<Plugin[]>([]);
   const [workspaceSkills, setWorkspaceSkills] = useState<WorkspaceSkill[]>(cachedWorkspaceSkills);
   const [skillsLoading, setSkillsLoading] = useState(false);
@@ -624,6 +886,28 @@ export function Store({
   }, [setupProvider]);
 
   useEffect(() => {
+    if (!setupProvider || !usesBrowserOAuthLaunch(setupProvider)) return;
+
+    const refreshSetupState = () => {
+      setSetupError(null);
+      refreshIntegrations({ force: true }).catch(() => undefined);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshSetupState();
+      }
+    };
+
+    window.addEventListener("focus", refreshSetupState);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", refreshSetupState);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [setupProvider]);
+
+  useEffect(() => {
     if (!setupProvider) {
       setSetupTimedOut(false);
       setSetupLaunchUrl(null);
@@ -779,17 +1063,12 @@ export function Store({
     setSetupError(null);
     try {
       const result = await connectIntegration(provider);
-      if (provider === "x") {
+      if (usesBrowserOAuthLaunch(provider)) {
         setSetupLaunchUrl(result.oauthUrl || null);
       }
-      if (provider !== "x") {
+      if (!usesBrowserOAuthLaunch(provider)) {
         setSetupStage("syncing");
       }
-      setIntegrations((prev) => {
-        const exists = prev.some((i) => i.provider === provider);
-        if (!exists) return prev;
-        return prev.map((i) => (i.provider === provider ? { ...i, connected: true, stale: false } : i));
-      });
       await refreshIntegrations({ force: true });
     } catch (err) {
       console.error("Failed to start OAuth:", err);
@@ -1043,6 +1322,67 @@ export function Store({
 
   const xIntegration = useMemo(() => integrations.find((i) => i.provider === "x"), [integrations]);
   const xConnected = !!xIntegration && !xIntegration.stale;
+  const hostedOauthCatalog = useMemo<OAuthCatalogItem[]>(
+    () =>
+      COMPOSIO_INTEGRATION_CANDIDATES.map((integration) => {
+        const entry = integration.provider
+          ? integrations.find((item) => item.provider === integration.provider)
+          : null;
+        return {
+          ...integration,
+          configured: entry?.configured ?? integration.configured,
+          connected: Boolean(entry && entry.connected && !entry.stale),
+          stale: entry?.stale,
+          email: entry?.email,
+        };
+      }),
+    [integrations]
+  );
+
+  const oauthCatalog = useMemo<OAuthCatalogItem[]>(
+    () => [
+      ...googleIntegrations.map((integration) => ({
+        id: integration.id,
+        name: integration.name,
+        description: integration.description,
+        icon: integration.icon,
+        provider: integration.id,
+        status: "available" as const,
+        sourceLabel: "Available now",
+        connected: integration.connected,
+        stale: integration.stale,
+        email: integration.email,
+      })),
+      {
+        id: "x",
+        name: "X (Twitter)",
+        description: "Search public posts, inspect profiles, and pull thread context.",
+        icon: XLogo,
+        provider: "x",
+        status: "available" as const,
+        sourceLabel: "Available now",
+        connected: xConnected,
+        stale: xIntegration?.stale,
+        email: xIntegration?.email,
+      },
+    ],
+    [googleIntegrations, xConnected, xIntegration?.email, xIntegration?.stale]
+  );
+
+  const connectedOauthCount = useMemo(
+    () =>
+      [...oauthCatalog, ...hostedOauthCatalog].filter(
+        (integration) => integration.connected && !integration.stale
+      ).length,
+    [hostedOauthCatalog, oauthCatalog]
+  );
+
+  const staleOauthCount = useMemo(
+    () =>
+      [...oauthCatalog, ...hostedOauthCatalog].filter((integration) => integration.stale).length,
+    [hostedOauthCatalog, oauthCatalog]
+  );
+  const setupUsesBrowserLaunch = setupProvider ? usesBrowserOAuthLaunch(setupProvider) : false;
 
   const installedSkillCards = useMemo(() => {
     const cards: SkillCard[] = [
@@ -1191,6 +1531,405 @@ export function Store({
           View Details
           <ChevronRight className="w-3.5 h-3.5" />
         </button>
+      </div>
+    );
+  }
+
+  if (isIntegrationsView) {
+    return (
+      <div className="h-full flex flex-col p-5">
+        <div className="mb-4 flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+          <div className="max-w-2xl">
+            <h1 className="text-xl font-semibold" style={{ color: "var(--text-primary)" }}>
+              Integrations
+            </h1>
+            <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--text-tertiary)" }}>
+              Connect OAuth accounts for your agent. Direct Google/X integrations stay on-device,
+              while hosted providers use <code>entropic-web</code> as the OAuth broker so the
+              desktop only keeps account references.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {integrationsSyncing && (
+              <div className="flex items-center gap-2 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-[var(--system-blue)]/10 text-[var(--system-blue)]">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Syncing
+              </div>
+            )}
+            <div className="px-3 py-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[11px] font-semibold text-[var(--text-secondary)]">
+              {connectedOauthCount} connected
+            </div>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-auto max-w-6xl w-full mx-auto space-y-4">
+          {integrationsMissing && (
+            <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-600">
+              Some connected accounts are still waiting to sync into the local gateway. Keep Entropic
+              open and it will finish the import automatically.
+            </div>
+          )}
+
+          {staleOauthCount > 0 && (
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-card)] px-4 py-3 text-sm text-[var(--text-secondary)]">
+              {staleOauthCount} account{staleOauthCount === 1 ? "" : "s"} need re-authorization
+              before the agent can use them again.
+            </div>
+          )}
+
+          <section className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] p-4">
+            <div className="mb-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div>
+                <h2 className="text-[13px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">
+                  Available Now
+                </h2>
+                <p className="mt-1 text-sm text-[var(--text-tertiary)]">
+                  These accounts already support direct connect and runtime sync.
+                </p>
+              </div>
+              <div className="inline-flex items-center gap-2 rounded-full bg-green-500/10 px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-green-600">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                Secure OAuth
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+              {oauthCatalog.map((integration) => {
+                const Icon = integration.icon;
+                const isConnected = Boolean(integration.connected && !integration.stale);
+                const isBusy = integration.provider ? connecting === integration.provider : false;
+                const canManage = Boolean(integration.provider);
+                const actionLabel = isBusy
+                  ? "Working..."
+                  : isConnected
+                    ? "Disconnect"
+                    : integration.stale
+                      ? "Reconnect"
+                      : "Connect";
+
+                return (
+                  <div
+                    key={integration.id}
+                    className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-3 shadow-sm"
+                  >
+                    <div className="flex items-start justify-between gap-2 mb-2.5">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-9 h-9 rounded-lg bg-[var(--system-gray-6)] border border-[var(--border-subtle)] flex items-center justify-center shrink-0">
+                          <Icon className="w-4 h-4 object-contain text-[var(--text-primary)]" />
+                        </div>
+                        <div className="min-w-0">
+                          <h3 className="text-sm font-semibold text-[var(--text-primary)] truncate">
+                            {integration.name}
+                          </h3>
+                          <p className="mt-1 text-[11px] font-medium text-[var(--text-tertiary)]">
+                            {integration.sourceLabel}
+                          </p>
+                        </div>
+                      </div>
+                      <span
+                        className={clsx(
+                          "px-2 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-widest border",
+                          isConnected
+                            ? "bg-green-500/10 text-green-600 border-green-500/20"
+                            : integration.stale
+                              ? "bg-amber-500/10 text-amber-600 border-amber-500/20"
+                              : "bg-[var(--bg-secondary)] text-[var(--text-secondary)] border-[var(--border-subtle)]"
+                        )}
+                      >
+                        {isConnected ? "Connected" : integration.stale ? "Reconnect" : "Not Connected"}
+                      </span>
+                    </div>
+
+                    <p className="text-[13px] leading-snug text-[var(--text-secondary)] line-clamp-3 min-h-[54px]">
+                      {integration.description}
+                    </p>
+
+                    <div className="mt-2.5 flex items-center justify-between gap-3 text-[11px] text-[var(--text-tertiary)]">
+                      <span className="truncate">
+                        {integration.email || (isConnected ? "Authorized" : "No account linked")}
+                      </span>
+                      {integration.provider && SYNC_REQUIRED.has(integration.provider) ? (
+                        <span className="shrink-0">Syncs to gateway</span>
+                      ) : (
+                        <span className="shrink-0">Desktop-only auth</span>
+                      )}
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        if (!integration.provider) return;
+                        if (isConnected) {
+                          void handleDisconnectIntegration(integration.provider);
+                          return;
+                        }
+                        void handleConnectIntegration(integration.provider);
+                      }}
+                      disabled={!canManage || isBusy}
+                      className={clsx(
+                        "mt-2.5 w-full rounded-lg px-3 py-2 text-[11px] font-bold uppercase tracking-widest transition-colors",
+                        isConnected
+                          ? "bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/15"
+                          : "bg-blue-600 text-white shadow-lg shadow-blue-500/20 hover:bg-blue-700"
+                      )}
+                    >
+                      {actionLabel}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] p-4">
+            <h2 className="mb-3 text-[13px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">
+              More integrations
+            </h2>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+              {hostedOauthCatalog.map((integration) => {
+                const Icon = integration.icon;
+                const isConnected = Boolean(integration.connected && !integration.stale);
+                const isBusy = integration.provider ? connecting === integration.provider : false;
+                const isConfigured = integration.configured !== false;
+                const actionLabel = !integration.provider
+                  ? "Coming Soon"
+                  : !isConfigured
+                    ? "Server Setup Required"
+                    : isBusy
+                      ? "Working..."
+                      : isConnected
+                        ? "Disconnect"
+                        : integration.stale
+                          ? "Reconnect"
+                          : "Connect";
+                return (
+                  <div
+                    key={integration.id}
+                    className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-3"
+                  >
+                    <div className="flex items-start justify-between gap-2 mb-2.5">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-9 h-9 rounded-lg bg-[var(--system-gray-6)] border border-[var(--border-subtle)] flex items-center justify-center shrink-0">
+                          <Icon className="w-4 h-4 object-contain text-[var(--text-primary)]" />
+                        </div>
+                        <div className="min-w-0">
+                          <h3 className="text-sm font-semibold text-[var(--text-primary)] truncate">
+                            {integration.name}
+                          </h3>
+                          <p className="mt-1 text-[11px] font-medium text-[var(--text-tertiary)]">
+                            {integration.sourceLabel}
+                          </p>
+                        </div>
+                      </div>
+                      <span
+                        className={clsx(
+                          "px-2 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-widest border",
+                          isConnected
+                            ? "bg-green-500/10 text-green-600 border-green-500/20"
+                            : !integration.provider || !isConfigured
+                              ? "bg-[var(--system-gray-6)] text-[var(--text-tertiary)] border-[var(--border-subtle)]"
+                            : integration.stale
+                              ? "bg-amber-500/10 text-amber-600 border-amber-500/20"
+                              : "bg-[var(--bg-secondary)] text-[var(--text-secondary)] border-[var(--border-subtle)]"
+                        )}
+                      >
+                        {isConnected
+                          ? "Connected"
+                          : !integration.provider
+                            ? "Planned"
+                            : !isConfigured
+                              ? "Unavailable"
+                              : integration.stale
+                                ? "Reconnect"
+                                : "Not Connected"}
+                      </span>
+                    </div>
+
+                    <p className="text-[13px] leading-snug text-[var(--text-secondary)] line-clamp-3 min-h-[54px]">
+                      {integration.description}
+                    </p>
+
+                    <div className="mt-2.5 text-[11px] text-[var(--text-tertiary)]">
+                      <span className="block truncate">
+                        {integration.email
+                          || (isConnected
+                            ? "Authorized"
+                            : !integration.provider
+                              ? "Planned"
+                              : !isConfigured
+                                ? "OAuth not configured on this server"
+                                : "No account linked")}
+                      </span>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        if (!integration.provider) return;
+                        if (isConnected) {
+                          void handleDisconnectIntegration(integration.provider);
+                          return;
+                        }
+                        void handleConnectIntegration(integration.provider);
+                      }}
+                      disabled={!integration.provider || !isConfigured || isBusy}
+                      className={clsx(
+                        "mt-2.5 w-full rounded-lg px-3 py-2 text-[11px] font-bold uppercase tracking-widest transition-colors",
+                        !integration.provider || !isConfigured
+                          ? "bg-[var(--system-gray-6)] text-[var(--text-tertiary)] border border-[var(--border-subtle)] cursor-not-allowed"
+                          : isConnected
+                          ? "bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/15"
+                          : "bg-blue-600 text-white shadow-lg shadow-blue-500/20 hover:bg-blue-700"
+                      )}
+                    >
+                      {actionLabel}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-4">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div className="max-w-2xl">
+                <h2 className="text-[13px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">
+                  Messaging Channels
+                </h2>
+                <p className="mt-1 text-sm text-[var(--text-tertiary)]">
+                  Bot-style channels like Telegram and Discord still live under Messaging. This page is
+                  focused on account-level OAuth providers.
+                </p>
+              </div>
+              {onNavigate && (
+                <button
+                  type="button"
+                  onClick={() => onNavigate("channels")}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--bg-secondary)] px-4 py-2.5 text-sm font-semibold text-[var(--text-primary)] border border-[var(--border-subtle)] hover:bg-[var(--system-gray-6)] transition-colors"
+                >
+                  Open Messaging
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+          </section>
+        </div>
+
+        {setupProvider && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/40 backdrop-blur-sm"
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && !setupVerifying) {
+                setSetupProvider(null);
+                setSetupStage("authorizing");
+              }
+            }}
+          >
+            <div className="w-full max-w-sm rounded-[32px] bg-[var(--bg-card)] p-8 shadow-2xl border border-[var(--border-subtle)] animate-in zoom-in-95 duration-200">
+              <div className="flex flex-col items-center text-center">
+                <div className="w-16 h-16 rounded-3xl bg-blue-500/10 flex items-center justify-center mb-6">
+                  <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+                </div>
+                <h2 className="text-xl font-bold text-[var(--text-primary)] mb-2">
+                  Setting up {INTEGRATION_NAMES[setupProvider]}
+                </h2>
+                <p className="text-sm text-[var(--text-secondary)] font-medium leading-relaxed mb-3">
+                  {setupStage === "authorizing"
+                    ? "Finish authorization in your browser. We'll update Entropic as soon as it's complete."
+                    : "Syncing your credentials with Entropic..."}
+                </p>
+                {setupTimedOut && !setupError && (
+                  <p className="text-xs text-amber-500 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2 mb-3 w-full">
+                    This is taking longer than expected. If your browser didn&apos;t open, use the buttons below to open or copy the link manually.
+                  </p>
+                )}
+                {setupError && (() => {
+                  const isAuthError = isAuthConfigured && !isAuthenticated ||
+                    /not authenticated|session expired|unauthorized/i.test(setupError);
+                  return isAuthError ? (
+                    <div className="w-full mb-3 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-3 text-left">
+                    <p className="text-xs font-semibold text-[var(--text-primary)] mb-1">Sign in required</p>
+                    <p className="text-xs text-[var(--text-secondary)] mb-3 leading-relaxed">
+                      You need an Entropic account to connect {INTEGRATION_NAMES[setupProvider]}. Sign in or create a free account to continue.
+                    </p>
+                      <button
+                        className="w-full py-2 bg-amber-600 text-white rounded-xl text-[12px] font-bold hover:bg-amber-700 transition-colors"
+                        onClick={() => {
+                          setSetupProvider(null);
+                          setSetupError(null);
+                          setSetupTimedOut(false);
+                          window.dispatchEvent(new CustomEvent("entropic-open-page", { detail: { page: "billing" } }));
+                        }}
+                      >
+                        Go to Billing &amp; Sign In
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-red-500 bg-red-500/10 border border-red-500/20 rounded-xl px-3 py-2 mb-3 w-full">
+                      {setupError}
+                    </p>
+                  );
+                })()}
+              {setupUsesBrowserLaunch && setupLaunchUrl && (
+                <div className="w-full mb-3 flex flex-col gap-2">
+                    <button
+                      className="w-full py-2.5 bg-blue-600 text-white rounded-2xl text-[13px] font-bold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+                      onClick={() => { void reopenSetupLaunchUrl(); }}
+                      disabled={setupVerifying}
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      Open in Browser
+                    </button>
+                    <button
+                      className="w-full py-2 bg-[var(--bg-muted)] border border-[var(--border-default)] text-[var(--text-secondary)] rounded-2xl text-[12px] font-medium hover:bg-[var(--bg-tertiary)] transition-colors px-3"
+                      title={setupLaunchUrl}
+                      onClick={() => {
+                        void navigator.clipboard.writeText(setupLaunchUrl).then(() => {
+                          setSetupUrlCopied(true);
+                          setTimeout(() => setSetupUrlCopied(false), 2000);
+                        });
+                      }}
+                    >
+                      {setupUrlCopied ? "Copied!" : "Copy link to open manually"}
+                    </button>
+                  </div>
+                )}
+              {setupUsesBrowserLaunch && !setupLaunchUrl && (setupTimedOut || setupError) && (
+                <button
+                  className="w-full py-2.5 mb-3 bg-blue-600 text-white rounded-2xl text-[13px] font-bold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+                  onClick={() => { void handleConnectIntegration(setupProvider); }}
+                  disabled={!!connecting || setupVerifying}
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  {connecting === setupProvider ? "Opening..." : "Try Again"}
+                </button>
+              )}
+                <button
+                  className="w-full py-2.5 mb-3 bg-[var(--bg-card)] border border-[var(--border-default)] text-[var(--text-primary)] rounded-2xl text-[13px] font-bold hover:bg-[var(--bg-muted)] transition-colors"
+                  onClick={() => {
+                    void verifySetupComplete();
+                  }}
+                  disabled={setupVerifying}
+                >
+                  {setupVerifying ? "Checking..." : "I've Completed Setup"}
+                </button>
+                <button
+                  className="w-full py-3 bg-[var(--bg-tertiary)] text-[var(--text-primary)] rounded-2xl text-[14px] font-bold hover:bg-[var(--bg-secondary)] transition-colors"
+                  onClick={() => {
+                    setSetupProvider(null);
+                    setSetupTimedOut(false);
+                    setSetupLaunchUrl(null);
+                    setSetupError(null);
+                    setSetupVerifying(false);
+                    setSetupUrlCopied(false);
+                  }}
+                  disabled={setupVerifying}
+                >
+                  Continue in Background
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1601,7 +2340,7 @@ export function Store({
                   <div className="w-full mb-3 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-3 text-left">
                     <p className="text-xs font-semibold text-[var(--text-primary)] mb-1">Sign in required</p>
                     <p className="text-xs text-[var(--text-secondary)] mb-3 leading-relaxed">
-                      You need an Entropic account to connect X (Twitter). Sign in or create a free account to continue.
+                      You need an Entropic account to connect {INTEGRATION_NAMES[setupProvider]}. Sign in or create a free account to continue.
                     </p>
                     <button
                       className="w-full py-2 bg-amber-600 text-white rounded-xl text-[12px] font-bold hover:bg-amber-700 transition-colors"
@@ -1621,7 +2360,7 @@ export function Store({
                   </p>
                 );
               })()}
-              {setupProvider === "x" && setupLaunchUrl && (
+              {setupUsesBrowserLaunch && setupLaunchUrl && (
                 <div className="w-full mb-3 flex flex-col gap-2">
                   <button
                     className="w-full py-2.5 bg-blue-600 text-white rounded-2xl text-[13px] font-bold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
@@ -1645,14 +2384,14 @@ export function Store({
                   </button>
                 </div>
               )}
-              {setupProvider === "x" && !setupLaunchUrl && (setupTimedOut || setupError) && (
+              {setupUsesBrowserLaunch && !setupLaunchUrl && (setupTimedOut || setupError) && (
                 <button
                   className="w-full py-2.5 mb-3 bg-blue-600 text-white rounded-2xl text-[13px] font-bold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
-                  onClick={() => { void handleConnectIntegration("x"); }}
+                  onClick={() => { void handleConnectIntegration(setupProvider); }}
                   disabled={!!connecting || setupVerifying}
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
-                  {connecting === "x" ? "Opening..." : "Try Again"}
+                  {connecting === setupProvider ? "Opening..." : "Try Again"}
                 </button>
               )}
               <button

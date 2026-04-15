@@ -19,6 +19,7 @@ import {
   ChevronDown,
   ChevronUp,
   Bot,
+  Puzzle,
   User,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
@@ -673,10 +674,10 @@ const QUICK_ACTION_ICONS: Record<ChatQuickActionIcon, typeof Mail> = {
   user: User,
 };
 
-const INTEGRATION_LOGOS: Record<
+const INTEGRATION_LOGOS: Partial<Record<
   IntegrationQuickActionRequirement["provider"],
   ComponentType<{ className?: string }>
-> = {
+>> = {
   google_email: GmailLogo,
   google_calendar: GoogleCalendarLogo,
   x: XLogo,
@@ -4721,7 +4722,7 @@ export function Chat({
   function renderIntegrationSetupAssistantCard() {
     if (!integrationSetup) return null;
     const setup = integrationSetup;
-    const RequirementLogo = INTEGRATION_LOGOS[setup.requirement.provider];
+    const RequirementLogo = INTEGRATION_LOGOS[setup.requirement.provider] || Puzzle;
 
     return (
       <div className="flex justify-start">
@@ -4910,7 +4911,10 @@ export function Chat({
       onNavigate(quickAction.handoffPage);
       if (quickAction.handoffPage === "channels") {
         appendAssistantNotice("Open Messaging to set up Telegram, then come back here to run it in chat.", sessionKey);
-      } else if (quickAction.handoffPage === "store") {
+      } else if (
+        quickAction.handoffPage === "store" ||
+        quickAction.handoffPage === "integrations"
+      ) {
         appendAssistantNotice("Open Integrations to connect this integration, then return to run it in chat.", sessionKey);
       }
       return;

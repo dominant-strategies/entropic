@@ -1160,6 +1160,27 @@ fn host_matches_exact_allowlist(host: &str, allowlist: &[&str]) -> bool {
         .any(|allowed| allowed.eq_ignore_ascii_case(host))
 }
 
+fn host_matches_proxy_allowlist(host: &str) -> bool {
+    if host_matches_exact_allowlist(host, ENTROPIC_PROXY_ALLOWED_HOSTS) {
+        return true;
+    }
+
+    if !cfg!(debug_assertions) {
+        return false;
+    }
+
+    std::env::var("ENTROPIC_DEV_ALLOWED_PROXY_HOSTS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .any(|allowed| allowed.eq_ignore_ascii_case(host))
+        })
+        .unwrap_or(false)
+}
+
 fn host_matches_domain_or_subdomain(host: &str, domain: &str) -> bool {
     host.eq_ignore_ascii_case(domain)
         || host
@@ -1486,10 +1507,16 @@ fn resolve_container_proxy_base(proxy_url: &str) -> Result<String, String> {
 
     if trimmed.starts_with('/') {
         let path = trimmed.trim_start_matches('/');
-        let managed_target = std::env::var("VITE_API_PROXY_TARGET")
+        let managed_target = std::env::var("ENTROPIC_RUNTIME_PROXY_TARGET")
             .ok()
             .map(|value| value.trim().trim_end_matches('/').to_string())
             .filter(|value| !value.is_empty())
+            .or_else(|| {
+                std::env::var("VITE_API_PROXY_TARGET")
+                    .ok()
+                    .map(|value| value.trim().trim_end_matches('/').to_string())
+                    .filter(|value| !value.is_empty())
+            })
             .or_else(|| {
                 let profile = std::env::var("ENTROPIC_BUILD_PROFILE").ok()?;
                 if profile.trim().eq_ignore_ascii_case("managed") {
@@ -1529,10 +1556,10 @@ fn resolve_container_proxy_base(proxy_url: &str) -> Result<String, String> {
     let host = url
         .host_str()
         .ok_or_else(|| "Invalid proxy URL: missing host.".to_string())?;
-    if !host_matches_exact_allowlist(host, ENTROPIC_PROXY_ALLOWED_HOSTS) {
+    if !host_matches_proxy_allowlist(host) {
         return Err(format!(
-            "Proxy host '{}' is not allowed. Configure ENTROPIC_PROXY_BASE_URL with an allowed host.",
-            host
+            "Proxy host '{}' is not allowed. Configure VITE_API_PROXY_TARGET with localhost/host.docker.internal or add the exact host to ENTROPIC_DEV_ALLOWED_PROXY_HOSTS for local dev.",
+            host,
         ));
     }
 

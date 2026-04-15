@@ -3716,13 +3716,14 @@ export function Files({
     focusWindow("chat");
   }
 
-  function handleDesktopChatNavigate(page: "chat" | "store" | "skills" | "channels" | "files" | "tasks" | "jobs" | "settings" | "billing") {
+  function handleDesktopChatNavigate(page: "chat" | "store" | "integrations" | "skills" | "channels" | "files" | "tasks" | "jobs" | "settings" | "billing") {
     switch (page) {
       case "chat":
         setChatOpen(true);
         focusWindow("chat");
         return;
       case "store":
+      case "integrations":
         setPluginsOpen(true);
         focusWindow("plugins");
         return;
@@ -5295,6 +5296,7 @@ export function Files({
             >
               <Suspense fallback={PANEL_FALLBACK}>
                 <PluginStore
+                  view="integrations"
                   integrationsSyncing={integrationsSyncing}
                   integrationsMissing={integrationsMissing}
                 />
@@ -5331,6 +5333,7 @@ export function Files({
             >
               <Suspense fallback={PANEL_FALLBACK}>
                 <SkillsStore
+                  view="skills"
                   integrationsSyncing={integrationsSyncing}
                   integrationsMissing={integrationsMissing}
                 />
