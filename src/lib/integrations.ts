@@ -23,6 +23,7 @@ const INTEGRATIONS_REDIRECT_URL =
 
 export const HOSTED_OAUTH_INTEGRATION_PROVIDERS = [
   "asana",
+  "onedrive",
   "google_sheets",
   "microsoft_teams",
   "google_drive",

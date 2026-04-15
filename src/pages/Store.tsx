@@ -32,6 +32,7 @@ import airtableLogo from "../assets/integrations/airtable.svg";
 import xBrandLogo from "../assets/integrations/x.svg";
 import supabaseLogo from "../assets/integrations/supabase.svg";
 import microsoftTeamsLogo from "../assets/integrations/microsoft-teams.svg";
+import onedriveLogo from "../assets/integrations/onedrive.svg";
 import outlookLogo from "../assets/integrations/outlook.svg";
 import pipedriveLogo from "../assets/integrations/pipedrive.svg";
 import {
@@ -337,6 +338,7 @@ const GoogleDocsBrand = brandLogo(googleDocsLogo, "Google Docs");
 const GoogleTasksBrand = brandLogo(googleTasksLogo, "Google Tasks");
 const AsanaBrand = brandLogo(asanaLogo, "Asana");
 const MicrosoftTeamsBrand = brandLogo(microsoftTeamsLogo, "Microsoft Teams");
+const OneDriveBrand = brandLogo(onedriveLogo, "OneDrive");
 const OutlookBrand = brandLogo(outlookLogo, "Outlook");
 const SlackBrand = brandLogo(slackLogo, "Slack");
 const NotionBrand = brandLogo(notionLogo, "Notion");
@@ -371,6 +373,15 @@ const COMPOSIO_INTEGRATION_CANDIDATES: OAuthCatalogItem[] = [
     description: "Manage tasks, projects, and assignments with server-side OAuth.",
     icon: AsanaBrand,
     provider: "asana",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "onedrive",
+    name: "OneDrive",
+    description: "Browse, upload, and organize Microsoft 365 files through hosted auth.",
+    icon: OneDriveBrand,
+    provider: "onedrive",
     status: "available",
     sourceLabel: COMPOSIO_SOURCE,
   },
@@ -527,6 +538,7 @@ const INTEGRATION_NAMES: Record<IntegrationProvider, string> = {
   google_email: "Gmail",
   google_sheets: "Google Sheets",
   google_tasks: "Google Tasks",
+  onedrive: "OneDrive",
   x: "X (Twitter)",
   microsoft_teams: "Microsoft Teams",
   outlook: "Outlook",
