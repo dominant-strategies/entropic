@@ -24,6 +24,8 @@ const INTEGRATIONS_REDIRECT_URL =
 export const HOSTED_OAUTH_INTEGRATION_PROVIDERS = [
   "asana",
   "onedrive",
+  "google_calendar",
+  "google_email",
   "google_sheets",
   "microsoft_teams",
   "google_drive",
@@ -54,10 +56,7 @@ const HOSTED_OAUTH_PROVIDER_SET = new Set<IntegrationProvider>(
   HOSTED_OAUTH_INTEGRATION_PROVIDERS
 );
 
-const OPENCLAW_SYNC_PROVIDERS = new Set<IntegrationProvider>([
-  "google_calendar",
-  "google_email",
-]);
+const OPENCLAW_SYNC_PROVIDERS = new Set<IntegrationProvider>([]);
 
 const INTEGRATIONS_CACHE_TTL_MS = 30_000;
 let integrationsCache: { ts: number; data: Integration[] } | null = null;

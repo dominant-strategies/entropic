@@ -4,7 +4,6 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import clsx from "clsx";
 import {
-  CheckCircle2,
   ChevronRight,
   Download,
   ExternalLink,
@@ -73,16 +72,6 @@ type Plugin = {
 type PluginIconSpec =
   | { kind: "component"; component: ComponentType<{ className?: string }> }
   | { kind: "image"; src: string; alt: string };
-
-type GoogleIntegration = {
-  id: IntegrationProvider;
-  name: string;
-  description: string;
-  icon: ComponentType<{ className?: string }>;
-  connected: boolean;
-  stale?: boolean;
-  email?: string;
-};
 
 type StoreView = "skills" | "integrations";
 
@@ -309,21 +298,6 @@ const META: Record<string, Partial<Plugin>> = {
   "entropic-quai-builder": { name: "Quai Network Builder", description: "Learn and build on Quai Network." },
 };
 
-const GOOGLE_INTEGRATIONS: Omit<GoogleIntegration, "connected" | "email">[] = [
-  {
-    id: "google_calendar",
-    name: "Google Calendar",
-    description: "Sync your calendar events.",
-    icon: GoogleCalendarIcon,
-  },
-  {
-    id: "google_email",
-    name: "Gmail",
-    description: "Read and send emails.",
-    icon: GmailIcon,
-  },
-];
-
 function brandLogo(src: string, alt: string): ComponentType<{ className?: string }> {
   const Logo = ({ className }: { className?: string }) => (
     <img src={src} alt={alt} className={className} draggable={false} />
@@ -358,6 +332,24 @@ const COMPOSIO_SOURCE = "Composio";
 // Asana, Microsoft Teams), then other productivity/workspace essentials, then
 // CRM / sales / data tooling.
 const COMPOSIO_INTEGRATION_CANDIDATES: OAuthCatalogItem[] = [
+  {
+    id: "google_calendar",
+    name: "Google Calendar",
+    description: "List and create calendar events through hosted auth.",
+    icon: GoogleCalendarIcon,
+    provider: "google_calendar",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
+  {
+    id: "google_email",
+    name: "Gmail",
+    description: "Search, read, draft, and send Gmail through hosted auth.",
+    icon: GmailIcon,
+    provider: "google_email",
+    status: "available",
+    sourceLabel: COMPOSIO_SOURCE,
+  },
   {
     id: "google_sheets",
     name: "Google Sheets",
@@ -520,14 +512,6 @@ const COMPOSIO_INTEGRATION_CANDIDATES: OAuthCatalogItem[] = [
     status: "available",
     sourceLabel: COMPOSIO_SOURCE,
   },
-  {
-    id: "twitter_composio",
-    name: "X (Twitter)",
-    description: "Post, search, and read timelines via the Composio broker.",
-    icon: XBrand,
-    status: "planned",
-    sourceLabel: COMPOSIO_SOURCE,
-  },
 ];
 
 const INTEGRATION_NAMES: Record<IntegrationProvider, string> = {
@@ -554,7 +538,7 @@ const INTEGRATION_NAMES: Record<IntegrationProvider, string> = {
   supabase: "Supabase",
 };
 
-const SYNC_REQUIRED = new Set<IntegrationProvider>(["google_calendar", "google_email"]);
+const SYNC_REQUIRED = new Set<IntegrationProvider>();
 const ENTROPIC_X_SKILL_ID = "entropic-x";
 const ENTROPIC_QUAI_SKILL_ID = "entropic-quai-builder";
 const MANAGED_SKILL_PLUGIN_IDS = new Set([ENTROPIC_X_SKILL_ID, ENTROPIC_QUAI_SKILL_ID]);
@@ -623,6 +607,7 @@ export function Store({
   const [category, setCategory] = useState("all");
   const [installing, setInstalling] = useState<string | null>(null);
   const [integrations, setIntegrations] = useState<Integration[]>([]);
+  const [integrationsLoaded, setIntegrationsLoaded] = useState(false);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [setupProvider, setSetupProvider] = useState<IntegrationProvider | null>(null);
   const [setupStage, setSetupStage] = useState<"authorizing" | "syncing">("authorizing");
@@ -875,6 +860,7 @@ export function Store({
         }
       }
       setIntegrations(merged.length ? merged : list);
+      setIntegrationsLoaded(true);
       const connectedIds = new Set(list.filter((i) => i.connected).map((i) => i.provider));
       for (const id of Array.from(syncedIntegrationsRef.current)) {
         if (!connectedIds.has(id as IntegrationProvider)) {
@@ -1320,18 +1306,6 @@ export function Store({
     [category, visiblePlugins]
   );
 
-  const googleIntegrations: GoogleIntegration[] = useMemo(() => {
-    return GOOGLE_INTEGRATIONS.map((gi) => {
-      const entry = integrations.find((i) => i.provider === gi.id);
-      return {
-        ...gi,
-        connected: !!entry && !entry.stale,
-        stale: entry?.stale,
-        email: entry?.email,
-      };
-    });
-  }, [integrations]);
-
   const xIntegration = useMemo(() => integrations.find((i) => i.provider === "x"), [integrations]);
   const xConnected = !!xIntegration && !xIntegration.stale;
   const hostedOauthCatalog = useMemo<OAuthCatalogItem[]>(
@@ -1351,20 +1325,16 @@ export function Store({
     [integrations]
   );
 
+  const visibleHostedOauthCatalog = useMemo(
+    () =>
+      integrationsLoaded
+        ? hostedOauthCatalog.filter((integration) => integration.configured !== false)
+        : [],
+    [hostedOauthCatalog, integrationsLoaded]
+  );
+
   const oauthCatalog = useMemo<OAuthCatalogItem[]>(
     () => [
-      ...googleIntegrations.map((integration) => ({
-        id: integration.id,
-        name: integration.name,
-        description: integration.description,
-        icon: integration.icon,
-        provider: integration.id,
-        status: "available" as const,
-        sourceLabel: "Available now",
-        connected: integration.connected,
-        stale: integration.stale,
-        email: integration.email,
-      })),
       {
         id: "x",
         name: "X (Twitter)",
@@ -1378,7 +1348,12 @@ export function Store({
         email: xIntegration?.email,
       },
     ],
-    [googleIntegrations, xConnected, xIntegration?.email, xIntegration?.stale]
+    [xConnected, xIntegration?.email, xIntegration?.stale]
+  );
+
+  const allOauthCatalog = useMemo(
+    () => [...oauthCatalog, ...visibleHostedOauthCatalog],
+    [oauthCatalog, visibleHostedOauthCatalog]
   );
 
   const connectedOauthCount = useMemo(
@@ -1551,15 +1526,10 @@ export function Store({
     return (
       <div className="h-full flex flex-col p-5">
         <div className="mb-4 flex flex-col md:flex-row md:items-start md:justify-between gap-3">
-          <div className="max-w-2xl">
+          <div>
             <h1 className="text-xl font-semibold" style={{ color: "var(--text-primary)" }}>
               Integrations
             </h1>
-            <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--text-tertiary)" }}>
-              Connect OAuth accounts for your agent. Direct Google/X integrations stay on-device,
-              while hosted providers use <code>entropic-web</code> as the OAuth broker so the
-              desktop only keeps account references.
-            </p>
           </div>
           <div className="flex items-center gap-2">
             {integrationsSyncing && (
@@ -1589,189 +1559,49 @@ export function Store({
             </div>
           )}
 
-          <section className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] p-4">
-            <div className="mb-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-              <div>
-                <h2 className="text-[13px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">
-                  Available Now
-                </h2>
-                <p className="mt-1 text-sm text-[var(--text-tertiary)]">
-                  These accounts already support direct connect and runtime sync.
-                </p>
-              </div>
-              <div className="inline-flex items-center gap-2 rounded-full bg-green-500/10 px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-green-600">
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                Secure OAuth
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-              {oauthCatalog.map((integration) => {
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+              {allOauthCatalog.map((integration) => {
                 const Icon = integration.icon;
                 const isConnected = Boolean(integration.connected && !integration.stale);
                 const isBusy = integration.provider ? connecting === integration.provider : false;
-                const canManage = Boolean(integration.provider);
-                const actionLabel = isBusy
-                  ? "Working..."
-                  : isConnected
-                    ? "Disconnect"
-                    : integration.stale
-                      ? "Reconnect"
-                      : "Connect";
-
-                return (
-                  <div
-                    key={integration.id}
-                    className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-3 shadow-sm"
-                  >
-                    <div className="flex items-start justify-between gap-2 mb-2.5">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-9 h-9 rounded-lg bg-[var(--system-gray-6)] border border-[var(--border-subtle)] flex items-center justify-center shrink-0">
-                          <Icon className="w-4 h-4 object-contain text-[var(--text-primary)]" />
-                        </div>
-                        <div className="min-w-0">
-                          <h3 className="text-sm font-semibold text-[var(--text-primary)] truncate">
-                            {integration.name}
-                          </h3>
-                          <p className="mt-1 text-[11px] font-medium text-[var(--text-tertiary)]">
-                            {integration.sourceLabel}
-                          </p>
-                        </div>
-                      </div>
-                      <span
-                        className={clsx(
-                          "px-2 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-widest border",
-                          isConnected
-                            ? "bg-green-500/10 text-green-600 border-green-500/20"
-                            : integration.stale
-                              ? "bg-amber-500/10 text-amber-600 border-amber-500/20"
-                              : "bg-[var(--bg-secondary)] text-[var(--text-secondary)] border-[var(--border-subtle)]"
-                        )}
-                      >
-                        {isConnected ? "Connected" : integration.stale ? "Reconnect" : "Not Connected"}
-                      </span>
-                    </div>
-
-                    <p className="text-[13px] leading-snug text-[var(--text-secondary)] line-clamp-3 min-h-[54px]">
-                      {integration.description}
-                    </p>
-
-                    <div className="mt-2.5 flex items-center justify-between gap-3 text-[11px] text-[var(--text-tertiary)]">
-                      <span className="truncate">
-                        {integration.email || (isConnected ? "Authorized" : "No account linked")}
-                      </span>
-                      {integration.provider && SYNC_REQUIRED.has(integration.provider) ? (
-                        <span className="shrink-0">Syncs to gateway</span>
-                      ) : (
-                        <span className="shrink-0">Desktop-only auth</span>
-                      )}
-                    </div>
-
-                    <button
-                      onClick={() => {
-                        if (!integration.provider) return;
-                        if (isConnected) {
-                          void handleDisconnectIntegration(integration.provider);
-                          return;
-                        }
-                        void handleConnectIntegration(integration.provider);
-                      }}
-                      disabled={!canManage || isBusy}
-                      className={clsx(
-                        "mt-2.5 w-full rounded-lg px-3 py-2 text-[11px] font-bold uppercase tracking-widest transition-colors",
-                        isConnected
-                          ? "bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/15"
-                          : "bg-blue-600 text-white shadow-lg shadow-blue-500/20 hover:bg-blue-700"
-                      )}
-                    >
-                      {actionLabel}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-
-          <section className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] p-4">
-            <h2 className="mb-3 text-[13px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">
-              More integrations
-            </h2>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-              {hostedOauthCatalog.map((integration) => {
-                const Icon = integration.icon;
-                const isConnected = Boolean(integration.connected && !integration.stale);
-                const isBusy = integration.provider ? connecting === integration.provider : false;
-                const isConfigured = integration.configured !== false;
+                const accountLabel =
+                  integration.email &&
+                  integration.email.trim().toLowerCase() !== integration.name.trim().toLowerCase()
+                    ? integration.email
+                    : null;
                 const actionLabel = !integration.provider
                   ? "Coming Soon"
-                  : !isConfigured
-                    ? "Server Setup Required"
-                    : isBusy
-                      ? "Working..."
-                      : isConnected
-                        ? "Disconnect"
-                        : integration.stale
-                          ? "Reconnect"
-                          : "Connect";
+                  : isBusy
+                    ? "Working..."
+                    : isConnected
+                      ? "Disconnect"
+                      : integration.stale
+                        ? "Reconnect"
+                        : "Connect";
                 return (
                   <div
                     key={integration.id}
-                    className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-3"
+                    className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-3 shadow-sm flex flex-col h-full"
                   >
                     <div className="flex items-start justify-between gap-2 mb-2.5">
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-9 h-9 rounded-lg bg-[var(--system-gray-6)] border border-[var(--border-subtle)] flex items-center justify-center shrink-0">
-                          <Icon className="w-4 h-4 object-contain text-[var(--text-primary)]" />
-                        </div>
+                        <Icon className="w-9 h-9 object-contain shrink-0 text-[var(--text-primary)]" />
                         <div className="min-w-0">
                           <h3 className="text-sm font-semibold text-[var(--text-primary)] truncate">
                             {integration.name}
                           </h3>
-                          <p className="mt-1 text-[11px] font-medium text-[var(--text-tertiary)]">
-                            {integration.sourceLabel}
-                          </p>
                         </div>
                       </div>
-                      <span
-                        className={clsx(
-                          "px-2 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-widest border",
-                          isConnected
-                            ? "bg-green-500/10 text-green-600 border-green-500/20"
-                            : !integration.provider || !isConfigured
-                              ? "bg-[var(--system-gray-6)] text-[var(--text-tertiary)] border-[var(--border-subtle)]"
-                            : integration.stale
-                              ? "bg-amber-500/10 text-amber-600 border-amber-500/20"
-                              : "bg-[var(--bg-secondary)] text-[var(--text-secondary)] border-[var(--border-subtle)]"
-                        )}
-                      >
-                        {isConnected
-                          ? "Connected"
-                          : !integration.provider
-                            ? "Planned"
-                            : !isConfigured
-                              ? "Unavailable"
-                              : integration.stale
-                                ? "Reconnect"
-                                : "Not Connected"}
-                      </span>
                     </div>
 
-                    <p className="text-[13px] leading-snug text-[var(--text-secondary)] line-clamp-3 min-h-[54px]">
-                      {integration.description}
-                    </p>
+                    <div className="flex-1">
+                      <p className="text-[13px] leading-snug text-[var(--text-secondary)] line-clamp-3 min-h-[54px]">
+                        {integration.description}
+                      </p>
 
-                    <div className="mt-2.5 text-[11px] text-[var(--text-tertiary)]">
-                      <span className="block truncate">
-                        {integration.email
-                          || (isConnected
-                            ? "Authorized"
-                            : !integration.provider
-                              ? "Planned"
-                              : !isConfigured
-                                ? "OAuth not configured on this server"
-                                : "No account linked")}
-                      </span>
+                      <div className="mt-2.5 min-h-[16px] text-[11px] text-[var(--text-tertiary)] truncate">
+                        {accountLabel ?? ""}
+                      </div>
                     </div>
 
                     <button
@@ -1783,10 +1613,10 @@ export function Store({
                         }
                         void handleConnectIntegration(integration.provider);
                       }}
-                      disabled={!integration.provider || !isConfigured || isBusy}
+                      disabled={!integration.provider || isBusy}
                       className={clsx(
-                        "mt-2.5 w-full rounded-lg px-3 py-2 text-[11px] font-bold uppercase tracking-widest transition-colors",
-                        !integration.provider || !isConfigured
+                        "mt-3 w-full rounded-lg px-3 py-2 text-[11px] font-bold uppercase tracking-widest transition-colors",
+                        !integration.provider
                           ? "bg-[var(--system-gray-6)] text-[var(--text-tertiary)] border border-[var(--border-subtle)] cursor-not-allowed"
                           : isConnected
                           ? "bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/15"
@@ -1798,32 +1628,7 @@ export function Store({
                   </div>
                 );
               })}
-            </div>
-          </section>
-
-          <section className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-4">
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-              <div className="max-w-2xl">
-                <h2 className="text-[13px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">
-                  Messaging Channels
-                </h2>
-                <p className="mt-1 text-sm text-[var(--text-tertiary)]">
-                  Bot-style channels like Telegram and Discord still live under Messaging. This page is
-                  focused on account-level OAuth providers.
-                </p>
-              </div>
-              {onNavigate && (
-                <button
-                  type="button"
-                  onClick={() => onNavigate("channels")}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--bg-secondary)] px-4 py-2.5 text-sm font-semibold text-[var(--text-primary)] border border-[var(--border-subtle)] hover:bg-[var(--system-gray-6)] transition-colors"
-                >
-                  Open Messaging
-                  <ChevronRight className="w-4 h-4" />
-                </button>
-              )}
-            </div>
-          </section>
+          </div>
         </div>
 
         {setupProvider && (
