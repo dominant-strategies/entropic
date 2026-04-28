@@ -42,7 +42,7 @@ jobs:
 
     steps:
       - name: Checkout Entropic
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: entropic
 
@@ -62,7 +62,7 @@ jobs:
           fi
 
       - name: Checkout OpenClaw
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: dominant-strategies/openclaw
           token: ${{ secrets.ENTROPIC_READ_PAT }}
@@ -70,7 +70,7 @@ jobs:
           ref: ${{ github.event.inputs.openclaw_ref }}
 
       - name: Checkout Entropic skills
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: dominant-strategies/entropic-skills
           token: ${{ secrets.ENTROPIC_READ_PAT }}
