@@ -153,7 +153,7 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Download unsigned installer
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: unsigned-windows-installer
           path: artifacts/unsigned-windows
@@ -253,7 +253,7 @@ jobs:
 
     steps:
       - name: Download signed Windows installer artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: entropic-windows-x86_64
           path: artifacts\entropic-windows-x86_64
@@ -299,7 +299,7 @@ jobs:
           fi
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
