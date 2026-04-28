@@ -42,7 +42,7 @@ http = "1"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = "0.25"
+cocoa = "0.26"
 objc = "0.2"
 
 [target.'cfg(unix)'.dependencies]
