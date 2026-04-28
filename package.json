@@ -64,7 +64,7 @@
     "build:cross-platform": "./scripts/build-cross-platform.sh"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.47.10",
+    "@supabase/supabase-js": "^2.105.1",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-deep-link": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.6.0",
