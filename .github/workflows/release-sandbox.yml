@@ -233,7 +233,7 @@ jobs:
           fi
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: entropic-mac-arm64
           path: |
@@ -253,7 +253,7 @@ jobs:
           METAEOF
 
       - name: Upload updater metadata
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: updater-mac
           path: updater-mac.json

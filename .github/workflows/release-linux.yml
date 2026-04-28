@@ -136,7 +136,7 @@ jobs:
           echo "tar_name=$TAR_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: entropic-linux-x86_64
           path: |
@@ -156,7 +156,7 @@ jobs:
           METAEOF
 
       - name: Upload updater metadata
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: updater-linux
           path: updater-linux.json
