@@ -1015,6 +1015,26 @@ function parseXSearchIntent(raw: string): XSearchIntent | null {
   return { topic: null };
 }
 
+function parseGmailIntent(raw: string): boolean {
+  const text = raw.trim().toLowerCase();
+  if (!text) return false;
+
+  // Keep explicit Microsoft mail requests on the Outlook path.
+  if (/\b(?:outlook|microsoft\s+mail|office\s*365\s+mail)\b/.test(text)) {
+    return false;
+  }
+
+  const mentionsGmail = /\bgmail\b/.test(text);
+  const mentionsInbox = /\binbox\b/.test(text);
+  const mentionsComposioGmail =
+    /\bcomposio\b/.test(text) && /\b(?:gmail|email|emails|mail|inbox)\b/.test(text);
+  const mentionsGenericMail =
+    /\b(?:email|emails|mail|messages?)\b/.test(text) &&
+    /\b(?:check|search|read|summari[sz]e|triage|send|draft|reply|inbox)\b/.test(text);
+
+  return mentionsGmail || mentionsInbox || mentionsComposioGmail || mentionsGenericMail;
+}
+
 export function Chat({
   isVisible,
   gatewayRunning,
@@ -4232,6 +4252,60 @@ export function Chat({
         `Original user request: ${messageContent.trim()}`,
       ].join("\n");
       addDiag(`x intent detected; routing via X integration topic=${xIntent.topic ? "yes" : "no"}`);
+    }
+
+    const gmailIntent =
+      !xIntent &&
+      shouldCheckXIntent &&
+      parseGmailIntent(messageContent);
+    if (gmailIntent && sendSession) {
+      const gmailQuickActionCandidate = getQuickActionById("inbox_cleanup");
+      const gmailQuickAction =
+        gmailQuickActionCandidate && gmailQuickActionCandidate.kind === "agent"
+          ? gmailQuickActionCandidate
+          : null;
+      const requirement = gmailQuickAction?.requirement;
+
+      if (gmailQuickAction && requirement?.kind === "integration") {
+        try {
+          const connectedNow = await isIntegrationReady(requirement.provider);
+          if (!connectedNow) {
+            addDiag("gmail intent detected; Gmail integration not connected");
+            setIntegrationSetupForSession(sendSession, {
+              requirement,
+              pendingAction: gmailQuickAction,
+              status: "idle",
+              error: null,
+            });
+            setQuickSuggestionForSession(sendSession, null);
+            setBuilderChecklistForSession(sendSession, null);
+            appendAssistantNotice(
+              `I can do that with ${integrationRequirementLabel(requirement)}, but it is not connected yet. Complete setup below and I will continue.`,
+              sendSession
+            );
+            return;
+          }
+        } catch {
+          setIntegrationSetupForSession(sendSession, {
+            requirement,
+            pendingAction: gmailQuickAction,
+            status: "idle",
+            error: `Failed to check ${integrationRequirementLabel(requirement)} status.`,
+          });
+          setQuickSuggestionForSession(sendSession, null);
+          setBuilderChecklistForSession(sendSession, null);
+          return;
+        }
+      }
+
+      outboundMessageContent = [
+        "Use the connected Gmail integration for this request.",
+        "Available Gmail tools: `gmail_search` for inbox/search, `gmail_get` for reading a specific message, `gmail_send` for sending, and `gmail_draft` for drafts.",
+        "Do not say Gmail or Composio is unavailable unless a Gmail tool call actually fails.",
+        "For inbox/list/summarize requests, start with `gmail_search` using query `in:inbox` and maxResults 10.",
+        `Original user request: ${messageContent.trim()}`,
+      ].join("\n");
+      addDiag("gmail intent detected; routing via Gmail integration");
     }
 
     const pendingSend: PersistedPendingSend = {

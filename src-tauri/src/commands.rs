@@ -9098,12 +9098,13 @@ Use it for durable decisions, preferences, and facts that should persist across 
     }
 
     // Ensure optional plugin tools are allowed without restricting core tools.
-    const ENTROPIC_INTEGRATION_TOOLS: [&str; 5] = [
+    const ENTROPIC_INTEGRATION_TOOLS: [&str; 6] = [
         "calendar_list",
         "calendar_create",
         "gmail_search",
         "gmail_get",
         "gmail_send",
+        "gmail_draft",
     ];
     const ENTROPIC_X_TOOLS: [&str; 4] = ["x_search", "x_profile", "x_thread", "x_user_tweets"];
     const ENTROPIC_CORE_TOOLS: [&str; 1] = ["image"];
