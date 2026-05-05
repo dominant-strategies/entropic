@@ -370,18 +370,6 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
     TOOLS_BLOCK=",
   \"tools\": {
     \"alsoAllow\": [${ALSO_ALLOW}]"
-    if [ -n "${ENTROPIC_PROXY_MODE:-}" ] && [ -n "${ENTROPIC_PROXY_BASE_URL:-}" ]; then
-        ENTROPIC_PROXY_BASE_URL_ESC="$(json_escape "${ENTROPIC_PROXY_BASE_URL}")"
-        TOOLS_BLOCK="${TOOLS_BLOCK},
-    \"web\": {
-      \"search\": {
-        \"provider\": \"perplexity\",
-        \"perplexity\": {
-          \"baseUrl\": \"${ENTROPIC_PROXY_BASE_URL_ESC}\"
-        }
-      }
-    }"
-    fi
     TOOLS_BLOCK="${TOOLS_BLOCK}
   }"
 

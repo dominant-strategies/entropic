@@ -4498,6 +4498,87 @@ fn thinking_level_from_model_ref(model: &str) -> String {
     }
 }
 
+fn openclaw_agent_model_is_configured(
+    model: &str,
+    proxy_mode: bool,
+    api_keys: &HashMap<String, String>,
+) -> bool {
+    if proxy_mode {
+        let trimmed = model.trim();
+        let base = trimmed.split(':').next().unwrap_or(trimmed).trim();
+        return base.starts_with("openrouter/");
+    }
+    let Some(provider) = model_provider_id(model) else {
+        return false;
+    };
+    local_gateway_model_key_provider(&provider)
+        .map(|key_provider| has_configured_provider_key(api_keys, key_provider))
+        .unwrap_or(false)
+}
+
+fn sync_openclaw_agent_list_models(
+    cfg: &mut serde_json::Value,
+    primary_model: Option<&str>,
+    image_model: Option<&str>,
+    proxy_mode: bool,
+    api_keys: &HashMap<String, String>,
+) {
+    let Some(primary_model) = primary_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    else {
+        return;
+    };
+    let image_model = image_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or(primary_model);
+
+    let Some(agents) = cfg
+        .pointer_mut("/agents/list")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return;
+    };
+
+    for agent in agents {
+        let Some(agent_obj) = agent.as_object_mut() else {
+            continue;
+        };
+        let agent_id = agent_obj
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let is_default = agent_obj
+            .get("default")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let current_primary = agent_obj
+            .get("model")
+            .and_then(|value| value.get("primary"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+
+        let should_update = proxy_mode
+            || is_default
+            || agent_id == "main"
+            || current_primary.trim().is_empty()
+            || !openclaw_agent_model_is_configured(current_primary, proxy_mode, api_keys);
+        if !should_update {
+            continue;
+        }
+
+        let next_model = if agent_id == "vision" {
+            image_model
+        } else {
+            primary_model
+        };
+        let model_obj = ensure_object_entry(agent_obj, "model");
+        model_obj.insert("primary".to_string(), serde_json::json!(next_model));
+        model_obj.insert("fallbacks".to_string(), serde_json::json!([]));
+    }
+}
+
 fn desired_gateway_selection(
     app: &AppHandle,
     state: &AppState,
@@ -8701,10 +8782,8 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
     let browser_enabled = capability_enabled(&settings.capabilities, "browser", true);
     let web_base_url = read_container_env("ENTROPIC_WEB_BASE_URL");
     let container_id = container_instance_id();
-    let openai_key_for_lancedb = {
-        let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
-        keys.get("openai").cloned()
-    };
+    let api_keys_snapshot = state.api_keys.lock().map_err(|e| e.to_string())?.clone();
+    let openai_key_for_lancedb = api_keys_snapshot.get("openai").cloned();
 
     let mut hb_body = String::from("# HEARTBEAT.md\n\n");
     if settings.heartbeat_tasks.is_empty() {
@@ -8841,6 +8920,13 @@ Use it for durable decisions, preferences, and facts that should persist across 
             serde_json::json!({ "primary": image_model }),
         );
     }
+    sync_openclaw_agent_list_models(
+        &mut cfg,
+        model.as_deref(),
+        image_model.as_deref(),
+        proxy_mode,
+        &api_keys_snapshot,
+    );
     if proxy_mode {
         if let Some(base_url) = &base_url {
             let model_id = model
@@ -8898,53 +8984,14 @@ Use it for durable decisions, preferences, and facts that should persist across 
                     "models": models
                 }),
             );
-            let web_search_base_url = if let Some(web_base_url) = &web_base_url {
-                resolve_container_openai_base(web_base_url)
-            } else {
-                base_url.clone()
-            };
-            if web_search_enabled {
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &["tools", "web", "search", "enabled"],
-                    serde_json::json!(true),
-                );
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &["tools", "web", "search", "provider"],
-                    serde_json::json!("perplexity"),
-                );
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &["plugins", "entries", "perplexity", "enabled"],
-                    serde_json::json!(true),
-                );
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &[
-                        "plugins",
-                        "entries",
-                        "perplexity",
-                        "config",
-                        "webSearch",
-                        "baseUrl",
-                    ],
-                    serde_json::json!(web_search_base_url),
-                );
-                remove_openclaw_config_value(&mut cfg, &["tools", "web", "search", "perplexity"]);
-                remove_openclaw_config_value(
-                    &mut cfg,
-                    &["plugins", "entries", "duckduckgo", "config", "webSearch"],
-                );
-            } else {
-                remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
-                remove_openclaw_config_value(&mut cfg, &["tools", "web", "search", "perplexity"]);
-                remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "perplexity"]);
-                remove_openclaw_config_value(
-                    &mut cfg,
-                    &["plugins", "entries", "duckduckgo", "config", "webSearch"],
-                );
-            }
+            // The managed runtime does not currently bundle a Perplexity web-search plugin,
+            // and newer OpenClaw rejects the legacy tools.web.search.perplexity key.
+            remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
+            remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "perplexity"]);
+            remove_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "entries", "duckduckgo", "config", "webSearch"],
+            );
         }
     } else {
         // Non-proxy mode: remove openrouter config to avoid validation errors
@@ -12182,7 +12229,14 @@ pub fn update_gateway_model(model: String) -> Result<(), String> {
     set_openclaw_config_value(
         &mut cfg,
         &["agents", "defaults", "model", "primary"],
-        serde_json::json!(config_model),
+        serde_json::json!(config_model.clone()),
+    );
+    sync_openclaw_agent_list_models(
+        &mut cfg,
+        Some(config_model.as_str()),
+        None,
+        read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1"),
+        &HashMap::new(),
     );
 
     if thinking_level != "off" {
