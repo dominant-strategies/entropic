@@ -1,12 +1,20 @@
 import { Loader2, Mic } from "lucide-react";
 
 type VoiceOverlayProps = {
-  state: "idle" | "listening" | "transcribing" | "thinking" | "speaking" | "error";
+  state: "idle" | "listening" | "transcribing" | "thinking" | "speaking" | "confirming" | "error";
   message?: string | null;
   onCancel?: () => void;
+  onConfirm?: () => void;
+  confirmLabel?: string;
 };
 
-export function VoiceOverlay({ state, message, onCancel }: VoiceOverlayProps) {
+export function VoiceOverlay({
+  state,
+  message,
+  onCancel,
+  onConfirm,
+  confirmLabel = "Continue",
+}: VoiceOverlayProps) {
   if (state === "idle") {
     return null;
   }
@@ -20,11 +28,20 @@ export function VoiceOverlay({ state, message, onCancel }: VoiceOverlayProps) {
           <Loader2 className="h-4 w-4 animate-spin text-[var(--text-secondary)]" />
         )}
         <span>{message || state}</span>
+        {onConfirm ? (
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="ml-2 rounded-md bg-[var(--text-primary)] px-2 py-1 text-xs font-medium text-[var(--bg-card)] hover:opacity-90"
+          >
+            {confirmLabel}
+          </button>
+        ) : null}
         {onCancel ? (
           <button
             type="button"
             onClick={onCancel}
-            className="ml-2 rounded-md px-2 py-1 text-xs text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
+            className="rounded-md px-2 py-1 text-xs text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
           >
             Cancel
           </button>
