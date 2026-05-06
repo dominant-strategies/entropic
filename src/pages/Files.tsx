@@ -19,7 +19,6 @@ import {
   Folder,
   FileText,
   Trash2,
-  Eye,
   Plus,
   X,
   ArrowUp,
@@ -28,7 +27,6 @@ import {
   Image,
   Puzzle,
   Sparkles,
-  Globe,
   Radio,
   ScrollText,
   Settings as SettingsIcon,
@@ -108,6 +106,8 @@ import {
 } from "../desktop/finder/FileIcons";
 import { FinderApp } from "../desktop/finder/FinderApp";
 import { DesktopDock } from "../desktop/dock/DesktopDock";
+import { DesktopContextMenus } from "../desktop/contextMenus/DesktopContextMenus";
+import { WallpaperPicker } from "../desktop/wallpaper/WallpaperPicker";
 import {
   workspaceBrowserUrl,
   workspaceFileCanOpenInBrowser,
@@ -4391,57 +4391,42 @@ export function Files({
             />
           )}
 
-          {/* Context menus */}
-          {contextMenu && !contextMenu.entry && (
-            <div className="fixed py-1 rounded-lg min-w-[180px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, zIndex: DESKTOP_CONTEXT_MENU_Z, background: "rgba(30,30,30,0.9)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.4)" }} onClick={(e) => e.stopPropagation()}>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFile(finderOpen ? currentPath : DESKTOP_WORKSPACE_PATH); setContextMenu(null); }}><FileText className="w-3.5 h-3.5" />New File</button>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFolder(finderOpen ? currentPath : DESKTOP_WORKSPACE_PATH); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" />New Folder</button>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openBrowserWindow(); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" />Open Browser</button>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openTerminalWindow(); setContextMenu(null); }}><Terminal className="w-3.5 h-3.5" />Open Terminal</button>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { setShowWallpaperPicker(true); setContextMenu(null); }}><Image className="w-3.5 h-3.5" />Change Wallpaper</button>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { fileInputRef.current?.click(); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" />Add Files</button>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openFolder(""); setContextMenu(null); }}><Folder className="w-3.5 h-3.5" />Open Workspace</button>
-            </div>
-          )}
-          {contextMenu && contextMenu.entry && (
-            <div className="fixed py-1 rounded-lg min-w-[160px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, zIndex: DESKTOP_CONTEXT_MENU_Z + 1, background: "rgba(30,30,30,0.95)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }} onClick={(e) => e.stopPropagation()}>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleEntryDoubleClick(contextMenu.entry!); setContextMenu(null); }}><Folder className="w-3.5 h-3.5" style={{ color: "#888" }} />Open</button>
-              {contextMenu.entry.is_directory && (
-                <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFile(contextMenu.entry!.path); setContextMenu(null); }}><FileText className="w-3.5 h-3.5" style={{ color: "#888" }} />New File Here</button>
-              )}
-              {contextMenu.entry.is_directory && (
-                <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFolder(contextMenu.entry!.path); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" style={{ color: "#888" }} />New Folder Here</button>
-              )}
-              {!contextMenu.entry.is_directory && workspaceFileCanOpenInBrowser(contextMenu.entry.path) && (
-                <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void openWorkspaceFileInBrowser(contextMenu.entry!); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" style={{ color: "#888" }} />Open in Browser</button>
-              )}
-              {!contextMenu.entry.is_directory && <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleView(contextMenu.entry!); setContextMenu(null); }}><Eye className="w-3.5 h-3.5" style={{ color: "#888" }} />Quick Look</button>}
-              {!contextMenu.entry.is_directory && <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void exportWorkspaceEntry(contextMenu.entry!); setContextMenu(null); }}><ArrowUp className="w-3.5 h-3.5 rotate-45" style={{ color: "#888" }} />Export...</button>}
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void copyDesktopPath(contextMenu.entry!.path); setContextMenu(null); }}><FileText className="w-3.5 h-3.5" style={{ color: "#888" }} />Copy Path</button>
-              <div className="my-1" style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }} />
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left" style={{ color: "#ff5f57" }} onClick={() => { handleDelete(contextMenu.entry!); setContextMenu(null); }}><Trash2 className="w-3.5 h-3.5" />Move to Trash</button>
-            </div>
-          )}
+          <DesktopContextMenus
+            contextMenu={contextMenu}
+            desktopBasePath={DESKTOP_WORKSPACE_PATH}
+            currentPath={currentPath}
+            finderOpen={finderOpen}
+            zIndex={DESKTOP_CONTEXT_MENU_Z}
+            onClose={() => setContextMenu(null)}
+            onCreateFile={handleCreateFile}
+            onCreateFolder={handleCreateFolder}
+            onOpenBrowser={openBrowserWindow}
+            onOpenTerminal={openTerminalWindow}
+            onChangeWallpaper={() => setShowWallpaperPicker(true)}
+            onAddFiles={() => fileInputRef.current?.click()}
+            onOpenWorkspace={() => openFolder("")}
+            onOpenEntry={handleEntryDoubleClick}
+            onOpenEntryInBrowser={openWorkspaceFileInBrowser}
+            onQuickLook={handleView}
+            onExport={exportWorkspaceEntry}
+            onCopyPath={copyDesktopPath}
+            onDelete={handleDelete}
+            canOpenInBrowser={workspaceFileCanOpenInBrowser}
+          />
 
-          {/* Wallpaper picker */}
-          {showWallpaperPicker && (
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-40 p-4 rounded-xl animate-fade-in" style={{ background: "rgba(20,20,20,0.92)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 12px 40px rgba(0,0,0,0.5)" }} onClick={(e) => e.stopPropagation()}>
-              <p className="text-xs font-medium mb-2" style={{ color: "rgba(255,255,255,0.6)" }}>Scenic</p>
-              <div className="grid grid-cols-4 gap-2 mb-3">
-                {WALLPAPERS.filter((wp) => wp.type === "photo").map((wp) => (
-                  <button key={wp.id} onClick={() => { saveWallpaper(wp.id, null); setShowWallpaperPicker(false); }} className="w-16 h-10 rounded-lg hover:scale-105 transition-transform overflow-hidden" style={{ backgroundImage: wp.thumbnail ? `url(${wp.thumbnail})` : wp.css, backgroundSize: "cover", backgroundPosition: "center", border: wallpaperId === wp.id ? "2px solid white" : "2px solid transparent", boxShadow: wallpaperId === wp.id ? "0 0 0 1px rgba(255,255,255,0.3)" : "none" }} title={wp.label} />
-                ))}
-              </div>
-              <p className="text-xs font-medium mb-2" style={{ color: "rgba(255,255,255,0.6)" }}>Gradients</p>
-              <div className="grid grid-cols-4 gap-2">
-                {WALLPAPERS.filter((wp) => wp.type === "gradient").map((wp) => (
-                  <button key={wp.id} onClick={() => { saveWallpaper(wp.id, null); setShowWallpaperPicker(false); }} className="w-16 h-10 rounded-lg hover:scale-105 transition-transform" style={{ background: wp.css, border: wallpaperId === wp.id ? "2px solid white" : "2px solid transparent", boxShadow: wallpaperId === wp.id ? "0 0 0 1px rgba(255,255,255,0.3)" : "none" }} title={wp.label} />
-                ))}
-                <button onClick={() => wallpaperInputRef.current?.click()} className="w-16 h-10 rounded-lg flex items-center justify-center hover:scale-105 transition-transform" style={{ background: customWallpaper ? `url(${customWallpaper})` : "rgba(255,255,255,0.1)", backgroundSize: "cover", backgroundPosition: "center", border: wallpaperId === "custom" ? "2px solid white" : "2px solid transparent" }} title="Custom">{!customWallpaper && <Image className="w-4 h-4" style={{ color: "rgba(255,255,255,0.4)" }} />}</button>
-              </div>
-              <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleCustomWallpaperUpload} />
-            </div>
-          )}
+          {showWallpaperPicker ? (
+            <WallpaperPicker
+              wallpaperId={wallpaperId}
+              customWallpaper={customWallpaper}
+              inputRef={wallpaperInputRef}
+              onSelectWallpaper={(id, custom) => {
+                void saveWallpaper(id, custom);
+                setShowWallpaperPicker(false);
+              }}
+              onChooseCustom={() => wallpaperInputRef.current?.click()}
+              onCustomUpload={handleCustomWallpaperUpload}
+            />
+          ) : null}
 
           {/* File viewer */}
           {preview !== null && (() => {
