@@ -10699,6 +10699,103 @@ fn validate_desktop_action(action: DesktopActionPayload) -> Result<DesktopAction
     }
 }
 
+#[cfg(test)]
+mod desktop_action_tests {
+    use super::*;
+
+    #[test]
+    fn validates_workspace_file_paths() {
+        let action = DesktopActionPayload::OpenWorkspaceFile {
+            path: " docs/report.md ".to_string(),
+        };
+        match validate_desktop_action(action).expect("valid workspace path") {
+            DesktopActionPayload::OpenWorkspaceFile { path } => {
+                assert_eq!(path, "docs/report.md");
+            }
+            other => panic!("unexpected action: {:?}", other),
+        }
+
+        assert!(
+            validate_desktop_action(DesktopActionPayload::OpenWorkspaceFile {
+                path: "/etc/passwd".to_string(),
+            })
+            .is_err()
+        );
+        assert!(
+            validate_desktop_action(DesktopActionPayload::OpenWorkspaceFile {
+                path: "../escape.txt".to_string(),
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_untrusted_browser_urls() {
+        assert!(
+            validate_desktop_action(DesktopActionPayload::OpenBrowserUrl {
+                url: "https://example.com/path".to_string(),
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_desktop_action(DesktopActionPayload::OpenBrowserUrl {
+                url: "file:///tmp/secret".to_string(),
+            })
+            .is_err()
+        );
+        assert!(
+            validate_desktop_action(DesktopActionPayload::OpenBrowserUrl {
+                url: "http://127.0.0.1:19791".to_string(),
+            })
+            .is_err()
+        );
+        assert!(
+            validate_desktop_action(DesktopActionPayload::OpenBrowserUrl {
+                url: "http://192.168.1.10".to_string(),
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validates_known_windows_and_chat_tasks() {
+        assert!(validate_desktop_action(DesktopActionPayload::FocusWindow {
+            window: "sheets".to_string(),
+        })
+        .is_ok());
+        assert!(validate_desktop_action(DesktopActionPayload::FocusWindow {
+            window: "root".to_string(),
+        })
+        .is_err());
+
+        match validate_desktop_action(DesktopActionPayload::NewChatTask {
+            prompt: "  summarize this  ".to_string(),
+            session_id: Some("abc".to_string()),
+            auto_submit: true,
+        })
+        .expect("valid chat task")
+        {
+            DesktopActionPayload::NewChatTask {
+                prompt,
+                session_id,
+                auto_submit,
+            } => {
+                assert_eq!(prompt, "summarize this");
+                assert_eq!(session_id.as_deref(), Some("abc"));
+                assert!(auto_submit);
+            }
+            other => panic!("unexpected action: {:?}", other),
+        }
+
+        assert!(validate_desktop_action(DesktopActionPayload::NewChatTask {
+            prompt: "   ".to_string(),
+            session_id: None,
+            auto_submit: false,
+        })
+        .is_err());
+    }
+}
+
 #[tauri::command]
 pub async fn request_desktop_action(
     app: AppHandle,
