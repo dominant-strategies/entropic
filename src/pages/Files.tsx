@@ -225,6 +225,7 @@ const BROWSER_APP_WINDOW_TITLEBAR_HEIGHT = 34;
 const BROWSER_TOOLBAR_HEIGHT = 49;
 const CHAT_WINDOW_MIN_SIZE_EXPANDED = { w: 560, h: 420 };
 const CHAT_WINDOW_MIN_SIZE_COLLAPSED = { w: 420, h: 360 };
+const PREVIEW_WINDOW_MIN_SIZE = { w: 420, h: 320 };
 const DESKTOP_CONTEXT_MENU_Z = 2000;
 const DESKTOP_MODAL_Z = 2100;
 const DESKTOP_ICON_WIDTH = 84;
@@ -294,6 +295,8 @@ type DesktopSessionState = {
   logsPos: WindowPoint;
   billingPos: WindowPoint;
   settingsPos: WindowPoint;
+  previewPos: WindowPoint;
+  previewSize: WindowSize;
   windowZ: Record<string, number>;
   zCounter: number;
   currentPath: string;
@@ -931,6 +934,8 @@ export function Files({
   const [logsSize] = useState({ w: 560, h: 420 });
   const [billingSize] = useState({ w: 520, h: 520 });
   const [settingsSize] = useState({ w: 740, h: 560 });
+  const [previewPos, setPreviewPos] = useState({ x: 260, y: 72 });
+  const [previewSize, setPreviewSize] = useState({ w: 860, h: 620 });
   const pluginsDragRef = useRef<WindowDragState | null>(null);
   const skillsDragRef = useRef<WindowDragState | null>(null);
   const skillsResizeRef = useRef<WindowResizeState | null>(null);
@@ -940,6 +945,8 @@ export function Files({
   const logsDragRef = useRef<WindowDragState | null>(null);
   const billingDragRef = useRef<WindowDragState | null>(null);
   const settingsDragRef = useRef<WindowDragState | null>(null);
+  const previewDragRef = useRef<WindowDragState | null>(null);
+  const previewResizeRef = useRef<WindowResizeState | null>(null);
   const { windowZ, setWindowZ, zCounter, focusWindow } = useWindowZStack();
 
   // File browser
@@ -1117,6 +1124,10 @@ export function Files({
       if (nextBillingPos) setBillingPos(nextBillingPos);
       const nextSettingsPos = asWindowPoint(saved.settingsPos);
       if (nextSettingsPos) setSettingsPos(nextSettingsPos);
+      const nextPreviewPos = asWindowPoint(saved.previewPos);
+      if (nextPreviewPos) setPreviewPos(nextPreviewPos);
+      const nextPreviewSize = asWindowSize(saved.previewSize);
+      if (nextPreviewSize) setPreviewSize(nextPreviewSize);
 
       const nextWindowZ = asWindowZ(saved.windowZ);
       if (nextWindowZ) {
@@ -1410,6 +1421,7 @@ export function Files({
     clampFixedWindow(logsPos, logsSize, setLogsPos);
     clampFixedWindow(billingPos, billingSize, setBillingPos);
     clampFixedWindow(settingsPos, settingsSize, setSettingsPos);
+    clampResizableWindow(previewPos, previewSize, PREVIEW_WINDOW_MIN_SIZE, setPreviewPos, setPreviewSize);
   }, [
     desktopBounds,
     finderPos,
@@ -1435,6 +1447,8 @@ export function Files({
     logsPos,
     billingPos,
     settingsPos,
+    previewPos,
+    previewSize,
     pluginsSize,
     skillsSize,
     channelsSize,
@@ -1506,6 +1520,8 @@ export function Files({
       logsPos,
       billingPos,
       settingsPos,
+      previewPos,
+      previewSize,
       windowZ,
       zCounter: zCounter.current,
       currentPath,
@@ -1576,6 +1592,8 @@ export function Files({
     logsPos,
     billingPos,
     settingsPos,
+    previewPos,
+    previewSize,
     windowZ,
     currentPath,
     history,
@@ -1659,6 +1677,10 @@ export function Files({
     startWindowDrag(e, chatDragRef, chatPos, chatSize, setChatPos, "chat");
   }
 
+  function handlePreviewDragStart(e: ReactMouseEvent<HTMLElement>) {
+    startWindowDrag(e, previewDragRef, previewPos, previewSize, setPreviewPos, "preview");
+  }
+
   function startWindowResize(
     e: ReactMouseEvent<HTMLElement>,
     direction: WindowResizeDirection,
@@ -1681,6 +1703,23 @@ export function Files({
       minSize,
       () => containerRef.current?.getBoundingClientRect(),
       () => focusWindow(id),
+    );
+  }
+
+  function handlePreviewResizeStart(
+    direction: WindowResizeDirection,
+    e: ReactMouseEvent<HTMLElement>,
+  ) {
+    startWindowResize(
+      e,
+      direction,
+      previewResizeRef,
+      previewPos,
+      previewSize,
+      setPreviewPos,
+      setPreviewSize,
+      "preview",
+      PREVIEW_WINDOW_MIN_SIZE,
     );
   }
 
@@ -3505,14 +3544,17 @@ export function Files({
               ? "image/jpeg"
               : `image/${ext}`;
         setPreview({ kind: "image", name: entry.name, path: entry.path, dataUrl: `data:${mime};base64,${base64}` });
+        focusWindow("preview");
         return;
       }
       if (BINARY_EXTS.has(ext)) {
         setPreview({ kind: "binary", name: entry.name, path: entry.path, size: entry.size });
+        focusWindow("preview");
         return;
       }
       const c = await invoke<string>("read_workspace_file", { path: entry.path });
       setPreview({ kind: "text", name: entry.name, path: entry.path, content: c });
+      focusWindow("preview");
     } catch (e) {
       setError(`Failed to read: ${describeError(e)}`);
     }
@@ -3842,7 +3884,7 @@ export function Files({
     if (preview) {
       frames.push({
         z: getWindowZ(windowZ, "preview"),
-        rect: { x: 0, y: 0, w: desktopBounds.width, h: desktopBounds.height },
+        rect: { x: previewPos.x, y: previewPos.y, w: previewSize.w, h: previewSize.h },
       });
     }
     return frames.filter((frame) => frame.z > browserWindowZ);
@@ -3920,8 +3962,10 @@ export function Files({
     settingsSize.w,
     settingsSize.h,
     preview,
-    desktopBounds.width,
-    desktopBounds.height,
+    previewPos.x,
+    previewPos.y,
+    previewSize.w,
+    previewSize.h,
     windowZ.finder,
     windowZ.chat,
     windowZ.terminal,
@@ -4269,9 +4313,13 @@ export function Files({
           {preview !== null ? (
             <FilePreviewWindow
               preview={preview}
+              position={previewPos}
+              size={previewSize}
               zIndex={getWindowZ(windowZ, "preview")}
               formatSize={formatSize}
               onFocus={() => focusWindow("preview")}
+              onDragStart={handlePreviewDragStart}
+              onResizeStart={handlePreviewResizeStart}
               onClose={() => setPreview(null)}
               onCopyText={copyPreviewText}
               onExport={exportPreviewFile}
