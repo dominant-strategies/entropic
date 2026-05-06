@@ -136,10 +136,12 @@ type Props = {
   imageGenerationModel: string;
   textToSpeechModel: string;
   audioUnderstandingModel: string;
+  voiceShortcut: string;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onTextToSpeechModelChange: (model: string) => void;
   onAudioUnderstandingModelChange: (model: string) => void;
+  onVoiceShortcutChange: (shortcut: string) => void | Promise<void>;
   onImageModelChange: (model: string) => void;
 };
 type ViewMode = "grid" | "list";
@@ -1049,10 +1051,12 @@ export function Files({
   imageGenerationModel,
   textToSpeechModel,
   audioUnderstandingModel,
+  voiceShortcut,
   onCodeModelChange,
   onImageGenerationModelChange,
   onTextToSpeechModelChange,
   onAudioUnderstandingModelChange,
+  onVoiceShortcutChange,
   onImageModelChange,
 }: Props) {
   const initialDesktopWarmCache = useMemo(() => readDesktopWarmCache(), []);
@@ -5831,10 +5835,12 @@ export function Files({
                   imageGenerationModel={imageGenerationModel}
                   textToSpeechModel={textToSpeechModel}
                   audioUnderstandingModel={audioUnderstandingModel}
+                  voiceShortcut={voiceShortcut}
                   onCodeModelChange={onCodeModelChange}
                   onImageGenerationModelChange={onImageGenerationModelChange}
                   onTextToSpeechModelChange={onTextToSpeechModelChange}
                   onAudioUnderstandingModelChange={onAudioUnderstandingModelChange}
+                  onVoiceShortcutChange={onVoiceShortcutChange}
                   onImageModelChange={onImageModelChange}
                 />
               </Suspense>
@@ -5844,6 +5850,7 @@ export function Files({
           <VoiceProvider
             audioUnderstandingModel={audioUnderstandingModel}
             desktopContext={voiceDesktopContext}
+            shortcut={voiceShortcut}
             dispatchAction={runDesktopAction}
           />
 

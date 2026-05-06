@@ -666,6 +666,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       ? DEFAULT_LOCAL_AUDIO_UNDERSTANDING_MODEL
       : DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL,
   );
+  const [voiceShortcut, setVoiceShortcut] = useState("");
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [currentChatSession, setCurrentChatSession] = useState<string | null>(null);
   const [pendingChatSession, setPendingChatSession] = useState<string | null>(null);
@@ -862,6 +863,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           bootstrap.settings.audioUnderstandingModel || "",
           isLocal,
         );
+        const nextVoiceShortcut = bootstrap.settings.voiceShortcut || "";
 
         selectedModelRef.current = nextSelectedModel;
         imageModelRef.current = nextImageModel;
@@ -873,6 +875,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         setImageGenerationModel(nextImageGenerationModel);
         setTextToSpeechModel(nextTextToSpeechModel);
         setAudioUnderstandingModel(nextAudioUnderstandingModel);
+        setVoiceShortcut(nextVoiceShortcut);
         dispatchBootstrap({ type: "bootstrap_loaded", payload: bootstrap });
 
         const normalizedPatch: Partial<DesktopSettingsSnapshot> = {};
@@ -890,6 +893,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         }
         if (bootstrap.settings.audioUnderstandingModel !== nextAudioUnderstandingModel) {
           normalizedPatch.audioUnderstandingModel = nextAudioUnderstandingModel;
+        }
+        if ((bootstrap.settings.voiceShortcut || "") !== nextVoiceShortcut) {
+          normalizedPatch.voiceShortcut = nextVoiceShortcut;
         }
         if (Object.keys(normalizedPatch).length > 0) {
           await updateDesktopSettings(normalizedPatch);
@@ -2313,6 +2319,15 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
   }
 
+  async function handleVoiceShortcutChange(value: string) {
+    setVoiceShortcut(value);
+    try {
+      await updateDesktopSettings({ voiceShortcut: value });
+    } catch (error) {
+      console.error("[Entropic] Failed to save voiceShortcut:", error);
+    }
+  }
+
   async function handleImageModelChange(value: string) {
     setImageModel(value);
     imageModelRef.current = value;
@@ -2447,10 +2462,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           imageGenerationModel={imageGenerationModel}
           textToSpeechModel={textToSpeechModel}
           audioUnderstandingModel={audioUnderstandingModel}
+          voiceShortcut={voiceShortcut}
           onCodeModelChange={handleCodeModelChange}
           onImageGenerationModelChange={handleImageGenerationModelChange}
           onTextToSpeechModelChange={handleTextToSpeechModelChange}
           onAudioUnderstandingModelChange={handleAudioUnderstandingModelChange}
+          onVoiceShortcutChange={handleVoiceShortcutChange}
           onImageModelChange={handleImageModelChange}
         />
       </Suspense>
@@ -2502,10 +2519,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             imageGenerationModel={imageGenerationModel}
             textToSpeechModel={textToSpeechModel}
             audioUnderstandingModel={audioUnderstandingModel}
+            voiceShortcut={voiceShortcut}
             onCodeModelChange={handleCodeModelChange}
             onImageGenerationModelChange={handleImageGenerationModelChange}
             onTextToSpeechModelChange={handleTextToSpeechModelChange}
             onAudioUnderstandingModelChange={handleAudioUnderstandingModelChange}
+            onVoiceShortcutChange={handleVoiceShortcutChange}
             onImageModelChange={handleImageModelChange}
           />
         );

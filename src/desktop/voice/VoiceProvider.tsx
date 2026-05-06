@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2, Mic } from "lucide-react";
 import clsx from "clsx";
 import type { DesktopAction } from "../actions";
@@ -13,6 +13,7 @@ type VoiceState = "idle" | "listening" | "transcribing" | "thinking" | "confirmi
 type VoiceProviderProps = {
   audioUnderstandingModel: string;
   desktopContext?: VoiceDesktopContext;
+  shortcut?: string;
   dispatchAction: (action: DesktopAction) => Promise<void>;
 };
 
@@ -145,9 +146,48 @@ function formatVoiceTaskPrompt(prompt: string, context?: VoiceDesktopContext): s
   return lines.join("\n");
 }
 
+function normalizeShortcutKey(key: string): string {
+  const normalized = key.trim().toLowerCase();
+  if (normalized === " ") return "space";
+  if (normalized === "escape") return "esc";
+  if (normalized === "arrowup") return "up";
+  if (normalized === "arrowdown") return "down";
+  if (normalized === "arrowleft") return "left";
+  if (normalized === "arrowright") return "right";
+  return normalized;
+}
+
+function shortcutMatchesEvent(shortcut: string | undefined, event: KeyboardEvent): boolean {
+  const parts = (shortcut || "")
+    .split("+")
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+  if (parts.length < 2) return false;
+
+  const wantsCtrl = parts.includes("ctrl") || parts.includes("control");
+  const wantsShift = parts.includes("shift");
+  const wantsAlt = parts.includes("alt") || parts.includes("option");
+  const wantsMeta = parts.includes("meta") || parts.includes("cmd") || parts.includes("command");
+  const keyParts = parts.filter(
+    (part) => !["ctrl", "control", "shift", "alt", "option", "meta", "cmd", "command"].includes(part),
+  );
+  if (keyParts.length !== 1 || (!wantsCtrl && !wantsShift && !wantsAlt && !wantsMeta)) {
+    return false;
+  }
+
+  return (
+    event.ctrlKey === wantsCtrl &&
+    event.shiftKey === wantsShift &&
+    event.altKey === wantsAlt &&
+    event.metaKey === wantsMeta &&
+    normalizeShortcutKey(event.key) === normalizeShortcutKey(keyParts[0])
+  );
+}
+
 export function VoiceProvider({
   audioUnderstandingModel,
   desktopContext,
+  shortcut,
   dispatchAction,
 }: VoiceProviderProps) {
   const [state, setState] = useState<VoiceState>("idle");
@@ -221,6 +261,22 @@ export function VoiceProvider({
 
   const busy =
     recorder.isRecording || isTranscribing || state === "thinking" || state === "confirming";
+
+  useEffect(() => {
+    if (!shortcut?.trim()) return;
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (!shortcutMatchesEvent(shortcut, event) || busy || recorder.isRecording) return;
+      event.preventDefault();
+      setState("listening");
+      setMessage("Listening for a desktop command...");
+      setPendingAction(null);
+      void recorder.startRecording();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [busy, recorder, shortcut]);
 
   return (
     <>
