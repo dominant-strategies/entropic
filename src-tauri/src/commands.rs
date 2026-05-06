@@ -38,7 +38,7 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
 
@@ -63,6 +63,10 @@ const BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS: &str = "0";
 const BROWSER_SERVICE_PATH: &str = "/app/browser-service/server.mjs";
 const BROWSER_SERVICE_LOG_PATH: &str = "/data/browser/browser-service.log";
 const BROWSER_CONTROL_TOKEN_PATH: &str = "/data/browser/control-token";
+const DESKTOP_ACTION_BRIDGE_DIR: &str = "/data/browser/desktop-actions";
+const DESKTOP_ACTION_BRIDGE_MAX_BATCH: usize = 20;
+const DESKTOP_ACTION_BRIDGE_MAX_BYTES: usize = 8192;
+const DESKTOP_ACTION_BRIDGE_POLL_MS: u64 = 900;
 const EMBEDDED_PREVIEW_WEBVIEW_LABEL: &str = "desktop-browser-preview";
 const EMBEDDED_PREVIEW_STATE_EVENT: &str = "embedded-preview-state";
 const DESKTOP_ACTION_EVENT: &str = "entropic-desktop-action";
@@ -86,6 +90,7 @@ static BROWSER_SERVICE_TOKEN_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::
 static EMBEDDED_PREVIEW_STATE_CACHE: OnceLock<Mutex<Option<EmbeddedPreviewStatePayload>>> =
     OnceLock::new();
 static DESKTOP_TERMINAL_MANAGER: OnceLock<DesktopTerminalManager> = OnceLock::new();
+static DESKTOP_ACTION_BRIDGE_STARTED: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -9339,6 +9344,9 @@ fn build_tools_markdown(capabilities: &[CapabilityState]) -> String {
     body.push_str(
         "- After creating an Office file, include its workspace path such as `/data/workspace/sales-plan.xlsx` or the relative `sales-plan.xlsx`; Entropic renders these as desktop links that open in the Office viewer.\n",
     );
+    body.push_str(
+        "- To ask the Entropic desktop to open a created file immediately, run `entropic-office desktop open /data/workspace/file.xlsx`. Entropic validates the queued workspace-relative request before opening it; the sandbox bridge only accepts low-risk file/folder/window actions.\n",
+    );
     body
 }
 
@@ -10699,6 +10707,111 @@ fn validate_desktop_action(action: DesktopActionPayload) -> Result<DesktopAction
     }
 }
 
+fn validate_desktop_bridge_action(
+    action: DesktopActionPayload,
+) -> Result<DesktopActionPayload, String> {
+    let validated = validate_desktop_action(action)?;
+    match validated {
+        DesktopActionPayload::OpenWorkspaceFile { .. }
+        | DesktopActionPayload::OpenWorkspaceFolder { .. }
+        | DesktopActionPayload::FocusWindow { .. }
+        | DesktopActionPayload::CloseWindow { .. } => Ok(validated),
+        DesktopActionPayload::OpenBrowserUrl { .. } => {
+            Err("Bridge browser opens are not supported".to_string())
+        }
+        DesktopActionPayload::NewChatTask { .. } => {
+            Err("Bridge chat task submission is not supported".to_string())
+        }
+    }
+}
+
+fn read_desktop_action_bridge_batch() -> Result<Vec<DesktopActionPayload>, String> {
+    let Some(container) = running_gateway_container_name() else {
+        return Ok(Vec::new());
+    };
+    let max_files = DESKTOP_ACTION_BRIDGE_MAX_BATCH.to_string();
+    let max_bytes = DESKTOP_ACTION_BRIDGE_MAX_BYTES.to_string();
+    let script = r#"
+set -eu
+dir="$1"
+max_files="$2"
+max_bytes="$3"
+mkdir -p -- "$dir"
+find "$dir" -maxdepth 1 -type f -name '*.json' | sort | head -n "$max_files" | while IFS= read -r file; do
+  [ -f "$file" ] || continue
+  printf '%s\t' "$file"
+  head -c "$max_bytes" -- "$file" | base64 | tr -d '\n'
+  printf '\n'
+  rm -f -- "$file"
+done
+"#;
+    let raw = docker_exec_output(&[
+        "exec",
+        container,
+        "sh",
+        "-lc",
+        script,
+        "sh",
+        DESKTOP_ACTION_BRIDGE_DIR,
+        &max_files,
+        &max_bytes,
+    ])?;
+    let mut actions = Vec::new();
+    for line in raw.lines() {
+        let Some((file, encoded)) = line.split_once('\t') else {
+            continue;
+        };
+        let Ok(decoded) = STANDARD.decode(encoded.trim()) else {
+            eprintln!(
+                "[Entropic] desktop action bridge: ignoring unreadable request {}",
+                file
+            );
+            continue;
+        };
+        let Ok(action) = serde_json::from_slice::<DesktopActionPayload>(&decoded) else {
+            eprintln!(
+                "[Entropic] desktop action bridge: ignoring invalid request {}",
+                file
+            );
+            continue;
+        };
+        match validate_desktop_bridge_action(action) {
+            Ok(validated) => actions.push(validated),
+            Err(err) => eprintln!(
+                "[Entropic] desktop action bridge: rejected request {}: {}",
+                file, err
+            ),
+        }
+    }
+    Ok(actions)
+}
+
+async fn poll_desktop_action_bridge_once(app: AppHandle) -> Result<(), String> {
+    let actions = tauri::async_runtime::spawn_blocking(read_desktop_action_bridge_batch)
+        .await
+        .map_err(|e| format!("Failed to poll desktop action bridge: {}", e))??;
+    for action in actions {
+        app.emit(DESKTOP_ACTION_EVENT, action)
+            .map_err(|e| format!("Failed to emit desktop action: {}", e))?;
+    }
+    Ok(())
+}
+
+pub fn start_desktop_action_bridge(app: &AppHandle) {
+    if DESKTOP_ACTION_BRIDGE_STARTED.set(()).is_err() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if let Err(err) = poll_desktop_action_bridge_once(app.clone()).await {
+                eprintln!("[Entropic] desktop action bridge poll failed: {}", err);
+            }
+            sleep(Duration::from_millis(DESKTOP_ACTION_BRIDGE_POLL_MS)).await;
+        }
+    });
+}
+
 #[cfg(test)]
 mod desktop_action_tests {
     use super::*;
@@ -10793,6 +10906,36 @@ mod desktop_action_tests {
             auto_submit: false,
         })
         .is_err());
+    }
+
+    #[test]
+    fn bridge_only_accepts_low_risk_actions() {
+        assert!(
+            validate_desktop_bridge_action(DesktopActionPayload::OpenWorkspaceFile {
+                path: "report.docx".to_string(),
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_desktop_bridge_action(DesktopActionPayload::FocusWindow {
+                window: "docs".to_string(),
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_desktop_bridge_action(DesktopActionPayload::OpenBrowserUrl {
+                url: "https://example.com".to_string(),
+            })
+            .is_err()
+        );
+        assert!(
+            validate_desktop_bridge_action(DesktopActionPayload::NewChatTask {
+                prompt: "summarize this".to_string(),
+                session_id: None,
+                auto_submit: true,
+            })
+            .is_err()
+        );
     }
 }
 

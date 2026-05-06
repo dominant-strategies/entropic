@@ -137,6 +137,7 @@ pub fn run() {
 
             let state = commands::init_state(app.handle());
             app.manage(state);
+            commands::start_desktop_action_bridge(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
