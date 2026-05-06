@@ -4,8 +4,6 @@ import {
   useCallback,
   useMemo,
   useRef,
-  lazy,
-  Suspense,
   type ClipboardEvent as ReactClipboardEvent,
   type MouseEvent as ReactMouseEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -24,14 +22,6 @@ import {
   MessageSquare,
   Loader2,
   Image,
-  Puzzle,
-  Sparkles,
-  Radio,
-  ScrollText,
-  Settings as SettingsIcon,
-  CalendarClock,
-  ListTodo,
-  CreditCard,
   MoreHorizontal,
   Pin,
   PanelLeftClose,
@@ -40,14 +30,6 @@ import {
 import { loadOnboardingData } from "../lib/profile";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
 import { loadDesktopSettings, updateDesktopSettings } from "../lib/settingsStore";
-const PluginStore = lazy(() => import("./Store").then((m) => ({ default: m.Store })));
-const SkillsStore = lazy(() => import("./Store").then((m) => ({ default: m.Store })));
-const Channels = lazy(() => import("./Channels").then((m) => ({ default: m.Channels })));
-const Logs = lazy(() => import("./Logs").then((m) => ({ default: m.Logs })));
-const Settings = lazy(() => import("./Settings").then((m) => ({ default: m.Settings })));
-const Tasks = lazy(() => import("./Tasks").then((m) => ({ default: m.Tasks })));
-const Jobs = lazy(() => import("./Jobs").then((m) => ({ default: m.Jobs })));
-const BillingPage = lazy(() => import("./BillingPage").then((m) => ({ default: m.BillingPage })));
 import {
   Chat,
   type ChatSession as SharedChatSession,
@@ -114,6 +96,7 @@ import {
   type DesktopTerminalSnapshot,
   type DesktopTerminalStatus,
 } from "../desktop/terminal/TerminalApp";
+import { DesktopUtilityWindows } from "../desktop/utility/UtilityWindows";
 import { WallpaperPicker } from "../desktop/wallpaper/WallpaperPicker";
 import {
   workspaceBrowserUrl,
@@ -262,10 +245,6 @@ const BROWSER_DESKTOP_MIN_VIEWPORT_WIDTH = 1180;
 const BROWSER_DESKTOP_MIN_VIEWPORT_HEIGHT = 760;
 const BROWSER_DESKTOP_VIEWPORT_SCALE = 1.08;
 const EMBEDDED_PREVIEW_FRAME_INSET = 8;
-const PANEL_FALLBACK = (
-  <div className="p-4 text-xs text-[var(--text-tertiary)]">Loading…</div>
-);
-
 type ChatWorkspaceReference = {
   key: string;
   path: string;
@@ -4847,207 +4826,84 @@ export function Files({
             />
           )}
 
-          {/* ── PLUGINS WINDOW ───────────────────────────────────────── */}
-          {pluginsOpen && (
-            <AppWindow
-              title="Integrations"
-              icon={Puzzle}
-              position={pluginsPos}
-              size={pluginsSize}
-              zIndex={getWindowZ(windowZ, "plugins")}
-              onClose={() => setPluginsOpen(false)}
-              onFocus={() => focusWindow("plugins")}
-              onDragStart={(e) =>
-                startWindowDrag(e, pluginsDragRef, pluginsPos, pluginsSize, setPluginsPos, "plugins")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <PluginStore
-                  view="integrations"
-                  integrationsSyncing={integrationsSyncing}
-                  integrationsMissing={integrationsMissing}
-                />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── SKILLS WINDOW ────────────────────────────────────────── */}
-          {skillsOpen && (
-            <AppWindow
-              title="Skills"
-              icon={Sparkles}
-              position={skillsPos}
-              size={skillsSize}
-              zIndex={getWindowZ(windowZ, "skills")}
-              onClose={() => setSkillsOpen(false)}
-              onFocus={() => focusWindow("skills")}
-              onDragStart={(e) =>
-                startWindowDrag(e, skillsDragRef, skillsPos, skillsSize, setSkillsPos, "skills")
-              }
-              onResizeStart={(direction, e) =>
-                startWindowResize(
-                  e,
-                  direction,
-                  skillsResizeRef,
-                  skillsPos,
-                  skillsSize,
-                  setSkillsPos,
-                  setSkillsSize,
-                  "skills",
-                  { w: 420, h: 360 },
-                )
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <SkillsStore
-                  view="skills"
-                  integrationsSyncing={integrationsSyncing}
-                  integrationsMissing={integrationsMissing}
-                />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── MESSAGING WINDOW ─────────────────────────────────────── */}
-          {channelsOpen && (
-            <AppWindow
-              title="Messaging"
-              icon={Radio}
-              position={channelsPos}
-              size={channelsSize}
-              zIndex={getWindowZ(windowZ, "channels")}
-              onClose={() => setChannelsOpen(false)}
-              onFocus={() => focusWindow("channels")}
-              onDragStart={(e) =>
-                startWindowDrag(e, channelsDragRef, channelsPos, channelsSize, setChannelsPos, "channels")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <Channels />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── TASKS WINDOW ──────────────────────────────────────── */}
-          {tasksOpen && (
-            <AppWindow
-              title="Tasks"
-              icon={ListTodo}
-              position={tasksPos}
-              size={tasksSize}
-              zIndex={getWindowZ(windowZ, "tasks")}
-              onClose={() => setTasksOpen(false)}
-              onFocus={() => focusWindow("tasks")}
-              onDragStart={(e) =>
-                startWindowDrag(e, tasksDragRef, tasksPos, tasksSize, setTasksPos, "tasks")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <Tasks gatewayRunning={gatewayRunning} />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── JOBS WINDOW ───────────────────────────────────────── */}
-          {jobsOpen && (
-            <AppWindow
-              title="Jobs"
-              icon={CalendarClock}
-              position={jobsPos}
-              size={jobsSize}
-              zIndex={getWindowZ(windowZ, "jobs")}
-              onClose={() => setJobsOpen(false)}
-              onFocus={() => focusWindow("jobs")}
-              onDragStart={(e) =>
-                startWindowDrag(e, jobsDragRef, jobsPos, jobsSize, setJobsPos, "jobs")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <Jobs gatewayRunning={gatewayRunning} />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── LOGS WINDOW ─────────────────────────────────────────── */}
-          {logsOpen && (
-            <AppWindow
-              title="Logs"
-              icon={ScrollText}
-              position={logsPos}
-              size={logsSize}
-              zIndex={getWindowZ(windowZ, "logs")}
-              onClose={() => setLogsOpen(false)}
-              onFocus={() => focusWindow("logs")}
-              onDragStart={(e) =>
-                startWindowDrag(e, logsDragRef, logsPos, logsSize, setLogsPos, "logs")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <Logs />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── BILLING WINDOW ─────────────────────────────────────── */}
-          {billingEnabled && billingOpen && (
-            <AppWindow
-              title="Billing"
-              icon={CreditCard}
-              position={billingPos}
-              size={billingSize}
-              zIndex={getWindowZ(windowZ, "billing")}
-              onClose={() => setBillingOpen(false)}
-              onFocus={() => focusWindow("billing")}
-              onDragStart={(e) =>
-                startWindowDrag(e, billingDragRef, billingPos, billingSize, setBillingPos, "billing")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <BillingPage />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── SETTINGS WINDOW ─────────────────────────────────────── */}
-          {settingsOpen && (
-            <AppWindow
-              title="Settings"
-              icon={SettingsIcon}
-              position={settingsPos}
-              size={settingsSize}
-              zIndex={getWindowZ(windowZ, "settings")}
-              onClose={() => setSettingsOpen(false)}
-              onFocus={() => focusWindow("settings")}
-              onDragStart={(e) =>
-                startWindowDrag(e, settingsDragRef, settingsPos, settingsSize, setSettingsPos, "settings")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <Settings
-                  gatewayRunning={gatewayRunning}
-                  onGatewayToggle={onGatewayToggle}
-                  onApplyRuntimeResources={onApplyRuntimeResources}
-                  isTogglingGateway={isTogglingGateway}
-                  selectedModel={selectedModel}
-                  onModelChange={onModelChange}
-                  useLocalKeys={useLocalKeys}
-                  onUseLocalKeysChange={onUseLocalKeysChange}
-                  codeModel={codeModel}
-                  imageModel={imageModel}
-                  imageGenerationModel={imageGenerationModel}
-                  textToSpeechModel={textToSpeechModel}
-                  audioUnderstandingModel={audioUnderstandingModel}
-                  voiceShortcut={voiceShortcut}
-                  onCodeModelChange={onCodeModelChange}
-                  onImageGenerationModelChange={onImageGenerationModelChange}
-                  onTextToSpeechModelChange={onTextToSpeechModelChange}
-                  onAudioUnderstandingModelChange={onAudioUnderstandingModelChange}
-                  onVoiceShortcutChange={onVoiceShortcutChange}
-                  onImageModelChange={onImageModelChange}
-                />
-              </Suspense>
-            </AppWindow>
-          )}
+          <DesktopUtilityWindows
+            windowZ={windowZ}
+            windows={{
+              plugins: { open: pluginsOpen, position: pluginsPos, size: pluginsSize },
+              skills: { open: skillsOpen, position: skillsPos, size: skillsSize },
+              channels: { open: channelsOpen, position: channelsPos, size: channelsSize },
+              tasks: { open: tasksOpen, position: tasksPos, size: tasksSize },
+              jobs: { open: jobsOpen, position: jobsPos, size: jobsSize },
+              logs: { open: logsOpen, position: logsPos, size: logsSize },
+              billing: { open: billingOpen, position: billingPos, size: billingSize },
+              settings: { open: settingsOpen, position: settingsPos, size: settingsSize },
+            }}
+            billingEnabled={billingEnabled}
+            gatewayRunning={gatewayRunning}
+            integrationsSyncing={integrationsSyncing}
+            integrationsMissing={integrationsMissing}
+            onGatewayToggle={onGatewayToggle}
+            onApplyRuntimeResources={onApplyRuntimeResources}
+            isTogglingGateway={isTogglingGateway}
+            selectedModel={selectedModel}
+            onModelChange={onModelChange}
+            useLocalKeys={useLocalKeys}
+            onUseLocalKeysChange={onUseLocalKeysChange}
+            codeModel={codeModel}
+            imageModel={imageModel}
+            imageGenerationModel={imageGenerationModel}
+            textToSpeechModel={textToSpeechModel}
+            audioUnderstandingModel={audioUnderstandingModel}
+            voiceShortcut={voiceShortcut}
+            onCodeModelChange={onCodeModelChange}
+            onImageGenerationModelChange={onImageGenerationModelChange}
+            onTextToSpeechModelChange={onTextToSpeechModelChange}
+            onAudioUnderstandingModelChange={onAudioUnderstandingModelChange}
+            onVoiceShortcutChange={onVoiceShortcutChange}
+            onImageModelChange={onImageModelChange}
+            onClose={{
+              plugins: () => setPluginsOpen(false),
+              skills: () => setSkillsOpen(false),
+              channels: () => setChannelsOpen(false),
+              tasks: () => setTasksOpen(false),
+              jobs: () => setJobsOpen(false),
+              logs: () => setLogsOpen(false),
+              billing: () => setBillingOpen(false),
+              settings: () => setSettingsOpen(false),
+            }}
+            onFocus={focusWindow}
+            onDragStart={{
+              plugins: (e) =>
+                startWindowDrag(e, pluginsDragRef, pluginsPos, pluginsSize, setPluginsPos, "plugins"),
+              skills: (e) =>
+                startWindowDrag(e, skillsDragRef, skillsPos, skillsSize, setSkillsPos, "skills"),
+              channels: (e) =>
+                startWindowDrag(e, channelsDragRef, channelsPos, channelsSize, setChannelsPos, "channels"),
+              tasks: (e) =>
+                startWindowDrag(e, tasksDragRef, tasksPos, tasksSize, setTasksPos, "tasks"),
+              jobs: (e) =>
+                startWindowDrag(e, jobsDragRef, jobsPos, jobsSize, setJobsPos, "jobs"),
+              logs: (e) =>
+                startWindowDrag(e, logsDragRef, logsPos, logsSize, setLogsPos, "logs"),
+              billing: (e) =>
+                startWindowDrag(e, billingDragRef, billingPos, billingSize, setBillingPos, "billing"),
+              settings: (e) =>
+                startWindowDrag(e, settingsDragRef, settingsPos, settingsSize, setSettingsPos, "settings"),
+            }}
+            onSkillsResizeStart={(direction, e) =>
+              startWindowResize(
+                e,
+                direction,
+                skillsResizeRef,
+                skillsPos,
+                skillsSize,
+                setSkillsPos,
+                setSkillsSize,
+                "skills",
+                { w: 420, h: 360 },
+              )
+            }
+          />
 
           <VoiceProvider
             audioUnderstandingModel={audioUnderstandingModel}
