@@ -3000,6 +3000,7 @@ export function Files({
     if (!officeKind) return false;
     try {
       setError(null);
+      clientLog("office.open.start", { appKind: officeKind, path: entry.path });
       const session = await createOnlyOfficeSession(entry.path);
       const nextSession: OfficeAppSession = {
         path: entry.path,
@@ -3025,7 +3026,13 @@ export function Files({
           openOfficeWindow("slides");
           break;
       }
+      clientLog("office.open.ready", { appKind: officeKind, path: entry.path });
     } catch (e) {
+      clientLog("office.open.failed", {
+        appKind: officeKind,
+        path: entry.path,
+        error: e instanceof Error ? e.message : String(e),
+      });
       setError(`Failed to start ONLYOFFICE: ${e instanceof Error ? e.message : String(e)}`);
     }
     return true;
