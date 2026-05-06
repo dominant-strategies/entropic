@@ -105,7 +105,7 @@ type RuntimeResourceUsage = {
   data_used_bytes?: number | null;
 };
 
-type LocalKeyProvider = "anthropic" | "google" | "openai";
+type LocalKeyProvider = "anthropic" | "google" | "openai" | "openrouter";
 
 function clampRuntimeCpu(value?: number | null) {
   return Math.min(16, Math.max(1, value ?? 2));
@@ -273,7 +273,7 @@ export function Settings({
   const initialRuntimeDiskGb = clampRuntimeDiskGb(cachedAgentProfileState?.runtime_disk_gb);
   const { isAuthenticated, isAuthConfigured, user, signOut } = useAuth();
   const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
-  const [apiKeys, setApiKeys] = useState({ anthropic: "", openai: "", google: "" });
+  const [apiKeys, setApiKeys] = useState({ anthropic: "", openai: "", google: "", openrouter: "" });
   const [localKeySavingProvider, setLocalKeySavingProvider] =
     useState<LocalKeyProvider | null>(null);
   const [localKeyError, setLocalKeyError] = useState<string | null>(null);
@@ -616,6 +616,8 @@ export function Settings({
         return "Google";
       case "openai":
         return "OpenAI";
+      case "openrouter":
+        return "OpenRouter";
     }
   }
 
@@ -1833,6 +1835,57 @@ export function Settings({
                     {hasKey && (
                       <button
                         onClick={() => void clearLocalApiKey("google")}
+                        disabled={isSaving}
+                        className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 disabled:opacity-40 transition-colors"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </SettingsRow>
+              );
+            })()}
+
+            {/* ── OpenRouter ── */}
+            <div className="px-4 pt-3 pb-1">
+              <span className="text-[11px] font-medium uppercase tracking-wider text-[var(--text-tertiary)]">OpenRouter</span>
+            </div>
+            {(() => {
+              const providerAuth = authState.providers.find((p) => p.id === "openrouter");
+              const hasKey = providerAuth?.has_key ?? false;
+              const last4 = providerAuth?.last4;
+              const isSaving = localKeySavingProvider === "openrouter";
+
+              return (
+                <SettingsRow
+                  label="API Key"
+                  icon={Key}
+                  description={
+                    hasKey
+                      ? `Key set (...${last4 || "****"})`
+                      : "Paste an OpenRouter API key for OpenRouter-only models"
+                  }
+                >
+                  <div className="flex w-full max-w-[360px] items-center gap-2">
+                    <input
+                      type="password"
+                      value={apiKeys.openrouter}
+                      onChange={(event) =>
+                        setApiKeys((prev) => ({ ...prev, openrouter: event.target.value }))
+                      }
+                      placeholder="sk-or-..."
+                      className="flex-1 min-w-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--system-blue)]"
+                    />
+                    <button
+                      onClick={() => void saveLocalApiKey("openrouter")}
+                      disabled={isSaving || !apiKeys.openrouter.trim()}
+                      className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--system-blue)] text-white hover:bg-[var(--system-blue)]/90 disabled:opacity-40 transition-colors"
+                    >
+                      {isSaving ? "Saving..." : hasKey ? "Replace" : "Save Key"}
+                    </button>
+                    {hasKey && (
+                      <button
+                        onClick={() => void clearLocalApiKey("openrouter")}
                         disabled={isSaving}
                         className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 disabled:opacity-40 transition-colors"
                       >

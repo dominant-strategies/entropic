@@ -5,12 +5,17 @@ import { Model } from "../lib/auth";
 // Proxy-mode models (routed through Entropic backend)
 export const PROXY_MODELS: Model[] = [
   { id: "openrouter/free", name: "OpenRouter Free (Router)", provider: "OpenRouter", tier: "fast" },
+  { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6", provider: "MoonshotAI", tier: "premium" },
+  { id: "anthropic/claude-opus-4.7", name: "Claude Opus 4.7", provider: "Anthropic", tier: "premium" },
   { id: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6", provider: "Anthropic", tier: "premium" },
   { id: "anthropic/claude-opus-4.5", name: "Claude Opus 4.5", provider: "Anthropic", tier: "premium" },
+  { id: "openai/gpt-5.5", name: "GPT-5.5", provider: "OpenAI", tier: "recommended" },
   { id: "openai/gpt-5.4", name: "GPT-5.4", provider: "OpenAI", tier: "recommended" },
   { id: "openai/gpt-5.3-codex", name: "GPT-5.3 Codex", provider: "OpenAI", tier: "reasoning" },
   { id: "openai/gpt-5.2", name: "GPT-5.2", provider: "OpenAI", tier: "recommended" },
   { id: "openai/gpt-5.2-codex", name: "GPT-5.2 Codex", provider: "OpenAI", tier: "reasoning" },
+  { id: "tencent/hy3-preview:free", name: "HY3 Preview (free)", provider: "Tencent", tier: "fast" },
+  { id: "deepseek/deepseek-v3.2", name: "DeepSeek V3.2", provider: "DeepSeek", tier: "reasoning" },
   { id: "google/gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview", provider: "Google", tier: "premium" },
   { id: "google/gemini-3.1-flash-image-preview", name: "Gemini 3.1 Flash Image Preview", provider: "Google", tier: "premium" },
   { id: "google/gemini-3-pro-image-preview", name: "Gemini 3 Pro Image (Nano Banana 3)", provider: "Google", tier: "premium" },
@@ -18,7 +23,15 @@ export const PROXY_MODELS: Model[] = [
 
 // Local-keys models (direct provider API access)
 export const LOCAL_MODELS: Model[] = [
+  // OpenRouter — local-key mode uses the user's OpenRouter key directly.
+  { id: "openrouter/moonshotai/kimi-k2.6", name: "Kimi K2.6", provider: "OpenRouter", tier: "premium" },
+  { id: "openrouter/anthropic/claude-opus-4.7", name: "Claude Opus 4.7", provider: "OpenRouter", tier: "premium" },
+  { id: "openrouter/openai/gpt-5.5", name: "GPT-5.5", provider: "OpenRouter", tier: "recommended" },
+  { id: "openrouter/tencent/hy3-preview:free", name: "HY3 Preview (free)", provider: "OpenRouter", tier: "fast" },
+  { id: "openrouter/deepseek/deepseek-v3.2", name: "DeepSeek V3.2", provider: "OpenRouter", tier: "reasoning" },
   // Anthropic — thinking-enabled variants first
+  { id: "anthropic/claude-opus-4.7:thinking", name: "Claude Opus 4.7 (Thinking)", provider: "Anthropic", tier: "premium" },
+  { id: "anthropic/claude-opus-4.7", name: "Claude Opus 4.7", provider: "Anthropic", tier: "premium" },
   { id: "anthropic/claude-opus-4-6:thinking", name: "Claude Opus 4.6 (Thinking)", provider: "Anthropic", tier: "premium" },
   { id: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6", provider: "Anthropic", tier: "premium" },
   { id: "anthropic/claude-opus-4-5:thinking", name: "Claude Opus 4.5 (Thinking)", provider: "Anthropic", tier: "premium" },

@@ -422,7 +422,14 @@ const GATEWAY_FAILURE_THRESHOLD = 3;
 const FEEDBACK_FORM_URL = entropicSitePath("/feedback");
 
 function stripModelParams(model: string) {
-  return model.split(":")[0] || model;
+  const trimmed = model.trim();
+  const separatorIndex = trimmed.lastIndexOf(":");
+  if (separatorIndex < 0) return trimmed || model;
+  const suffix = trimmed.slice(separatorIndex + 1);
+  if (suffix === "thinking" || suffix.startsWith("reasoning=")) {
+    return trimmed.slice(0, separatorIndex);
+  }
+  return trimmed || model;
 }
 
 function defaultLocalImageGenerationModel(primaryModel?: string) {
@@ -444,6 +451,10 @@ function remapModelForMode(model: string, useLocalKeys: boolean): string {
     const base = stripModelParams(model);
     if (LOCAL_MODEL_IDS.has(base)) {
       return base;
+    }
+    const openrouterCandidate = `openrouter/${base}`;
+    if (LOCAL_MODEL_IDS.has(openrouterCandidate)) {
+      return openrouterCandidate;
     }
     if (base.startsWith("anthropic/")) {
       return DEFAULT_LOCAL_MODEL;
@@ -480,6 +491,12 @@ function remapModelForMode(model: string, useLocalKeys: boolean): string {
   const base = stripModelParams(model);
   if (PROXY_MODEL_IDS.has(base)) {
     return base;
+  }
+  if (base.startsWith("openrouter/")) {
+    const openrouterModel = base.slice("openrouter/".length);
+    if (PROXY_MODEL_IDS.has(openrouterModel)) {
+      return openrouterModel;
+    }
   }
   if (base.startsWith("openai-codex/")) {
     const openaiModel = base.slice("openai-codex/".length);

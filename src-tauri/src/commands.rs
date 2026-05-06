@@ -75,12 +75,11 @@ const ENTROPIC_NATIVE_API_ALLOWED_DOMAINS: &[&str] = &["entropic.qu.ai"];
 const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const CLIENT_LOG_READ_MAX_BYTES: usize = 512 * 1024;
 const DEFAULT_PROXY_GATEWAY_MODEL: &str = "openai/gpt-5.4";
-const DEFAULT_PROXY_ANTHROPIC_GATEWAY_MODEL: &str = "anthropic/claude-opus-4-6";
-const DEFAULT_PROXY_GOOGLE_GATEWAY_MODEL: &str = "google/gemini-3.1-pro-preview";
-const DEFAULT_PROXY_OPENROUTER_GATEWAY_MODEL: &str = "openrouter/free";
 const DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL: &str = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL: &str = "openai-codex/gpt-5.3-codex";
 const DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL: &str = "google/gemini-2.5-pro";
+const DEFAULT_LOCAL_OPENROUTER_GATEWAY_MODEL: &str = "openrouter/free";
+const OPENROUTER_API_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 static BROWSER_SERVICE_TOKEN_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static EMBEDDED_PREVIEW_STATE_CACHE: OnceLock<Mutex<Option<EmbeddedPreviewStatePayload>>> =
@@ -523,21 +522,41 @@ fn remove_bundled_plugin_load_paths(cfg: &mut serde_json::Value, plugin_id: &str
     }
 }
 
+fn split_model_runtime_suffix(model: &str) -> (&str, Option<&str>) {
+    let trimmed = model.trim();
+    if let Some((base, suffix)) = trimmed.rsplit_once(':') {
+        let suffix = suffix.trim();
+        if suffix == "thinking" || suffix.starts_with("reasoning=") {
+            return (base.trim(), Some(suffix));
+        }
+    }
+    (trimmed, None)
+}
+
+fn model_base_ref(model: &str) -> &str {
+    split_model_runtime_suffix(model).0
+}
+
 fn normalize_proxy_gateway_model(model: &str) -> String {
     let trimmed = model.trim();
     if trimmed.is_empty() {
         return DEFAULT_PROXY_GATEWAY_MODEL.to_string();
     }
 
-    let base_model = trimmed.split(':').next().unwrap_or(trimmed).trim();
+    let base_model = model_base_ref(trimmed);
     match base_model {
         "openrouter/free"
         | "anthropic/claude-opus-4-6"
         | "anthropic/claude-opus-4.5"
+        | "anthropic/claude-opus-4.7"
+        | "moonshotai/kimi-k2.6"
+        | "openai/gpt-5.5"
         | "openai/gpt-5.4"
         | "openai/gpt-5.3-codex"
         | "openai/gpt-5.2"
         | "openai/gpt-5.2-codex"
+        | "tencent/hy3-preview:free"
+        | "deepseek/deepseek-v3.2"
         | "google/gemini-3.1-pro-preview"
         | "google/gemini-3.1-flash-image-preview"
         | "google/gemini-3-pro-image-preview" => base_model.to_string(),
@@ -552,17 +571,8 @@ fn normalize_proxy_gateway_model(model: &str) -> String {
                 }
             }
 
-            if base_model.starts_with("anthropic/") {
-                return DEFAULT_PROXY_ANTHROPIC_GATEWAY_MODEL.to_string();
-            }
-            if base_model.starts_with("google/") {
-                return DEFAULT_PROXY_GOOGLE_GATEWAY_MODEL.to_string();
-            }
-            if base_model.starts_with("openrouter/") {
-                return DEFAULT_PROXY_OPENROUTER_GATEWAY_MODEL.to_string();
-            }
-            if base_model.starts_with("openai/") || base_model.starts_with("openai-codex/") {
-                return DEFAULT_PROXY_GATEWAY_MODEL.to_string();
+            if base_model.contains('/') {
+                return base_model.to_string();
             }
 
             DEFAULT_PROXY_GATEWAY_MODEL.to_string()
@@ -572,7 +582,7 @@ fn normalize_proxy_gateway_model(model: &str) -> String {
 
 fn proxy_auth_profile_providers_for_model(model: &str) -> Vec<&'static str> {
     let trimmed = model.trim();
-    let base_model = trimmed.split(':').next().unwrap_or(trimmed).trim();
+    let base_model = model_base_ref(trimmed);
     let Some((provider, _raw_model)) = base_model.split_once('/') else {
         return Vec::new();
     };
@@ -597,11 +607,22 @@ fn normalize_proxy_runtime_model_ref(model: &str) -> String {
     format!("openrouter/{}", trimmed)
 }
 
+fn openrouter_provider_model_id(model: &str) -> String {
+    let base = model_base_ref(model);
+    let stripped = base.trim_start_matches("openrouter/");
+    if stripped == "free" || stripped == "auto" {
+        base.to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
 fn local_gateway_model_key_provider(provider: &str) -> Option<&'static str> {
     match provider {
         "anthropic" => Some("anthropic"),
         "openai" | "openai-codex" => Some("openai"),
         "google" => Some("google"),
+        "openrouter" => Some("openrouter"),
         _ => None,
     }
 }
@@ -611,6 +632,7 @@ fn default_local_gateway_model_for_provider(provider: &str) -> &'static str {
         "anthropic" => DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL,
         "openai" | "openai-codex" => DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL,
         "google" => DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL,
+        "openrouter" => DEFAULT_LOCAL_OPENROUTER_GATEWAY_MODEL,
         _ => DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL,
     }
 }
@@ -625,7 +647,7 @@ fn choose_local_gateway_provider(
         }
     }
 
-    for provider in ["anthropic", "openai", "google"] {
+    for provider in ["anthropic", "openai", "google", "openrouter"] {
         if has_configured_provider_key(api_keys, provider) {
             return provider;
         }
@@ -648,7 +670,7 @@ fn normalize_local_gateway_model(
             let raw_model = raw_model.trim();
             if !provider.is_empty() && !raw_model.is_empty() {
                 match provider {
-                    "anthropic" | "google" => {
+                    "anthropic" | "google" | "openrouter" => {
                         if let Some(key_provider) = local_gateway_model_key_provider(provider) {
                             if has_configured_provider_key(api_keys, key_provider) {
                                 return requested_model.to_string();
@@ -662,9 +684,9 @@ fn normalize_local_gateway_model(
                     }
                     "openai" => {
                         if has_configured_provider_key(api_keys, "openai") {
-                            let base_model =
-                                requested_model.split(':').next().unwrap_or(requested_model);
+                            let base_model = model_base_ref(requested_model);
                             let mapped = match base_model {
+                                "openai/gpt-5.5" => "openai-codex/gpt-5.5:reasoning=medium",
                                 "openai/gpt-5.3-codex" => {
                                     "openai-codex/gpt-5.3-codex:reasoning=medium"
                                 }
@@ -4505,8 +4527,10 @@ fn model_provider_id(model: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let base = trimmed.split(':').next().unwrap_or(trimmed).trim();
-    let base = base.strip_prefix("openrouter/").unwrap_or(base);
+    let base = model_base_ref(trimmed);
+    if base.starts_with("openrouter/") {
+        return Some("openrouter".to_string());
+    }
     let provider = base.split('/').next().unwrap_or("").trim();
     if provider.is_empty() {
         None
@@ -4516,8 +4540,8 @@ fn model_provider_id(model: &str) -> Option<String> {
 }
 
 fn thinking_level_from_model_ref(model: &str) -> String {
-    let trimmed = model.trim();
-    let model_params = trimmed.split(':').nth(1).unwrap_or("").trim();
+    let (_, model_params) = split_model_runtime_suffix(model);
+    let model_params = model_params.unwrap_or("").trim();
     if model_params == "thinking" {
         "high".to_string()
     } else if let Some(level) = model_params.strip_prefix("reasoning=") {
@@ -4539,7 +4563,7 @@ fn openclaw_agent_model_is_configured(
 ) -> bool {
     if proxy_mode {
         let trimmed = model.trim();
-        let base = trimmed.split(':').next().unwrap_or(trimmed).trim();
+        let base = model_base_ref(trimmed);
         return base.starts_with("openrouter/");
     }
     let Some(provider) = model_provider_id(model) else {
@@ -4658,17 +4682,15 @@ fn desired_gateway_selection(
         active_provider.as_deref(),
         &api_keys,
     );
-    let config_model = normalized_local
-        .split(':')
-        .next()
-        .unwrap_or(normalized_local.as_str())
-        .to_string();
-    let config_image_model = selected_image_model
-        .split(':')
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+    let config_model = model_base_ref(&normalized_local).to_string();
+    let config_image_model = {
+        let base = model_base_ref(selected_image_model.as_str()).trim();
+        if base.is_empty() {
+            None
+        } else {
+            Some(base.to_string())
+        }
+    };
 
     Ok(DesiredGatewaySelection {
         config_model: Some(config_model.clone()),
@@ -10015,6 +10037,19 @@ fn build_oauth_auth_profiles(stored: &StoredAuth) -> serde_json::Value {
         }
     }
 
+    if let Some(openrouter_key) = stored.keys.get("openrouter").map(|key| key.trim()) {
+        if !openrouter_key.is_empty() {
+            profiles.insert(
+                "openrouter:default".to_string(),
+                serde_json::json!({
+                    "type": "api_key",
+                    "provider": "openrouter",
+                    "key": openrouter_key
+                }),
+            );
+        }
+    }
+
     serde_json::json!({
         "version": 1,
         "profiles": serde_json::Value::Object(profiles)
@@ -10282,25 +10317,11 @@ Use it for durable decisions, preferences, and facts that should persist across 
         if let Some(base_url) = &base_url {
             let model_id = model
                 .as_ref()
-                .map(|m| {
-                    let stripped = m.trim_start_matches("openrouter/").to_string();
-                    if stripped == "free" || stripped == "auto" {
-                        m.to_string()
-                    } else {
-                        stripped
-                    }
-                })
+                .map(|m| openrouter_provider_model_id(m))
                 .unwrap_or_default();
             let image_model_id = image_model
                 .as_ref()
-                .map(|m| {
-                    let stripped = m.trim_start_matches("openrouter/").to_string();
-                    if stripped == "free" || stripped == "auto" {
-                        m.to_string()
-                    } else {
-                        stripped
-                    }
-                })
+                .map(|m| openrouter_provider_model_id(m))
                 .unwrap_or_default();
             let mut models = Vec::new();
 
@@ -10345,9 +10366,58 @@ Use it for durable decisions, preferences, and facts that should persist across 
             );
         }
     } else {
-        // Non-proxy mode: remove openrouter config to avoid validation errors
-        // (an empty models.providers.openrouter object causes "baseUrl required" validation failure)
-        remove_openclaw_config_value(&mut cfg, &["models", "providers", "openrouter"]);
+        let local_openrouter_model_id = model
+            .as_deref()
+            .map(model_base_ref)
+            .filter(|m| m.starts_with("openrouter/"))
+            .map(openrouter_provider_model_id);
+        let local_openrouter_image_model_id = image_model
+            .as_deref()
+            .map(model_base_ref)
+            .filter(|m| m.starts_with("openrouter/"))
+            .map(openrouter_provider_model_id);
+        if has_configured_provider_key(&api_keys_snapshot, "openrouter")
+            && (local_openrouter_model_id.is_some() || local_openrouter_image_model_id.is_some())
+        {
+            let mut models = Vec::new();
+            if let Some(model_id) = &local_openrouter_model_id {
+                models.push(serde_json::json!({
+                    "id": model_id,
+                    "name": model_id,
+                    "input": ["text", "image"],
+                    "reasoning": false,
+                    "contextWindow": 200000,
+                    "maxTokens": 8192,
+                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+                }));
+            }
+            if let Some(image_model_id) = &local_openrouter_image_model_id {
+                if local_openrouter_model_id.as_ref() != Some(image_model_id) {
+                    models.push(serde_json::json!({
+                        "id": image_model_id,
+                        "name": image_model_id,
+                        "input": ["text", "image"],
+                        "reasoning": false,
+                        "contextWindow": 200000,
+                        "maxTokens": 8192,
+                        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+                    }));
+                }
+            }
+            set_openclaw_config_value(
+                &mut cfg,
+                &["models", "providers", "openrouter"],
+                serde_json::json!({
+                    "baseUrl": OPENROUTER_API_BASE_URL,
+                    "api": "openai-completions",
+                    "models": models
+                }),
+            );
+        } else {
+            // Non-proxy mode: remove stale OpenRouter config unless the user explicitly
+            // selected an OpenRouter-backed local-key model and provided an OpenRouter key.
+            remove_openclaw_config_value(&mut cfg, &["models", "providers", "openrouter"]);
+        }
         if web_search_enabled {
             set_openclaw_config_value(
                 &mut cfg,
@@ -12695,7 +12765,7 @@ pub async fn set_active_provider(
 pub async fn get_auth_state(state: State<'_, AppState>) -> Result<AuthState, String> {
     let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
     let active = state.active_provider.lock().map_err(|e| e.to_string())?;
-    let providers = ["anthropic", "openai", "google"]
+    let providers = ["anthropic", "openai", "google", "openrouter"]
         .into_iter()
         .map(|id| {
             let last4 = keys.get(id).and_then(|k| {
@@ -12800,10 +12870,11 @@ async fn start_gateway_inner(
 
     let has_any_local_api_key = has_configured_provider_key(&api_keys, "anthropic")
         || has_configured_provider_key(&api_keys, "openai")
-        || has_configured_provider_key(&api_keys, "google");
+        || has_configured_provider_key(&api_keys, "google")
+        || has_configured_provider_key(&api_keys, "openrouter");
     if !has_any_local_api_key {
         return Err(
-            "No local API key configured. Add an Anthropic/OpenAI/Google key in Settings, or sign in and disable 'Use Local Keys'."
+            "No local API key configured. Add an Anthropic/OpenAI/Google/OpenRouter key in Settings, or sign in and disable 'Use Local Keys'."
                 .to_string(),
         );
     }
@@ -12826,11 +12897,7 @@ async fn start_gateway_inner(
 
     // Parse model string: "provider/model-id:param" -> base model + optional params
     // Supported suffixes: ":thinking" (Anthropic), ":reasoning=level" (OpenAI)
-    let (base_model, model_params) = if let Some(colon_pos) = model_full.find(':') {
-        (&model_full[..colon_pos], Some(&model_full[colon_pos + 1..]))
-    } else {
-        (model_full.as_str(), None)
-    };
+    let (base_model, model_params) = split_model_runtime_suffix(&model_full);
 
     // Derive thinking / reasoning env vars from suffix
     let thinking_enabled = model_params == Some("thinking");
@@ -13047,6 +13114,9 @@ async fn start_gateway_inner(
     }
     if let Some(key) = api_keys.get("google") {
         env_entries.push(("GEMINI_API_KEY", key.as_str()));
+    }
+    if let Some(key) = api_keys.get("openrouter") {
+        env_entries.push(("OPENROUTER_API_KEY", key.as_str()));
     }
     let mut web_base_url = None;
     if let Ok(base) = std::env::var("ENTROPIC_WEB_BASE_URL") {
@@ -13677,12 +13747,10 @@ pub async fn start_gateway_with_proxy(
 /// Only works for same-provider changes (API keys stay the same).
 #[tauri::command]
 pub fn update_gateway_model(model: String) -> Result<(), String> {
-    let base_model = model.split(':').next().unwrap_or(&model);
-    let thinking_enabled = model.contains(":thinking");
-    let reasoning_effort = model
-        .split(':')
-        .find_map(|s| s.strip_prefix("reasoning="))
-        .unwrap_or("");
+    let (base_model, model_params) = split_model_runtime_suffix(&model);
+    let model_params = model_params.unwrap_or("");
+    let thinking_enabled = model_params == "thinking";
+    let reasoning_effort = model_params.strip_prefix("reasoning=").unwrap_or("");
 
     let thinking_level = if thinking_enabled {
         "high"
