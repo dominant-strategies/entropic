@@ -20,7 +20,6 @@ import {
   FileText,
   Trash2,
   Plus,
-  X,
   ArrowUp,
   MessageSquare,
   Loader2,
@@ -105,6 +104,7 @@ import {
   getFileIcon,
 } from "../desktop/finder/FileIcons";
 import { FinderApp } from "../desktop/finder/FinderApp";
+import { FilePreviewWindow, type FilePreviewState } from "../desktop/finder/FilePreviewWindow";
 import { DesktopDock } from "../desktop/dock/DesktopDock";
 import { DesktopContextMenus } from "../desktop/contextMenus/DesktopContextMenus";
 import { WallpaperPicker } from "../desktop/wallpaper/WallpaperPicker";
@@ -278,11 +278,6 @@ const DESKTOP_TERMINAL_EVENT = "desktop-terminal-output";
 const PANEL_FALLBACK = (
   <div className="p-4 text-xs text-[var(--text-tertiary)]">Loading…</div>
 );
-
-type PreviewState =
-  | { kind: "text"; name: string; path: string; content: string }
-  | { kind: "image"; name: string; path: string; dataUrl: string }
-  | { kind: "binary"; name: string; path: string; size: number };
 
 type ChatWorkspaceReference = {
   key: string;
@@ -1012,7 +1007,7 @@ export function Files({
   const [historyIndex, setHistoryIndex] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [preview, setPreview] = useState<FilePreviewState | null>(null);
   const [sheetsSession, setSheetsSession] = useState<OfficeAppSession | null>(null);
   const [docsSession, setDocsSession] = useState<OfficeAppSession | null>(null);
   const [slidesSession, setSlidesSession] = useState<OfficeAppSession | null>(null);
@@ -4428,97 +4423,17 @@ export function Files({
             />
           ) : null}
 
-          {/* File viewer */}
-          {preview !== null && (() => {
-            const ext = preview.name.split(".").pop()?.toLowerCase() || "";
-            const isCode = ["js","ts","jsx","tsx","py","rs","go","c","cpp","h","rb","sh","bash","zsh","css","html","xml","json","yaml","yml","toml","sql","java","kt","swift","php","lua","r","pl","ex","exs","hs","ml","scala","clj","dart","vue","svelte"].includes(ext);
-            const isMd = ext === "md";
-            const Icon = getFileIcon(preview.name, false);
-            const iconColor = getFileColor(preview.name, false);
-            const lines = preview.kind === "text" ? preview.content.split("\n") : [];
-            const lnw = String(lines.length || 1).length;
-            return (
-              <div
-                className="absolute inset-0 flex items-center justify-center"
-                style={{ zIndex: getWindowZ(windowZ, "preview"), background: "rgba(0,0,0,0.45)" }}
-                onMouseDownCapture={() => focusWindow("preview")}
-              >
-                <div
-                  className="w-full max-w-3xl mx-6 h-[min(85vh,720px)] flex flex-col rounded-xl overflow-hidden animate-fade-in"
-                  style={{ boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56)" }}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <div className="flex items-center px-3 py-2.5 flex-shrink-0 relative" style={{ background: "#2d2d2d", borderBottom: "1px solid #1a1a1a" }}>
-                    <div className="flex items-center gap-2 z-10">
-                      <button onClick={() => setPreview(null)} className="w-3 h-3 rounded-full hover:opacity-80 group relative" style={{ background: "#ff5f57" }}><X className="w-2 h-2 absolute inset-0.5 opacity-0 group-hover:opacity-100 text-black/60" /></button>
-                      <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} /><div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
-                    </div>
-                    <div className="ml-auto flex items-center gap-2 z-10">
-                      {preview.kind === "text" && (
-                        <button
-                          type="button"
-                          onClick={() => { void copyPreviewText(); }}
-                          className="px-2.5 py-1 rounded-lg text-[11px] font-medium"
-                          style={{ background: "rgba(255,255,255,0.08)", color: "#d7d7d7" }}
-                        >
-                          Copy Text
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => { void exportPreviewFile(); }}
-                        className="px-2.5 py-1 rounded-lg text-[11px] font-medium"
-                        style={{ background: "rgba(84,163,247,0.18)", color: "#e9f3ff" }}
-                      >
-                        Export...
-                      </button>
-                    </div>
-                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none"><div className="flex items-center gap-2"><Icon className="w-3.5 h-3.5" style={{ color: iconColor }} /><span className="text-xs font-medium" style={{ color: "#ccc" }}>{preview.name}</span></div></div>
-                  </div>
-                  <div className="flex-1 min-h-0 overflow-auto" style={{ background: preview.kind === "text" && (isCode || isMd) ? "#1e1e1e" : "#252526" }}>
-                    {preview.kind === "image" && (
-                      <div className="p-4 flex items-center justify-center">
-                        <img
-                          src={preview.dataUrl}
-                          alt={preview.name}
-                          className="max-w-full max-h-[70vh] rounded-lg shadow-lg"
-                        />
-                      </div>
-                    )}
-                    {preview.kind === "binary" && (
-                      <div className="p-6 text-sm" style={{ color: "#d4d4d4" }}>
-                        <p className="font-medium mb-2">Preview not available</p>
-                        <p>This file type isn’t viewable yet.</p>
-                        <p className="text-xs mt-2" style={{ color: "#888" }}>
-                          {preview.name} · {formatSize(preview.size)}
-                        </p>
-                      </div>
-                    )}
-                    {preview.kind === "text" && (
-                      (isCode || isMd) ? (
-                        <div className="flex text-[13px] font-mono leading-[1.6] select-text">
-                          <div className="flex-shrink-0 text-right select-none py-3 pr-3 sticky left-0" style={{ color: "#858585", background: "#1e1e1e", paddingLeft: "12px", minWidth: `${lnw * 0.65 + 1.8}em`, borderRight: "1px solid #2d2d2d" }}>{lines.map((_, i) => <div key={i}>{i + 1}</div>)}</div>
-                          <pre className="flex-1 py-3 px-4 whitespace-pre-wrap break-words select-text cursor-text" style={{ color: "#d4d4d4", tabSize: 4 }}>{preview.content}</pre>
-                        </div>
-                      ) : (
-                        <pre className="p-5 text-[13px] font-mono whitespace-pre-wrap break-words leading-relaxed select-text cursor-text" style={{ color: "#d4d4d4" }}>{preview.content}</pre>
-                      )
-                    )}
-                  </div>
-                  <div className="flex items-center justify-between px-3 py-1 flex-shrink-0 text-[11px]" style={{ background: "#007acc", color: "rgba(255,255,255,0.9)" }}>
-                    <span>{ext.toUpperCase() || "TXT"}</span>
-                    {preview.kind === "text" ? (
-                      <span>{lines.length} lines · {formatSize(new Blob([preview.content]).size)}</span>
-                    ) : preview.kind === "image" ? (
-                      <span>Image preview</span>
-                    ) : (
-                      <span>{formatSize(preview.size)}</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
+          {preview !== null ? (
+            <FilePreviewWindow
+              preview={preview}
+              zIndex={getWindowZ(windowZ, "preview")}
+              formatSize={formatSize}
+              onFocus={() => focusWindow("preview")}
+              onClose={() => setPreview(null)}
+              onCopyText={copyPreviewText}
+              onExport={exportPreviewFile}
+            />
+          ) : null}
 
           {/* Error toast */}
           {error && (
