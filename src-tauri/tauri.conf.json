@@ -51,6 +51,7 @@
     "longDescription": "Entropic brings OpenClaw to your desktop with a beautiful interface and secure container-based sandboxing for AI-generated commands.",
     "macOS": {
       "entitlements": "entitlements.plist",
+      "infoPlist": "Info.plist",
       "exceptionDomain": null,
       "frameworks": [],
       "minimumSystemVersion": "12.0",
