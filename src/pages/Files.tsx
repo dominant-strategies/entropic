@@ -79,8 +79,8 @@ import {
 import { hostedFeaturesEnabled } from "../lib/buildProfile";
 import { createOnlyOfficeSession } from "../lib/office";
 import {
-  DEFAULT_WINDOW_Z,
   clampWindowFrame,
+  getWindowZ,
   startDesktopWindowDrag,
   startDesktopWindowResize,
   useWindowZStack,
@@ -4009,54 +4009,54 @@ export function Files({
       desktopChatSessionTitle(session).toLowerCase().includes(normalizedChatQuery)
     ))
     : sortedChatSessions;
-  const browserWindowZ = windowZ.browser ?? DEFAULT_WINDOW_Z.browser;
+  const browserWindowZ = getWindowZ(windowZ, "browser");
   const embeddedPreviewForegroundWindows = useMemo(() => {
     const frames: Array<{ z: number; rect: WindowRect }> = [];
     if (finderOpen) {
-      frames.push({ z: windowZ.finder ?? DEFAULT_WINDOW_Z.finder, rect: { x: finderPos.x, y: finderPos.y, w: finderSize.w, h: finderSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "finder"), rect: { x: finderPos.x, y: finderPos.y, w: finderSize.w, h: finderSize.h } });
     }
     if (chatOpen) {
-      frames.push({ z: windowZ.chat ?? DEFAULT_WINDOW_Z.chat, rect: { x: chatPos.x, y: chatPos.y, w: chatSize.w, h: chatSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "chat"), rect: { x: chatPos.x, y: chatPos.y, w: chatSize.w, h: chatSize.h } });
     }
     if (terminalOpen) {
-      frames.push({ z: windowZ.terminal ?? DEFAULT_WINDOW_Z.terminal, rect: { x: terminalPos.x, y: terminalPos.y, w: terminalSize.w, h: terminalSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "terminal"), rect: { x: terminalPos.x, y: terminalPos.y, w: terminalSize.w, h: terminalSize.h } });
     }
     if (sheetsOpen) {
-      frames.push({ z: windowZ.sheets ?? DEFAULT_WINDOW_Z.sheets, rect: { x: sheetsPos.x, y: sheetsPos.y, w: sheetsSize.w, h: sheetsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "sheets"), rect: { x: sheetsPos.x, y: sheetsPos.y, w: sheetsSize.w, h: sheetsSize.h } });
     }
     if (docsOpen) {
-      frames.push({ z: windowZ.docs ?? DEFAULT_WINDOW_Z.docs, rect: { x: docsPos.x, y: docsPos.y, w: docsSize.w, h: docsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "docs"), rect: { x: docsPos.x, y: docsPos.y, w: docsSize.w, h: docsSize.h } });
     }
     if (slidesOpen) {
-      frames.push({ z: windowZ.slides ?? DEFAULT_WINDOW_Z.slides, rect: { x: slidesPos.x, y: slidesPos.y, w: slidesSize.w, h: slidesSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "slides"), rect: { x: slidesPos.x, y: slidesPos.y, w: slidesSize.w, h: slidesSize.h } });
     }
     if (pluginsOpen) {
-      frames.push({ z: windowZ.plugins ?? DEFAULT_WINDOW_Z.plugins, rect: { x: pluginsPos.x, y: pluginsPos.y, w: pluginsSize.w, h: pluginsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "plugins"), rect: { x: pluginsPos.x, y: pluginsPos.y, w: pluginsSize.w, h: pluginsSize.h } });
     }
     if (skillsOpen) {
-      frames.push({ z: windowZ.skills ?? DEFAULT_WINDOW_Z.skills, rect: { x: skillsPos.x, y: skillsPos.y, w: skillsSize.w, h: skillsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "skills"), rect: { x: skillsPos.x, y: skillsPos.y, w: skillsSize.w, h: skillsSize.h } });
     }
     if (channelsOpen) {
-      frames.push({ z: windowZ.channels ?? DEFAULT_WINDOW_Z.channels, rect: { x: channelsPos.x, y: channelsPos.y, w: channelsSize.w, h: channelsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "channels"), rect: { x: channelsPos.x, y: channelsPos.y, w: channelsSize.w, h: channelsSize.h } });
     }
     if (tasksOpen) {
-      frames.push({ z: windowZ.tasks ?? DEFAULT_WINDOW_Z.tasks, rect: { x: tasksPos.x, y: tasksPos.y, w: tasksSize.w, h: tasksSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "tasks"), rect: { x: tasksPos.x, y: tasksPos.y, w: tasksSize.w, h: tasksSize.h } });
     }
     if (jobsOpen) {
-      frames.push({ z: windowZ.jobs ?? DEFAULT_WINDOW_Z.jobs, rect: { x: jobsPos.x, y: jobsPos.y, w: jobsSize.w, h: jobsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "jobs"), rect: { x: jobsPos.x, y: jobsPos.y, w: jobsSize.w, h: jobsSize.h } });
     }
     if (logsOpen) {
-      frames.push({ z: windowZ.logs ?? DEFAULT_WINDOW_Z.logs, rect: { x: logsPos.x, y: logsPos.y, w: logsSize.w, h: logsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "logs"), rect: { x: logsPos.x, y: logsPos.y, w: logsSize.w, h: logsSize.h } });
     }
     if (billingEnabled && billingOpen) {
-      frames.push({ z: windowZ.billing ?? DEFAULT_WINDOW_Z.billing, rect: { x: billingPos.x, y: billingPos.y, w: billingSize.w, h: billingSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "billing"), rect: { x: billingPos.x, y: billingPos.y, w: billingSize.w, h: billingSize.h } });
     }
     if (settingsOpen) {
-      frames.push({ z: windowZ.settings ?? DEFAULT_WINDOW_Z.settings, rect: { x: settingsPos.x, y: settingsPos.y, w: settingsSize.w, h: settingsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "settings"), rect: { x: settingsPos.x, y: settingsPos.y, w: settingsSize.w, h: settingsSize.h } });
     }
     if (preview) {
       frames.push({
-        z: windowZ.preview ?? DEFAULT_WINDOW_Z.preview,
+        z: getWindowZ(windowZ, "preview"),
         rect: { x: 0, y: 0, w: desktopBounds.width, h: desktopBounds.height },
       });
     }
@@ -4457,7 +4457,7 @@ export function Files({
                 width: finderSize.w, height: finderSize.h,
                 boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56), 0 0 0 0.5px rgba(255,255,255,0.1)",
                 border: "0.5px solid rgba(255,255,255,0.08)",
-                zIndex: windowZ.finder ?? DEFAULT_WINDOW_Z.finder,
+                zIndex: getWindowZ(windowZ, "finder"),
               }}
               onMouseDownCapture={() => focusWindow("finder")}
               onClick={(e) => e.stopPropagation()}
@@ -4667,7 +4667,7 @@ export function Files({
             return (
               <div
                 className="absolute inset-0 flex items-center justify-center"
-                style={{ zIndex: windowZ.preview ?? DEFAULT_WINDOW_Z.preview, background: "rgba(0,0,0,0.45)" }}
+                style={{ zIndex: getWindowZ(windowZ, "preview"), background: "rgba(0,0,0,0.45)" }}
                 onMouseDownCapture={() => focusWindow("preview")}
               >
                 <div
@@ -4897,7 +4897,7 @@ export function Files({
               icon={MessageSquare}
               position={chatPos}
               size={chatSize}
-              zIndex={windowZ.chat ?? DEFAULT_WINDOW_Z.chat}
+              zIndex={getWindowZ(windowZ, "chat")}
               glass={false}
               onClose={() => setChatOpen(false)}
               onFocus={() => focusWindow("chat")}
@@ -5125,7 +5125,7 @@ export function Files({
               icon={Globe}
               position={browserPos}
               size={browserSize}
-              zIndex={windowZ.browser ?? DEFAULT_WINDOW_Z.browser}
+              zIndex={getWindowZ(windowZ, "browser")}
               onClose={() => { void closeBrowserWindow(); }}
               onFocus={() => focusWindow("browser")}
               onDragStart={(e) =>
@@ -5421,9 +5421,9 @@ export function Files({
             position={{ sheets: sheetsPos, docs: docsPos, slides: slidesPos }}
             size={{ sheets: sheetsSize, docs: docsSize, slides: slidesSize }}
             zIndex={{
-              sheets: windowZ.sheets ?? DEFAULT_WINDOW_Z.sheets,
-              docs: windowZ.docs ?? DEFAULT_WINDOW_Z.docs,
-              slides: windowZ.slides ?? DEFAULT_WINDOW_Z.slides,
+              sheets: getWindowZ(windowZ, "sheets"),
+              docs: getWindowZ(windowZ, "docs"),
+              slides: getWindowZ(windowZ, "slides"),
             }}
             onClose={(kind) => closeDesktopWindow(kind)}
             onFocus={(kind) => focusWindow(kind)}
@@ -5486,7 +5486,7 @@ export function Files({
               icon={Terminal}
               position={terminalPos}
               size={terminalSize}
-              zIndex={windowZ.terminal ?? DEFAULT_WINDOW_Z.terminal}
+              zIndex={getWindowZ(windowZ, "terminal")}
               onClose={() => { void closeTerminalWindow(); }}
               onFocus={() => focusWindow("terminal")}
               onDragStart={(e) =>
@@ -5603,7 +5603,7 @@ export function Files({
               icon={Puzzle}
               position={pluginsPos}
               size={pluginsSize}
-              zIndex={windowZ.plugins ?? DEFAULT_WINDOW_Z.plugins}
+              zIndex={getWindowZ(windowZ, "plugins")}
               onClose={() => setPluginsOpen(false)}
               onFocus={() => focusWindow("plugins")}
               onDragStart={(e) =>
@@ -5627,7 +5627,7 @@ export function Files({
               icon={Sparkles}
               position={skillsPos}
               size={skillsSize}
-              zIndex={windowZ.skills ?? DEFAULT_WINDOW_Z.skills}
+              zIndex={getWindowZ(windowZ, "skills")}
               onClose={() => setSkillsOpen(false)}
               onFocus={() => focusWindow("skills")}
               onDragStart={(e) =>
@@ -5664,7 +5664,7 @@ export function Files({
               icon={Radio}
               position={channelsPos}
               size={channelsSize}
-              zIndex={windowZ.channels ?? DEFAULT_WINDOW_Z.channels}
+              zIndex={getWindowZ(windowZ, "channels")}
               onClose={() => setChannelsOpen(false)}
               onFocus={() => focusWindow("channels")}
               onDragStart={(e) =>
@@ -5684,7 +5684,7 @@ export function Files({
               icon={ListTodo}
               position={tasksPos}
               size={tasksSize}
-              zIndex={windowZ.tasks ?? DEFAULT_WINDOW_Z.tasks}
+              zIndex={getWindowZ(windowZ, "tasks")}
               onClose={() => setTasksOpen(false)}
               onFocus={() => focusWindow("tasks")}
               onDragStart={(e) =>
@@ -5704,7 +5704,7 @@ export function Files({
               icon={CalendarClock}
               position={jobsPos}
               size={jobsSize}
-              zIndex={windowZ.jobs ?? DEFAULT_WINDOW_Z.jobs}
+              zIndex={getWindowZ(windowZ, "jobs")}
               onClose={() => setJobsOpen(false)}
               onFocus={() => focusWindow("jobs")}
               onDragStart={(e) =>
@@ -5724,7 +5724,7 @@ export function Files({
               icon={ScrollText}
               position={logsPos}
               size={logsSize}
-              zIndex={windowZ.logs ?? DEFAULT_WINDOW_Z.logs}
+              zIndex={getWindowZ(windowZ, "logs")}
               onClose={() => setLogsOpen(false)}
               onFocus={() => focusWindow("logs")}
               onDragStart={(e) =>
@@ -5744,7 +5744,7 @@ export function Files({
               icon={CreditCard}
               position={billingPos}
               size={billingSize}
-              zIndex={windowZ.billing ?? DEFAULT_WINDOW_Z.billing}
+              zIndex={getWindowZ(windowZ, "billing")}
               onClose={() => setBillingOpen(false)}
               onFocus={() => focusWindow("billing")}
               onDragStart={(e) =>
@@ -5764,7 +5764,7 @@ export function Files({
               icon={SettingsIcon}
               position={settingsPos}
               size={settingsSize}
-              zIndex={windowZ.settings ?? DEFAULT_WINDOW_Z.settings}
+              zIndex={getWindowZ(windowZ, "settings")}
               onClose={() => setSettingsOpen(false)}
               onFocus={() => focusWindow("settings")}
               onDragStart={(e) =>
