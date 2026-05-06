@@ -19,10 +19,7 @@ import { Store } from "@tauri-apps/plugin-store";
 import {
   Folder,
   FileText,
-  ChevronLeft,
-  ChevronRight,
   LayoutGrid,
-  List,
   Trash2,
   Eye,
   Plus,
@@ -111,6 +108,7 @@ import {
   getFileColor,
   getFileIcon,
 } from "../desktop/finder/FileIcons";
+import { FinderApp } from "../desktop/finder/FinderApp";
 import {
   workspaceBrowserUrl,
   workspaceFileCanOpenInBrowser,
@@ -4387,160 +4385,46 @@ export function Files({
             </div>
           )}
 
-          {/* ── FLOATING FINDER WINDOW (draggable) ────────────────────── */}
           {finderOpen && (
-            <div
-              className="absolute flex flex-col rounded-xl overflow-hidden animate-scale-in"
-              data-desktop-drop-target={currentPath}
-              style={{
-                top: finderPos.y, left: finderPos.x,
-                width: finderSize.w, height: finderSize.h,
-                boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56), 0 0 0 0.5px rgba(255,255,255,0.1)",
-                border: "0.5px solid rgba(255,255,255,0.08)",
-                zIndex: getWindowZ(windowZ, "finder"),
+            <FinderApp
+              position={finderPos}
+              size={finderSize}
+              zIndex={getWindowZ(windowZ, "finder")}
+              currentPath={currentPath}
+              pathSegments={pathSegments}
+              folderName={folderName}
+              entries={entries}
+              loading={loading}
+              viewMode={viewMode}
+              selected={selected}
+              dragDropTarget={dragDropTarget}
+              historyIndex={historyIndex}
+              historyLength={history.length}
+              itemCount={itemCount}
+              formatDate={formatDate}
+              formatSize={formatSize}
+              onClose={() => setFinderOpen(false)}
+              onFocus={() => focusWindow("finder")}
+              onDragStart={handleFinderDragStart}
+              onBack={goBack}
+              onForward={goForward}
+              onNavigate={navigateTo}
+              onViewModeChange={setViewMode}
+              onCreateFile={handleCreateFile}
+              onCreateFolder={handleCreateFolder}
+              onChooseFiles={() => fileInputRef.current?.click()}
+              onClearSelection={() => {
+                setSelected(null);
+                setContextMenu(null);
+                setDragDropTarget(null);
               }}
-              onMouseDownCapture={() => focusWindow("finder")}
-              onClick={(e) => e.stopPropagation()}
-            >
-              {/* Title bar — drag handle */}
-              <div
-                className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing select-none"
-                style={{ background: "#2d2d2d", borderBottom: "1px solid #1a1a1a" }}
-                onMouseDown={handleFinderDragStart}
-              >
-                <div className="flex items-center gap-2 z-10">
-                  <button onClick={() => setFinderOpen(false)} className="w-3 h-3 rounded-full hover:opacity-80 group relative" style={{ background: "#ff5f57" }} title="Close">
-                    <X className="w-2 h-2 absolute inset-0.5 opacity-0 group-hover:opacity-100 text-black/60" />
-                  </button>
-                  <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} />
-                  <div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
-                </div>
-                <div className="flex items-center gap-0.5 ml-3 z-10">
-                  <button onClick={goBack} disabled={historyIndex <= 0} className="p-1 rounded disabled:opacity-30 hover:bg-white/10"><ChevronLeft className="w-3.5 h-3.5" style={{ color: "#aaa" }} /></button>
-                  <button onClick={goForward} disabled={historyIndex >= history.length - 1} className="p-1 rounded disabled:opacity-30 hover:bg-white/10"><ChevronRight className="w-3.5 h-3.5" style={{ color: "#aaa" }} /></button>
-                </div>
-                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                  <div className="flex items-center gap-2">
-                    {currentPath && <button onClick={() => navigateTo(pathSegments.slice(0, -1).join("/"))} className="pointer-events-auto p-0.5 rounded hover:bg-white/10"><ArrowUp className="w-3 h-3" style={{ color: "#888" }} /></button>}
-                    <Folder className="w-3.5 h-3.5" style={{ color: "#54a3f7" }} />
-                    <span className="text-xs font-medium" style={{ color: "#ccc" }}>{folderName}</span>
-                  </div>
-                </div>
-                <div className="flex items-center gap-0.5 ml-auto z-10">
-                  <button onClick={() => setViewMode("grid")} className="p-1 rounded" style={{ color: viewMode === "grid" ? "#fff" : "#666", background: viewMode === "grid" ? "rgba(255,255,255,0.1)" : "transparent" }}><LayoutGrid className="w-3.5 h-3.5" /></button>
-                  <button onClick={() => setViewMode("list")} className="p-1 rounded" style={{ color: viewMode === "list" ? "#fff" : "#666", background: viewMode === "list" ? "rgba(255,255,255,0.1)" : "transparent" }}><List className="w-3.5 h-3.5" /></button>
-                  <div className="w-px h-3.5 mx-1" style={{ background: "rgba(255,255,255,0.1)" }} />
-                  <button onClick={() => handleCreateFile(finderOpen ? currentPath : DESKTOP_WORKSPACE_PATH)} className="p-1 rounded hover:bg-white/10" title="New file"><FileText className="w-3.5 h-3.5" style={{ color: "#aaa" }} /></button>
-                  <button onClick={() => handleCreateFolder(finderOpen ? currentPath : DESKTOP_WORKSPACE_PATH)} className="p-1 rounded hover:bg-white/10"><Plus className="w-3.5 h-3.5" style={{ color: "#aaa" }} /></button>
-                </div>
-              </div>
-
-              {/* Path bar */}
-              <div className="flex items-center gap-0.5 px-3 py-1 text-[11px] flex-shrink-0 overflow-x-auto" style={{ background: "#252526", borderBottom: "1px solid #1a1a1a", color: "#888" }}>
-                <button onClick={() => navigateTo("")} className="px-1.5 py-0.5 rounded hover:bg-white/10 flex-shrink-0" style={{ color: pathSegments.length === 0 ? "#ddd" : "#888" }}>Workspace</button>
-                {pathSegments.map((seg, i) => {
-                  const segPath = pathSegments.slice(0, i + 1).join("/");
-                  return (
-                    <span key={segPath} className="flex items-center gap-0.5 flex-shrink-0">
-                      <ChevronRight className="w-3 h-3" style={{ color: "#555" }} />
-                      <button onClick={() => navigateTo(segPath)} className="px-1.5 py-0.5 rounded hover:bg-white/10" style={{ color: i === pathSegments.length - 1 ? "#ddd" : "#888" }}>{seg}</button>
-                    </span>
-                  );
-                })}
-              </div>
-
-              {/* File area */}
-              <div
-                className="flex-1 overflow-auto relative"
-                onClick={() => { setSelected(null); setContextMenu(null); setDragDropTarget(null); }}
-                onDragOver={(e) => handleUploadDragOver(e, currentPath)}
-                onDragLeave={(e) => handleUploadDragLeave(e, currentPath)}
-                onDrop={(e) => { void handleUploadDropToPath(e, currentPath); }}
-                style={{ background: "#1e1e1e" }}
-              >
-                {loading && entries.length === 0 ? (
-                  <div className="flex items-center justify-center h-full"><div className="text-center"><div className="w-8 h-8 rounded-full border-2 border-t-transparent animate-spin mx-auto mb-3" style={{ borderColor: "#555", borderTopColor: "transparent" }} /><p className="text-xs" style={{ color: "#888" }}>Loading...</p></div></div>
-                ) : entries.length === 0 ? (
-                  <div className="flex items-center justify-center h-full"><div className="text-center max-w-xs"><Folder className="w-16 h-16 mx-auto mb-4" style={{ color: "#54a3f7", opacity: 0.3 }} /><p className="text-sm font-medium mb-1" style={{ color: "#ddd" }}>This folder is empty</p><p className="text-xs mb-4" style={{ color: "#888" }}>Drag files here or click + to add</p><button onClick={() => fileInputRef.current?.click()} className="text-xs px-4 py-2 rounded-lg" style={{ background: "rgba(255,255,255,0.1)", color: "#ccc" }}>Choose Files</button></div></div>
-                ) : viewMode === "grid" ? (
-                  <div className="p-3 grid gap-1" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(84px, 1fr))" }}>
-                    {entries.map((entry) => {
-                      const Icon = getFileIcon(entry.name, entry.is_directory);
-                      const iconColor = getFileColor(entry.name, entry.is_directory);
-                      const isSel = selected === entry.path;
-                      const isDropTarget = dragDropTarget === entry.path;
-                      return (
-                        <div
-                          key={entry.path}
-                          className="flex flex-col items-center p-2 rounded-lg cursor-default"
-                          data-desktop-drop-target={entry.is_directory ? entry.path : undefined}
-                          style={{
-                            background: isSel
-                              ? "rgba(59,130,246,0.2)"
-                              : isDropTarget
-                                ? "rgba(84,163,247,0.18)"
-                                : "transparent",
-                            outline: isDropTarget ? "1px solid rgba(122,184,245,0.55)" : "none",
-                          }}
-                          onClick={(e) => handleEntryClick(entry, e)}
-                          onDoubleClick={() => handleEntryDoubleClick(entry)}
-                          onContextMenu={(e) => handleContextMenuEntry(entry, e)}
-                          onDragOver={entry.is_directory ? (e) => handleUploadDragOver(e, entry.path) : undefined}
-                          onDragLeave={entry.is_directory ? (e) => handleUploadDragLeave(e, entry.path) : undefined}
-                          onDrop={entry.is_directory ? ((e) => { void handleUploadDropToPath(e, entry.path); }) : undefined}
-                        >
-                          {entry.is_directory ? <div className="w-11 h-11 flex items-center justify-center mb-1"><FolderIcon size={44} selected={isSel || isDropTarget} /></div> : <div className="w-11 h-11 flex items-center justify-center mb-1"><Icon className="w-8 h-8" style={{ color: iconColor }} strokeWidth={1.2} /></div>}
-                          <span className="text-[10px] text-center leading-tight w-full px-0.5" style={{ color: isSel ? "#fff" : "#ccc", fontWeight: isSel ? 500 : 400, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", wordBreak: "break-all" }}>{entry.name}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="flex flex-col">
-                    <div className="flex items-center gap-3 px-4 py-1.5 text-[11px] font-medium sticky top-0 z-10" style={{ color: "#888", background: "#252526", borderBottom: "1px solid #1a1a1a" }}><span className="flex-1">Name</span><span className="w-28 text-right">Date Modified</span><span className="w-20 text-right">Size</span></div>
-                    {entries.map((entry) => {
-                      const Icon = getFileIcon(entry.name, entry.is_directory);
-                      const iconColor = getFileColor(entry.name, entry.is_directory);
-                      const isSel = selected === entry.path;
-                      const isDropTarget = dragDropTarget === entry.path;
-                      return (
-                        <div
-                          key={entry.path}
-                          className="flex items-center gap-3 px-4 py-1.5 cursor-default"
-                          data-desktop-drop-target={entry.is_directory ? entry.path : undefined}
-                          style={{
-                            background: isSel
-                              ? "rgba(59,130,246,0.15)"
-                              : isDropTarget
-                                ? "rgba(84,163,247,0.18)"
-                                : "transparent",
-                            borderBottom: "1px solid #2a2a2a",
-                            outline: isDropTarget ? "1px solid rgba(122,184,245,0.55)" : "none",
-                          }}
-                          onClick={(e) => handleEntryClick(entry, e)}
-                          onDoubleClick={() => handleEntryDoubleClick(entry)}
-                          onContextMenu={(e) => handleContextMenuEntry(entry, e)}
-                          onDragOver={entry.is_directory ? (e) => handleUploadDragOver(e, entry.path) : undefined}
-                          onDragLeave={entry.is_directory ? (e) => handleUploadDragLeave(e, entry.path) : undefined}
-                          onDrop={entry.is_directory ? ((e) => { void handleUploadDropToPath(e, entry.path); }) : undefined}
-                        >
-                          <Icon className="w-4 h-4 flex-shrink-0" style={{ color: iconColor }} />
-                          <span className="flex-1 text-xs truncate" style={{ color: isSel ? "#fff" : "#ccc", fontWeight: isSel ? 500 : 400 }}>{entry.name}</span>
-                          <span className="w-28 text-right text-[11px]" style={{ color: "#666" }}>{formatDate(entry.modified_at)}</span>
-                          <span className="w-20 text-right text-[11px]" style={{ color: "#666" }}>{entry.is_directory ? "\u2014" : formatSize(entry.size)}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Status bar */}
-              <div className="flex items-center justify-between px-3 py-1 flex-shrink-0 text-[11px]" style={{ background: "#252526", borderTop: "1px solid #1a1a1a", color: "#888" }}>
-                <span>{itemCount} item{itemCount !== 1 ? "s" : ""}</span>
-                <button onClick={() => fileInputRef.current?.click()} className="hover:underline" style={{ color: "#aaa" }}>Add files...</button>
-              </div>
-            </div>
+              onDragOverPath={handleUploadDragOver}
+              onDragLeavePath={handleUploadDragLeave}
+              onDropToPath={(e, path) => { void handleUploadDropToPath(e, path); }}
+              onEntryClick={handleEntryClick}
+              onEntryDoubleClick={handleEntryDoubleClick}
+              onEntryContextMenu={handleContextMenuEntry}
+            />
           )}
 
           {/* Context menus */}
