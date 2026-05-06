@@ -49,6 +49,14 @@ sameJson(resolveVoiceAction("open roadmap.pptx"), {
   type: "open_workspace_file",
   path: "roadmap.pptx",
 });
+sameJson(resolveVoiceAction("open sales plan dot xlsx"), {
+  type: "open_workspace_file",
+  path: "sales-plan.xlsx",
+});
+sameJson(resolveVoiceAction("open ui smoke xlsx"), {
+  type: "open_workspace_file",
+  path: "ui-smoke.xlsx",
+});
 sameJson(resolveVoiceAction("focus Settings"), {
   type: "focus_window",
   window: "settings",
@@ -58,6 +66,10 @@ sameJson(resolveVoiceAction("show spreadsheet"), {
   window: "sheets",
 });
 sameJson(resolveVoiceAction("Open browser and go to Gmail"), {
+  type: "open_browser_url",
+  url: "https://mail.google.com",
+});
+sameJson(resolveVoiceAction("Open browser and go to G mail"), {
   type: "open_browser_url",
   url: "https://mail.google.com",
 });
