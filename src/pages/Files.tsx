@@ -62,6 +62,7 @@ import {
   dispatchDesktopAction,
   type DesktopAction,
 } from "../desktop/actions";
+import { resolveDesktopHandoff, type DesktopHandoff } from "../desktop/handoff";
 import {
   OfficeApps,
   officeAppKindForPath,
@@ -239,12 +240,6 @@ type ChatWorkspaceReference = {
   name: string;
   isHtml: boolean;
   looksLikeFile: boolean;
-};
-type DesktopHandoff = {
-  path?: string;
-  url?: string;
-  action: "open" | "preview" | "browser";
-  looksLikeFile?: boolean;
 };
 type DesktopDropTarget = string | null;
 type NativeDragDropPayload = {
@@ -3187,38 +3182,30 @@ export function Files({
   }
 
   async function applyDesktopHandoff(handoff: DesktopHandoff | null) {
-    if (!handoff || typeof handoff.action !== "string") {
-      return;
-    }
-    if (handoff.action === "browser" && typeof handoff.url === "string" && handoff.url.trim()) {
-      await openBrowserUrlInDesktop(handoff.url);
-      return;
-    }
-    if (typeof handoff.path !== "string") {
-      return;
-    }
-    const looksLikeFile =
-      typeof handoff.looksLikeFile === "boolean"
-        ? handoff.looksLikeFile
-        : Boolean(handoff.path && workspacePathName(handoff.path).includes("."));
-    if (handoff.action === "browser") {
-      await openWorkspacePathInBrowser(handoff.path);
-      return;
-    }
-    if (handoff.action === "preview") {
-      showWorkspacePathInDesktop(handoff.path, true);
-      await previewWorkspacePath(handoff.path);
-      return;
-    }
-    if (handoff.action === "open") {
-      if (looksLikeFile) {
-        await openWorkspaceFilePath(handoff.path);
+    const resolution = resolveDesktopHandoff(handoff);
+    switch (resolution.type) {
+      case "ignore":
         return;
-      }
-      openFolder(handoff.path);
-      return;
+      case "open_browser_url":
+        await openBrowserUrlInDesktop(resolution.url);
+        return;
+      case "open_workspace_in_browser":
+        await openWorkspacePathInBrowser(resolution.path);
+        return;
+      case "preview_workspace_path":
+        showWorkspacePathInDesktop(resolution.path, true);
+        await previewWorkspacePath(resolution.path);
+        return;
+      case "open_workspace_file":
+        await openWorkspaceFilePath(resolution.path);
+        return;
+      case "open_workspace_folder":
+        openFolder(resolution.path);
+        return;
+      case "show_workspace_path":
+        showWorkspacePathInDesktop(resolution.path, resolution.looksLikeFile);
+        return;
     }
-    showWorkspacePathInDesktop(handoff.path, looksLikeFile);
   }
 
   useEffect(() => {

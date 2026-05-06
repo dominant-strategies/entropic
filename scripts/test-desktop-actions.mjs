@@ -5,36 +5,44 @@ import vm from "node:vm";
 import ts from "typescript";
 
 const repoRoot = process.cwd();
-const sourcePath = path.join(repoRoot, "src/desktop/actions.ts");
-const source = fs.readFileSync(sourcePath, "utf8");
-const transpiled = ts.transpileModule(source, {
-  fileName: sourcePath,
-  compilerOptions: {
-    module: ts.ModuleKind.CommonJS,
-    target: ts.ScriptTarget.ES2022,
-    importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
-  },
-});
-
-const module = { exports: {} };
-vm.runInNewContext(
-  transpiled.outputText,
-  {
-    URL,
-    exports: module.exports,
-    module,
-    require(specifier) {
-      throw new Error(`Unexpected runtime import from actions.ts: ${specifier}`);
+function loadTsModule(relativePath) {
+  const sourcePath = path.join(repoRoot, relativePath);
+  const source = fs.readFileSync(sourcePath, "utf8");
+  const transpiled = ts.transpileModule(source, {
+    fileName: sourcePath,
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+      importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
     },
-  },
-  { filename: sourcePath },
-);
+  });
+
+  const module = { exports: {} };
+  vm.runInNewContext(
+    transpiled.outputText,
+    {
+      URL,
+      exports: module.exports,
+      module,
+      require(specifier) {
+        throw new Error(`Unexpected runtime import from ${relativePath}: ${specifier}`);
+      },
+    },
+    { filename: sourcePath },
+  );
+  return module.exports;
+}
 
 const {
   sanitizeWorkspaceActionPath,
   validateBrowserActionUrl,
   validateDesktopAction,
-} = module.exports;
+} = loadTsModule("src/desktop/actions.ts");
+
+const {
+  resolveDesktopHandoff,
+  workspacePathLooksLikeFile,
+} = loadTsModule("src/desktop/handoff.ts");
 
 function rejects(message, fn) {
   assert.throws(fn, { message });
@@ -108,5 +116,30 @@ sameJson(
 rejects("Chat task prompt is empty.", () =>
   validateDesktopAction({ type: "new_chat_task", prompt: "   " }),
 );
+
+assert.equal(workspacePathLooksLikeFile("sales-plan.xlsx"), true);
+assert.equal(workspacePathLooksLikeFile("Reports"), false);
+
+sameJson(
+  resolveDesktopHandoff({ action: "open", path: "sales-plan.xlsx", looksLikeFile: true }),
+  { type: "open_workspace_file", path: "sales-plan.xlsx" },
+);
+sameJson(
+  resolveDesktopHandoff({ action: "open", path: "Reports", looksLikeFile: false }),
+  { type: "open_workspace_folder", path: "Reports" },
+);
+sameJson(
+  resolveDesktopHandoff({ action: "preview", path: "notes.md" }),
+  { type: "preview_workspace_path", path: "notes.md" },
+);
+sameJson(
+  resolveDesktopHandoff({ action: "browser", url: "https://example.com" }),
+  { type: "open_browser_url", url: "https://example.com" },
+);
+sameJson(
+  resolveDesktopHandoff({ action: "browser", path: "index.html" }),
+  { type: "open_workspace_in_browser", path: "index.html" },
+);
+sameJson(resolveDesktopHandoff({ action: "open" }), { type: "ignore" });
 
 console.log("desktop action validator tests passed");
