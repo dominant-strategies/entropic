@@ -80,6 +80,7 @@ import {
   type TaskBoardChatIntent,
 } from "../lib/taskBoard";
 import { resolveGatewayAuth } from "../lib/gateway-auth";
+import { clientLog } from "../lib/clientLog";
 import { appendDiagnosticLog } from "../lib/diagnostics";
 import { entropicSitePath } from "../lib/buildProfile";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
@@ -3310,6 +3311,10 @@ export function Chat({
         if (pendingOfficeOpen) {
           delete workspaceOfficeOpenByRunIdRef.current[eventRunId];
           addDiag(`workspace office auto-open path=${pendingOfficeOpen.path}`);
+          clientLog("chat.office.auto_open", {
+            runId: eventRunId,
+            path: pendingOfficeOpen.path,
+          });
           void handoffWorkspacePathToDesktop({
             path: pendingOfficeOpen.path,
             action: "open",
@@ -4564,6 +4569,10 @@ export function Chat({
       workspaceOfficeOpenBySendIdRef.current[pendingSend.id] = {
         path: workspaceOfficeAutoOpenPath,
       };
+      clientLog("chat.office.auto_open.pending", {
+        sendId: pendingSend.id,
+        path: workspaceOfficeAutoOpenPath,
+      });
     }
     upsertOutboxEntry(pendingSend);
     clearPendingAttachments();
