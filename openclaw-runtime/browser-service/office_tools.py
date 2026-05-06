@@ -6208,18 +6208,33 @@ def blank_document_payload(lines: Iterable[str]) -> Dict[str, object]:
 
 def cli_usage() -> str:
     return """Usage:
-  # Preferred AIO workflow for .xlsx / .docx / .pptx and text documents
+  # Preferred Office/AIO workflow for .xlsx / .docx / .pptx and text documents
+  # 1. Inspect the file:
   entropic-office api inspect-aio <path>
+  # 2. Edit only the returned object member.
+  # 3. Apply the full AIO payload back to the same workspace path:
   entropic-office api apply-aio <path>
-  # AIO payloads keep the canonical editable state in object plus optional
-  # analysis / annotations / projections / artifacts for supporting context.
-  # Document AIO uses object.blocks with headings, paragraphs, lists, tables,
-  # and optional inline marks/links when the backend can expose them.
+  #
+  # The object member is the canonical editable state. analysis, annotations,
+  # projections, and artifacts are context only; do not write edits there.
+  #
+  # Spreadsheets use object.worksheets. Preserve formulas, dates, number-like
+  # values, freeze panes, filters, dimensions, and merged ranges where possible.
+  # Prefer formulas and totals over static-only spreadsheet output.
+  #
+  # Documents use object.blocks. Preserve headings, paragraphs, lists, tables,
+  # links, and common inline marks where the backend exposes them.
+  #
+  # Presentations use object.slides with layout refs, title/body summaries,
+  # objects[], frame, style, image_ref, table, chart, ordering, and notes.
+  #
   # Markdown / HTML / rst / org / asciidoc / latex / txt route through the
   # Pandoc text adapter when available. PDF and image inspection route through
   # the Docling adapter and are currently read-only.
-  # Presentation AIO uses object.slides with sparse layout_ref/title/body
-  # summaries plus objects[] entries carrying kind, frame, and optional notes/image_ref.
+  #
+  # After creating or editing an Office file, return a workspace-relative link
+  # or request request_desktop_action({"type":"open_workspace_file","path":"..."})
+  # so Entropic can validate the path and open it through a signed desktop session.
 
   # Legacy compatibility helpers
   entropic-office spreadsheet new <path>
