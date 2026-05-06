@@ -65,6 +65,7 @@ const BROWSER_SERVICE_LOG_PATH: &str = "/data/browser/browser-service.log";
 const BROWSER_CONTROL_TOKEN_PATH: &str = "/data/browser/control-token";
 const EMBEDDED_PREVIEW_WEBVIEW_LABEL: &str = "desktop-browser-preview";
 const EMBEDDED_PREVIEW_STATE_EVENT: &str = "embedded-preview-state";
+const DESKTOP_ACTION_EVENT: &str = "entropic-desktop-action";
 const DESKTOP_TERMINAL_EVENT: &str = "desktop-terminal-output";
 const DESKTOP_TERMINAL_BUFFER_MAX_BYTES: usize = 200_000;
 const HOST_DROP_PATH_TTL_MS: u64 = 60_000;
@@ -9729,6 +9730,143 @@ fn sanitize_workspace_path(path: &str) -> Result<String, String> {
         }
     }
     Ok(parts.join("/"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DesktopActionPayload {
+    OpenWorkspaceFile {
+        path: String,
+    },
+    OpenWorkspaceFolder {
+        path: String,
+    },
+    OpenBrowserUrl {
+        url: String,
+    },
+    FocusWindow {
+        window: String,
+    },
+    CloseWindow {
+        window: String,
+    },
+    NewChatTask {
+        prompt: String,
+        #[serde(rename = "sessionId")]
+        session_id: Option<String>,
+    },
+}
+
+fn is_desktop_window_key(window: &str) -> bool {
+    matches!(
+        window,
+        "finder"
+            | "chat"
+            | "browser"
+            | "terminal"
+            | "plugins"
+            | "skills"
+            | "channels"
+            | "tasks"
+            | "jobs"
+            | "logs"
+            | "billing"
+            | "settings"
+            | "preview"
+            | "sheets"
+            | "docs"
+            | "slides"
+            | "integrations"
+            | "voiceOverlay"
+    )
+}
+
+fn host_is_private_or_local(host: &str) -> bool {
+    let lower = host.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "localhost" | "127.0.0.1" | "0.0.0.0" | "::1"
+    ) {
+        return true;
+    }
+    let Ok(ip) = lower.parse::<IpAddr>() else {
+        return false;
+    };
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()
+        }
+        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local(),
+    }
+}
+
+fn validate_desktop_action_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Browser URL is empty".to_string());
+    }
+    let parsed = Url::parse(trimmed).map_err(|_| "Browser URL must be absolute".to_string())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("Browser URL must use http or https".to_string());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Browser URL must include a host".to_string())?;
+    if host_is_private_or_local(host) {
+        return Err(
+            "Local browser URLs must be opened through trusted Entropic UI paths".to_string(),
+        );
+    }
+    Ok(parsed.to_string())
+}
+
+fn validate_desktop_action(action: DesktopActionPayload) -> Result<DesktopActionPayload, String> {
+    match action {
+        DesktopActionPayload::OpenWorkspaceFile { path } => {
+            let path = sanitize_workspace_path(&path)?;
+            if path.is_empty() {
+                return Err("Workspace file path is empty".to_string());
+            }
+            Ok(DesktopActionPayload::OpenWorkspaceFile { path })
+        }
+        DesktopActionPayload::OpenWorkspaceFolder { path } => {
+            let path = sanitize_workspace_path(&path)?;
+            Ok(DesktopActionPayload::OpenWorkspaceFolder { path })
+        }
+        DesktopActionPayload::OpenBrowserUrl { url } => {
+            let url = validate_desktop_action_url(&url)?;
+            Ok(DesktopActionPayload::OpenBrowserUrl { url })
+        }
+        DesktopActionPayload::FocusWindow { window } => {
+            if !is_desktop_window_key(&window) {
+                return Err("Unknown desktop window".to_string());
+            }
+            Ok(DesktopActionPayload::FocusWindow { window })
+        }
+        DesktopActionPayload::CloseWindow { window } => {
+            if !is_desktop_window_key(&window) {
+                return Err("Unknown desktop window".to_string());
+            }
+            Ok(DesktopActionPayload::CloseWindow { window })
+        }
+        DesktopActionPayload::NewChatTask { prompt, session_id } => {
+            let prompt = prompt.trim().to_string();
+            if prompt.is_empty() {
+                return Err("Chat task prompt is empty".to_string());
+            }
+            Ok(DesktopActionPayload::NewChatTask { prompt, session_id })
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn request_desktop_action(
+    app: AppHandle,
+    action: DesktopActionPayload,
+) -> Result<(), String> {
+    let validated = validate_desktop_action(action)?;
+    app.emit(DESKTOP_ACTION_EVENT, validated)
+        .map_err(|e| format!("Failed to emit desktop action: {}", e))
 }
 
 fn validate_host_output_path(raw: &str) -> Result<PathBuf, String> {

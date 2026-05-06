@@ -86,12 +86,18 @@ import {
   useWindowZStack,
   windowRectsIntersect,
   type WindowDragState,
+  type WindowKey,
   type WindowPoint,
   type WindowRect,
   type WindowResizeDirection,
   type WindowResizeState,
   type WindowSize,
 } from "../desktop/windowManager";
+import {
+  DESKTOP_ACTION_EVENT,
+  dispatchDesktopAction,
+  type DesktopAction,
+} from "../desktop/actions";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -1223,6 +1229,7 @@ export function Files({
   const filesLoadingSeqRef = useRef(0);
   const desktopEntriesFetchSeqRef = useRef(0);
   const desktopImagePreviewSeqRef = useRef(0);
+  const desktopActionHandlerRef = useRef<((action: DesktopAction) => Promise<void>) | null>(null);
   const desktopLoadedAtRef = useRef(initialDesktopWarmCache.lastLoadedAt);
 
   // Chat
@@ -3165,18 +3172,14 @@ export function Files({
       navigateTo(entry.path);
       return;
     }
-    if (workspaceFileCanOpenInBrowser(entry.path)) {
-      void openWorkspaceFileInBrowser(entry);
-      return;
-    }
-    handleView(entry);
+    void runDesktopAction({ type: "open_workspace_file", path: entry.path });
   }
   function handleDesktopEntryOpen(entry: WorkspaceFileEntry) {
     if (entry.is_directory) {
-      openFolder(entry.path);
+      void runDesktopAction({ type: "open_workspace_folder", path: entry.path });
       return;
     }
-    handleEntryDoubleClick(entry);
+    void runDesktopAction({ type: "open_workspace_file", path: entry.path });
   }
   function handleContextMenuEntry(entry: WorkspaceFileEntry, e: React.MouseEvent) { e.preventDefault(); e.stopPropagation(); setSelected(entry.path); setContextMenu({ x: e.clientX, y: e.clientY, entry }); }
 
@@ -3358,6 +3361,26 @@ export function Files({
     };
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<DesktopAction>(DESKTOP_ACTION_EVENT, (event) => {
+      void desktopActionHandlerRef.current?.(event.payload).catch((error) => {
+        setError(error instanceof Error ? error.message : String(error));
+      });
+    }).then((dispose) => {
+      if (disposed) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   function openBrowserWindow(targetUrl = browserCurrentUrl) {
     if (!browserOpen) {
       setBrowserOpen(true);
@@ -3374,6 +3397,164 @@ export function Files({
     if (browserSessionId && targetUrl !== browserCurrentUrl) {
       void navigateBrowser(targetUrl);
     }
+  }
+
+  async function openWorkspaceFilePath(path: string) {
+    const entry: WorkspaceFileEntry = {
+      name: workspacePathName(path),
+      path,
+      is_directory: false,
+      size: 0,
+      modified_at: 0,
+    };
+    if (workspaceFileCanOpenInBrowser(path)) {
+      await openWorkspaceFileInBrowser(entry);
+      return;
+    }
+    await handleView(entry);
+  }
+
+  function focusDesktopWindow(window: WindowKey) {
+    switch (window) {
+      case "finder":
+        if (!finderOpen) {
+          setFinderOpen(true);
+          void fetchFiles(currentPath || "");
+        }
+        focusWindow("finder");
+        return;
+      case "chat":
+        if (!chatOpen) setChatOpen(true);
+        focusWindow("chat");
+        return;
+      case "browser":
+        if (!browserOpen) setBrowserOpen(true);
+        focusWindow("browser");
+        return;
+      case "terminal":
+        if (!terminalOpen) setTerminalOpen(true);
+        focusWindow("terminal");
+        return;
+      case "plugins":
+      case "integrations":
+        if (!pluginsOpen) setPluginsOpen(true);
+        focusWindow("plugins");
+        return;
+      case "skills":
+        if (!skillsOpen) setSkillsOpen(true);
+        focusWindow("skills");
+        return;
+      case "channels":
+        if (!channelsOpen) setChannelsOpen(true);
+        focusWindow("channels");
+        return;
+      case "tasks":
+        if (!tasksOpen) setTasksOpen(true);
+        focusWindow("tasks");
+        return;
+      case "jobs":
+        if (!jobsOpen) setJobsOpen(true);
+        focusWindow("jobs");
+        return;
+      case "logs":
+        if (!logsOpen) setLogsOpen(true);
+        focusWindow("logs");
+        return;
+      case "billing":
+        if (billingEnabled && !billingOpen) setBillingOpen(true);
+        if (billingEnabled) focusWindow("billing");
+        return;
+      case "settings":
+        if (!settingsOpen) setSettingsOpen(true);
+        focusWindow("settings");
+        return;
+      case "preview":
+        if (preview) focusWindow("preview");
+        return;
+      case "sheets":
+      case "docs":
+      case "slides":
+      case "voiceOverlay":
+        focusWindow(window);
+        return;
+    }
+  }
+
+  async function closeDesktopWindow(window: WindowKey) {
+    switch (window) {
+      case "finder":
+        setFinderOpen(false);
+        return;
+      case "chat":
+        setChatOpen(false);
+        return;
+      case "browser":
+        await closeBrowserWindow();
+        return;
+      case "terminal":
+        await closeTerminalWindow();
+        return;
+      case "plugins":
+      case "integrations":
+        setPluginsOpen(false);
+        return;
+      case "skills":
+        setSkillsOpen(false);
+        return;
+      case "channels":
+        setChannelsOpen(false);
+        return;
+      case "tasks":
+        setTasksOpen(false);
+        return;
+      case "jobs":
+        setJobsOpen(false);
+        return;
+      case "logs":
+        setLogsOpen(false);
+        return;
+      case "billing":
+        setBillingOpen(false);
+        return;
+      case "settings":
+        setSettingsOpen(false);
+        return;
+      case "preview":
+        setPreview(null);
+        return;
+      case "sheets":
+      case "docs":
+      case "slides":
+      case "voiceOverlay":
+        return;
+    }
+  }
+
+  function startDesktopChatTask(prompt: string, sessionId?: string) {
+    setChatRequestedSession(sessionId || "__new__");
+    setChatRequestedAction(null);
+    setChatOpen(true);
+    focusWindow("chat");
+  }
+
+  async function runDesktopAction(action: DesktopAction) {
+    await dispatchDesktopAction(
+      action,
+      {
+        openWorkspaceFile: openWorkspaceFilePath,
+        openWorkspaceFolder: openFolder,
+        openBrowserUrl: openBrowserUrlInDesktop,
+        focusWindow: focusDesktopWindow,
+        closeWindow: closeDesktopWindow,
+        newChatTask: startDesktopChatTask,
+      },
+      { isTrustedLocalPreviewUrl },
+    );
+  }
+  desktopActionHandlerRef.current = runDesktopAction;
+
+  function requestDesktopWindowFocus(window: WindowKey) {
+    void runDesktopAction({ type: "focus_window", window });
   }
 
   async function copyDesktopPath(path: string) {
@@ -5425,13 +5606,7 @@ export function Files({
             <DockIconButton
               label="Finder"
               active={finderOpen}
-              onClick={() => {
-                if (!finderOpen) {
-                  setFinderOpen(true);
-                  fetchFiles(currentPath || "");
-                }
-                focusWindow("finder");
-              }}
+              onClick={() => requestDesktopWindowFocus("finder")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5445,10 +5620,7 @@ export function Files({
             <DockIconButton
               label="Chat"
               active={chatOpen}
-              onClick={() => {
-                if (!chatOpen) setChatOpen(true);
-                focusWindow("chat");
-              }}
+              onClick={() => requestDesktopWindowFocus("chat")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5482,9 +5654,7 @@ export function Files({
             <DockIconButton
               label="Terminal"
               active={terminalOpen}
-              onClick={() => {
-                openTerminalWindow();
-              }}
+              onClick={() => requestDesktopWindowFocus("terminal")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5498,10 +5668,7 @@ export function Files({
             <DockIconButton
               label="Skills"
               active={skillsOpen}
-              onClick={() => {
-                if (!skillsOpen) setSkillsOpen(true);
-                focusWindow("skills");
-              }}
+              onClick={() => requestDesktopWindowFocus("skills")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5515,10 +5682,7 @@ export function Files({
             <DockIconButton
               label="Messaging"
               active={channelsOpen}
-              onClick={() => {
-                if (!channelsOpen) setChannelsOpen(true);
-                focusWindow("channels");
-              }}
+              onClick={() => requestDesktopWindowFocus("channels")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5532,10 +5696,7 @@ export function Files({
             <DockIconButton
               label="Tasks"
               active={tasksOpen}
-              onClick={() => {
-                if (!tasksOpen) setTasksOpen(true);
-                focusWindow("tasks");
-              }}
+              onClick={() => requestDesktopWindowFocus("tasks")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5549,10 +5710,7 @@ export function Files({
             <DockIconButton
               label="Jobs"
               active={jobsOpen}
-              onClick={() => {
-                if (!jobsOpen) setJobsOpen(true);
-                focusWindow("jobs");
-              }}
+              onClick={() => requestDesktopWindowFocus("jobs")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5566,10 +5724,7 @@ export function Files({
             <DockIconButton
               label="Logs"
               active={logsOpen}
-              onClick={() => {
-                if (!logsOpen) setLogsOpen(true);
-                focusWindow("logs");
-              }}
+              onClick={() => requestDesktopWindowFocus("logs")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5584,10 +5739,7 @@ export function Files({
               <DockIconButton
                 label="Billing"
                 active={billingOpen}
-                onClick={() => {
-                  if (!billingOpen) setBillingOpen(true);
-                  focusWindow("billing");
-                }}
+                onClick={() => requestDesktopWindowFocus("billing")}
               >
                 <div
                   className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5602,10 +5754,7 @@ export function Files({
             <DockIconButton
               label="Settings"
               active={settingsOpen}
-              onClick={() => {
-                if (!settingsOpen) setSettingsOpen(true);
-                focusWindow("settings");
-              }}
+              onClick={() => requestDesktopWindowFocus("settings")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
