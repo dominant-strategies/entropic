@@ -38,6 +38,7 @@ import {
   syncEmbeddedPreviewWebview,
 } from "../lib/nativePreview";
 import { hostedFeaturesEnabled } from "../lib/buildProfile";
+import { clientLog } from "../lib/clientLog";
 import { createOnlyOfficeSession } from "../lib/office";
 import {
   clampWindowFrame,
@@ -58,7 +59,6 @@ import { AppWindow } from "../desktop/AppWindow";
 import { BrowserApp } from "../desktop/browser/BrowserApp";
 import { ChatDesktopApp } from "../desktop/chat/ChatDesktopApp";
 import {
-  DESKTOP_ACTION_EVENT,
   dispatchDesktopAction,
   type DesktopAction,
 } from "../desktop/actions";
@@ -129,6 +129,8 @@ type Props = {
   onAudioUnderstandingModelChange: (model: string) => void;
   onVoiceShortcutChange: (shortcut: string) => void | Promise<void>;
   onImageModelChange: (model: string) => void;
+  pendingDesktopAction?: { id: string; action: DesktopAction } | null;
+  onDesktopActionHandled?: (id: string) => void;
 };
 type ViewMode = "grid" | "list";
 type DesktopIcon = { id: string; x: number; y: number };
@@ -842,11 +844,14 @@ export function Files({
   onAudioUnderstandingModelChange,
   onVoiceShortcutChange,
   onImageModelChange,
+  pendingDesktopAction,
+  onDesktopActionHandled,
 }: Props) {
   const initialDesktopWarmCache = useMemo(() => readDesktopWarmCache(), []);
   const { balance, isAuthenticated, isAuthConfigured } = useAuth();
   const billingEnabled = hostedFeaturesEnabled;
   const [agentName, setAgentName] = useState("Joulie");
+  const handledDesktopActionIdsRef = useRef<Set<string>>(new Set());
 
   // Wallpaper
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
@@ -3213,26 +3218,6 @@ export function Files({
     };
   }, []);
 
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void listen<DesktopAction>(DESKTOP_ACTION_EVENT, (event) => {
-      void desktopActionHandlerRef.current?.(event.payload).catch((error) => {
-        setError(error instanceof Error ? error.message : String(error));
-      });
-    }).then((dispose) => {
-      if (disposed) {
-        dispose();
-        return;
-      }
-      unlisten = dispose;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
   function openBrowserWindow(targetUrl = browserCurrentUrl) {
     if (!browserOpen) {
       setBrowserOpen(true);
@@ -3431,6 +3416,28 @@ export function Files({
     );
   }
   desktopActionHandlerRef.current = runDesktopAction;
+
+  useEffect(() => {
+    if (!pendingDesktopAction) return;
+    const handler = desktopActionHandlerRef.current;
+    if (!handler) return;
+    const { id, action } = pendingDesktopAction;
+    if (handledDesktopActionIdsRef.current.has(id)) return;
+    handledDesktopActionIdsRef.current.add(id);
+    clientLog("desktop_action.replay", { id, type: action.type });
+    void handler(action)
+      .catch((error) => {
+        clientLog("desktop_action.replay.failed", {
+          id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        setError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        clientLog("desktop_action.replay.done", { id });
+        onDesktopActionHandled?.(id);
+      });
+  }, [pendingDesktopAction, onDesktopActionHandled]);
 
   function requestDesktopWindowFocus(window: WindowKey) {
     void runDesktopAction({ type: "focus_window", window });
