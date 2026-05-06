@@ -7,6 +7,8 @@ export type DesktopSettingsSnapshot = {
   codeModel?: string;
   imageModel?: string;
   imageGenerationModel?: string;
+  textToSpeechModel?: string;
+  audioUnderstandingModel?: string;
   desktopWallpaper?: string;
   desktopCustomWallpaper?: string;
 };
@@ -20,6 +22,8 @@ const SETTING_KEYS = [
   "codeModel",
   "imageModel",
   "imageGenerationModel",
+  "textToSpeechModel",
+  "audioUnderstandingModel",
   "desktopWallpaper",
   "desktopCustomWallpaper",
 ] as const satisfies ReadonlyArray<keyof DesktopSettingsSnapshot>;
@@ -55,6 +59,8 @@ function normalizeDesktopSettings(
     codeModel: normalizeString(raw?.codeModel),
     imageModel: normalizeString(raw?.imageModel),
     imageGenerationModel: normalizeString(raw?.imageGenerationModel),
+    textToSpeechModel: normalizeString(raw?.textToSpeechModel),
+    audioUnderstandingModel: normalizeString(raw?.audioUnderstandingModel),
     desktopWallpaper: normalizeString(raw?.desktopWallpaper),
     desktopCustomWallpaper: normalizeString(raw?.desktopCustomWallpaper),
   };

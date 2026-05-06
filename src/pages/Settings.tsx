@@ -14,9 +14,13 @@ import {
 } from "../lib/profile";
 import { useAuth } from "../contexts/AuthContext";
 import {
+  LOCAL_AUDIO_UNDERSTANDING_MODELS,
   LOCAL_IMAGE_GENERATION_MODELS,
+  LOCAL_TEXT_TO_SPEECH_MODELS,
   ModelSelector,
+  PROXY_AUDIO_UNDERSTANDING_MODELS,
   PROXY_IMAGE_GENERATION_MODELS,
+  PROXY_TEXT_TO_SPEECH_MODELS,
 } from "../components/ModelSelector";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
 import { getProxyUrl, signOut as authSignOut } from "../lib/auth";
@@ -57,8 +61,12 @@ type Props = {
   codeModel: string;
   imageModel: string;
   imageGenerationModel: string;
+  textToSpeechModel: string;
+  audioUnderstandingModel: string;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
+  onTextToSpeechModelChange: (model: string) => void;
+  onAudioUnderstandingModelChange: (model: string) => void;
   onImageModelChange: (model: string) => void;
 };
 
@@ -262,8 +270,12 @@ export function Settings({
   codeModel,
   imageModel,
   imageGenerationModel,
+  textToSpeechModel,
+  audioUnderstandingModel,
   onCodeModelChange,
   onImageGenerationModelChange,
+  onTextToSpeechModelChange,
+  onAudioUnderstandingModelChange,
   onImageModelChange,
 }: Props) {
   const cachedWarmState = getCachedSettingsWarmState();
@@ -309,6 +321,14 @@ export function Settings({
     (provider) => provider === "google" || provider === "openai",
   );
   const localImageGenerationProviderKey = localImageGenerationProviders.join(",");
+  const localAudioUnderstandingProviders: string[] = connectedProviders.filter(
+    (provider) => provider === "google" || provider === "openai",
+  );
+  const localAudioUnderstandingProviderKey = localAudioUnderstandingProviders.join(",");
+  const localTextToSpeechProviders: string[] = connectedProviders.filter(
+    (provider) => provider === "openai",
+  );
+  const localTextToSpeechProviderKey = localTextToSpeechProviders.join(",");
   // Anthropic OAuth code-paste state
   const [anthropicCodePending, setAnthropicCodePending] = useState(false);
   const [anthropicCodeInput, setAnthropicCodeInput] = useState("");
@@ -715,6 +735,60 @@ export function Settings({
     imageGenerationModel,
     localImageGenerationProviderKey,
     onImageGenerationModelChange,
+    useLocalKeys,
+  ]);
+
+  useEffect(() => {
+    if (!useLocalKeys || authMetaLoading || localAudioUnderstandingProviders.length === 0) {
+      return;
+    }
+    const allowedModelIds = new Set(
+      LOCAL_AUDIO_UNDERSTANDING_MODELS
+        .filter((model) => localAudioUnderstandingProviders.includes(model.provider.toLowerCase()))
+        .map((model) => model.id),
+    );
+    if (allowedModelIds.has(audioUnderstandingModel)) {
+      return;
+    }
+    const nextModel = LOCAL_AUDIO_UNDERSTANDING_MODELS.find((model) =>
+      localAudioUnderstandingProviders.includes(model.provider.toLowerCase()),
+    )?.id;
+    if (!nextModel || nextModel === audioUnderstandingModel) {
+      return;
+    }
+    void Promise.resolve(onAudioUnderstandingModelChange(nextModel));
+  }, [
+    audioUnderstandingModel,
+    authMetaLoading,
+    localAudioUnderstandingProviderKey,
+    onAudioUnderstandingModelChange,
+    useLocalKeys,
+  ]);
+
+  useEffect(() => {
+    if (!useLocalKeys || authMetaLoading || localTextToSpeechProviders.length === 0) {
+      return;
+    }
+    const allowedModelIds = new Set(
+      LOCAL_TEXT_TO_SPEECH_MODELS
+        .filter((model) => localTextToSpeechProviders.includes(model.provider.toLowerCase()))
+        .map((model) => model.id),
+    );
+    if (allowedModelIds.has(textToSpeechModel)) {
+      return;
+    }
+    const nextModel = LOCAL_TEXT_TO_SPEECH_MODELS.find((model) =>
+      localTextToSpeechProviders.includes(model.provider.toLowerCase()),
+    )?.id;
+    if (!nextModel || nextModel === textToSpeechModel) {
+      return;
+    }
+    void Promise.resolve(onTextToSpeechModelChange(nextModel));
+  }, [
+    authMetaLoading,
+    localTextToSpeechProviderKey,
+    onTextToSpeechModelChange,
+    textToSpeechModel,
     useLocalKeys,
   ]);
 
@@ -1383,6 +1457,24 @@ export function Settings({
                   />
                 </div>
               </SettingsRow>
+              <SettingsRow label="Text to Speech Model" icon={Image}>
+                <div className="settings-row-dropdown">
+                  <ModelSelector
+                    selectedModel={textToSpeechModel}
+                    onModelChange={onTextToSpeechModelChange}
+                    models={PROXY_TEXT_TO_SPEECH_MODELS}
+                  />
+                </div>
+              </SettingsRow>
+              <SettingsRow label="Audio Understanding Model" icon={Image}>
+                <div className="settings-row-dropdown">
+                  <ModelSelector
+                    selectedModel={audioUnderstandingModel}
+                    onModelChange={onAudioUnderstandingModelChange}
+                    models={PROXY_AUDIO_UNDERSTANDING_MODELS}
+                  />
+                </div>
+              </SettingsRow>
             </>
           )}
           {useLocalKeys && !authMetaLoading && localImageGenerationProviders.length > 0 && (
@@ -1407,6 +1499,40 @@ export function Settings({
             <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
               Connect an OpenAI or Google API key to use local image generation. Anthropic local
               keys accept image input, but do not generate image output.
+            </div>
+          )}
+          {useLocalKeys && !authMetaLoading && localTextToSpeechProviders.length > 0 && (
+            <SettingsRow label="Text to Speech Model" icon={Image}>
+              <div className="settings-row-dropdown">
+                <ModelSelector
+                  selectedModel={textToSpeechModel}
+                  onModelChange={onTextToSpeechModelChange}
+                  models={LOCAL_TEXT_TO_SPEECH_MODELS}
+                  connectedProviders={localTextToSpeechProviders}
+                />
+              </div>
+            </SettingsRow>
+          )}
+          {useLocalKeys && !authMetaLoading && localTextToSpeechProviders.length === 0 && (
+            <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
+              Connect an OpenAI API key to use local text to speech.
+            </div>
+          )}
+          {useLocalKeys && !authMetaLoading && localAudioUnderstandingProviders.length > 0 && (
+            <SettingsRow label="Audio Understanding Model" icon={Image}>
+              <div className="settings-row-dropdown">
+                <ModelSelector
+                  selectedModel={audioUnderstandingModel}
+                  onModelChange={onAudioUnderstandingModelChange}
+                  models={LOCAL_AUDIO_UNDERSTANDING_MODELS}
+                  connectedProviders={localAudioUnderstandingProviders}
+                />
+              </div>
+            </SettingsRow>
+          )}
+          {useLocalKeys && !authMetaLoading && localAudioUnderstandingProviders.length === 0 && (
+            <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
+              Connect an OpenAI or Google API key to transcribe local audio attachments.
             </div>
           )}
         </SettingsGroup>
