@@ -8,9 +8,9 @@ import { useAudioTranscription } from "./useAudioTranscription";
 import { VoiceOverlay } from "./VoiceOverlay";
 import { clientLog } from "../../lib/clientLog";
 import {
-  chatTaskNeedsConfirmation,
   formatVoiceTaskPrompt,
   messageForMode,
+  previewForVoiceAction,
   resolveVoiceAction,
   type VoiceDesktopContext,
   type VoiceMode,
@@ -24,24 +24,6 @@ type VoiceProviderProps = {
   shortcut?: string;
   dispatchAction: (action: DesktopAction) => Promise<void>;
 };
-
-function previewForAction(action: DesktopAction): { message: string; confirmLabel: string } | null {
-  switch (action.type) {
-    case "open_workspace_file":
-      return { message: `Open workspace file: ${action.path}?`, confirmLabel: "Open" };
-    case "open_workspace_folder":
-      return { message: `Open workspace folder: ${action.path || "/"}?`, confirmLabel: "Open" };
-    case "open_browser_url":
-      return { message: `Open browser URL: ${action.url}?`, confirmLabel: "Open" };
-    case "new_chat_task":
-      if (action.autoSubmit && chatTaskNeedsConfirmation(action.prompt)) {
-        return { message: "Send this voice task to the agent now?", confirmLabel: "Send" };
-      }
-      return null;
-    default:
-      return null;
-  }
-}
 
 function voiceActionLogPayload(action: DesktopAction): Record<string, string | boolean | undefined> {
   switch (action.type) {
@@ -149,7 +131,7 @@ export function VoiceProvider({
           autoSubmit: true,
         };
       }
-      const preview = previewForAction(action);
+      const preview = previewForVoiceAction(action);
       if (preview) {
         clientLog("voice.action.confirmation_required", voiceActionLogPayload(action));
         setPendingAction(action);

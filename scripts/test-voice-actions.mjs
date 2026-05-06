@@ -34,6 +34,7 @@ const {
   chatTaskNeedsConfirmation,
   formatVoiceTaskPrompt,
   messageForMode,
+  previewForVoiceAction,
   resolveVoiceAction,
 } = module.exports;
 
@@ -91,6 +92,34 @@ assert.equal(chatTaskNeedsConfirmation("Voice command: move the Asana task to do
 assert.equal(
   chatTaskNeedsConfirmation("Voice command: summarize this note\n- Integrations: Gmail connected"),
   false,
+);
+
+sameJson(previewForVoiceAction({ type: "open_workspace_file", path: "sales-plan.xlsx" }), {
+  message: "Open workspace file: sales-plan.xlsx?",
+  confirmLabel: "Open",
+});
+sameJson(previewForVoiceAction({ type: "open_browser_url", url: "https://mail.google.com" }), {
+  message: "Open browser URL: https://mail.google.com?",
+  confirmLabel: "Open",
+});
+sameJson(
+  previewForVoiceAction({
+    type: "new_chat_task",
+    prompt: "Voice command: send Alan an Outlook email",
+    autoSubmit: true,
+  }),
+  {
+    message: "Send this voice task to the agent now?",
+    confirmLabel: "Send",
+  },
+);
+assert.equal(
+  previewForVoiceAction({
+    type: "new_chat_task",
+    prompt: "Voice command: summarize this note",
+    autoSubmit: true,
+  }),
+  null,
 );
 
 const formatted = formatVoiceTaskPrompt("summarize this sheet", "command", {
