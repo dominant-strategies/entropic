@@ -3203,6 +3203,14 @@ export function Files({
       await previewWorkspacePath(handoff.path);
       return;
     }
+    if (handoff.action === "open") {
+      if (looksLikeFile) {
+        await openWorkspaceFilePath(handoff.path);
+        return;
+      }
+      openFolder(handoff.path);
+      return;
+    }
     showWorkspacePathInDesktop(handoff.path, looksLikeFile);
   }
 
