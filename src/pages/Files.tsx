@@ -16,24 +16,16 @@ import { Store } from "@tauri-apps/plugin-store";
 import {
   Folder,
   FileText,
-  Trash2,
-  Plus,
   ArrowUp,
-  MessageSquare,
   Loader2,
   Image,
-  MoreHorizontal,
-  Pin,
-  PanelLeftClose,
-  PanelLeftOpen,
 } from "lucide-react";
 import { loadOnboardingData } from "../lib/profile";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
 import { loadDesktopSettings, updateDesktopSettings } from "../lib/settingsStore";
-import {
-  Chat,
-  type ChatSession as SharedChatSession,
-  type ChatSessionActionRequest,
+import type {
+  ChatSession as SharedChatSession,
+  ChatSessionActionRequest,
 } from "./Chat";
 import { ModelSelector } from "../components/ModelSelector";
 import { useAuth } from "../contexts/AuthContext";
@@ -64,6 +56,7 @@ import {
 } from "../desktop/windowManager";
 import { AppWindow } from "../desktop/AppWindow";
 import { BrowserApp } from "../desktop/browser/BrowserApp";
+import { ChatDesktopApp } from "../desktop/chat/ChatDesktopApp";
 import {
   DESKTOP_ACTION_EVENT,
   dispatchDesktopAction,
@@ -211,7 +204,6 @@ const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
 const DESKTOP_HANDOFF_EVENT = "entropic-desktop-handoff";
 const DESKTOP_SESSION_STORAGE_KEY = "entropic.desktop.session.v1";
-const DEFAULT_DESKTOP_CHAT_TITLE = "New chat";
 const DESKTOP_WORKSPACE_PATH = "Desktop";
 const CHAT_WORKSPACE_PREFIXES = [
   "/data/.openclaw/workspace",
@@ -462,21 +454,6 @@ function asWindowSize(value: unknown): WindowSize | null {
   const h = Number(value.h);
   if (!Number.isFinite(w) || !Number.isFinite(h)) return null;
   return { w, h };
-}
-
-function desktopChatSessionTitle(session: SharedChatSession): string {
-  return session.label || session.derivedTitle || session.displayName || DEFAULT_DESKTOP_CHAT_TITLE;
-}
-
-function sortDesktopChatSessions(list: SharedChatSession[]): SharedChatSession[] {
-  return [...list].sort((a, b) => {
-    const aPinned = a.pinned ? 1 : 0;
-    const bPinned = b.pinned ? 1 : 0;
-    if (aPinned !== bPinned) return bPinned - aPinned;
-    const aUpdated = typeof a.updatedAt === "number" ? a.updatedAt : 0;
-    const bUpdated = typeof b.updatedAt === "number" ? b.updatedAt : 0;
-    return bUpdated - aUpdated;
-  });
 }
 
 function workspaceEntriesEqual(a: WorkspaceFileEntry[], b: WorkspaceFileEntry[]): boolean {
@@ -3799,16 +3776,6 @@ export function Files({
   const wallpaperCss = getWallpaperCss();
   const currentWp = getWallpaperById(wallpaperId);
   const isWpImage = (wallpaperId === "custom" && customWallpaper) || currentWp?.type === "photo";
-  const normalizedChatQuery = chatSessionQuery.trim().toLowerCase();
-  const sortedChatSessions = sortDesktopChatSessions(chatSessions);
-  const activeChatSession = chatCurrentSession
-    ? chatSessions.find((session) => session.key === chatCurrentSession) || null
-    : null;
-  const visibleChatSessions = normalizedChatQuery
-    ? sortedChatSessions.filter((session) => (
-      desktopChatSessionTitle(session).toLowerCase().includes(normalizedChatQuery)
-    ))
-    : sortedChatSessions;
   const browserWindowZ = getWindowZ(windowZ, "browser");
   const embeddedPreviewForegroundWindows = useMemo(() => {
     const frames: Array<{ z: number; rect: WindowRect }> = [];
@@ -4420,15 +4387,31 @@ export function Files({
             onSubmit={submitCreateFile}
           />
 
-          {/* ── FLOATING CHAT WINDOW (draggable) ────────────────────── */}
           {chatOpen && (
-            <AppWindow
-              title="Chat"
-              icon={MessageSquare}
+            <ChatDesktopApp
+              open={chatOpen}
               position={chatPos}
               size={chatSize}
               zIndex={getWindowZ(windowZ, "chat")}
-              glass={false}
+              navCollapsed={chatNavCollapsed}
+              sessions={chatSessions}
+              currentSession={chatCurrentSession}
+              query={chatSessionQuery}
+              requestedSession={chatRequestedSession}
+              requestedSessionAction={chatRequestedAction}
+              openSessionMenuKey={openChatSessionMenuKey}
+              gatewayRunning={gatewayRunning}
+              gatewayStarting={Boolean(gatewayRetryIn) || (isTogglingGateway && !gatewayRunning)}
+              gatewayRetryIn={gatewayRetryIn ?? null}
+              useLocalKeys={useLocalKeys}
+              selectedModel={selectedModel}
+              imageModel={imageModel}
+              imageGenerationModel={imageGenerationModel}
+              textToSpeechModel={textToSpeechModel}
+              audioUnderstandingModel={audioUnderstandingModel}
+              integrationsSyncing={integrationsSyncing}
+              integrationsMissing={integrationsMissing}
+              formatDate={formatDate}
               onClose={() => setChatOpen(false)}
               onFocus={() => focusWindow("chat")}
               onDragStart={handleChatDragStart}
@@ -4445,207 +4428,29 @@ export function Files({
                   chatMinSize,
                 )
               }
-            >
-              <div className="h-full min-w-0 flex bg-[var(--bg-app)] text-[var(--text-primary)]">
-                {!chatNavCollapsed && (
-                  <aside
-                    className="w-[280px] shrink-0 border-r flex flex-col"
-                    style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
-                  >
-                  <div className="p-3 border-b" style={{ borderColor: "var(--border-subtle)" }}>
-                    <div className="flex items-center justify-between gap-2 mb-3">
-                      <div className="min-w-0">
-                        <button
-                          type="button"
-                          onClick={() => setChatNavCollapsed((prev) => !prev)}
-                          className="h-8 w-8 rounded-xl border flex items-center justify-center transition-colors hover:bg-[var(--border-subtle)]"
-                          style={{ borderColor: "var(--border-subtle)", color: "var(--text-primary)" }}
-                          title="Collapse conversations"
-                          aria-label="Collapse conversations"
-                        >
-                          <PanelLeftClose className="w-4 h-4" />
-                        </button>
-                        <p className="text-[11px] uppercase tracking-[0.24em]" style={{ color: "var(--text-tertiary)" }}>
-                          Conversations
-                        </p>
-                        <p className="text-[12px] mt-1" style={{ color: "var(--text-secondary)" }}>
-                          {activeChatSession ? desktopChatSessionTitle(activeChatSession) : "Shared with main chat"}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={createNewChatSession}
-                        className="h-8 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 px-3"
-                        style={{ background: "var(--text-primary)", color: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}
-                        title="New chat"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        New
-                      </button>
-                    </div>
-                    <input
-                      type="text"
-                      value={chatSessionQuery}
-                      onChange={(e) => setChatSessionQuery(e.target.value)}
-                      placeholder="Search history"
-                      className="w-full h-9 px-3 rounded-xl text-xs outline-none"
-                      style={{ background: "var(--bg-card)", color: "var(--text-primary)", border: "1px solid var(--border-subtle)" }}
-                    />
-                  </div>
-                  <div className="flex-1 overflow-auto p-2 space-y-1.5">
-                    {visibleChatSessions.length === 0 ? (
-                      <div className="px-3 py-5 text-center">
-                        <p className="text-xs" style={{ color: "var(--text-tertiary)" }}>No matching chats</p>
-                      </div>
-                    ) : visibleChatSessions.map((session) => {
-                      const isActive = session.key === chatCurrentSession;
-                      return (
-                        <div key={session.key} className="relative flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => selectChatSession(session.key)}
-                            className="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-2xl text-left transition-colors min-w-0"
-                            style={{
-                              background: isActive ? "rgba(139,92,246,0.15)" : "var(--bg-tertiary)",
-                              border: isActive ? "1px solid rgba(139,92,246,0.25)" : "1px solid var(--border-subtle)",
-                            }}
-                          >
-                            {session.pinned ? (
-                              <Pin className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--text-secondary)" }} />
-                            ) : (
-                              <MessageSquare className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--text-secondary)" }} />
-                            )}
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-[12px] font-semibold" style={{ color: "var(--text-primary)" }}>
-                                {desktopChatSessionTitle(session)}
-                              </p>
-                              <p className="mt-1 text-[10px]" style={{ color: "var(--text-tertiary)" }}>
-                                {typeof session.updatedAt === "number"
-                                  ? formatDate(Math.floor(session.updatedAt / 1000))
-                                  : "Saved conversation"}
-                              </p>
-                            </div>
-                          </button>
-                          <button
-                            data-desktop-chat-session-trigger
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setOpenChatSessionMenuKey((prev) => (prev === session.key ? null : session.key));
-                            }}
-                            className="p-1.5 rounded-lg transition-colors hover:bg-[var(--border-subtle)]"
-                            style={{ color: "var(--text-secondary)" }}
-                            title="Chat options"
-                            aria-label="Chat options"
-                          >
-                            <MoreHorizontal className="w-3.5 h-3.5" />
-                          </button>
-                          {openChatSessionMenuKey === session.key && (
-                            <div
-                              data-desktop-chat-session-menu
-                              className="absolute right-0 top-10 z-30 w-40 rounded-xl border p-1.5 shadow-lg"
-                              style={{
-                                background: "var(--bg-card)",
-                                borderColor: "var(--border-subtle)",
-                              }}
-                            >
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  requestChatSessionAction({
-                                    type: "pin",
-                                    key: session.key,
-                                    pinned: !session.pinned,
-                                  });
-                                  setOpenChatSessionMenuKey(null);
-                                }}
-                                className="w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] text-left transition-colors hover:bg-[var(--border-subtle)]"
-                                style={{ color: "var(--text-primary)" }}
-                              >
-                                <Pin className="w-3.5 h-3.5" />
-                                {session.pinned ? "Unpin" : "Pin"}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  requestChatSessionAction({ type: "delete", key: session.key });
-                                  setOpenChatSessionMenuKey(null);
-                                }}
-                                className="w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] text-left transition-colors hover:bg-red-500/10"
-                                style={{ color: "#dc2626" }}
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                Delete
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                  </aside>
-                )}
-
-                <div className="min-w-0 flex-1 flex flex-col bg-[var(--bg-app)] relative">
-                  {chatNavCollapsed && (
-                    <button
-                      type="button"
-                      onClick={() => setChatNavCollapsed(false)}
-                      className="absolute left-3 top-3 z-20 h-9 w-9 rounded-xl border shadow-sm flex items-center justify-center transition-colors hover:bg-[var(--bg-secondary)]"
-                      style={{
-                        borderColor: "var(--border-subtle)",
-                        background: "color-mix(in srgb, var(--bg-card) 92%, transparent)",
-                        color: "var(--text-primary)",
-                        backdropFilter: "blur(10px)",
-                        WebkitBackdropFilter: "blur(10px)",
-                      }}
-                      title="Show conversations"
-                      aria-label="Show conversations"
-                    >
-                      <PanelLeftOpen className="w-4 h-4" />
-                    </button>
-                  )}
-                  <div className="min-w-0 flex-1 overflow-hidden">
-                    <Chat
-                      isVisible={chatOpen}
-                      gatewayRunning={gatewayRunning}
-                      gatewayStarting={Boolean(gatewayRetryIn) || (isTogglingGateway && !gatewayRunning)}
-                      gatewayRetryIn={gatewayRetryIn ?? null}
-                      gatewayLifecycleLabel={null}
-                      onStartGateway={onGatewayToggle}
-                      onRecoverProxyAuth={onRecoverProxyAuth}
-                      useLocalKeys={useLocalKeys}
-                      selectedModel={selectedModel}
-                      onModelChange={onModelChange}
-                      imageModel={imageModel}
-                      imageGenerationModel={imageGenerationModel}
-                      textToSpeechModel={textToSpeechModel}
-                      audioUnderstandingModel={audioUnderstandingModel}
-                      integrationsSyncing={integrationsSyncing}
-                      integrationsMissing={integrationsMissing}
-                      onNavigate={handleDesktopChatNavigate}
-                      onSessionsChange={(sessions, currentKey) => {
-                        setChatSessions(sessions);
-                        setChatCurrentSession((prev) => currentKey ?? prev);
-                        setChatRequestedSession((pending) => {
-                          if (!pending) return pending;
-                          if (pending === "__new__") {
-                            return currentKey ? null : pending;
-                          }
-                          return pending === currentKey ? null : pending;
-                        });
-                        setChatRequestedAction(null);
-                      }}
-                      requestedSession={chatRequestedSession}
-                      requestedSessionAction={chatRequestedAction}
-                      wideLayout={chatNavCollapsed}
-                    />
-                  </div>
-                </div>
-              </div>
-            </AppWindow>
+              onNavCollapsedChange={setChatNavCollapsed}
+              onQueryChange={setChatSessionQuery}
+              onCreateSession={createNewChatSession}
+              onSelectSession={selectChatSession}
+              onRequestSessionAction={requestChatSessionAction}
+              onOpenSessionMenuKeyChange={setOpenChatSessionMenuKey}
+              onStartGateway={onGatewayToggle}
+              onRecoverProxyAuth={onRecoverProxyAuth}
+              onModelChange={onModelChange}
+              onNavigate={handleDesktopChatNavigate}
+              onSessionsChange={(sessions, currentKey) => {
+                setChatSessions(sessions);
+                setChatCurrentSession((prev) => currentKey ?? prev);
+                setChatRequestedSession((pending) => {
+                  if (!pending) return pending;
+                  if (pending === "__new__") {
+                    return currentKey ? null : pending;
+                  }
+                  return pending === currentKey ? null : pending;
+                });
+                setChatRequestedAction(null);
+              }}
+            />
           )}
 
           {browserOpen && (
