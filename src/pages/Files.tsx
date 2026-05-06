@@ -105,6 +105,7 @@ import {
 } from "../desktop/finder/FileIcons";
 import { FinderApp } from "../desktop/finder/FinderApp";
 import { FilePreviewWindow, type FilePreviewState } from "../desktop/finder/FilePreviewWindow";
+import { CreateWorkspaceEntryModal } from "../desktop/finder/CreateWorkspaceEntryModal";
 import { DesktopDock } from "../desktop/dock/DesktopDock";
 import { DesktopContextMenus } from "../desktop/contextMenus/DesktopContextMenus";
 import { WallpaperPicker } from "../desktop/wallpaper/WallpaperPicker";
@@ -4443,140 +4444,34 @@ export function Files({
             </div>
           )}
 
-          {createFolderOpen && (
-            <div
-              className="absolute inset-0 flex items-center justify-center"
-              style={{ zIndex: DESKTOP_MODAL_Z, background: "rgba(0,0,0,0.34)", backdropFilter: "blur(6px)" }}
-              onClick={() => { if (!creatingFolder) setCreateFolderOpen(false); }}
-            >
-              <div
-                className="w-full max-w-sm rounded-2xl p-4"
-                style={{
-                  background: "rgba(28,28,30,0.92)",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  boxShadow: "0 24px 60px rgba(0,0,0,0.45)",
-                }}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="mb-3">
-                  <p className="text-sm font-semibold" style={{ color: "#fff" }}>New Folder</p>
-                  <p className="text-xs mt-1" style={{ color: "#9a9a9a" }}>
-                    {createFolderBasePath ? `Create inside ${createFolderBasePath}` : "Create in Workspace"}
-                  </p>
-                </div>
-                <input
-                  ref={createFolderInputRef}
-                  type="text"
-                  value={createFolderName}
-                  disabled={creatingFolder}
-                  onChange={(e) => setCreateFolderName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      submitCreateFolder();
-                    }
-                    if (e.key === "Escape" && !creatingFolder) {
-                      setCreateFolderOpen(false);
-                    }
-                  }}
-                  className="w-full px-3 py-2 rounded-xl text-sm outline-none"
-                  style={{
-                    background: "rgba(255,255,255,0.08)",
-                    color: "#fff",
-                    border: "1px solid rgba(255,255,255,0.12)",
-                  }}
-                  placeholder="Folder name"
-                />
-                <div className="mt-4 flex items-center justify-end gap-2">
-                  <button
-                    onClick={() => setCreateFolderOpen(false)}
-                    disabled={creatingFolder}
-                    className="px-3 py-1.5 rounded-lg text-xs"
-                    style={{ background: "rgba(255,255,255,0.08)", color: "#d0d0d0" }}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={submitCreateFolder}
-                    disabled={!createFolderName.trim() || creatingFolder}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
-                    style={{ background: "#54a3f7", color: "#fff" }}
-                  >
-                    {creatingFolder ? "Creating..." : "Create"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+          <CreateWorkspaceEntryModal
+            kind="folder"
+            open={createFolderOpen}
+            basePath={createFolderBasePath}
+            value={createFolderName}
+            busy={creatingFolder}
+            inputRef={createFolderInputRef}
+            zIndex={DESKTOP_MODAL_Z}
+            placeholder="Folder name"
+            onValueChange={setCreateFolderName}
+            onCancel={() => setCreateFolderOpen(false)}
+            onSubmit={submitCreateFolder}
+          />
 
-          {createFileOpen && (
-            <div
-              className="absolute inset-0 flex items-center justify-center"
-              style={{ zIndex: DESKTOP_MODAL_Z, background: "rgba(0,0,0,0.34)", backdropFilter: "blur(6px)" }}
-              onClick={() => { if (!creatingFile) setCreateFileOpen(false); }}
-            >
-              <div
-                className="w-full max-w-sm rounded-2xl p-4"
-                style={{
-                  background: "rgba(28,28,30,0.92)",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  boxShadow: "0 24px 60px rgba(0,0,0,0.45)",
-                }}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="mb-3">
-                  <p className="text-sm font-semibold" style={{ color: "#fff" }}>New File</p>
-                  <p className="text-xs mt-1" style={{ color: "#9a9a9a" }}>
-                    {createFileBasePath ? `Create inside ${createFileBasePath}` : "Create in Workspace"}
-                  </p>
-                </div>
-                <input
-                  ref={createFileInputRef}
-                  type="text"
-                  value={createFileName}
-                  disabled={creatingFile}
-                  onChange={(e) => setCreateFileName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void submitCreateFile();
-                    }
-                    if (e.key === "Escape" && !creatingFile) {
-                      setCreateFileOpen(false);
-                    }
-                  }}
-                  className="w-full px-3 py-2 rounded-xl text-sm outline-none"
-                  style={{
-                    background: "rgba(255,255,255,0.08)",
-                    color: "#fff",
-                    border: "1px solid rgba(255,255,255,0.12)",
-                  }}
-                  placeholder="notes.md"
-                />
-                <p className="mt-2 text-[11px]" style={{ color: "#8f8f8f" }}>
-                  Markdown and text files can be copied directly from Quick Look after creation.
-                </p>
-                <div className="mt-4 flex items-center justify-end gap-2">
-                  <button
-                    onClick={() => setCreateFileOpen(false)}
-                    disabled={creatingFile}
-                    className="px-3 py-1.5 rounded-lg text-xs"
-                    style={{ background: "rgba(255,255,255,0.08)", color: "#d0d0d0" }}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => { void submitCreateFile(); }}
-                    disabled={!createFileName.trim() || creatingFile}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
-                    style={{ background: "#54a3f7", color: "#fff" }}
-                  >
-                    {creatingFile ? "Creating..." : "Create"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+          <CreateWorkspaceEntryModal
+            kind="file"
+            open={createFileOpen}
+            basePath={createFileBasePath}
+            value={createFileName}
+            busy={creatingFile}
+            inputRef={createFileInputRef}
+            zIndex={DESKTOP_MODAL_Z}
+            placeholder="notes.md"
+            helperText="Markdown and text files can be copied directly from Quick Look after creation."
+            onValueChange={setCreateFileName}
+            onCancel={() => setCreateFileOpen(false)}
+            onSubmit={submitCreateFile}
+          />
 
           {/* ── FLOATING CHAT WINDOW (draggable) ────────────────────── */}
           {chatOpen && (
