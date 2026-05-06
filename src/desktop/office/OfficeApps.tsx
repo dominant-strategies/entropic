@@ -1,6 +1,10 @@
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { FileText, Image, LayoutGrid } from "lucide-react";
 import { AppWindow } from "../AppWindow";
+import {
+  workspacePathExtension,
+  workspacePathName,
+} from "../finder/workspacePaths";
 import type { WindowPoint, WindowResizeDirection, WindowSize } from "../windowManager";
 
 export type OfficeAppKind = "sheets" | "docs" | "slides";
@@ -38,7 +42,6 @@ type OfficeAppsProps = {
   onOpenChat: () => void;
 };
 
-const OFFICE_EXTS = new Set(["docx", "xlsx", "pptx"]);
 const OFFICE_KINDS: OfficeAppKind[] = ["sheets", "docs", "slides"];
 
 const OFFICE_META = {
@@ -46,10 +49,6 @@ const OFFICE_META = {
   docs: { title: "Docs", icon: FileText },
   slides: { title: "Slides", icon: Image },
 } as const;
-
-function workspacePathName(path: string): string {
-  return path.split("/").filter(Boolean).pop() || path || "workspace";
-}
 
 function formatOfficeDate(epochMs: number): string {
   if (!epochMs) return "-";
@@ -72,13 +71,8 @@ function formatOfficeDate(epochMs: number): string {
   });
 }
 
-export function workspaceFileUsesOnlyOffice(path: string): boolean {
-  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
-  return OFFICE_EXTS.has(ext);
-}
-
 export function officeAppKindForPath(path: string): OfficeAppKind | null {
-  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
+  const ext = workspacePathExtension(path);
   if (ext === "xlsx") return "sheets";
   if (ext === "docx") return "docs";
   if (ext === "pptx") return "slides";

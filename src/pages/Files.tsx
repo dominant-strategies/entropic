@@ -103,11 +103,18 @@ import {
   OfficeApps,
   officeAppKindForPath,
   pushOfficeRecentEntry,
-  workspaceFileUsesOnlyOffice,
   type OfficeAppKind,
   type OfficeAppSession,
   type OfficeRecentEntry,
 } from "../desktop/office/OfficeApps";
+import {
+  workspaceBrowserUrl,
+  workspaceFileCanOpenInBrowser,
+  workspaceFileIsHtml,
+  workspaceFileUsesOnlyOffice,
+  workspacePathName,
+  workspacePathParent,
+} from "../desktop/finder/workspacePaths";
 import { VoiceProvider, type VoiceDesktopContext } from "../desktop/voice/VoiceProvider";
 
 type WorkspaceFileEntry = {
@@ -228,7 +235,6 @@ type DesktopTerminalEventPayload = {
 const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md"]);
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
-const HTML_EXTS = new Set(["html", "htm"]);
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
 const DESKTOP_HANDOFF_EVENT = "entropic-desktop-handoff";
 const DESKTOP_SESSION_STORAGE_KEY = "entropic.desktop.session.v1";
@@ -242,7 +248,6 @@ const CHAT_WORKSPACE_PREFIXES = [
 const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/node\/\.openclaw\/workspace)(?:\/[^\s`"'<>]+)?)/g;
 const DEFAULT_BROWSER_URL = "https://www.google.com";
 const DEFAULT_BROWSER_LIVE_WS_BASE = "ws://127.0.0.1:19792/live";
-const CONTAINER_LOCAL_BROWSER_BASE = "http://container.localhost:19791";
 const WORKSPACE_FOLDER_REFRESH_MS = 4000;
 const DESKTOP_CACHE_STALE_MS = 12000;
 const DESKTOP_WARM_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -856,22 +861,6 @@ function requestedBrowserViewportSize(width: number, height: number) {
   };
 }
 
-function workspaceBrowserUrl(path: string): string {
-  const normalized = path
-    .split("/")
-    .filter(Boolean)
-    .map((part) => encodeURIComponent(part))
-    .join("/");
-  return normalized
-    ? `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace__/${normalized}`
-    : `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace__/`;
-}
-
-function workspaceFileCanOpenInBrowser(path: string): boolean {
-  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
-  return HTML_EXTS.has(ext);
-}
-
 function trimChatWorkspaceToken(raw: string): string {
   return raw
     .replace(/^[("'`\[]+/, "")
@@ -891,17 +880,6 @@ function normalizeChatWorkspacePath(raw: string): string | null {
   return null;
 }
 
-function workspacePathName(path: string): string {
-  const parts = path.split("/").filter(Boolean);
-  return parts[parts.length - 1] || "Workspace";
-}
-
-function workspacePathParent(path: string): string {
-  const parts = path.split("/").filter(Boolean);
-  parts.pop();
-  return parts.join("/");
-}
-
 function extractChatWorkspaceReferences(content: string): ChatWorkspaceReference[] {
   const refs: ChatWorkspaceReference[] = [];
   const seen = new Set<string>();
@@ -910,12 +888,11 @@ function extractChatWorkspaceReferences(content: string): ChatWorkspaceReference
     const path = normalizeChatWorkspacePath(match[1] || "");
     if (path === null) continue;
     const name = workspacePathName(path);
-    const ext = name.split(".").pop()?.toLowerCase() || "";
     const ref: ChatWorkspaceReference = {
       key: path || "__workspace__",
       path,
       name,
-      isHtml: HTML_EXTS.has(ext),
+      isHtml: workspaceFileIsHtml(path),
       looksLikeFile: Boolean(path) && name.includes("."),
     };
     if (seen.has(ref.key)) continue;
