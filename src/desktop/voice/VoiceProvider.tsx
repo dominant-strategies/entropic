@@ -10,7 +10,6 @@ import { VoiceOverlay } from "./VoiceOverlay";
 type VoiceState = "idle" | "listening" | "transcribing" | "thinking" | "error";
 
 type VoiceProviderProps = {
-  enabled: boolean;
   audioUnderstandingModel: string;
   dispatchAction: (action: DesktopAction) => Promise<void>;
 };
@@ -78,7 +77,6 @@ export function resolveVoiceAction(transcript: string): DesktopAction {
 }
 
 export function VoiceProvider({
-  enabled,
   audioUnderstandingModel,
   dispatchAction,
 }: VoiceProviderProps) {
@@ -117,10 +115,6 @@ export function VoiceProvider({
       setMessage(error);
     },
   });
-
-  if (!enabled) {
-    return null;
-  }
 
   const busy = recorder.isRecording || isTranscribing || state === "thinking";
 

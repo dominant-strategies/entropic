@@ -6098,7 +6098,6 @@ export function Files({
           )}
 
           <VoiceProvider
-            enabled={import.meta.env.DEV}
             audioUnderstandingModel={audioUnderstandingModel}
             dispatchAction={runDesktopAction}
           />
