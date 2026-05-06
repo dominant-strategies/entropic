@@ -51,13 +51,30 @@ function parseEvents(text) {
         payload = {};
       }
     }
-    events.push({ ts, name: match[2], payload, line });
+    events.push({ index: events.length, ts, name: match[2], payload, line });
   }
   return events;
 }
 
+function eventMatches(event, name, predicate = () => true) {
+  return event.name === name && predicate(event.payload, event);
+}
+
+function findEvent(events, name, predicate = () => true) {
+  return events.find((event) => eventMatches(event, name, predicate)) ?? null;
+}
+
+function isAfter(event, previous) {
+  return event.ts > previous.ts || (event.ts === previous.ts && event.index > previous.index);
+}
+
 function hasEvent(events, name, predicate = () => true) {
-  return events.some((event) => event.name === name && predicate(event.payload, event));
+  return findEvent(events, name, predicate) !== null;
+}
+
+function hasEventAfter(events, previous, name, predicate = () => true) {
+  if (!previous) return false;
+  return events.some((event) => isAfter(event, previous) && eventMatches(event, name, predicate));
 }
 
 function countEvents(events, name, predicate = () => true) {
@@ -74,37 +91,56 @@ if (!fs.existsSync(logPath)) {
 }
 
 const events = parseEvents(fs.readFileSync(logPath, "utf8"));
-const officeConfirm = hasEvent(
+const officeConfirmEvent = findEvent(
   events,
   "voice.action.confirmation_required",
   (payload) => payload.type === "open_workspace_file" && payload.path === "sales-plan.xlsx",
 );
-const officeDispatch = hasEvent(
+const officeDispatchEvent = officeConfirmEvent
+  ? findEvent(
+      events.filter((event) => isAfter(event, officeConfirmEvent)),
+      "voice.action.dispatch",
+      (payload) => payload.type === "open_workspace_file" && payload.path === "sales-plan.xlsx",
+    )
+  : null;
+const officeConfirm = officeConfirmEvent !== null;
+const officeDispatch = officeDispatchEvent !== null;
+const officeReady = hasEventAfter(
   events,
-  "voice.action.dispatch",
-  (payload) => payload.type === "open_workspace_file" && payload.path === "sales-plan.xlsx",
-);
-const officeReady = hasEvent(
-  events,
+  officeDispatchEvent,
   "office.open.ready",
   (payload) => payload.appKind === "sheets" && payload.path === "sales-plan.xlsx",
 );
-const browserConfirm = hasEvent(
+const browserConfirmEvent = findEvent(
   events,
   "voice.action.confirmation_required",
   (payload) => payload.type === "open_browser_url" && typeof payload.url === "string",
 );
-const browserDispatch = hasEvent(
+const browserDispatch = hasEventAfter(
   events,
+  browserConfirmEvent,
   "voice.action.dispatch",
   (payload) => payload.type === "open_browser_url" && typeof payload.url === "string",
 );
+const browserConfirm = browserConfirmEvent !== null;
 const newChatConfirmations = countEvents(
   events,
   "voice.action.confirmation_required",
   (payload) => payload.type === "new_chat_task",
 );
-const newChatDispatches = countEvents(
+const firstNewChatConfirmation = findEvent(
+  events,
+  "voice.action.confirmation_required",
+  (payload) => payload.type === "new_chat_task",
+);
+const newChatDispatches = firstNewChatConfirmation
+  ? countEvents(
+      events.filter((event) => isAfter(event, firstNewChatConfirmation)),
+      "voice.action.dispatch",
+      (payload) => payload.type === "new_chat_task" && payload.autoSubmit === true,
+    )
+  : 0;
+const oldNewChatDispatches = countEvents(
   events,
   "voice.action.dispatch",
   (payload) => payload.type === "new_chat_task" && payload.autoSubmit === true,
@@ -149,7 +185,7 @@ const checks = [
   {
     label: "Linux real-mic integration task dispatch",
     passed: newChatDispatches >= 1,
-    detail: `observed ${newChatDispatches} dispatched auto-submit new_chat_task event(s)`,
+    detail: `observed ${newChatDispatches} dispatched auto-submit new_chat_task event(s) after confirmation (${oldNewChatDispatches} total)`,
   },
 ];
 
