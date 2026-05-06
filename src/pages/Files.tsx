@@ -98,6 +98,7 @@ import {
   dispatchDesktopAction,
   type DesktopAction,
 } from "../desktop/actions";
+import { VoiceProvider } from "../desktop/voice/VoiceProvider";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -3855,10 +3856,15 @@ export function Files({
   }
 
   function startDesktopChatTask(prompt: string, sessionId?: string) {
-    setChatRequestedSession(sessionId || "__new__");
-    setChatRequestedAction(null);
     setChatOpen(true);
     focusWindow("chat");
+    setChatRequestedSession(sessionId || null);
+    setChatRequestedAction({
+      id: `compose-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      type: "compose",
+      key: sessionId,
+      prompt,
+    });
   }
 
   async function runDesktopAction(action: DesktopAction) {
@@ -6090,6 +6096,12 @@ export function Files({
               </Suspense>
             </AppWindow>
           )}
+
+          <VoiceProvider
+            enabled={import.meta.env.DEV}
+            audioUnderstandingModel={audioUnderstandingModel}
+            dispatchAction={runDesktopAction}
+          />
 
           {/* ── FLOATING DOCK ─────────────────────────────────────────── */}
           <div

@@ -140,7 +140,8 @@ export type { ChatSession };
 export type ChatSessionActionRequest =
   | { id: string; type: "delete"; key: string }
   | { id: string; type: "pin"; key: string; pinned: boolean }
-  | { id: string; type: "rename"; key: string; label: string };
+  | { id: string; type: "rename"; key: string; label: string }
+  | { id: string; type: "compose"; key?: string; prompt: string };
 type Provider = { id: string; name: string; icon: string; placeholder: string; keyUrl: string };
 type PendingAttachment = {
   id: string;
@@ -3592,6 +3593,27 @@ export function Chat({
   }
 
   async function applySessionAction(action: ChatSessionActionRequest) {
+    if (action.type === "compose") {
+      let targetKey = action.key || currentSessionRef.current;
+      if (!targetKey) {
+        createNewSession({ force: true });
+        targetKey = currentSessionRef.current;
+      } else if (targetKey !== currentSessionRef.current) {
+        await selectSession(targetKey);
+      }
+      if (!targetKey) return;
+      setComposerModeForSession(targetKey, "chat");
+      setDraftsBySession((prev) => {
+        const existing = (prev[targetKey] || "").trim();
+        const nextValue = existing ? `${existing}\n\n${action.prompt}` : action.prompt;
+        if (prev[targetKey] === nextValue) return prev;
+        return { ...prev, [targetKey]: nextValue };
+      });
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+      });
+      return;
+    }
     if (!action?.key) return;
     if (action.type === "pin") {
       setSessions((prev) =>
