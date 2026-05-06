@@ -79,23 +79,23 @@
 @media (prefers-color-scheme: dark) {
   :root:not(.light) {
     --system-gray-1: #8E8E93;
-    --system-gray-2: #636366;
-    --system-gray-3: #48484A;
-    --system-gray-4: #3A3A3C;
-    --system-gray-5: #2C2C2E;
-    --system-gray-6: #1C1C1E;
+    --system-gray-2: #5A5A5F;
+    --system-gray-3: #343438;
+    --system-gray-4: #242428;
+    --system-gray-5: #17171A;
+    --system-gray-6: #101012;
 
     --purple-accent: #A78BFA;
     --purple-accent-hover: #8B5CF6;
     --purple-accent-subtle: rgba(167, 139, 250, 0.15);
 
-    --bg-app: #131313;
-    --bg-primary: #131313;
-    --bg-secondary: #191919;
-    --bg-tertiary: #262626;
-    --bg-sidebar: #131313;
-    --bg-muted: #1A1A1A;
-    --bg-card: #1E1E1E;
+    --bg-app: #030304;
+    --bg-primary: #030304;
+    --bg-secondary: #070708;
+    --bg-tertiary: #101012;
+    --bg-sidebar: #030304;
+    --bg-muted: #0B0B0D;
+    --bg-card: #0A0A0C;
 
     --text-primary: #F0F0F0;
     --text-secondary: #A0A0A0;
@@ -103,24 +103,24 @@
     --text-quaternary: #4A4A4A;
     --text-accent: #A78BFA;
 
-    --border-subtle: rgba(255, 255, 255, 0.08);
-    --border-default: rgba(255, 255, 255, 0.12);
-    --border-primary: rgba(255, 255, 255, 0.16);
-    --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
-    --shadow-floating: 0 8px 30px rgba(0, 0, 0, 0.4);
+    --border-subtle: rgba(255, 255, 255, 0.07);
+    --border-default: rgba(255, 255, 255, 0.11);
+    --border-primary: rgba(255, 255, 255, 0.15);
+    --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.55), 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-floating: 0 18px 50px rgba(0, 0, 0, 0.72);
 
-    --glass-bg: rgba(30, 30, 30, 0.80);
-    --glass-bg-hover: rgba(40, 40, 40, 0.90);
-    --glass-border: rgba(255, 255, 255, 0.08);
+    --glass-bg: rgba(10, 10, 12, 0.82);
+    --glass-bg-hover: rgba(16, 16, 18, 0.92);
+    --glass-border: rgba(255, 255, 255, 0.07);
     --glass-border-subtle: rgba(255, 255, 255, 0.05);
 
     --chat-user-bg: var(--purple-accent-hover);
     --chat-user-text: #FFFFFF;
-    --chat-assistant-bg: #262626;
+    --chat-assistant-bg: #101012;
     --chat-assistant-text: #F0F0F0;
     --chat-assistant-border: rgba(255, 255, 255, 0.08);
 
-    --composer-bg: #1E1E1E;
+    --composer-bg: #0A0A0C;
     --composer-border: rgba(255, 255, 255, 0.10);
 
     color-scheme: dark;
@@ -130,23 +130,23 @@
 /* Manual dark class override (for settings toggle) */
 :root.dark {
   --system-gray-1: #8E8E93;
-  --system-gray-2: #636366;
-  --system-gray-3: #48484A;
-  --system-gray-4: #3A3A3C;
-  --system-gray-5: #2C2C2E;
-  --system-gray-6: #1C1C1E;
+  --system-gray-2: #5A5A5F;
+  --system-gray-3: #343438;
+  --system-gray-4: #242428;
+  --system-gray-5: #17171A;
+  --system-gray-6: #101012;
 
   --purple-accent: #A78BFA;
   --purple-accent-hover: #8B5CF6;
   --purple-accent-subtle: rgba(167, 139, 250, 0.10);
 
-  --bg-app: #131313;
-  --bg-primary: #131313;
-  --bg-secondary: #191919;
-  --bg-tertiary: #262626;
-  --bg-sidebar: #131313;
-  --bg-muted: #1A1A1A;
-  --bg-card: #1E1E1E;
+  --bg-app: #030304;
+  --bg-primary: #030304;
+  --bg-secondary: #070708;
+  --bg-tertiary: #101012;
+  --bg-sidebar: #030304;
+  --bg-muted: #0B0B0D;
+  --bg-card: #0A0A0C;
 
   --text-primary: #F0F0F0;
   --text-secondary: #A0A0A0;
@@ -154,24 +154,24 @@
   --text-quaternary: #4A4A4A;
   --text-accent: #A78BFA;
 
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --border-default: rgba(255, 255, 255, 0.12);
-  --border-primary: rgba(255, 255, 255, 0.16);
-  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
-  --shadow-floating: 0 8px 30px rgba(0, 0, 0, 0.4);
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-default: rgba(255, 255, 255, 0.11);
+  --border-primary: rgba(255, 255, 255, 0.15);
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.55), 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-floating: 0 18px 50px rgba(0, 0, 0, 0.72);
 
-  --glass-bg: rgba(30, 30, 30, 0.80);
-  --glass-bg-hover: rgba(40, 40, 40, 0.90);
-  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-bg: rgba(10, 10, 12, 0.82);
+  --glass-bg-hover: rgba(16, 16, 18, 0.92);
+  --glass-border: rgba(255, 255, 255, 0.07);
   --glass-border-subtle: rgba(255, 255, 255, 0.05);
 
   --chat-user-bg: var(--purple-accent-hover);
   --chat-user-text: #FFFFFF;
-  --chat-assistant-bg: #262626;
+  --chat-assistant-bg: #101012;
   --chat-assistant-text: #F0F0F0;
   --chat-assistant-border: rgba(255, 255, 255, 0.08);
 
-  --composer-bg: #1E1E1E;
+  --composer-bg: #0A0A0C;
   --composer-border: rgba(255, 255, 255, 0.10);
 
   color-scheme: dark;

@@ -247,6 +247,7 @@ export function ModelSelector({
   const [isOpen, setIsOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
+  const [menuPlacement, setMenuPlacement] = useState<"top" | "bottom">("bottom");
 
   // Save model preference
   const handleModelChange = async (modelId: string) => {
@@ -271,23 +272,50 @@ export function ModelSelector({
       setMenuStyle(null);
       return;
     }
-    const rect = wrapperRef.current.getBoundingClientRect();
-    const spacing = 8;
-    const maxMenuHeight = Math.min(400, window.innerHeight - 16);
-    let top = rect.bottom + spacing;
-    if (top + maxMenuHeight > window.innerHeight - spacing) {
-      top = Math.max(spacing, rect.top - spacing - maxMenuHeight);
+
+    function updateMenuPosition() {
+      const rect = wrapperRef.current?.getBoundingClientRect();
+      if (!rect) return;
+
+      const spacing = 8;
+      const viewportPadding = 12;
+      const availableBelow = window.innerHeight - rect.bottom - spacing - viewportPadding;
+      const availableAbove = rect.top - spacing - viewportPadding;
+      const placeAbove = availableBelow < 240 && availableAbove > availableBelow;
+      const maxMenuHeight = Math.max(
+        180,
+        Math.min(420, placeAbove ? availableAbove : availableBelow, window.innerHeight - viewportPadding * 2),
+      );
+      const menuWidth = Math.min(
+        Math.max(rect.width, 340),
+        window.innerWidth - viewportPadding * 2,
+      );
+      const left = Math.min(
+        Math.max(viewportPadding, rect.left),
+        window.innerWidth - viewportPadding - menuWidth,
+      );
+      const top = placeAbove
+        ? Math.max(viewportPadding, rect.top - spacing - maxMenuHeight)
+        : Math.min(rect.bottom + spacing, window.innerHeight - viewportPadding - maxMenuHeight);
+
+      setMenuPlacement(placeAbove ? "top" : "bottom");
+      setMenuStyle({
+        position: "fixed",
+        top,
+        left,
+        width: menuWidth,
+        zIndex: 80,
+        maxHeight: `${maxMenuHeight}px`,
+      });
     }
-    const left = rect.left;
-    const width = rect.width;
-    setMenuStyle({
-      position: "fixed",
-      top,
-      left,
-      width,
-      zIndex: 60,
-      maxHeight: `${maxMenuHeight}px`,
-    });
+
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+    };
   }, [isOpen]);
 
   if (compact) {
@@ -308,13 +336,13 @@ export function ModelSelector({
         {isOpen && (
           <>
             <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
-            <div className="absolute right-0 mt-2 w-72 max-h-96 overflow-y-auto z-50
-                          bg-[var(--bg-card)] border border-[var(--border-subtle)]
-                          rounded-xl shadow-2xl animate-scale-in">
+            <div className="absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto z-50
+                          bg-[var(--bg-card)] border border-[var(--border-default)]
+                          rounded-xl shadow-2xl animate-scale-in ring-1 ring-black/5">
               {Object.entries(groupedModels).map(([provider, providerModels]) => (
                 <div key={provider}>
                   <div className="px-3 py-2 text-[11px] font-bold text-[var(--text-tertiary)]
-                                border-b border-[var(--border-subtle)] bg-[var(--system-gray-6)]/50 uppercase tracking-wider">
+                                border-b border-[var(--border-subtle)] bg-[var(--bg-secondary)]/95 uppercase tracking-wider">
                     {provider}
                   </div>
                   {providerModels.map(model => {
@@ -331,9 +359,6 @@ export function ModelSelector({
                         <div className="flex-1 min-w-0">
                           <div className="text-[13px] font-medium text-[var(--text-primary)] truncate">
                             {model.name}
-                          </div>
-                          <div className="text-[11px] text-[var(--text-tertiary)] truncate">
-                            {model.tier}
                           </div>
                         </div>
                         {model.id === selectedModel && (
@@ -374,12 +399,14 @@ export function ModelSelector({
           <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
           <div
             style={menuStyle ?? undefined}
-            className="overflow-y-auto bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-lg shadow-2xl animate-scale-in"
+            className={`overflow-y-auto bg-[var(--bg-card)] border border-[var(--border-default)] rounded-xl shadow-2xl animate-scale-in ring-1 ring-black/5 ${
+              menuPlacement === "top" ? "origin-bottom" : "origin-top"
+            }`}
           >
             {Object.entries(groupedModels).map(([provider, providerModels]) => (
               <div key={provider}>
-                <div className="sticky top-0 px-3 py-1.5 text-[10px] font-bold text-[var(--text-tertiary)]
-                              bg-[var(--system-gray-6)]/80 backdrop-blur-md border-b border-[var(--border-subtle)] uppercase tracking-wider">
+                <div className="sticky top-0 px-3 py-2 text-[10px] font-bold text-[var(--text-tertiary)]
+                              bg-[var(--bg-secondary)]/95 backdrop-blur-md border-b border-[var(--border-subtle)] uppercase tracking-wider">
                   {provider}
                 </div>
                 {providerModels.map(model => {
@@ -388,7 +415,7 @@ export function ModelSelector({
                     <button
                       key={model.id}
                       onClick={() => handleModelChange(model.id)}
-                      className={`w-full flex items-center gap-3 px-3 py-2.5
+                      className={`w-full flex items-center gap-3 px-3 py-2.5 text-left
                                 hover:bg-[var(--system-gray-6)] transition-colors
                                 ${model.id === selectedModel ? "bg-[var(--system-blue)]/5" : ""}`}
                     >
