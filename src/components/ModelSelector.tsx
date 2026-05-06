@@ -397,12 +397,6 @@ export function ModelSelector({
                         <div className="text-[13px] font-medium text-[var(--text-primary)] truncate leading-tight">
                           {model.name}
                         </div>
-                        <div className="text-[11px] text-[var(--text-secondary)] leading-tight mt-px">
-                          {model.tier === "fast" && "Fast & affordable response"}
-                          {model.tier === "recommended" && "Optimized for most tasks"}
-                          {model.tier === "premium" && "Maximum intelligence & reasoning"}
-                          {model.tier === "reasoning" && "Deep chain-of-thought processing"}
-                        </div>
                       </div>
                       {model.id === selectedModel && (
                         <div className="w-1.5 h-1.5 rounded-full bg-[var(--system-blue)] shadow-[0_0_6px_rgba(0,122,255,0.4)]" />
