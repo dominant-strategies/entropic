@@ -93,11 +93,21 @@ import {
   type WindowResizeState,
   type WindowSize,
 } from "../desktop/windowManager";
+import { AppWindow } from "../desktop/AppWindow";
 import {
   DESKTOP_ACTION_EVENT,
   dispatchDesktopAction,
   type DesktopAction,
 } from "../desktop/actions";
+import {
+  OfficeApps,
+  officeAppKindForPath,
+  pushOfficeRecentEntry,
+  workspaceFileUsesOnlyOffice,
+  type OfficeAppKind,
+  type OfficeAppSession,
+  type OfficeRecentEntry,
+} from "../desktop/office/OfficeApps";
 import { VoiceProvider } from "../desktop/voice/VoiceProvider";
 
 type WorkspaceFileEntry = {
@@ -173,22 +183,6 @@ type EmbeddedPreviewState = {
   title: string | null;
 };
 
-type OfficeAppKind = "sheets" | "docs" | "slides";
-
-type OfficeAppSession = {
-  path: string;
-  name: string;
-  url: string;
-  appKind: OfficeAppKind;
-  launchToken: string;
-};
-
-type OfficeRecentEntry = {
-  path: string;
-  name: string;
-  openedAt: number;
-};
-
 type BrowserTabState = {
   id: string;
   title: string | null;
@@ -233,7 +227,6 @@ const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.m
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
 const HTML_EXTS = new Set(["html", "htm"]);
-const ONLYOFFICE_BROWSER_EXTS = new Set(["docx", "xlsx", "pptx"]);
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
 const DESKTOP_HANDOFF_EVENT = "entropic-desktop-handoff";
 const DESKTOP_SESSION_STORAGE_KEY = "entropic.desktop.session.v1";
@@ -877,40 +870,6 @@ function workspaceFileCanOpenInBrowser(path: string): boolean {
   return HTML_EXTS.has(ext);
 }
 
-function workspaceFileUsesOnlyOffice(path: string): boolean {
-  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
-  return ONLYOFFICE_BROWSER_EXTS.has(ext);
-}
-
-function officeAppKindForPath(path: string): OfficeAppKind | null {
-  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
-  if (ext === "xlsx") return "sheets";
-  if (ext === "docx") return "docs";
-  if (ext === "pptx") return "slides";
-  return null;
-}
-
-function officeAppLabel(kind: OfficeAppKind): string {
-  switch (kind) {
-    case "sheets":
-      return "Sheets";
-    case "docs":
-      return "Docs";
-    case "slides":
-      return "Slides";
-  }
-}
-
-function pushOfficeRecentEntry(
-  current: OfficeRecentEntry[],
-  nextEntry: OfficeRecentEntry,
-): OfficeRecentEntry[] {
-  return [
-    nextEntry,
-    ...current.filter((entry) => entry.path !== nextEntry.path),
-  ].slice(0, 8);
-}
-
 function trimChatWorkspaceToken(raw: string): string {
   return raw
     .replace(/^[("'`\[]+/, "")
@@ -1034,111 +993,6 @@ function DesktopImagePreviewIcon({
   );
 }
 
-function AppWindow({
-  title,
-  icon: Icon,
-  position,
-  size,
-  onClose,
-  onDragStart,
-  onResizeStart,
-  onFocus,
-  zIndex,
-  glass = true,
-  children,
-}: {
-  title: string;
-  icon: typeof Folder;
-  position: { x: number; y: number };
-  size: { w: number; h: number };
-  onClose: () => void;
-  onDragStart: (e: ReactMouseEvent<HTMLDivElement>) => void;
-  onResizeStart?: (direction: WindowResizeDirection, e: ReactMouseEvent<HTMLDivElement>) => void;
-  onFocus: () => void;
-  zIndex: number;
-  glass?: boolean;
-  children: ReactNode;
-}) {
-  const resizeHandles: Array<{
-    direction: WindowResizeDirection;
-    className: string;
-  }> = [
-    { direction: "n", className: "absolute left-4 right-4 top-0 z-20 h-3 cursor-ns-resize" },
-    { direction: "s", className: "absolute bottom-0 left-4 right-4 z-20 h-3 cursor-ns-resize" },
-    { direction: "e", className: "absolute right-0 top-4 bottom-4 z-20 w-3 cursor-ew-resize" },
-    { direction: "w", className: "absolute left-0 top-4 bottom-4 z-20 w-3 cursor-ew-resize" },
-    { direction: "nw", className: "absolute left-0 top-0 z-20 h-4 w-4 cursor-nwse-resize" },
-    { direction: "ne", className: "absolute right-0 top-0 z-20 h-4 w-4 cursor-nesw-resize" },
-    { direction: "se", className: "absolute bottom-0 right-0 z-20 h-4 w-4 cursor-nwse-resize" },
-    { direction: "sw", className: "absolute bottom-0 left-0 z-20 h-4 w-4 cursor-nesw-resize" },
-  ];
-
-  return (
-    <div
-      className="absolute flex flex-col rounded-xl overflow-hidden animate-scale-in bg-[var(--bg-card)]"
-      style={{
-        top: position.y,
-        left: position.x,
-        width: size.w,
-        height: size.h,
-        zIndex,
-        backdropFilter: glass ? "blur(18px)" : "none",
-        WebkitBackdropFilter: glass ? "blur(18px)" : "none",
-        boxShadow: "0 24px 70px rgba(0,0,0,0.28), 0 0 0 0.5px var(--border-subtle)",
-        border: "1px solid var(--border-subtle)",
-      }}
-      onMouseDownCapture={onFocus}
-      onClick={(e) => e.stopPropagation()}
-    >
-      <div
-        className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing bg-[var(--bg-secondary)] select-none"
-        style={{
-          borderBottom: "1px solid var(--border-subtle)",
-        }}
-        onMouseDown={onDragStart}
-      >
-        <div className="flex items-center gap-2 z-10">
-          <button
-            onClick={onClose}
-            className="w-3 h-3 rounded-full hover:opacity-80 group relative"
-            style={{ background: "#ff5f57" }}
-            title="Close"
-          >
-            <X className="w-2 h-2 absolute inset-0.5 opacity-0 group-hover:opacity-100 text-black/60" />
-          </button>
-          <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} />
-          <div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
-        </div>
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="flex items-center gap-2">
-            <Icon className="w-3.5 h-3.5" style={{ color: "var(--purple-accent)" }} />
-            <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>
-              {title}
-            </span>
-          </div>
-        </div>
-      </div>
-      <div
-        className="flex-1 overflow-hidden bg-[var(--bg-app)]"
-      >
-        <div className="h-full overflow-auto">{children}</div>
-      </div>
-      {onResizeStart && (
-        <>
-          {resizeHandles.map((handle) => (
-            <div
-              key={handle.direction}
-              className={handle.className}
-              onMouseDown={(e) => onResizeStart(handle.direction, e)}
-            />
-          ))}
-          <div className="pointer-events-none absolute bottom-1 right-1 z-10 h-3 w-3 rounded-sm border-r-2 border-b-2 border-black/25" />
-        </>
-      )}
-    </div>
-  );
-}
-
 function DockIconButton({
   label,
   active = false,
@@ -1173,82 +1027,6 @@ function DockIconButton({
       {children}
       <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${active ? "bg-white/80" : "opacity-0"}`} />
     </button>
-  );
-}
-
-function OfficeHomePanel({
-  kind,
-  recent,
-  onOpenRecent,
-  onOpenChat,
-}: {
-  kind: OfficeAppKind;
-  recent: OfficeRecentEntry[];
-  onOpenRecent: (path: string) => void;
-  onOpenChat: () => void;
-}) {
-  const title = officeAppLabel(kind);
-  const subtitle =
-    kind === "sheets"
-      ? "Create spreadsheets with chat or reopen recent work."
-      : kind === "docs"
-        ? "Create documents with chat or reopen recent work."
-        : "Create presentations with chat or reopen recent work.";
-
-  return (
-    <div className="h-full overflow-auto bg-[linear-gradient(180deg,#f8fafc_0%,#eef5ff_100%)] px-8 py-8">
-      <div className="mx-auto flex h-full max-w-3xl flex-col">
-        <div className="mb-8">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
-            {title}
-          </div>
-          <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-900">{title}</h2>
-          <p className="mt-2 max-w-xl text-sm text-slate-600">{subtitle}</p>
-        </div>
-
-        {recent.length > 0 ? (
-          <div className="rounded-[24px] border border-slate-200 bg-white/85 p-4 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur">
-            <div className="mb-3 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
-              Recent
-            </div>
-            <div className="space-y-2">
-              {recent.map((entry) => (
-                <button
-                  key={entry.path}
-                  type="button"
-                  onClick={() => onOpenRecent(entry.path)}
-                  className="flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-slate-300 hover:bg-slate-50"
-                >
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium text-slate-900">{entry.name}</div>
-                    <div className="truncate text-xs text-slate-500">{entry.path}</div>
-                  </div>
-                  <div className="ml-4 shrink-0 text-[11px] text-slate-400">
-                    {formatDate(Math.floor(entry.openedAt / 1000))}
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="flex flex-1 items-center justify-center">
-            <div className="max-w-md rounded-[28px] border border-slate-200 bg-white/92 px-8 py-9 text-center shadow-[0_24px_80px_rgba(15,23,42,0.1)] backdrop-blur">
-              <div className="text-lg font-semibold text-slate-900">No recent {title.toLowerCase()} yet</div>
-              <p className="mt-2 text-sm text-slate-600">
-                Open chat and ask Entropic to create one for you, then it will appear here.
-              </p>
-              <button
-                type="button"
-                onClick={onOpenChat}
-                className="mt-5 inline-flex h-11 items-center justify-center rounded-2xl bg-slate-900 px-5 text-sm font-semibold text-white transition hover:bg-slate-800"
-              >
-                Create With Chat
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -5636,20 +5414,30 @@ export function Files({
             </AppWindow>
           )}
 
-          {sheetsOpen && (
-            <AppWindow
-              title="Sheets"
-              icon={LayoutGrid}
-              position={sheetsPos}
-              size={sheetsSize}
-              zIndex={windowZ.sheets ?? DEFAULT_WINDOW_Z.sheets}
-              glass={false}
-              onClose={() => { setSheetsOpen(false); setSheetsSession(null); }}
-              onFocus={() => focusWindow("sheets")}
-              onDragStart={(e) =>
-                startWindowDrag(e, sheetsDragRef, sheetsPos, sheetsSize, setSheetsPos, "sheets")
+          <OfficeApps
+            open={{ sheets: sheetsOpen, docs: docsOpen, slides: slidesOpen }}
+            sessions={{ sheets: sheetsSession, docs: docsSession, slides: slidesSession }}
+            recent={{ sheets: sheetsRecent, docs: docsRecent, slides: slidesRecent }}
+            position={{ sheets: sheetsPos, docs: docsPos, slides: slidesPos }}
+            size={{ sheets: sheetsSize, docs: docsSize, slides: slidesSize }}
+            zIndex={{
+              sheets: windowZ.sheets ?? DEFAULT_WINDOW_Z.sheets,
+              docs: windowZ.docs ?? DEFAULT_WINDOW_Z.docs,
+              slides: windowZ.slides ?? DEFAULT_WINDOW_Z.slides,
+            }}
+            onClose={(kind) => closeDesktopWindow(kind)}
+            onFocus={(kind) => focusWindow(kind)}
+            onDragStart={(kind, e) => {
+              if (kind === "sheets") {
+                startWindowDrag(e, sheetsDragRef, sheetsPos, sheetsSize, setSheetsPos, "sheets");
+              } else if (kind === "docs") {
+                startWindowDrag(e, docsDragRef, docsPos, docsSize, setDocsPos, "docs");
+              } else {
+                startWindowDrag(e, slidesDragRef, slidesPos, slidesSize, setSlidesPos, "slides");
               }
-              onResizeStart={(direction, e) =>
+            }}
+            onResizeStart={(kind, direction, e) => {
+              if (kind === "sheets") {
                 startWindowResize(
                   e,
                   direction,
@@ -5660,44 +5448,8 @@ export function Files({
                   setSheetsSize,
                   "sheets",
                   { w: 720, h: 480 },
-                )
-              }
-            >
-              <div className="h-full bg-white">
-                {sheetsSession ? (
-                  <iframe
-                    key={`${sheetsSession.path}:${sheetsSession.launchToken}`}
-                    src={sheetsSession.url}
-                    title={sheetsSession.name}
-                    className="block h-full w-full border-0 bg-white"
-                    allow="clipboard-read; clipboard-write; fullscreen"
-                  />
-                ) : (
-                  <OfficeHomePanel
-                    kind="sheets"
-                    recent={sheetsRecent}
-                    onOpenRecent={openRecentOfficePath}
-                    onOpenChat={openOfficeAppHomeInChat}
-                  />
-                )}
-              </div>
-            </AppWindow>
-          )}
-
-          {docsOpen && (
-            <AppWindow
-              title="Docs"
-              icon={FileText}
-              position={docsPos}
-              size={docsSize}
-              zIndex={windowZ.docs ?? DEFAULT_WINDOW_Z.docs}
-              glass={false}
-              onClose={() => { setDocsOpen(false); setDocsSession(null); }}
-              onFocus={() => focusWindow("docs")}
-              onDragStart={(e) =>
-                startWindowDrag(e, docsDragRef, docsPos, docsSize, setDocsPos, "docs")
-              }
-              onResizeStart={(direction, e) =>
+                );
+              } else if (kind === "docs") {
                 startWindowResize(
                   e,
                   direction,
@@ -5708,44 +5460,8 @@ export function Files({
                   setDocsSize,
                   "docs",
                   { w: 720, h: 480 },
-                )
-              }
-            >
-              <div className="h-full bg-white">
-                {docsSession ? (
-                  <iframe
-                    key={`${docsSession.path}:${docsSession.launchToken}`}
-                    src={docsSession.url}
-                    title={docsSession.name}
-                    className="block h-full w-full border-0 bg-white"
-                    allow="clipboard-read; clipboard-write; fullscreen"
-                  />
-                ) : (
-                  <OfficeHomePanel
-                    kind="docs"
-                    recent={docsRecent}
-                    onOpenRecent={openRecentOfficePath}
-                    onOpenChat={openOfficeAppHomeInChat}
-                  />
-                )}
-              </div>
-            </AppWindow>
-          )}
-
-          {slidesOpen && (
-            <AppWindow
-              title="Slides"
-              icon={Image}
-              position={slidesPos}
-              size={slidesSize}
-              zIndex={windowZ.slides ?? DEFAULT_WINDOW_Z.slides}
-              glass={false}
-              onClose={() => { setSlidesOpen(false); setSlidesSession(null); }}
-              onFocus={() => focusWindow("slides")}
-              onDragStart={(e) =>
-                startWindowDrag(e, slidesDragRef, slidesPos, slidesSize, setSlidesPos, "slides")
-              }
-              onResizeStart={(direction, e) =>
+                );
+              } else {
                 startWindowResize(
                   e,
                   direction,
@@ -5756,29 +5472,12 @@ export function Files({
                   setSlidesSize,
                   "slides",
                   { w: 720, h: 480 },
-                )
+                );
               }
-            >
-              <div className="h-full bg-white">
-                {slidesSession ? (
-                  <iframe
-                    key={`${slidesSession.path}:${slidesSession.launchToken}`}
-                    src={slidesSession.url}
-                    title={slidesSession.name}
-                    className="block h-full w-full border-0 bg-white"
-                    allow="clipboard-read; clipboard-write; fullscreen"
-                  />
-                ) : (
-                  <OfficeHomePanel
-                    kind="slides"
-                    recent={slidesRecent}
-                    onOpenRecent={openRecentOfficePath}
-                    onOpenChat={openOfficeAppHomeInChat}
-                  />
-                )}
-              </div>
-            </AppWindow>
-          )}
+            }}
+            onOpenRecent={openRecentOfficePath}
+            onOpenChat={openOfficeAppHomeInChat}
+          />
 
           {/* ── TERMINAL WINDOW ─────────────────────────────────────── */}
           {terminalOpen && (
