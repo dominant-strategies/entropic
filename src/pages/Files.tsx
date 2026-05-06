@@ -32,7 +32,6 @@ import {
   CalendarClock,
   ListTodo,
   CreditCard,
-  Terminal,
   MoreHorizontal,
   Pin,
   PanelLeftClose,
@@ -108,6 +107,13 @@ import { FilePreviewWindow, type FilePreviewState } from "../desktop/finder/File
 import { CreateWorkspaceEntryModal } from "../desktop/finder/CreateWorkspaceEntryModal";
 import { DesktopDock } from "../desktop/dock/DesktopDock";
 import { DesktopContextMenus } from "../desktop/contextMenus/DesktopContextMenus";
+import {
+  DESKTOP_TERMINAL_EVENT,
+  TerminalApp,
+  type DesktopTerminalEventPayload,
+  type DesktopTerminalSnapshot,
+  type DesktopTerminalStatus,
+} from "../desktop/terminal/TerminalApp";
 import { WallpaperPicker } from "../desktop/wallpaper/WallpaperPicker";
 import {
   workspaceBrowserUrl,
@@ -216,25 +222,6 @@ type PersistedBrowserTab = {
   embeddedPreviewTitle: string | null;
 };
 
-type DesktopTerminalStatus = "disconnected" | "ready" | "exited" | "error";
-
-type DesktopTerminalSnapshot = {
-  session_id: string;
-  output: string;
-  status: Exclude<DesktopTerminalStatus, "disconnected">;
-  exit_code: number | null;
-  container_name: string;
-  workspace_path: string;
-};
-
-type DesktopTerminalEventPayload = {
-  session_id: string;
-  chunk: string;
-  stream: "stdout" | "stderr" | "system";
-  status: Exclude<DesktopTerminalStatus, "disconnected">;
-  exit_code: number | null;
-};
-
 const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md"]);
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
@@ -275,7 +262,6 @@ const BROWSER_DESKTOP_MIN_VIEWPORT_WIDTH = 1180;
 const BROWSER_DESKTOP_MIN_VIEWPORT_HEIGHT = 760;
 const BROWSER_DESKTOP_VIEWPORT_SCALE = 1.08;
 const EMBEDDED_PREVIEW_FRAME_INSET = 8;
-const DESKTOP_TERMINAL_EVENT = "desktop-terminal-output";
 const PANEL_FALLBACK = (
   <div className="p-4 text-xs text-[var(--text-tertiary)]">Loading…</div>
 );
@@ -1877,24 +1863,6 @@ export function Files({
     browserSnapshot?.title ||
     browserSnapshot?.url ||
     browserCurrentUrl;
-  const terminalStatusLabel = terminalBootstrapping
-    ? "Connecting"
-    : terminalStatus === "ready"
-      ? "Live"
-      : terminalStatus === "exited"
-        ? terminalExitCode === null
-          ? "Exited"
-          : `Exited (${terminalExitCode})`
-        : terminalStatus === "error"
-          ? "Error"
-          : "Idle";
-  const terminalStatusTone = terminalBootstrapping
-    ? "#f59e0b"
-    : terminalStatus === "ready"
-      ? "#22c55e"
-      : terminalStatus === "error"
-        ? "#ef4444"
-        : "rgba(148,163,184,0.95)";
   function buildActiveBrowserTabState(base?: BrowserTabState | null): BrowserTabState {
     return {
       id: base?.id ?? activeBrowserTabId ?? makeBrowserTabId(),
@@ -4842,12 +4810,19 @@ export function Files({
 
           {/* ── TERMINAL WINDOW ─────────────────────────────────────── */}
           {terminalOpen && (
-            <AppWindow
-              title="Terminal"
-              icon={Terminal}
+            <TerminalApp
               position={terminalPos}
               size={terminalSize}
               zIndex={getWindowZ(windowZ, "terminal")}
+              sessionId={terminalSessionId}
+              output={terminalOutput}
+              input={terminalInput}
+              status={terminalStatus}
+              exitCode={terminalExitCode}
+              error={terminalError}
+              bootstrapping={terminalBootstrapping}
+              outputRef={terminalOutputRef}
+              onInputChange={setTerminalInput}
               onClose={() => { void closeTerminalWindow(); }}
               onFocus={() => focusWindow("terminal")}
               onDragStart={(e) =>
@@ -4866,95 +4841,10 @@ export function Files({
                   { w: 680, h: 360 },
                 )
               }
-            >
-              <div className="h-full flex flex-col bg-[#060816] text-[#e5e7eb]">
-                <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-white/10 bg-[#0b1020]">
-                  <div className="min-w-0 flex items-center gap-3">
-                    <div
-                      className="inline-flex items-center gap-2 rounded-full px-2.5 py-1 text-[11px] font-medium"
-                      style={{ background: "rgba(255,255,255,0.06)", color: "#f8fafc" }}
-                    >
-                      <span className="h-2 w-2 rounded-full" style={{ background: terminalStatusTone }} />
-                      {terminalStatusLabel}
-                    </div>
-                    <span className="truncate text-[11px] text-slate-400">
-                      OpenClaw runtime shell in `/data/workspace`
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => { void clearTerminalBuffer(); }}
-                      className="h-8 px-3 rounded-lg border border-white/10 bg-white/5 text-xs font-medium text-slate-200 hover:bg-white/10"
-                    >
-                      Clear
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { void restartTerminalSession(); }}
-                      className="h-8 px-3 rounded-lg border border-white/10 bg-white/5 text-xs font-medium text-slate-200 hover:bg-white/10"
-                    >
-                      Restart
-                    </button>
-                  </div>
-                </div>
-                <div
-                  ref={terminalOutputRef}
-                  className="flex-1 overflow-auto px-4 py-3 font-mono text-[12px] leading-6 select-text"
-                >
-                  {terminalOutput ? (
-                    <pre className="whitespace-pre-wrap break-words text-[#e5e7eb]">{terminalOutput}</pre>
-                  ) : (
-                    <div className="text-[12px] text-slate-500">
-                      {terminalBootstrapping
-                        ? "Starting runtime shell..."
-                        : "Run commands inside the OpenClaw container workspace."}
-                    </div>
-                  )}
-                </div>
-                <div className="border-t border-white/10 bg-[#0b1020] px-4 py-3">
-                  {terminalError && (
-                    <div className="mb-2 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-[11px] text-red-100">
-                      {terminalError}
-                    </div>
-                  )}
-                  <div className="flex items-start gap-3 rounded-2xl border border-white/10 bg-black/25 px-3 py-3">
-                    <span className="pt-1 font-mono text-sm text-emerald-400">$</span>
-                    <textarea
-                      value={terminalInput}
-                      onChange={(e) => setTerminalInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          void submitTerminalInput();
-                        }
-                      }}
-                      disabled={terminalBootstrapping || terminalStatus !== "ready" || !terminalSessionId}
-                      placeholder={
-                        terminalBootstrapping
-                          ? "Starting shell…"
-                          : terminalStatus === "ready"
-                            ? "Enter a command"
-                            : "Restart the session to run more commands"
-                      }
-                      className="min-h-[78px] flex-1 resize-none bg-transparent font-mono text-[13px] leading-6 text-[#f8fafc] outline-none placeholder:text-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => { void submitTerminalInput(); }}
-                      disabled={terminalBootstrapping || terminalStatus !== "ready" || !terminalSessionId || !terminalInput.trim()}
-                      className="mt-1 h-9 px-4 rounded-xl bg-emerald-500 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      Run
-                    </button>
-                  </div>
-                  <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-slate-500">
-                    <span>`Enter` runs the command. `Shift+Enter` adds a new line.</span>
-                    <span>This shell runs inside the sandbox container, not on your host.</span>
-                  </div>
-                </div>
-              </div>
-            </AppWindow>
+              onClear={() => { void clearTerminalBuffer(); }}
+              onRestart={() => { void restartTerminalSession(); }}
+              onSubmit={() => { void submitTerminalInput(); }}
+            />
           )}
 
           {/* ── PLUGINS WINDOW ───────────────────────────────────────── */}
