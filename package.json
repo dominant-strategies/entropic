@@ -9,6 +9,7 @@
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
     "test:desktop-actions": "node scripts/test-desktop-actions.mjs",
+    "test:chat-office-routing": "node scripts/test-chat-office-routing.mjs",
     "test:voice-actions": "node scripts/test-voice-actions.mjs",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml --no-default-features",
     "preview": "vite preview",

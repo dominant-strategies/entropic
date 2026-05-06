@@ -9349,7 +9349,7 @@ fn build_tools_markdown(capabilities: &[CapabilityState]) -> String {
         "- After creating an Office file, include its workspace path such as `/data/workspace/sales-plan.xlsx` or the relative `sales-plan.xlsx`; Entropic renders these as desktop links that open in the Office viewer.\n",
     );
     body.push_str(
-        "- To ask the Entropic desktop to open a created file immediately, run `entropic-office desktop open /data/workspace/file.xlsx`. Entropic validates the queued workspace-relative request before opening it; the sandbox bridge only accepts low-risk file/folder/window actions.\n",
+        "- To ask the Entropic desktop to open a created file immediately, run `entropic-office desktop open /data/workspace/file.xlsx` in the same successful `exec` command that creates or edits the file. Entropic validates the queued workspace-relative request before opening it; the sandbox bridge only accepts low-risk file/folder/window actions.\n",
     );
     body
 }
