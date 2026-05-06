@@ -12,7 +12,18 @@ type VoiceState = "idle" | "listening" | "transcribing" | "thinking" | "confirmi
 
 type VoiceProviderProps = {
   audioUnderstandingModel: string;
+  desktopContext?: VoiceDesktopContext;
   dispatchAction: (action: DesktopAction) => Promise<void>;
+};
+
+export type VoiceDesktopContext = {
+  focusedWindow: WindowKey | null;
+  openWindows: WindowKey[];
+  finderPath: string;
+  selectedWorkspaceFile: string | null;
+  browser: { url: string; title: string | null } | null;
+  office: { appKind: "sheets" | "docs" | "slides"; path: string | null; name: string | null } | null;
+  integrations: string;
 };
 
 const WINDOW_ALIASES: Record<string, WindowKey> = {
@@ -111,8 +122,32 @@ function previewForAction(action: DesktopAction): { message: string; confirmLabe
   }
 }
 
+function formatVoiceTaskPrompt(prompt: string, context?: VoiceDesktopContext): string {
+  if (!context) return prompt;
+  const lines = [
+    `Voice command: ${prompt}`,
+    "",
+    "Desktop context:",
+    `- Focused window: ${context.focusedWindow || "none"}`,
+    `- Open windows: ${context.openWindows.length > 0 ? context.openWindows.join(", ") : "none"}`,
+    `- Finder folder: ${context.finderPath || "/"}`,
+    `- Selected workspace file: ${context.selectedWorkspaceFile || "none"}`,
+    `- Browser: ${context.browser ? `${context.browser.title || "Untitled"} (${context.browser.url})` : "closed"}`,
+    `- Office: ${
+      context.office
+        ? `${context.office.appKind}${context.office.path ? `: ${context.office.path}` : ""}`
+        : "closed"
+    }`,
+    `- Integrations: ${context.integrations}`,
+    "",
+    "Use the desktop context if it is relevant. Ask for confirmation before destructive actions or external side effects.",
+  ];
+  return lines.join("\n");
+}
+
 export function VoiceProvider({
   audioUnderstandingModel,
+  desktopContext,
   dispatchAction,
 }: VoiceProviderProps) {
   const [state, setState] = useState<VoiceState>("idle");
@@ -145,7 +180,13 @@ export function VoiceProvider({
     setMessage("Transcribing voice command...");
     try {
       const transcript = await transcribeAudio([attachment]);
-      const action = validateDesktopAction(resolveVoiceAction(transcript));
+      let action = validateDesktopAction(resolveVoiceAction(transcript));
+      if (action.type === "new_chat_task") {
+        action = {
+          ...action,
+          prompt: formatVoiceTaskPrompt(action.prompt, desktopContext),
+        };
+      }
       const preview = previewForAction(action);
       if (preview) {
         setPendingAction(action);

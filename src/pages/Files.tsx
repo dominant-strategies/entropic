@@ -108,7 +108,7 @@ import {
   type OfficeAppSession,
   type OfficeRecentEntry,
 } from "../desktop/office/OfficeApps";
-import { VoiceProvider } from "../desktop/voice/VoiceProvider";
+import { VoiceProvider, type VoiceDesktopContext } from "../desktop/voice/VoiceProvider";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -4281,6 +4281,51 @@ export function Files({
     desktopBounds.height,
   ]);
 
+  const voiceOpenWindows: WindowKey[] = [];
+  if (finderOpen) voiceOpenWindows.push("finder");
+  if (chatOpen) voiceOpenWindows.push("chat");
+  if (browserOpen) voiceOpenWindows.push("browser");
+  if (terminalOpen) voiceOpenWindows.push("terminal");
+  if (sheetsOpen) voiceOpenWindows.push("sheets");
+  if (docsOpen) voiceOpenWindows.push("docs");
+  if (slidesOpen) voiceOpenWindows.push("slides");
+  if (pluginsOpen) voiceOpenWindows.push("plugins");
+  if (skillsOpen) voiceOpenWindows.push("skills");
+  if (channelsOpen) voiceOpenWindows.push("channels");
+  if (tasksOpen) voiceOpenWindows.push("tasks");
+  if (jobsOpen) voiceOpenWindows.push("jobs");
+  if (logsOpen) voiceOpenWindows.push("logs");
+  if (billingEnabled && billingOpen) voiceOpenWindows.push("billing");
+  if (settingsOpen) voiceOpenWindows.push("settings");
+  if (preview) voiceOpenWindows.push("preview");
+
+  const focusedVoiceWindow = voiceOpenWindows.reduce<WindowKey | null>((current, key) => {
+    if (!current) return key;
+    return getWindowZ(windowZ, key) > getWindowZ(windowZ, current) ? key : current;
+  }, null);
+  const activeOffice = [
+    { appKind: "sheets" as const, open: sheetsOpen, session: sheetsSession },
+    { appKind: "docs" as const, open: docsOpen, session: docsSession },
+    { appKind: "slides" as const, open: slidesOpen, session: slidesSession },
+  ]
+    .filter((entry) => entry.open)
+    .sort((a, b) => getWindowZ(windowZ, b.appKind) - getWindowZ(windowZ, a.appKind))[0] ?? null;
+  const voiceDesktopContext: VoiceDesktopContext = {
+    focusedWindow: focusedVoiceWindow,
+    openWindows: voiceOpenWindows,
+    finderPath: currentPath || "/",
+    selectedWorkspaceFile: selected && !selected.startsWith("__") ? selected : null,
+    browser: browserOpen ? { url: browserCurrentUrl, title: browserTitle || null } : null,
+    office: activeOffice
+      ? {
+          appKind: activeOffice.appKind,
+          path: activeOffice.session?.path ?? null,
+          name: activeOffice.session?.name ?? null,
+        }
+      : null,
+    integrations: integrationsMissing ? "missing configuration" : integrationsSyncing ? "syncing" : "ready",
+  };
+
   // ═══════════════════════════════════════════════════════════════════
   // RENDER
   // ═══════════════════════════════════════════════════════════════════
@@ -5798,6 +5843,7 @@ export function Files({
 
           <VoiceProvider
             audioUnderstandingModel={audioUnderstandingModel}
+            desktopContext={voiceDesktopContext}
             dispatchAction={runDesktopAction}
           />
 
