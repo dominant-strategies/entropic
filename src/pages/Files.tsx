@@ -94,6 +94,7 @@ import {
   type WindowSize,
 } from "../desktop/windowManager";
 import { AppWindow } from "../desktop/AppWindow";
+import { BrowserApp } from "../desktop/browser/BrowserApp";
 import {
   DESKTOP_ACTION_EVENT,
   dispatchDesktopAction,
@@ -5144,14 +5145,36 @@ export function Files({
             </AppWindow>
           )}
 
-          {/* ── BROWSER WINDOW ───────────────────────────────────────── */}
           {browserOpen && (
-            <AppWindow
-              title="Browser"
-              icon={Globe}
+            <BrowserApp
               position={browserPos}
               size={browserSize}
               zIndex={getWindowZ(windowZ, "browser")}
+              tabs={browserTabs}
+              activeTabId={activeBrowserTabId}
+              urlInput={browserUrlInput}
+              canGoBack={browserCanGoBack}
+              canGoForward={browserCanGoForward}
+              loading={browserLoading}
+              loadError={browserLoadError}
+              loadErrorSummary={browserLoadError ? firstMeaningfulLine(browserLoadError) : null}
+              usingEmbeddedPreview={browserUsingEmbeddedPreview}
+              embeddedPreviewCovered={browserEmbeddedPreviewCovered}
+              snapshotImage={browserSnapshotImage}
+              title={browserTitle}
+              liveConnected={browserLiveConnected}
+              hasRenderableImage={browserHasRenderableImage}
+              liveStatePresent={Boolean(browserLiveState)}
+              snapshotPresent={Boolean(browserSnapshot)}
+              snapshotWidth={browserSnapshot?.screenshot_width ?? 0}
+              snapshotHeight={browserSnapshot?.screenshot_height ?? 0}
+              viewportWidth={browserViewportWidth}
+              viewportHeight={browserViewportHeight}
+              interactiveElements={browserSnapshot?.interactive_elements ?? []}
+              clickingId={browserClickingId}
+              viewportRef={browserViewportRef}
+              liveImageRef={browserLiveImageRef}
+              labelTab={browserTabLabel}
               onClose={() => { void closeBrowserWindow(); }}
               onFocus={() => focusWindow("browser")}
               onDragStart={(e) =>
@@ -5170,274 +5193,30 @@ export function Files({
                   { w: 640, h: 420 },
                 )
               }
-            >
-              <div className="h-full flex flex-col bg-[var(--bg-card)]">
-                {browserTabs.length > 1 && (
-                  <div className="flex items-center gap-2 px-2 py-2 border-b border-[var(--border-subtle)] bg-[var(--bg-secondary)]">
-                    <div className="flex-1 min-w-0 flex items-center gap-2 overflow-x-auto">
-                      {browserTabs.map((tab) => {
-                        const isActive = tab.id === activeBrowserTabId;
-                        return (
-                          <button
-                            key={tab.id}
-                            type="button"
-                            onClick={() => selectBrowserTab(tab.id)}
-                            className={`group min-w-0 max-w-[240px] h-9 px-3 rounded-xl border flex items-center gap-2 text-sm transition-colors ${
-                              isActive
-                                ? "bg-[var(--bg-card)] text-[var(--text-primary)] shadow-sm"
-                                : "bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
-                            }`}
-                            style={{ borderColor: isActive ? "var(--border-default)" : "var(--border-subtle)" }}
-                            title={browserTabLabel(tab)}
-                          >
-                            <Globe className="w-3.5 h-3.5 shrink-0" />
-                            <span className="min-w-0 flex-1 truncate text-left">
-                              {browserTabLabel(tab)}
-                            </span>
-                            <span
-                              role="button"
-                              tabIndex={-1}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void closeBrowserTab(tab.id);
-                              }}
-                              className="shrink-0 rounded-md p-0.5 text-[var(--text-tertiary)] hover:bg-[var(--border-subtle)] hover:text-[var(--text-primary)]"
-                              aria-label={`Close ${browserTabLabel(tab)}`}
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-                <div className="px-3 py-2 border-b border-[var(--border-subtle)] bg-[var(--system-gray-6)]/70">
-                  <form
-                    className="flex items-center gap-2"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void navigateBrowser(browserUrlInput);
-                    }}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => { void goBrowserBack(); }}
-                      disabled={!browserCanGoBack || browserLoading}
-                      className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] disabled:opacity-40"
-                      title="Back"
-                    >
-                      <ChevronLeft className="w-4 h-4 mx-auto" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { void goBrowserForward(); }}
-                      disabled={!browserCanGoForward || browserLoading}
-                      className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] disabled:opacity-40"
-                      title="Forward"
-                    >
-                      <ChevronRight className="w-4 h-4 mx-auto" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { void reloadBrowser(); }}
-                      className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)]"
-                      title="Reload"
-                    >
-                      {browserLoading ? (
-                        <Loader2 className="w-4 h-4 mx-auto animate-spin" />
-                      ) : (
-                        <ArrowUp className="w-4 h-4 mx-auto rotate-90" />
-                      )}
-                    </button>
-                    <input
-                      type="text"
-                      value={browserUrlInput}
-                      onChange={(e) => setBrowserUrlInput(e.target.value)}
-                      className="flex-1 h-8 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-sm outline-none"
-                      placeholder="Enter URL"
-                    />
-                    <button
-                      type="submit"
-                      className="h-8 px-3 rounded-lg bg-[var(--system-blue)] text-white text-sm font-semibold"
-                    >
-                      Go
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => openBrowserExternally(browserUrlInput)}
-                      className="h-8 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-sm font-medium text-[var(--text-primary)]"
-                    >
-                      Open
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => createBrowserTab()}
-                      className="h-8 w-8 shrink-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                      title="New tab"
-                      aria-label="New tab"
-                    >
-                      <Plus className="w-4 h-4 mx-auto" />
-                    </button>
-                  </form>
-                </div>
-                {browserLoadError && (
-                  <div className="px-3 py-3 border-b border-[var(--border-subtle)] bg-red-500/5">
-                    <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-semibold text-red-200">Browser unavailable</p>
-                          <p className="mt-1 text-xs leading-relaxed text-red-100/90 break-words">
-                            {firstMeaningfulLine(browserLoadError)}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => { void retryCurrentBrowserTarget(); }}
-                            className="h-8 px-3 rounded-lg bg-red-100 text-[11px] font-semibold text-red-900"
-                          >
-                            Retry
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => { void openBrowserExternally(browserUrlInput); }}
-                            className="h-8 px-3 rounded-lg border border-white/15 bg-black/10 text-[11px] font-medium text-white/90"
-                          >
-                            Open externally
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setBrowserLoadError(null)}
-                            className="h-8 px-3 rounded-lg border border-white/15 bg-transparent text-[11px] font-medium text-white/70"
-                          >
-                            Dismiss
-                          </button>
-                        </div>
-                      </div>
-                      {browserLoadError.includes("\n") && (
-                        <details className="mt-3">
-                          <summary className="cursor-pointer text-[11px] font-medium text-red-100/80">
-                            Error details
-                          </summary>
-                          <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-black/20 px-3 py-2 text-[11px] leading-relaxed text-red-50 select-text">
-                            {browserLoadError}
-                          </pre>
-                        </details>
-                      )}
-                    </div>
-                  </div>
-                )}
-                <div className="relative flex-1 bg-[var(--bg-card)]">
-                  {browserLoading && !browserSnapshot && !browserLiveState && !browserUsingEmbeddedPreview ? (
-                    <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
-                      <div className="flex items-center gap-2">
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Loading browser session...
-                      </div>
-                    </div>
-                  ) : (browserUsingEmbeddedPreview || browserSnapshot || browserLiveState) ? (
-                    <div className="h-full flex flex-col">
-                      <div
-                        ref={browserViewportRef}
-                        className={browserUsingEmbeddedPreview
-                          ? "flex-1 min-h-0 overflow-hidden bg-[var(--bg-card)]"
-                          : browserLiveConnected
-                          ? "flex-1 min-h-0 overflow-hidden bg-[#0b0b0c] flex items-center justify-center"
-                          : "flex-1 min-h-0 overflow-auto bg-[#f5f5f5]"}
-                      >
-                        {browserUsingEmbeddedPreview ? (
-                          <div className="relative w-full h-full overflow-hidden bg-[var(--bg-card)]">
-                            {browserEmbeddedPreviewCovered && browserSnapshotImage ? (
-                              <img
-                                src={browserSnapshotImage}
-                                alt={browserTitle}
-                                className="block h-full w-full object-contain select-none"
-                                draggable={false}
-                                decoding="async"
-                              />
-                            ) : browserLoading ? (
-                              <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
-                                Local preview is loading...
-                              </div>
-                            ) : null}
-                          </div>
-                        ) : browserHasRenderableImage ? (
-                          <div
-                            className={browserLiveConnected
-                              ? "relative w-full h-full flex items-center justify-center"
-                              : "relative w-full"}
-                          >
-                            <img
-                              ref={browserLiveImageRef}
-                              src={browserSnapshotImage || undefined}
-                              alt={browserTitle}
-                              className={browserLiveConnected
-                                ? "block max-w-full max-h-full object-contain select-none"
-                                : "w-full h-auto block cursor-pointer"}
-                              draggable={false}
-                              decoding="async"
-                              tabIndex={browserLiveConnected ? 0 : -1}
-                              onFocus={() => sendBrowserLiveMessage({ type: "focus" })}
-                              onMouseMove={handleBrowserViewportMouseMove}
-                              onMouseDown={handleBrowserViewportMouseDown}
-                              onMouseUp={handleBrowserViewportMouseUp}
-                              onClick={(event) => {
-                                if (!browserLiveConnected) {
-                                  void clickBrowserSnapshotAtPoint(event.clientX, event.clientY);
-                                }
-                              }}
-                              onWheel={handleBrowserViewportWheel}
-                              onKeyDown={handleBrowserViewportKeyDown}
-                              onPaste={handleBrowserViewportPaste}
-                              onCopy={handleBrowserViewportCopy}
-                              onContextMenu={(e) => e.preventDefault()}
-                            />
-                            {!browserLiveConnected && (
-                              <div className="pointer-events-none absolute bottom-3 left-3 rounded-full bg-black/70 px-3 py-1.5 text-[11px] font-medium text-white shadow-lg">
-                                Snapshot mode: click anywhere on the page if a button is not highlighted.
-                              </div>
-                            )}
-                            {!browserLiveConnected && (browserSnapshot?.interactive_elements ?? []).map((element) => (
-                              <button
-                                key={element.id}
-                                type="button"
-                                title={element.label || element.tag}
-                                onClick={() => { void clickBrowserElement(element); }}
-                                disabled={Boolean(browserClickingId) || browserLoading}
-                                className="absolute rounded border border-sky-500/80 bg-sky-400/10 hover:bg-sky-400/20 transition-colors disabled:cursor-wait"
-                                style={{
-                                  left: `${(element.x / Math.max(browserSnapshot?.screenshot_width ?? browserViewportWidth, 1)) * 100}%`,
-                                  top: `${(element.y / Math.max(browserSnapshot?.screenshot_height ?? browserViewportHeight, 1)) * 100}%`,
-                                  width: `${(element.width / Math.max(browserSnapshot?.screenshot_width ?? browserViewportWidth, 1)) * 100}%`,
-                                  height: `${(element.height / Math.max(browserSnapshot?.screenshot_height ?? browserViewportHeight, 1)) * 100}%`,
-                                }}
-                              >
-                                <span className="absolute left-0 top-0 -translate-y-full rounded bg-sky-600 px-1.5 py-0.5 text-[10px] font-medium text-white shadow-sm max-w-[240px] truncate">
-                                  {element.label || element.tag}
-                                </span>
-                              </button>
-                            ))}
-                          </div>
-                        ) : browserLiveConnected ? (
-                          <div className="h-full flex items-center justify-center text-sm text-white/60">
-                            Waiting for live browser frame...
-                          </div>
-                        ) : (
-                          <div className="h-full flex items-center justify-center text-sm text-[var(--text-secondary)]">
-                            No browser screenshot available.
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
-                      Enter a URL to start a browser session.
-                    </div>
-                  )}
-                </div>
-              </div>
-            </AppWindow>
+              onSelectTab={selectBrowserTab}
+              onCloseTab={(tabId) => { void closeBrowserTab(tabId); }}
+              onUrlInputChange={setBrowserUrlInput}
+              onNavigate={(target) => { void navigateBrowser(target); }}
+              onBack={() => { void goBrowserBack(); }}
+              onForward={() => { void goBrowserForward(); }}
+              onReload={() => { void reloadBrowser(); }}
+              onOpenExternal={(target) => { void openBrowserExternally(target); }}
+              onCreateTab={() => createBrowserTab()}
+              onRetry={() => { void retryCurrentBrowserTarget(); }}
+              onDismissError={() => setBrowserLoadError(null)}
+              onLiveFocus={() => sendBrowserLiveMessage({ type: "focus" })}
+              onViewportMouseMove={handleBrowserViewportMouseMove}
+              onViewportMouseDown={handleBrowserViewportMouseDown}
+              onViewportMouseUp={handleBrowserViewportMouseUp}
+              onViewportClick={(clientX, clientY) => {
+                void clickBrowserSnapshotAtPoint(clientX, clientY);
+              }}
+              onViewportWheel={handleBrowserViewportWheel}
+              onViewportKeyDown={handleBrowserViewportKeyDown}
+              onViewportPaste={handleBrowserViewportPaste}
+              onViewportCopy={handleBrowserViewportCopy}
+              onElementClick={(element) => { void clickBrowserElement(element); }}
+            />
           )}
 
           <OfficeApps
