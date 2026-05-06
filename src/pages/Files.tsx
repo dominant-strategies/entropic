@@ -78,6 +78,20 @@ import {
 } from "../lib/nativePreview";
 import { hostedFeaturesEnabled } from "../lib/buildProfile";
 import { createOnlyOfficeSession } from "../lib/office";
+import {
+  DEFAULT_WINDOW_Z,
+  clampWindowFrame,
+  startDesktopWindowDrag,
+  startDesktopWindowResize,
+  useWindowZStack,
+  windowRectsIntersect,
+  type WindowDragState,
+  type WindowPoint,
+  type WindowRect,
+  type WindowResizeDirection,
+  type WindowResizeState,
+  type WindowSize,
+} from "../desktop/windowManager";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -188,22 +202,6 @@ type DesktopTerminalEventPayload = {
   exit_code: number | null;
 };
 
-const DEFAULT_WINDOW_Z: Record<string, number> = {
-  finder: 60,
-  chat: 61,
-  browser: 62,
-  terminal: 63,
-  plugins: 64,
-  skills: 65,
-  channels: 66,
-  tasks: 67,
-  jobs: 68,
-  logs: 69,
-  billing: 70,
-  settings: 71,
-  preview: 80,
-};
-
 const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md"]);
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
@@ -257,8 +255,6 @@ type PreviewState =
   | { kind: "image"; name: string; path: string; dataUrl: string }
   | { kind: "binary"; name: string; path: string; size: number };
 
-type WindowResizeDirection = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
-type WindowResizeState = { sx: number; sy: number; ox: number; oy: number; ow: number; oh: number };
 type ChatWorkspaceReference = {
   key: string;
   path: string;
@@ -272,9 +268,6 @@ type DesktopHandoff = {
   action: "open" | "preview" | "browser";
   looksLikeFile?: boolean;
 };
-type WindowPoint = { x: number; y: number };
-type WindowSize = { w: number; h: number };
-type WindowRect = { x: number; y: number; w: number; h: number };
 type DesktopDropTarget = string | null;
 type NativeDragDropPayload = {
   paths?: string[] | null;
@@ -482,29 +475,6 @@ function sortDesktopChatSessions(list: SharedChatSession[]): SharedChatSession[]
     const bUpdated = typeof b.updatedAt === "number" ? b.updatedAt : 0;
     return bUpdated - aUpdated;
   });
-}
-
-function clampWindowFrame(
-  bounds: { width: number; height: number },
-  position: WindowPoint,
-  size: WindowSize,
-  minSize: WindowSize,
-): { position: WindowPoint; size: WindowSize } {
-  const maxWidth = Math.max(minSize.w, Math.floor(bounds.width - 12));
-  const maxHeight = Math.max(minSize.h, Math.floor(bounds.height - 12));
-  const nextSize = {
-    w: Math.min(Math.max(size.w, minSize.w), maxWidth),
-    h: Math.min(Math.max(size.h, minSize.h), maxHeight),
-  };
-  const maxX = Math.max(0, Math.floor(bounds.width - nextSize.w));
-  const maxY = Math.max(0, Math.floor(bounds.height - nextSize.h));
-  return {
-    position: {
-      x: Math.min(Math.max(0, position.x), maxX),
-      y: Math.min(Math.max(0, position.y), maxY),
-    },
-    size: nextSize,
-  };
 }
 
 function workspaceEntriesEqual(a: WorkspaceFileEntry[], b: WorkspaceFileEntry[]): boolean {
@@ -888,15 +858,6 @@ function workspacePathParent(path: string): string {
   return parts.join("/");
 }
 
-function windowRectsIntersect(a: WindowRect, b: WindowRect): boolean {
-  return (
-    a.x < b.x + b.w &&
-    a.x + a.w > b.x &&
-    a.y < b.y + b.h &&
-    a.y + a.h > b.y
-  );
-}
-
 function extractChatWorkspaceReferences(content: string): ChatWorkspaceReference[] {
   const refs: ChatWorkspaceReference[] = [];
   const seen = new Set<string>();
@@ -1181,23 +1142,23 @@ export function Files({
   // Finder drag
   const [finderPos, setFinderPos] = useState({ x: 30, y: 20 });
   const [finderSize, setFinderSize] = useState({ w: 680, h: 460 });
-  const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const dragRef = useRef<WindowDragState | null>(null);
 
   // Chat window drag
   const [chatPos, setChatPos] = useState({ x: 120, y: 40 });
   const [chatSize, setChatSize] = useState({ w: 860, h: 560 });
   const [chatNavCollapsed, setChatNavCollapsed] = useState(false);
   const chatMinSize = chatNavCollapsed ? CHAT_WINDOW_MIN_SIZE_COLLAPSED : CHAT_WINDOW_MIN_SIZE_EXPANDED;
-  const chatDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const chatDragRef = useRef<WindowDragState | null>(null);
   const chatResizeRef = useRef<WindowResizeState | null>(null);
   const [desktopBounds, setDesktopBounds] = useState({ width: 0, height: 0 });
   const [browserPos, setBrowserPos] = useState({ x: 108, y: 40 });
   const [browserSize, setBrowserSize] = useState({ w: 1180, h: 760 });
-  const browserDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const browserDragRef = useRef<WindowDragState | null>(null);
   const browserResizeRef = useRef<WindowResizeState | null>(null);
   const [terminalPos, setTerminalPos] = useState({ x: 156, y: 70 });
   const [terminalSize, setTerminalSize] = useState({ w: 920, h: 560 });
-  const terminalDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const terminalDragRef = useRef<WindowDragState | null>(null);
   const terminalResizeRef = useRef<WindowResizeState | null>(null);
 
   // Plugin windows drag
@@ -1217,17 +1178,16 @@ export function Files({
   const [logsSize] = useState({ w: 560, h: 420 });
   const [billingSize] = useState({ w: 520, h: 520 });
   const [settingsSize] = useState({ w: 740, h: 560 });
-  const pluginsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const skillsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const pluginsDragRef = useRef<WindowDragState | null>(null);
+  const skillsDragRef = useRef<WindowDragState | null>(null);
   const skillsResizeRef = useRef<WindowResizeState | null>(null);
-  const channelsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const tasksDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const jobsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const logsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const billingDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const settingsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const zCounter = useRef(Math.max(...Object.values(DEFAULT_WINDOW_Z)));
-  const [windowZ, setWindowZ] = useState<Record<string, number>>(DEFAULT_WINDOW_Z);
+  const channelsDragRef = useRef<WindowDragState | null>(null);
+  const tasksDragRef = useRef<WindowDragState | null>(null);
+  const jobsDragRef = useRef<WindowDragState | null>(null);
+  const logsDragRef = useRef<WindowDragState | null>(null);
+  const billingDragRef = useRef<WindowDragState | null>(null);
+  const settingsDragRef = useRef<WindowDragState | null>(null);
+  const { windowZ, setWindowZ, zCounter, focusWindow } = useWindowZStack();
 
   // File browser
   const [entries, setEntries] = useState<WorkspaceFileEntry[]>([]);
@@ -1858,43 +1818,23 @@ export function Files({
 
   // ── Finder drag ─────────────────────────────────────────────────────
 
-  function focusWindow(id: string) {
-    setWindowZ((prev) => {
-      const nextZ = zCounter.current + 1;
-      zCounter.current = nextZ;
-      return { ...prev, [id]: nextZ };
-    });
-  }
-
   function startWindowDrag(
     e: ReactMouseEvent<HTMLElement>,
-    ref: React.MutableRefObject<{ sx: number; sy: number; ox: number; oy: number } | null>,
-    pos: { x: number; y: number },
-    size: { w: number; h: number },
-    setPos: (next: { x: number; y: number }) => void,
+    ref: React.MutableRefObject<WindowDragState | null>,
+    pos: WindowPoint,
+    size: WindowSize,
+    setPos: (next: WindowPoint) => void,
     id: string
   ) {
-    if ((e.target as HTMLElement).closest("button")) return;
-    e.preventDefault();
-    focusWindow(id);
-    ref.current = { sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y };
-    function onMove(ev: globalThis.MouseEvent) {
-      if (!ref.current) return;
-      const bounds = containerRef.current?.getBoundingClientRect();
-      const maxX = bounds ? Math.max(0, Math.floor(bounds.width - size.w)) : Number.POSITIVE_INFINITY;
-      const maxY = bounds ? Math.max(0, Math.floor(bounds.height - size.h)) : Number.POSITIVE_INFINITY;
-      setPos({
-        x: Math.min(Math.max(0, ref.current.ox + ev.clientX - ref.current.sx), maxX),
-        y: Math.min(Math.max(0, ref.current.oy + ev.clientY - ref.current.sy), maxY),
-      });
-    }
-    function onUp() {
-      ref.current = null;
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    startDesktopWindowDrag(
+      e,
+      ref,
+      pos,
+      size,
+      setPos,
+      () => containerRef.current?.getBoundingClientRect(),
+      () => focusWindow(id),
+    );
   }
 
   function handleFinderDragStart(e: ReactMouseEvent<HTMLElement>) {
@@ -1909,63 +1849,25 @@ export function Files({
     e: ReactMouseEvent<HTMLElement>,
     direction: WindowResizeDirection,
     ref: React.MutableRefObject<WindowResizeState | null>,
-    pos: { x: number; y: number },
-    size: { w: number; h: number },
-    setPos: (next: { x: number; y: number }) => void,
-    setSize: (next: { w: number; h: number }) => void,
+    pos: WindowPoint,
+    size: WindowSize,
+    setPos: (next: WindowPoint) => void,
+    setSize: (next: WindowSize) => void,
     id: string,
-    minSize: { w: number; h: number },
+    minSize: WindowSize,
   ) {
-    e.preventDefault();
-    e.stopPropagation();
-    focusWindow(id);
-    ref.current = { sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y, ow: size.w, oh: size.h };
-    function onMove(ev: globalThis.MouseEvent) {
-      if (!ref.current) return;
-      const deltaX = ev.clientX - ref.current.sx;
-      const deltaY = ev.clientY - ref.current.sy;
-      const bounds = containerRef.current?.getBoundingClientRect();
-      const maxRight = bounds ? Math.floor(bounds.width - 12) : Number.POSITIVE_INFINITY;
-      const maxBottom = bounds ? Math.floor(bounds.height - 12) : Number.POSITIVE_INFINITY;
-      const originalLeft = ref.current.ox;
-      const originalTop = ref.current.oy;
-      const originalRight = ref.current.ox + ref.current.ow;
-      const originalBottom = ref.current.oy + ref.current.oh;
-
-      let nextLeft = originalLeft;
-      let nextTop = originalTop;
-      let nextRight = originalRight;
-      let nextBottom = originalBottom;
-
-      if (direction.includes("w")) {
-        nextLeft = Math.max(0, Math.min(originalLeft + deltaX, originalRight - minSize.w));
-      }
-      if (direction.includes("e")) {
-        nextRight = Math.max(
-          originalLeft + minSize.w,
-          Math.min(originalRight + deltaX, maxRight),
-        );
-      }
-      if (direction.includes("n")) {
-        nextTop = Math.max(0, Math.min(originalTop + deltaY, originalBottom - minSize.h));
-      }
-      if (direction.includes("s")) {
-        nextBottom = Math.max(
-          originalTop + minSize.h,
-          Math.min(originalBottom + deltaY, maxBottom),
-        );
-      }
-
-      setPos({ x: nextLeft, y: nextTop });
-      setSize({ w: nextRight - nextLeft, h: nextBottom - nextTop });
-    }
-    function onUp() {
-      ref.current = null;
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    startDesktopWindowResize(
+      e,
+      direction,
+      ref,
+      pos,
+      size,
+      setPos,
+      setSize,
+      minSize,
+      () => containerRef.current?.getBoundingClientRect(),
+      () => focusWindow(id),
+    );
   }
 
   function applyTerminalSnapshot(snapshot: DesktopTerminalSnapshot) {
