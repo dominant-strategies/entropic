@@ -77,6 +77,7 @@ import {
   syncEmbeddedPreviewWebview,
 } from "../lib/nativePreview";
 import { hostedFeaturesEnabled } from "../lib/buildProfile";
+import { createOnlyOfficeSession } from "../lib/office";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -207,7 +208,9 @@ const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.m
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
 const HTML_EXTS = new Set(["html", "htm"]);
+const ONLYOFFICE_BROWSER_EXTS = new Set(["docx", "xlsx", "pptx"]);
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
+const DESKTOP_HANDOFF_EVENT = "entropic-desktop-handoff";
 const DESKTOP_SESSION_STORAGE_KEY = "entropic.desktop.session.v1";
 const DEFAULT_DESKTOP_CHAT_TITLE = "New chat";
 const DESKTOP_WORKSPACE_PATH = "Desktop";
@@ -843,6 +846,16 @@ function workspaceBrowserUrl(path: string): string {
   return normalized
     ? `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace__/${normalized}`
     : `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace__/`;
+}
+
+function workspaceFileCanOpenInBrowser(path: string): boolean {
+  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
+  return HTML_EXTS.has(ext) || ONLYOFFICE_BROWSER_EXTS.has(ext);
+}
+
+function workspaceFileUsesOnlyOffice(path: string): boolean {
+  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
+  return ONLYOFFICE_BROWSER_EXTS.has(ext);
 }
 
 function trimChatWorkspaceToken(raw: string): string {
@@ -3250,8 +3263,7 @@ export function Files({
       navigateTo(entry.path);
       return;
     }
-    const ext = entry.name.split(".").pop()?.toLowerCase() || "";
-    if (HTML_EXTS.has(ext)) {
+    if (workspaceFileCanOpenInBrowser(entry.path)) {
       void openWorkspaceFileInBrowser(entry);
       return;
     }
@@ -3313,9 +3325,20 @@ export function Files({
 
   async function openWorkspaceFileInBrowser(entry: WorkspaceFileEntry) {
     if (entry.is_directory) return;
-    const ext = entry.name.split(".").pop()?.toLowerCase() || "";
-    if (!HTML_EXTS.has(ext)) return;
-    const targetUrl = workspaceBrowserUrl(entry.path);
+    if (!workspaceFileCanOpenInBrowser(entry.path)) return;
+    let targetUrl: string;
+    if (workspaceFileUsesOnlyOffice(entry.path)) {
+      try {
+        setError(null);
+        const session = await createOnlyOfficeSession(entry.path);
+        targetUrl = session.url;
+      } catch (e) {
+        setError(`Failed to start ONLYOFFICE: ${e instanceof Error ? e.message : String(e)}`);
+        return;
+      }
+    } else {
+      targetUrl = workspaceBrowserUrl(entry.path);
+    }
     if (!browserOpen) {
       setBrowserOpen(true);
     }
@@ -3423,6 +3446,14 @@ export function Files({
 
   useEffect(() => {
     void applyDesktopHandoff(consumeDesktopHandoff());
+    const handleDesktopHandoff = (event: Event) => {
+      const detail = (event as CustomEvent<DesktopHandoff>).detail;
+      void applyDesktopHandoff(detail ?? consumeDesktopHandoff());
+    };
+    window.addEventListener(DESKTOP_HANDOFF_EVENT, handleDesktopHandoff);
+    return () => {
+      window.removeEventListener(DESKTOP_HANDOFF_EVENT, handleDesktopHandoff);
+    };
   }, []);
 
   function openBrowserWindow(targetUrl = browserCurrentUrl) {
@@ -4375,7 +4406,7 @@ export function Files({
               {contextMenu.entry.is_directory && (
                 <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFolder(contextMenu.entry!.path); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" style={{ color: "#888" }} />New Folder Here</button>
               )}
-              {!contextMenu.entry.is_directory && HTML_EXTS.has(contextMenu.entry.name.split(".").pop()?.toLowerCase() || "") && (
+              {!contextMenu.entry.is_directory && workspaceFileCanOpenInBrowser(contextMenu.entry.path) && (
                 <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void openWorkspaceFileInBrowser(contextMenu.entry!); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" style={{ color: "#888" }} />Open in Browser</button>
               )}
               {!contextMenu.entry.is_directory && <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleView(contextMenu.entry!); setContextMenu(null); }}><Eye className="w-3.5 h-3.5" style={{ color: "#888" }} />Quick Look</button>}
