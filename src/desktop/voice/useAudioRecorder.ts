@@ -6,7 +6,25 @@ export type RecordedAudioAttachment = {
   mimeType: string;
   content: string;
   previewUrl: string;
+  capture: RecordedAudioCaptureStats;
 };
+
+export type RecordedAudioCaptureStats = {
+  durationMs: number;
+  speechSeen: boolean | null;
+  speechMs: number | null;
+  peakLevel: number | null;
+  autoStopTriggered: boolean;
+};
+
+const MIN_DETECTED_SPEECH_MS = 120;
+
+export function recordedAudioHasDetectedSpeech(attachment: RecordedAudioAttachment): boolean {
+  const { capture } = attachment;
+  if (capture.speechSeen === false) return false;
+  if (capture.speechMs !== null && capture.speechMs < MIN_DETECTED_SPEECH_MS) return false;
+  return true;
+}
 
 type UseAudioRecorderOptions = {
   maxBytes: number;
@@ -35,6 +53,8 @@ type SilenceDetectorState = AudioSilenceAutoStopOptions & {
   intervalId: number;
   startedAt: number;
   speechSeen: boolean;
+  speechMs: number;
+  speechFrameCount: number;
   silentSince: number | null;
   autoStopTriggered: boolean;
   noiseFloor: number;
@@ -176,6 +196,7 @@ export function useAudioRecorder({
   const pcmRecorderRef = useRef<PcmRecorderState | null>(null);
   const silenceDetectorRef = useRef<SilenceDetectorState | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const recordingStartedAtRef = useRef<number | null>(null);
 
   const isSupported =
     typeof navigator !== "undefined" &&
@@ -219,6 +240,8 @@ export function useAudioRecorder({
 
     if (level >= speechThreshold) {
       detector.speechSeen = true;
+      detector.speechFrameCount += 1;
+      detector.speechMs += detector.checkIntervalMs;
       detector.silentSince = null;
       if (!detector.speechLogged) {
         detector.speechLogged = true;
@@ -256,6 +279,29 @@ export function useAudioRecorder({
     }
   }
 
+  function captureRecordingStats(): RecordedAudioCaptureStats {
+    const now = Date.now();
+    const detector = silenceDetectorRef.current;
+    if (detector) {
+      return {
+        durationMs: now - detector.startedAt,
+        speechSeen: detector.speechSeen,
+        speechMs: detector.speechMs,
+        peakLevel: detector.peakLevel,
+        autoStopTriggered: detector.autoStopTriggered,
+      };
+    }
+
+    const startedAt = recordingStartedAtRef.current;
+    return {
+      durationMs: startedAt ? now - startedAt : 0,
+      speechSeen: null,
+      speechMs: null,
+      peakLevel: null,
+      autoStopTriggered: false,
+    };
+  }
+
   function cleanupSilenceDetector() {
     const detector = silenceDetectorRef.current;
     silenceDetectorRef.current = null;
@@ -289,6 +335,8 @@ export function useAudioRecorder({
         intervalId: 0,
         startedAt: Date.now(),
         speechSeen: false,
+        speechMs: 0,
+        speechFrameCount: 0,
         silentSince: null,
         autoStopTriggered: false,
         noiseFloor: 0.0015,
@@ -335,6 +383,7 @@ export function useAudioRecorder({
     }
 
     const audioContext = new AudioContextCtor();
+    recordingStartedAtRef.current = Date.now();
     const source = audioContext.createMediaStreamSource(stream);
     const processor = audioContext.createScriptProcessor(4096, 1, 1);
     const pcmRecorder: PcmRecorderState = {
@@ -371,9 +420,11 @@ export function useAudioRecorder({
   }
 
   async function finishPcmRecording() {
+    const capture = captureRecordingStats();
     const pcmRecorder = cleanupPcmRecorder();
     setIsRecording(false);
     stopStream();
+    recordingStartedAtRef.current = null;
 
     if (!pcmRecorder || pcmRecorder.totalSamples === 0) {
       onError("No audio was captured. Try again.");
@@ -396,6 +447,7 @@ export function useAudioRecorder({
       mimeType: "audio/wav",
       content: await blobToBase64(blob),
       previewUrl: URL.createObjectURL(blob),
+      capture,
     });
   }
 
@@ -445,6 +497,7 @@ export function useAudioRecorder({
       recorder.onerror = () => {
         setIsRecording(false);
         stopStream();
+        recordingStartedAtRef.current = null;
         chunksRef.current = [];
         recorderRef.current = null;
         onError("Microphone recording failed. Please try again.");
@@ -452,10 +505,12 @@ export function useAudioRecorder({
       recorder.onstop = () => {
         const chunks = chunksRef.current;
         const resolvedMimeType = recorder.mimeType || mimeType || "audio/webm";
+        const capture = captureRecordingStats();
         chunksRef.current = [];
         recorderRef.current = null;
         setIsRecording(false);
         stopStream();
+        recordingStartedAtRef.current = null;
 
         if (chunks.length === 0) {
           onError("No audio was captured. Try again.");
@@ -474,6 +529,7 @@ export function useAudioRecorder({
             mimeType: resolvedMimeType,
             content: await blobToBase64(blob),
             previewUrl: URL.createObjectURL(blob),
+            capture,
           });
         })().catch((error: unknown) => {
           onError(error instanceof Error ? error.message : "Failed to read recorded audio.");
@@ -482,10 +538,12 @@ export function useAudioRecorder({
 
       try {
         recorder.start();
+        recordingStartedAtRef.current = Date.now();
         await startSilenceDetector(stream);
         setIsRecording(true);
       } catch {
         cleanupSilenceDetector();
+        recordingStartedAtRef.current = null;
         recorderRef.current = null;
         chunksRef.current = [];
         await startPcmRecording(stream);
@@ -509,6 +567,7 @@ export function useAudioRecorder({
     if (!recorder) {
       setIsRecording(false);
       stopStream();
+      recordingStartedAtRef.current = null;
       return;
     }
     if (recorder.state !== "inactive") {
@@ -525,6 +584,7 @@ export function useAudioRecorder({
       cleanupSilenceDetector();
       cleanupPcmRecorder();
       stopStream();
+      recordingStartedAtRef.current = null;
     };
   }, []);
 

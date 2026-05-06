@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { AppWindow } from "../AppWindow";
 import { getWindowZ, type WindowKey, type WindowPoint, type WindowResizeDirection, type WindowSize } from "../windowManager";
+import type { VoiceSpeechVoice } from "../voice/voicePreferences";
 
 const PluginStore = lazy(() => import("../../pages/Store").then((m) => ({ default: m.Store })));
 const SkillsStore = lazy(() => import("../../pages/Store").then((m) => ({ default: m.Store })));
@@ -65,11 +66,15 @@ type DesktopUtilityWindowsProps = {
   textToSpeechModel: string;
   audioUnderstandingModel: string;
   voiceShortcut: string;
+  voiceSpeechRate: number;
+  voiceSpeechVoice: VoiceSpeechVoice;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onTextToSpeechModelChange: (model: string) => void;
   onAudioUnderstandingModelChange: (model: string) => void;
   onVoiceShortcutChange: (shortcut: string) => void | Promise<void>;
+  onVoiceSpeechRateChange: (rate: number) => void | Promise<void>;
+  onVoiceSpeechVoiceChange: (voice: VoiceSpeechVoice) => void | Promise<void>;
   onImageModelChange: (model: string) => void;
   onClose: Record<UtilityWindowKey, () => void>;
   onFocus: (window: WindowKey) => void;
@@ -100,11 +105,15 @@ export function DesktopUtilityWindows({
   textToSpeechModel,
   audioUnderstandingModel,
   voiceShortcut,
+  voiceSpeechRate,
+  voiceSpeechVoice,
   onCodeModelChange,
   onImageGenerationModelChange,
   onTextToSpeechModelChange,
   onAudioUnderstandingModelChange,
   onVoiceShortcutChange,
+  onVoiceSpeechRateChange,
+  onVoiceSpeechVoiceChange,
   onImageModelChange,
   onClose,
   onFocus,
@@ -268,11 +277,15 @@ export function DesktopUtilityWindows({
               textToSpeechModel={textToSpeechModel}
               audioUnderstandingModel={audioUnderstandingModel}
               voiceShortcut={voiceShortcut}
+              voiceSpeechRate={voiceSpeechRate}
+              voiceSpeechVoice={voiceSpeechVoice}
               onCodeModelChange={onCodeModelChange}
               onImageGenerationModelChange={onImageGenerationModelChange}
               onTextToSpeechModelChange={onTextToSpeechModelChange}
               onAudioUnderstandingModelChange={onAudioUnderstandingModelChange}
               onVoiceShortcutChange={onVoiceShortcutChange}
+              onVoiceSpeechRateChange={onVoiceSpeechRateChange}
+              onVoiceSpeechVoiceChange={onVoiceSpeechVoiceChange}
               onImageModelChange={onImageModelChange}
             />
           </Suspense>

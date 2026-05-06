@@ -16,7 +16,12 @@ type ChatAudioGenerationResponse = {
   }>;
 };
 
-export function useTextToSpeech(model: string) {
+export type TextToSpeechOptions = {
+  voiceId?: string;
+  speed?: number;
+};
+
+export function useTextToSpeech(model: string, options: TextToSpeechOptions = {}) {
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
 
   async function generateSpeech(text: string) {
@@ -34,6 +39,8 @@ export function useTextToSpeech(model: string) {
       const response = await invoke<ChatAudioGenerationResponse>("generate_chat_audio", {
         model: normalizedModel,
         text: normalizedText,
+        voiceId: options.voiceId,
+        speed: options.speed,
       });
       return {
         text: response.text.trim(),

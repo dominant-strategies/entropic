@@ -135,12 +135,24 @@ import {
   normalizeGatewayMessage,
 } from "../lib/chatMessageUtils";
 import { VoiceControlButton } from "../desktop/voice/VoiceControlButton";
-import { useAudioRecorder, type RecordedAudioAttachment } from "../desktop/voice/useAudioRecorder";
+import {
+  recordedAudioHasDetectedSpeech,
+  useAudioRecorder,
+  type RecordedAudioAttachment,
+} from "../desktop/voice/useAudioRecorder";
 import {
   cleanRecordedVoiceTranscript,
   useAudioTranscription,
 } from "../desktop/voice/useAudioTranscription";
 import { useTextToSpeech } from "../desktop/voice/useTextToSpeech";
+import {
+  DEFAULT_VOICE_SPEECH_RATE,
+  DEFAULT_VOICE_SPEECH_VOICE,
+  normalizeVoiceSpeechRate,
+  normalizeVoiceSpeechVoice,
+  voiceIdForSpeechProvider,
+  type VoiceSpeechVoice,
+} from "../desktop/voice/voicePreferences";
 
 type GatewayMutationResult = {
   plan: "noop" | "config_reload" | "container_restart" | "container_recreate";
@@ -206,6 +218,26 @@ const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/n
 const FINAL_RESPONSE_RECOVERY_RETRY_MS = 1200;
 const FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS = 2;
 const MAX_VOICE_RESPONSE_SPEECH_CHARS = 1800;
+const VOICE_TTS_MIN_STREAM_CHARS = 18;
+const VOICE_TTS_MAX_STREAM_CHARS = 360;
+
+type VoiceSpeechChunk = {
+  sequence: number;
+  text: string;
+  source: "delta" | "final_event" | "history";
+};
+
+type VoiceSpeechRunState = {
+  lastSourceText: string;
+  pendingText: string;
+  queue: VoiceSpeechChunk[];
+  processing: boolean;
+  final: boolean;
+  started: boolean;
+  notified: boolean;
+  sequence: number;
+  queuedAny: boolean;
+};
 
 function formatAssistantResponseForSpeech(text: string): string {
   const normalized = text
@@ -224,6 +256,60 @@ function formatAssistantResponseForSpeech(text: string): string {
 
 function audioDataUrlFromBase64(base64: string, mimeType?: string | null): string {
   return `data:${mimeType?.trim() || "audio/mpeg"};base64,${base64.trim()}`;
+}
+
+function findVoiceSpeechBoundary(text: string): number {
+  const limit = Math.min(text.length, VOICE_TTS_MAX_STREAM_CHARS);
+  let newlineBoundary = -1;
+  for (let index = 0; index < limit; index += 1) {
+    const char = text[index];
+    const next = text[index + 1] || "";
+    const candidateLength = text.slice(0, index + 1).trim().length;
+    if (char === "\n" && candidateLength >= VOICE_TTS_MIN_STREAM_CHARS) {
+      newlineBoundary = index + 1;
+    }
+    if (
+      (char === "." || char === "!" || char === "?") &&
+      candidateLength >= VOICE_TTS_MIN_STREAM_CHARS &&
+      (!next || /\s/.test(next))
+    ) {
+      return index + 1;
+    }
+  }
+
+  if (newlineBoundary >= 0) return newlineBoundary;
+  if (text.length <= VOICE_TTS_MAX_STREAM_CHARS) return -1;
+
+  const hardLimit = Math.min(text.length, VOICE_TTS_MAX_STREAM_CHARS);
+  for (let index = hardLimit; index >= VOICE_TTS_MIN_STREAM_CHARS; index -= 1) {
+    if (/\s/.test(text[index] || "")) {
+      return index + 1;
+    }
+  }
+  return hardLimit;
+}
+
+function splitVoiceSpeechBuffer(
+  buffer: string,
+  final: boolean,
+): { chunks: string[]; rest: string } {
+  const chunks: string[] = [];
+  let rest = buffer;
+
+  while (rest.trim()) {
+    const boundary = findVoiceSpeechBoundary(rest);
+    if (boundary < 0) break;
+    const chunk = rest.slice(0, boundary).trim();
+    rest = rest.slice(boundary).trimStart();
+    if (chunk) chunks.push(chunk);
+  }
+
+  if (final && rest.trim()) {
+    chunks.push(rest.trim());
+    rest = "";
+  }
+
+  return { chunks, rest };
 }
 
 function trimChatWorkspaceToken(raw: string): string {
@@ -1087,6 +1173,8 @@ export function Chat({
   imageGenerationModel,
   textToSpeechModel,
   audioUnderstandingModel,
+  voiceSpeechRate = DEFAULT_VOICE_SPEECH_RATE,
+  voiceSpeechVoice = DEFAULT_VOICE_SPEECH_VOICE,
   integrationsSyncing,
   integrationsMissing,
   onNavigate,
@@ -1110,6 +1198,8 @@ export function Chat({
   imageGenerationModel: string;
   textToSpeechModel: string;
   audioUnderstandingModel: string;
+  voiceSpeechRate?: number;
+  voiceSpeechVoice?: VoiceSpeechVoice;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
   onNavigate?: (page: Page) => void;
@@ -1242,6 +1332,7 @@ export function Chat({
   const voiceSpeakResponseByRunIdRef = useRef<Set<string>>(new Set());
   const voiceReplyAudioRef = useRef<HTMLAudioElement | null>(null);
   const voiceSpeakingRunIdRef = useRef<string | null>(null);
+  const voiceSpeechRunStateByRunIdRef = useRef<Record<string, VoiceSpeechRunState>>({});
   const workspaceOfficeOpenBySendIdRef = useRef<Record<string, { path: string }>>({});
   const workspaceOfficeOpenByRunIdRef = useRef<Record<string, { path: string }>>({});
   const [outboxWakeTick, setOutboxWakeTick] = useState(0);
@@ -1251,8 +1342,16 @@ export function Chat({
   const activeTerminalState = currentSession
     ? terminalStateBySession[currentSession] || { cwd: TERMINAL_DEFAULT_CWD }
     : { cwd: TERMINAL_DEFAULT_CWD };
+  const normalizedVoiceSpeechRate = normalizeVoiceSpeechRate(voiceSpeechRate);
+  const normalizedVoiceSpeechVoice = normalizeVoiceSpeechVoice(voiceSpeechVoice);
+  const voiceSpeechProviderVoiceId = voiceIdForSpeechProvider(normalizedVoiceSpeechVoice, {
+    useLocalKeys,
+  });
   const { isTranscribing, transcribeAudio } = useAudioTranscription(audioUnderstandingModel);
-  const { isGeneratingAudio, generateSpeech } = useTextToSpeech(textToSpeechModel);
+  const { isGeneratingAudio, generateSpeech } = useTextToSpeech(textToSpeechModel, {
+    voiceId: voiceSpeechProviderVoiceId,
+    speed: normalizedVoiceSpeechRate,
+  });
 
   function attachRecordedAudio(attachment: RecordedAudioAttachment) {
     setPendingAttachments((prev) => {
@@ -1278,6 +1377,11 @@ export function Chat({
     try {
       setThinkingStatus("Transcribing recording");
       setError(null);
+      if (!recordedAudioHasDetectedSpeech(attachment)) {
+        revokeAttachmentPreviewUrl(attachment);
+        setError("I didn't catch any speech in that recording. Try again.");
+        return;
+      }
       const transcript = cleanRecordedVoiceTranscript(await transcribeAudio([attachment]));
       insertTextIntoChatDraft(transcript);
       revokeAttachmentPreviewUrl(attachment);
@@ -1652,30 +1756,80 @@ export function Chat({
     }
   }
 
-  async function speakAssistantResponseForRun(runId: string, text: string) {
-    if (!runId || !voiceSpeakResponseByRunIdRef.current.has(runId)) return;
+  function notifyVoiceResponseComplete(runId: string) {
+    window.dispatchEvent(
+      new CustomEvent("entropic-voice-response-complete", {
+        detail: { runId },
+      }),
+    );
+  }
+
+  function notifyVoiceResponseStarted(runId: string) {
+    window.dispatchEvent(
+      new CustomEvent("entropic-voice-response-started", {
+        detail: { runId },
+      }),
+    );
+  }
+
+  function getVoiceSpeechRunState(runId: string): VoiceSpeechRunState {
+    const existing = voiceSpeechRunStateByRunIdRef.current[runId];
+    if (existing) return existing;
+    const next: VoiceSpeechRunState = {
+      lastSourceText: "",
+      pendingText: "",
+      queue: [],
+      processing: false,
+      final: false,
+      started: false,
+      notified: false,
+      sequence: 0,
+      queuedAny: false,
+    };
+    voiceSpeechRunStateByRunIdRef.current[runId] = next;
+    return next;
+  }
+
+  function clearCurrentVoiceReplyAudio() {
+    const audio = voiceReplyAudioRef.current;
+    if (!audio) return;
+    audio.pause();
+    audio.removeAttribute("src");
+    voiceReplyAudioRef.current = null;
+  }
+
+  function completeVoiceSpeechRun(runId: string) {
+    const state = voiceSpeechRunStateByRunIdRef.current[runId];
+    if (state?.notified) return;
+    if (state) state.notified = true;
+    delete voiceSpeechRunStateByRunIdRef.current[runId];
     voiceSpeakResponseByRunIdRef.current.delete(runId);
-
-    const speechText = formatAssistantResponseForSpeech(text);
-    if (!speechText) return;
-
-    const previousAudio = voiceReplyAudioRef.current;
-    if (previousAudio) {
-      previousAudio.pause();
-      previousAudio.removeAttribute("src");
-      voiceReplyAudioRef.current = null;
+    if (voiceSpeakingRunIdRef.current === runId) {
+      voiceSpeakingRunIdRef.current = null;
     }
+    setThinkingStatus((current) => (current === "Speaking response" ? null : current));
+    notifyVoiceResponseComplete(runId);
+  }
 
+  async function createVoiceSpeechAudio(
+    runId: string,
+    speechText: string,
+    chunk: VoiceSpeechChunk,
+  ): Promise<HTMLAudioElement | null> {
+    if (!voiceSpeakResponseByRunIdRef.current.has(runId)) return null;
     voiceSpeakingRunIdRef.current = runId;
-    setThinkingStatus("Speaking response");
+
     try {
       const liveClient = clientRef.current;
       if (!liveClient || !liveClient.isConnected()) {
         throw new Error("OpenClaw is not connected, so the response could not be read back.");
       }
-      const result = await liveClient.talkSpeak(speechText);
-      if (voiceSpeakingRunIdRef.current !== runId) {
-        return;
+      const result = await liveClient.talkSpeak(speechText, {
+        voiceId: voiceSpeechProviderVoiceId,
+        speed: normalizedVoiceSpeechRate,
+      });
+      if (voiceSpeakingRunIdRef.current !== runId || !voiceSpeakResponseByRunIdRef.current.has(runId)) {
+        return null;
       }
       if (!result.audioBase64?.trim()) {
         throw new Error("OpenClaw talk.speak did not return audio.");
@@ -1683,37 +1837,28 @@ export function Chat({
 
       clientLog("voice.reply.openclaw_tts", {
         runId,
+        sequence: chunk.sequence,
+        source: chunk.source,
+        chars: speechText.length,
         provider: result.provider,
         outputFormat: result.outputFormat,
         mimeType: result.mimeType,
       });
-      const audio = new Audio(audioDataUrlFromBase64(result.audioBase64, result.mimeType));
-      voiceReplyAudioRef.current = audio;
-      audio.addEventListener(
-        "ended",
-        () => {
-          if (voiceSpeakingRunIdRef.current !== runId) return;
-          voiceSpeakingRunIdRef.current = null;
-          voiceReplyAudioRef.current = null;
-          setThinkingStatus((current) => (current === "Speaking response" ? null : current));
-        },
-        { once: true },
-      );
-      await audio.play();
+      return new Audio(audioDataUrlFromBase64(result.audioBase64, result.mimeType));
     } catch (openClawError) {
       const openClawMessage = formatUnknownUiError(
         openClawError,
         "OpenClaw talk.speak failed.",
       );
-      addDiag(`voice reply OpenClaw TTS failed runId=${runId}: ${openClawMessage}`);
-      if (voiceSpeakingRunIdRef.current !== runId) {
-        return;
+      addDiag(`voice reply OpenClaw TTS failed runId=${runId} seq=${chunk.sequence}: ${openClawMessage}`);
+      if (voiceSpeakingRunIdRef.current !== runId || !voiceSpeakResponseByRunIdRef.current.has(runId)) {
+        return null;
       }
 
       try {
         const fallback = await generateSpeech(speechText);
-        if (voiceSpeakingRunIdRef.current !== runId) {
-          return;
+        if (voiceSpeakingRunIdRef.current !== runId || !voiceSpeakResponseByRunIdRef.current.has(runId)) {
+          return null;
         }
         const generatedAudio = fallback.audio[0];
         if (!generatedAudio?.previewUrl) {
@@ -1722,34 +1867,156 @@ export function Chat({
 
         clientLog("voice.reply.managed_tts_fallback", {
           runId,
+          sequence: chunk.sequence,
+          source: chunk.source,
+          chars: speechText.length,
           mimeType: generatedAudio.mimeType,
         });
-        const audio = new Audio(generatedAudio.previewUrl);
-        voiceReplyAudioRef.current = audio;
-        audio.addEventListener(
-          "ended",
-          () => {
-            if (voiceSpeakingRunIdRef.current !== runId) return;
-            voiceSpeakingRunIdRef.current = null;
-            voiceReplyAudioRef.current = null;
-            setThinkingStatus((current) => (current === "Speaking response" ? null : current));
-          },
-          { once: true },
-        );
-        await audio.play();
+        return new Audio(generatedAudio.previewUrl);
       } catch (fallbackError) {
-        if (voiceSpeakingRunIdRef.current === runId) {
-          voiceSpeakingRunIdRef.current = null;
-          voiceReplyAudioRef.current = null;
-          setThinkingStatus((current) => (current === "Speaking response" ? null : current));
-        }
         const fallbackMessage = formatUnknownUiError(
           fallbackError,
           "Managed speech fallback failed.",
         );
-        addDiag(`voice reply fallback failed runId=${runId}: ${fallbackMessage}`);
+        addDiag(`voice reply fallback failed runId=${runId} seq=${chunk.sequence}: ${fallbackMessage}`);
+        if (voiceSpeakingRunIdRef.current === runId) {
+          voiceSpeakingRunIdRef.current = null;
+        }
         setError(`${openClawMessage} ${fallbackMessage}`);
+        return null;
       }
+    }
+  }
+
+  function playVoiceSpeechAudio(runId: string, audio: HTMLAudioElement): Promise<void> {
+    clearCurrentVoiceReplyAudio();
+    voiceReplyAudioRef.current = audio;
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        audio.removeEventListener("ended", handleEnded);
+        audio.removeEventListener("error", handleError);
+        audio.removeEventListener("pause", handlePause);
+        if (voiceReplyAudioRef.current === audio) {
+          voiceReplyAudioRef.current = null;
+        }
+      };
+      const settle = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (voiceSpeakingRunIdRef.current === runId) {
+          voiceSpeakingRunIdRef.current = null;
+        }
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      };
+      const handleEnded = () => settle();
+      const handleError = () => settle(new Error("Voice response audio playback failed."));
+      const handlePause = () => {
+        if (voiceSpeakingRunIdRef.current !== runId) {
+          settle();
+        }
+      };
+
+      audio.addEventListener("ended", handleEnded);
+      audio.addEventListener("error", handleError);
+      audio.addEventListener("pause", handlePause);
+      audio.play().catch((error: unknown) => {
+        settle(error instanceof Error ? error : new Error("Voice response audio playback failed."));
+      });
+    });
+  }
+
+  async function processVoiceSpeechQueue(runId: string) {
+    const state = voiceSpeechRunStateByRunIdRef.current[runId];
+    if (!state || state.processing) return;
+    state.processing = true;
+    if (!state.started) {
+      state.started = true;
+      notifyVoiceResponseStarted(runId);
+    }
+    setThinkingStatus("Speaking response");
+
+    try {
+      while (voiceSpeakResponseByRunIdRef.current.has(runId)) {
+        const chunk = state.queue.shift();
+        if (!chunk) break;
+        const speechText = formatAssistantResponseForSpeech(chunk.text);
+        if (!speechText) continue;
+
+        const audio = await createVoiceSpeechAudio(runId, speechText, chunk);
+        if (!audio || !voiceSpeakResponseByRunIdRef.current.has(runId)) return;
+        await playVoiceSpeechAudio(runId, audio);
+      }
+    } catch (error) {
+      addDiag(`voice reply playback failed runId=${runId}: ${String(error)}`);
+    } finally {
+      const current = voiceSpeechRunStateByRunIdRef.current[runId];
+      if (!current) return;
+      current.processing = false;
+      if (current.queue.length > 0) {
+        void processVoiceSpeechQueue(runId);
+        return;
+      }
+      if (current.final) {
+        completeVoiceSpeechRun(runId);
+        return;
+      }
+      setThinkingStatus((status) => (status === "Speaking response" ? null : status));
+    }
+  }
+
+  function enqueueVoiceAssistantSpeech(
+    runId: string,
+    text: string,
+    options: { final: boolean; source: VoiceSpeechChunk["source"] },
+  ) {
+    if (!runId || !voiceSpeakResponseByRunIdRef.current.has(runId)) return;
+
+    const state = getVoiceSpeechRunState(runId);
+    const sourceText = text.trimEnd();
+    let delta = "";
+    if (!state.lastSourceText) {
+      delta = sourceText;
+    } else if (sourceText.startsWith(state.lastSourceText)) {
+      delta = sourceText.slice(state.lastSourceText.length);
+    } else if (options.final) {
+      delta = state.queuedAny ? "" : sourceText;
+    } else if (sourceText.length > state.lastSourceText.length) {
+      delta = sourceText.slice(state.lastSourceText.length);
+    }
+    state.lastSourceText = sourceText;
+
+    if (delta) {
+      state.pendingText += delta;
+    }
+    if (options.final) {
+      state.final = true;
+    }
+
+    const { chunks, rest } = splitVoiceSpeechBuffer(state.pendingText, options.final);
+    state.pendingText = rest;
+    for (const chunkText of chunks) {
+      state.sequence += 1;
+      state.queuedAny = true;
+      state.queue.push({
+        sequence: state.sequence,
+        text: chunkText,
+        source: options.source,
+      });
+    }
+
+    if (state.queue.length > 0 && !state.processing) {
+      void processVoiceSpeechQueue(runId);
+      return;
+    }
+    if (state.final && !state.processing && state.queue.length === 0) {
+      completeVoiceSpeechRun(runId);
     }
   }
 
@@ -1759,12 +2026,44 @@ export function Chat({
     fallbackText: string,
   ) {
     if (!runId || !voiceSpeakResponseByRunIdRef.current.has(runId)) return;
+    const existingSpeechState = voiceSpeechRunStateByRunIdRef.current[runId];
+    if (
+      existingSpeechState &&
+      (
+        existingSpeechState.queuedAny ||
+        existingSpeechState.queue.length > 0 ||
+        existingSpeechState.pendingText.trim() ||
+        existingSpeechState.processing
+      )
+    ) {
+      enqueueVoiceAssistantSpeech(runId, "", {
+        final: true,
+        source: "history",
+      });
+      return;
+    }
 
     let attempts = 0;
     const maxAttempts = 10;
     const scheduleAttempt = () => {
       window.setTimeout(() => {
         if (!voiceSpeakResponseByRunIdRef.current.has(runId)) return;
+        const currentSpeechState = voiceSpeechRunStateByRunIdRef.current[runId];
+        if (
+          currentSpeechState &&
+          (
+            currentSpeechState.queuedAny ||
+            currentSpeechState.queue.length > 0 ||
+            currentSpeechState.pendingText.trim() ||
+            currentSpeechState.processing
+          )
+        ) {
+          enqueueVoiceAssistantSpeech(runId, "", {
+            final: true,
+            source: "history",
+          });
+          return;
+        }
         attempts += 1;
 
         const sessionMessages = sessionKey ? sessionMessagesRef.current[sessionKey] || [] : [];
@@ -1786,7 +2085,10 @@ export function Chat({
           chars: assistantText.length,
           source: visibleAssistantText ? "chat_state" : "final_event",
         });
-        void speakAssistantResponseForRun(runId, assistantText);
+        enqueueVoiceAssistantSpeech(runId, assistantText, {
+          final: true,
+          source: visibleAssistantText ? "history" : "final_event",
+        });
       }, 100);
     };
 
@@ -2410,12 +2712,9 @@ export function Chat({
       if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current);
       if (streamPersistTimerRef.current) clearTimeout(streamPersistTimerRef.current);
       clearActiveRunTracking();
-      if (voiceReplyAudioRef.current) {
-        voiceReplyAudioRef.current.pause();
-        voiceReplyAudioRef.current.removeAttribute("src");
-        voiceReplyAudioRef.current = null;
-      }
+      clearCurrentVoiceReplyAudio();
       voiceSpeakingRunIdRef.current = null;
+      voiceSpeechRunStateByRunIdRef.current = {};
       const sessionsSnap = sessionsRef.current;
       const currentSnap = currentSessionRef.current;
       const messagesSnap = { ...sessionMessagesRef.current };
@@ -2447,11 +2746,16 @@ export function Chat({
 
   useEffect(() => {
     function stopVoiceReplyAudio() {
-      if (!voiceReplyAudioRef.current) return;
-      voiceReplyAudioRef.current.pause();
-      voiceReplyAudioRef.current.removeAttribute("src");
-      voiceReplyAudioRef.current = null;
+      const hadSpeechState =
+        voiceReplyAudioRef.current ||
+        voiceSpeakingRunIdRef.current ||
+        Object.keys(voiceSpeechRunStateByRunIdRef.current).length > 0;
+      if (!hadSpeechState) return;
+      voiceSpeakResponseBySendIdRef.current.clear();
+      voiceSpeakResponseByRunIdRef.current.clear();
+      voiceSpeechRunStateByRunIdRef.current = {};
       voiceSpeakingRunIdRef.current = null;
+      clearCurrentVoiceReplyAudio();
       setThinkingStatus((current) => (current === "Speaking response" ? null : current));
       clientLog("voice.reply.stopped_for_capture");
     }
@@ -3420,6 +3724,13 @@ export function Chat({
     if (isActiveRunTerminalEvent) {
       setIsLoading(false);
       setThinkingStatus(null);
+      if (
+        eventRunId &&
+        (event.state === "error" || event.state === "aborted") &&
+        voiceSpeakResponseByRunIdRef.current.has(eventRunId)
+      ) {
+        completeVoiceSpeechRun(eventRunId);
+      }
       clearActiveRunTracking();
       // Refresh credit balance after message completion
       window.dispatchEvent(new Event("entropic-local-credits-changed"));
@@ -3508,6 +3819,12 @@ export function Chat({
             schedulePersist();
           }, 5000);
         }
+        if (eventRunId && text.trim() && normalized?.kind !== "toolResult") {
+          enqueueVoiceAssistantSpeech(eventRunId, text, {
+            final: event.state === "final",
+            source: event.state === "final" ? "final_event" : "delta",
+          });
+        }
       } else if (event.state === "final" && eventRunId && knownSessionKey) {
         addDiag(`final event missing payload runId=${eventRunId}; attempting history recovery`);
         void recoverFinalRunFromHistory(eventRunId, knownSessionKey);
@@ -3524,8 +3841,15 @@ export function Chat({
           timings.finalAt = Date.now();
           addDiag(`timing final runId=${eventRunId} t=${timings.finalAt - timings.startedAt}ms`);
         }
-        if (text.trim()) {
-          scheduleSpeakAssistantResponseForRun(eventRunId, knownSessionKey || currentSessionRef.current, text);
+        if (
+          voiceSpeakResponseByRunIdRef.current.has(eventRunId) &&
+          (normalized?.kind === "toolResult" ||
+            (!text.trim() && Boolean(voiceSpeechRunStateByRunIdRef.current[eventRunId])))
+        ) {
+          enqueueVoiceAssistantSpeech(eventRunId, "", {
+            final: true,
+            source: "final_event",
+          });
         }
         const pendingOfficeOpen = workspaceOfficeOpenByRunIdRef.current[eventRunId];
         if (pendingOfficeOpen) {

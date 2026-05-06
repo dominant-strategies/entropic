@@ -1,8 +1,9 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { Key, Shield, Sparkles, Cpu, Image, ChevronRight, User, Palette, ChevronDown, ScrollText, LogIn, LogOut, Loader2, Trash2, AlertTriangle, Copy, Download, Sun, Moon, Monitor, RotateCcw } from "lucide-react";
+import { Key, Shield, Sparkles, Cpu, Image, ChevronRight, User, Palette, ChevronDown, ScrollText, LogIn, LogOut, Loader2, Trash2, AlertTriangle, Copy, Download, Sun, Moon, Monitor, RotateCcw, Volume2 } from "lucide-react";
 import clsx from "clsx";
 import {
   getProfileInitials,
@@ -49,6 +50,14 @@ import {
   type UpdaterStatus,
 } from "../lib/updater";
 import { updaterEnabled } from "../lib/buildProfile";
+import {
+  DEFAULT_VOICE_SPEECH_RATE,
+  VOICE_SPEECH_VOICES,
+  normalizeVoiceSpeechRate,
+  normalizeVoiceSpeechVoice,
+  type VoiceSpeechVoiceOption,
+  type VoiceSpeechVoice,
+} from "../desktop/voice/voicePreferences";
 type Props = {
   gatewayRunning: boolean;
   onGatewayToggle: () => void;
@@ -64,11 +73,15 @@ type Props = {
   textToSpeechModel: string;
   audioUnderstandingModel: string;
   voiceShortcut: string;
+  voiceSpeechRate: number;
+  voiceSpeechVoice: VoiceSpeechVoice;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onTextToSpeechModelChange: (model: string) => void;
   onAudioUnderstandingModelChange: (model: string) => void;
   onVoiceShortcutChange: (shortcut: string) => void | Promise<void>;
+  onVoiceSpeechRateChange: (rate: number) => void | Promise<void>;
+  onVoiceSpeechVoiceChange: (voice: VoiceSpeechVoice) => void | Promise<void>;
   onImageModelChange: (model: string) => void;
 };
 
@@ -158,18 +171,23 @@ function SettingsRow({
   children, 
   icon: Icon,
   description,
-  onClick
+  onClick,
+  wideControl = false,
 }: { 
   label: string, 
   children?: React.ReactNode, 
   icon?: any,
   description?: string,
-  onClick?: () => void
+  onClick?: () => void,
+  wideControl?: boolean,
 }) {
   return (
     <div
       className={clsx(
-        "settings-row px-4 py-3 flex flex-col items-stretch gap-2 transition-colors",
+        "settings-row px-4 py-3 transition-colors",
+        wideControl
+          ? "grid grid-cols-[minmax(200px,240px)_minmax(280px,460px)] items-center justify-between gap-4"
+          : "flex flex-col items-stretch gap-2",
         onClick && "cursor-pointer hover:bg-[var(--system-gray-6)]",
       )}
       onClick={onClick}
@@ -185,7 +203,7 @@ function SettingsRow({
           {description && <div className="text-[11px] text-[var(--text-secondary)]">{description}</div>}
         </div>
       </div>
-      <div className="settings-row-right flex min-w-0 items-center gap-2">
+      <div className={clsx("settings-row-right flex min-w-0 items-center gap-2", wideControl && "w-full")}>
         {children}
       </div>
     </div>
@@ -232,6 +250,159 @@ function scheduleDeferredSettingsWork(work: () => void, delayMs = 0) {
   };
 }
 
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function VoiceSpeechVoiceSelector({
+  value,
+  onChange,
+}: {
+  value: VoiceSpeechVoice;
+  onChange: (voice: VoiceSpeechVoice) => void | Promise<void>;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
+  const [menuPlacement, setMenuPlacement] = useState<"top" | "bottom">("bottom");
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const selectedVoice =
+    VOICE_SPEECH_VOICES.find((voice) => voice.id === value) ?? VOICE_SPEECH_VOICES[0];
+
+  useEffect(() => {
+    if (!isOpen || !wrapperRef.current) {
+      setMenuStyle(null);
+      return;
+    }
+
+    function updateMenuPosition() {
+      const rect = wrapperRef.current?.getBoundingClientRect();
+      if (!rect) return;
+
+      const spacing = 10;
+      const viewportPadding = 16;
+      const menuHeight = Math.min(320, window.innerHeight - viewportPadding * 2);
+      const availableBelow = window.innerHeight - rect.bottom - spacing - viewportPadding;
+      const availableAbove = rect.top - spacing - viewportPadding;
+      const placeAbove = availableBelow < menuHeight && availableAbove > availableBelow;
+      const menuWidth = Math.min(
+        Math.max(rect.width, 260),
+        window.innerWidth - viewportPadding * 2,
+      );
+      const left = clampNumber(
+        rect.left,
+        viewportPadding,
+        window.innerWidth - viewportPadding - menuWidth,
+      );
+      const top = placeAbove
+        ? Math.max(viewportPadding, rect.top - spacing - menuHeight)
+        : Math.min(rect.bottom + spacing, window.innerHeight - viewportPadding - menuHeight);
+
+      setMenuPlacement(placeAbove ? "top" : "bottom");
+      setMenuStyle({
+        position: "fixed",
+        top,
+        left,
+        width: menuWidth,
+        maxHeight: `${menuHeight}px`,
+        zIndex: 2_147_483_000,
+        transformOrigin: placeAbove ? "bottom left" : "top left",
+      });
+    }
+
+    updateMenuPosition();
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsOpen(false);
+      }
+    }
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isOpen]);
+
+  function handleVoiceSelect(voice: VoiceSpeechVoiceOption) {
+    setIsOpen(false);
+    void onChange(voice.id);
+  }
+
+  const menu =
+    isOpen && menuStyle && typeof document !== "undefined"
+      ? createPortal(
+          <>
+            <div
+              className="fixed inset-0"
+              style={{ zIndex: 2_147_482_999 }}
+              onClick={() => setIsOpen(false)}
+            />
+            <div
+              style={menuStyle}
+              className={clsx(
+                "overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--bg-card)] shadow-[0_24px_80px_rgba(0,0,0,0.42)] ring-1 ring-black/10 animate-scale-in",
+                menuPlacement === "top" ? "origin-bottom-left" : "origin-top-left",
+              )}
+            >
+              <div className="max-h-[inherit] overflow-y-auto py-1">
+                {VOICE_SPEECH_VOICES.map((voice) => (
+                  <button
+                    key={voice.id}
+                    type="button"
+                    onClick={() => handleVoiceSelect(voice)}
+                    className={clsx(
+                      "flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-[var(--system-gray-6)]",
+                      voice.id === value && "bg-[var(--system-blue)]/10",
+                    )}
+                  >
+                    <Volume2 className="h-4 w-4 shrink-0 text-[var(--system-blue)]" />
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--text-primary)]">
+                      {voice.label}
+                    </span>
+                    {voice.id === value && (
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--system-blue)]" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>,
+          document.body,
+        )
+      : null;
+
+  return (
+    <div className="relative min-w-[220px]" ref={wrapperRef}>
+      <button
+        type="button"
+        onClick={() => setIsOpen((open) => !open)}
+        className={clsx(
+          "flex h-10 w-full items-center justify-between gap-2 rounded-lg border px-3 text-left shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20",
+          isOpen
+            ? "border-[var(--system-blue)] bg-[var(--bg-card)]"
+            : "border-[var(--border-subtle)] bg-[var(--bg-card)] hover:bg-[var(--system-gray-6)]",
+        )}
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <Volume2 className="h-3.5 w-3.5 shrink-0 text-[var(--system-blue)]" />
+          <span className="truncate text-[13px] font-medium text-[var(--text-primary)]">
+            {selectedVoice.label}
+          </span>
+        </div>
+        <ChevronDown
+          className={clsx(
+            "h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)] transition-transform",
+            isOpen && "rotate-180",
+          )}
+        />
+      </button>
+      {menu}
+    </div>
+  );
+}
+
 const SETTINGS_SIDEBAR_CATEGORIES: Array<{
   label: string;
   items: Array<{ id: SettingsSection; label: string; icon: any }>;
@@ -275,11 +446,15 @@ export function Settings({
   textToSpeechModel,
   audioUnderstandingModel,
   voiceShortcut,
+  voiceSpeechRate,
+  voiceSpeechVoice,
   onCodeModelChange,
   onImageGenerationModelChange,
   onTextToSpeechModelChange,
   onAudioUnderstandingModelChange,
   onVoiceShortcutChange,
+  onVoiceSpeechRateChange,
+  onVoiceSpeechVoiceChange,
   onImageModelChange,
 }: Props) {
   const cachedWarmState = getCachedSettingsWarmState();
@@ -333,6 +508,8 @@ export function Settings({
     (provider) => provider === "openai",
   );
   const localTextToSpeechProviderKey = localTextToSpeechProviders.join(",");
+  const normalizedVoiceSpeechRate = normalizeVoiceSpeechRate(voiceSpeechRate);
+  const normalizedVoiceSpeechVoice = normalizeVoiceSpeechVoice(voiceSpeechVoice);
   // Anthropic OAuth code-paste state
   const [anthropicCodePending, setAnthropicCodePending] = useState(false);
   const [anthropicCodeInput, setAnthropicCodeInput] = useState("");
@@ -1200,7 +1377,7 @@ export function Settings({
         </nav>
 
         <div ref={contentRef} className="flex-1 overflow-y-auto">
-          <div className="max-w-3xl py-8 px-8">
+          <div className={clsx("mx-auto w-full px-8 py-8", activeSection === "intelligence" ? "max-w-4xl" : "max-w-3xl")}>
 
       {gatewayConfigInvalid && (
         <div className="mb-6 rounded-xl border border-amber-500/20 bg-amber-500/10 p-4">
@@ -1435,44 +1612,47 @@ export function Settings({
       {activeSection === "intelligence" && (
       <div className="relative">
         <SettingsGroup title="Intelligence">
-          <SettingsRow label="Primary Model" icon={Cpu}>
-            <div className="settings-row-dropdown">
-              <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
+          <SettingsRow label="Primary Model" icon={Cpu} wideControl>
+            <div className="settings-row-dropdown w-full">
+              <ModelSelector wide selectedModel={selectedModel} onModelChange={onModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
             </div>
           </SettingsRow>
           {!useLocalKeys && (
             <>
-              <SettingsRow label="Coding Model" icon={Cpu}>
-                <div className="settings-row-dropdown">
-                  <ModelSelector selectedModel={codeModel} onModelChange={onCodeModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
+              <SettingsRow label="Coding Model" icon={Cpu} wideControl>
+                <div className="settings-row-dropdown w-full">
+                  <ModelSelector wide selectedModel={codeModel} onModelChange={onCodeModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
                 </div>
               </SettingsRow>
-              <SettingsRow label="Vision Model" icon={Image}>
-                <div className="settings-row-dropdown">
-                  <ModelSelector selectedModel={imageModel} onModelChange={onImageModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
+              <SettingsRow label="Vision Model" icon={Image} wideControl>
+                <div className="settings-row-dropdown w-full">
+                  <ModelSelector wide selectedModel={imageModel} onModelChange={onImageModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
                 </div>
               </SettingsRow>
-              <SettingsRow label="Image Generation Model" icon={Sparkles}>
-                <div className="settings-row-dropdown">
+              <SettingsRow label="Image Generation Model" icon={Sparkles} wideControl>
+                <div className="settings-row-dropdown w-full">
                   <ModelSelector
+                    wide
                     selectedModel={imageGenerationModel}
                     onModelChange={onImageGenerationModelChange}
                     models={PROXY_IMAGE_GENERATION_MODELS}
                   />
                 </div>
               </SettingsRow>
-              <SettingsRow label="Text to Speech Model" icon={Image}>
-                <div className="settings-row-dropdown">
+              <SettingsRow label="Text to Speech Model" icon={Image} wideControl>
+                <div className="settings-row-dropdown w-full">
                   <ModelSelector
+                    wide
                     selectedModel={textToSpeechModel}
                     onModelChange={onTextToSpeechModelChange}
                     models={PROXY_TEXT_TO_SPEECH_MODELS}
                   />
                 </div>
               </SettingsRow>
-              <SettingsRow label="Audio Understanding Model" icon={Image}>
-                <div className="settings-row-dropdown">
+              <SettingsRow label="Audio Understanding Model" icon={Image} wideControl>
+                <div className="settings-row-dropdown w-full">
                   <ModelSelector
+                    wide
                     selectedModel={audioUnderstandingModel}
                     onModelChange={onAudioUnderstandingModelChange}
                     models={PROXY_AUDIO_UNDERSTANDING_MODELS}
@@ -1483,9 +1663,10 @@ export function Settings({
           )}
           {useLocalKeys && !authMetaLoading && localImageGenerationProviders.length > 0 && (
             <>
-              <SettingsRow label="Image Generation Model" icon={Sparkles}>
-                <div className="settings-row-dropdown">
+              <SettingsRow label="Image Generation Model" icon={Sparkles} wideControl>
+                <div className="settings-row-dropdown w-full">
                   <ModelSelector
+                    wide
                     selectedModel={imageGenerationModel}
                     onModelChange={onImageGenerationModelChange}
                     models={LOCAL_IMAGE_GENERATION_MODELS}
@@ -1506,9 +1687,10 @@ export function Settings({
             </div>
           )}
           {useLocalKeys && !authMetaLoading && localTextToSpeechProviders.length > 0 && (
-            <SettingsRow label="Text to Speech Model" icon={Image}>
-              <div className="settings-row-dropdown">
+            <SettingsRow label="Text to Speech Model" icon={Image} wideControl>
+              <div className="settings-row-dropdown w-full">
                 <ModelSelector
+                  wide
                   selectedModel={textToSpeechModel}
                   onModelChange={onTextToSpeechModelChange}
                   models={LOCAL_TEXT_TO_SPEECH_MODELS}
@@ -1523,9 +1705,10 @@ export function Settings({
             </div>
           )}
           {useLocalKeys && !authMetaLoading && localAudioUnderstandingProviders.length > 0 && (
-            <SettingsRow label="Audio Understanding Model" icon={Image}>
-              <div className="settings-row-dropdown">
+            <SettingsRow label="Audio Understanding Model" icon={Image} wideControl>
+              <div className="settings-row-dropdown w-full">
                 <ModelSelector
+                  wide
                   selectedModel={audioUnderstandingModel}
                   onModelChange={onAudioUnderstandingModelChange}
                   models={LOCAL_AUDIO_UNDERSTANDING_MODELS}
@@ -1539,6 +1722,50 @@ export function Settings({
               Connect an OpenAI or Google API key to transcribe local audio attachments.
             </div>
           )}
+          <SettingsRow
+            label="Voice"
+            icon={Volume2}
+            description="Choose the voice used when Entropic reads agent responses aloud."
+          >
+            <VoiceSpeechVoiceSelector
+              value={normalizedVoiceSpeechVoice}
+              onChange={(voice) => {
+                void onVoiceSpeechVoiceChange(normalizeVoiceSpeechVoice(voice));
+              }}
+            />
+          </SettingsRow>
+          <SettingsRow
+            label="Voice Speed"
+            icon={Volume2}
+            description="Default is 30% faster for snappier voice conversations."
+          >
+            <div className="flex min-w-[260px] items-center gap-3">
+              <input
+                type="range"
+                min="0.75"
+                max="1.75"
+                step="0.05"
+                value={normalizedVoiceSpeechRate}
+                onChange={(event) => {
+                  void onVoiceSpeechRateChange(normalizeVoiceSpeechRate(event.target.value));
+                }}
+                className="min-w-0 flex-1 accent-[var(--system-blue)]"
+                aria-label="Voice speed"
+              />
+              <span className="w-12 text-right text-[13px] font-semibold tabular-nums text-[var(--text-primary)]">
+                {normalizedVoiceSpeechRate.toFixed(2)}x
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  void onVoiceSpeechRateChange(DEFAULT_VOICE_SPEECH_RATE);
+                }}
+                className="h-9 rounded-lg px-3 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
+              >
+                Reset
+              </button>
+            </div>
+          </SettingsRow>
           <SettingsRow
             label="Global Voice Shortcut"
             icon={Key}

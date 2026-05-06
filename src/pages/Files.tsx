@@ -96,6 +96,7 @@ import {
 } from "../desktop/finder/workspacePaths";
 import { VoiceProvider } from "../desktop/voice/VoiceProvider";
 import type { VoiceDesktopContext } from "../desktop/voice/voiceActions";
+import type { VoiceSpeechVoice } from "../desktop/voice/voicePreferences";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -124,11 +125,15 @@ type Props = {
   textToSpeechModel: string;
   audioUnderstandingModel: string;
   voiceShortcut: string;
+  voiceSpeechRate: number;
+  voiceSpeechVoice: VoiceSpeechVoice;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onTextToSpeechModelChange: (model: string) => void;
   onAudioUnderstandingModelChange: (model: string) => void;
   onVoiceShortcutChange: (shortcut: string) => void | Promise<void>;
+  onVoiceSpeechRateChange: (rate: number) => void | Promise<void>;
+  onVoiceSpeechVoiceChange: (voice: VoiceSpeechVoice) => void | Promise<void>;
   onImageModelChange: (model: string) => void;
   pendingDesktopAction?: { id: string; action: DesktopAction } | null;
   onDesktopActionHandled?: (id: string) => void;
@@ -833,11 +838,15 @@ export function Files({
   textToSpeechModel,
   audioUnderstandingModel,
   voiceShortcut,
+  voiceSpeechRate,
+  voiceSpeechVoice,
   onCodeModelChange,
   onImageGenerationModelChange,
   onTextToSpeechModelChange,
   onAudioUnderstandingModelChange,
   onVoiceShortcutChange,
+  onVoiceSpeechRateChange,
+  onVoiceSpeechVoiceChange,
   onImageModelChange,
   pendingDesktopAction,
   onDesktopActionHandled,
@@ -4328,6 +4337,8 @@ export function Files({
               imageGenerationModel={imageGenerationModel}
               textToSpeechModel={textToSpeechModel}
               audioUnderstandingModel={audioUnderstandingModel}
+              voiceSpeechRate={voiceSpeechRate}
+              voiceSpeechVoice={voiceSpeechVoice}
               integrationsSyncing={integrationsSyncing}
               integrationsMissing={integrationsMissing}
               formatDate={formatDate}
@@ -4579,11 +4590,15 @@ export function Files({
             textToSpeechModel={textToSpeechModel}
             audioUnderstandingModel={audioUnderstandingModel}
             voiceShortcut={voiceShortcut}
+            voiceSpeechRate={voiceSpeechRate}
+            voiceSpeechVoice={voiceSpeechVoice}
             onCodeModelChange={onCodeModelChange}
             onImageGenerationModelChange={onImageGenerationModelChange}
             onTextToSpeechModelChange={onTextToSpeechModelChange}
             onAudioUnderstandingModelChange={onAudioUnderstandingModelChange}
             onVoiceShortcutChange={onVoiceShortcutChange}
+            onVoiceSpeechRateChange={onVoiceSpeechRateChange}
+            onVoiceSpeechVoiceChange={onVoiceSpeechVoiceChange}
             onImageModelChange={onImageModelChange}
             onClose={{
               plugins: () => setPluginsOpen(false),

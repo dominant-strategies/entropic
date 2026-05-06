@@ -1,8 +1,6 @@
 import type { DesktopAction } from "../actions";
 import type { WindowKey } from "../windowManager";
 
-export type VoiceMode = "dictation" | "command" | "conversation";
-
 export type VoiceDesktopContext = {
   focusedWindow: WindowKey | null;
   openWindows: WindowKey[];
@@ -77,9 +75,27 @@ function urlFromVoiceTarget(target: string): string | null {
   return null;
 }
 
+function stripWorkspaceLocationFromVoiceTarget(target: string): { target: string; desktop: boolean } {
+  let cleaned = target;
+  let desktop = false;
+  const desktopLocationPattern =
+    /\s+(?:(?:that|which)\s+is\s+|that's\s+)?(?:on|in|inside|from)\s+(?:my\s+|the\s+)?(?:entropic\s+)?desktop(?:\s+folder)?\b.*$/i;
+  if (desktopLocationPattern.test(cleaned)) {
+    desktop = true;
+    cleaned = cleaned.replace(desktopLocationPattern, "");
+  }
+  return { target: cleaned, desktop };
+}
+
+function applyWorkspaceLocationToPath(path: string, location: { desktop: boolean }): string {
+  if (!location.desktop || /^desktop(?:\/|$)/i.test(path)) return path;
+  return `Desktop/${path.replace(/^\/+/, "")}`;
+}
+
 function workspaceFilePathFromVoiceTarget(target: string): string | null {
   const hadSpokenDot = /\s+(?:dot|period)\s+/i.test(target);
-  const cleaned = cleanVoiceTarget(target)
+  const location = stripWorkspaceLocationFromVoiceTarget(target);
+  const cleaned = cleanVoiceTarget(location.target)
     .replace(/\s+(?:dot|period)\s+/gi, ".")
     .replace(/\s+(?:dash|hyphen)\s+/gi, "-")
     .replace(/\s+slash\s+/gi, "/")
@@ -90,10 +106,10 @@ function workspaceFilePathFromVoiceTarget(target: string): string | null {
   const literalMatch = cleaned.match(/^(.+\.(?:xlsx|xlsm|docx|pptx|pdf|txt|md|csv|html?))$/i);
   if (literalMatch?.[1]) {
     const path = cleanVoiceTarget(literalMatch[1]);
-    if (!hadSpokenDot) return path;
+    if (!hadSpokenDot) return applyWorkspaceLocationToPath(path, location);
     const dotIndex = path.lastIndexOf(".");
     const basename = path.slice(0, dotIndex).replace(/\s+/g, "-");
-    return `${basename}${path.slice(dotIndex).toLowerCase()}`;
+    return applyWorkspaceLocationToPath(`${basename}${path.slice(dotIndex).toLowerCase()}`, location);
   }
 
   const spokenExtensionMatch = cleaned.match(
@@ -106,7 +122,7 @@ function workspaceFilePathFromVoiceTarget(target: string): string | null {
     .replace(/\s+/g, "-");
   const extension = spokenExtensionMatch[2].toLowerCase();
   if (!basename) return null;
-  return `${basename}.${extension}`;
+  return applyWorkspaceLocationToPath(`${basename}.${extension}`, location);
 }
 
 export function resolveVoiceAction(transcript: string): DesktopAction {
@@ -162,42 +178,13 @@ export function resolveVoiceAction(transcript: string): DesktopAction {
   return { type: "new_chat_task", prompt: text };
 }
 
-export function chatTaskNeedsConfirmation(prompt: string): boolean {
-  const riskText = prompt.match(/^Voice command:\s*(.+)$/m)?.[1] ?? prompt;
-  return /\b(send|email|message|post|create|update|edit|delete|remove|move|rename|run|execute|asana|jira|linear|github|gmail|outlook|teams|slack)\b/i.test(
-    riskText,
-  );
-}
-
-export function previewForVoiceAction(
-  action: DesktopAction,
-): { message: string; confirmLabel: string } | null {
-  switch (action.type) {
-    case "open_workspace_file":
-      return { message: `Open workspace file: ${action.path}?`, confirmLabel: "Open" };
-    case "open_workspace_folder":
-      return { message: `Open workspace folder: ${action.path || "/"}?`, confirmLabel: "Open" };
-    case "open_browser_url":
-      return { message: `Open browser URL: ${action.url}?`, confirmLabel: "Open" };
-    case "new_chat_task":
-      if (action.autoSubmit && chatTaskNeedsConfirmation(action.prompt)) {
-        return { message: "Send this voice task to the agent now?", confirmLabel: "Send" };
-      }
-      return null;
-    default:
-      return null;
-  }
-}
-
 export function formatVoiceTaskPrompt(
   prompt: string,
-  mode: VoiceMode,
   context?: VoiceDesktopContext,
 ): string {
   if (!context) return prompt;
   const lines = [
-    `Voice command: ${prompt}`,
-    `Voice mode: ${mode}`,
+    `Spoken request: ${prompt}`,
     "",
     "Desktop context:",
     `- Focused window: ${context.focusedWindow || "none"}`,
@@ -217,14 +204,6 @@ export function formatVoiceTaskPrompt(
   return lines.join("\n");
 }
 
-export function messageForMode(mode: VoiceMode): string {
-  switch (mode) {
-    case "dictation":
-      return "Listening for dictation.";
-    case "conversation":
-      return "Listening.";
-    case "command":
-    default:
-      return "Listening for a desktop command.";
-  }
+export function listeningMessage(): string {
+  return "Listening.";
 }

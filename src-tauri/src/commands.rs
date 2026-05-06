@@ -658,6 +658,13 @@ fn openrouter_provider_model_id(model: &str) -> String {
     }
 }
 
+fn venice_provider_model_id(model: &str) -> String {
+    model_base_ref(model)
+        .strip_prefix("venice/")
+        .unwrap_or(model_base_ref(model))
+        .to_string()
+}
+
 fn local_gateway_model_key_provider(provider: &str) -> Option<&'static str> {
     match provider {
         "anthropic" => Some("anthropic"),
@@ -1196,6 +1203,14 @@ const MANAGED_PROXY_TTS_MODEL: &str = "hexgrad/kokoro-82m";
 const MANAGED_PROXY_TTS_VOICE: &str = "af_alloy";
 const MANAGED_PROXY_TTS_RESPONSE_FORMAT: &str = "mp3";
 
+fn normalize_tts_speed(speed: Option<f64>) -> Option<f64> {
+    let speed = speed?;
+    if !speed.is_finite() {
+        return None;
+    }
+    Some(speed.clamp(0.5, 2.0))
+}
+
 fn format_audio_generation_http_error(status: reqwest::StatusCode, body: String) -> String {
     let detail = extract_image_generation_error_detail(&body);
     let suffix = if detail.is_empty() {
@@ -1211,16 +1226,26 @@ async fn generate_openai_chat_audio(
     api_key: &str,
     raw_model: &str,
     text: &str,
+    voice_id: Option<&str>,
+    speed: Option<f64>,
 ) -> Result<ChatAudioGenerationResult, String> {
+    let voice = voice_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_TTS_VOICE);
+    let mut payload = serde_json::json!({
+        "model": raw_model,
+        "voice": voice,
+        "response_format": DEFAULT_TTS_FORMAT,
+        "input": text,
+    });
+    if let Some(speed) = normalize_tts_speed(speed) {
+        payload["speed"] = serde_json::json!(speed);
+    }
     let response = client
         .post("https://api.openai.com/v1/audio/speech")
         .bearer_auth(api_key)
-        .json(&serde_json::json!({
-            "model": raw_model,
-            "voice": DEFAULT_TTS_VOICE,
-            "response_format": DEFAULT_TTS_FORMAT,
-            "input": text,
-        }))
+        .json(&payload)
         .send()
         .await
         .map_err(|e| format!("Audio generation request failed: {}", e))?;
@@ -1250,6 +1275,8 @@ async fn generate_proxy_chat_audio(
     client: &reqwest::Client,
     model: &str,
     text: &str,
+    voice_id: Option<&str>,
+    speed: Option<f64>,
 ) -> Result<ChatAudioGenerationResult, String> {
     let gateway_token = read_container_env("OPENROUTER_API_KEY").ok_or_else(|| {
         "Proxy auth is unavailable. Restart the sandbox and try again.".to_string()
@@ -1266,15 +1293,24 @@ async fn generate_proxy_chat_audio(
         requested_model
     };
 
+    let voice = voice_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(MANAGED_PROXY_TTS_VOICE);
+    let mut payload = serde_json::json!({
+        "model": speech_model,
+        "voice": voice,
+        "response_format": MANAGED_PROXY_TTS_RESPONSE_FORMAT,
+        "input": text,
+    });
+    if let Some(speed) = normalize_tts_speed(speed) {
+        payload["speed"] = serde_json::json!(speed);
+    }
+
     let response = client
         .post(&endpoint)
         .bearer_auth(&gateway_token)
-        .json(&serde_json::json!({
-            "model": speech_model,
-            "voice": MANAGED_PROXY_TTS_VOICE,
-            "response_format": MANAGED_PROXY_TTS_RESPONSE_FORMAT,
-            "input": text,
-        }))
+        .json(&payload)
         .send()
         .await
         .map_err(|e| format!("Audio generation request failed: {}", e))?;
@@ -1543,6 +1579,84 @@ async fn transcribe_google_audio(
         .ok_or_else(|| "The selected model did not return a transcript.".to_string())
 }
 
+async fn transcribe_proxy_venice_audio(
+    client: &reqwest::Client,
+    gateway_token: &str,
+    proxy_base: &str,
+    model: &str,
+    attachments: &[ChatAudioTranscriptionAttachment],
+) -> Result<ChatAudioTranscriptionResult, String> {
+    let host_proxy_base = resolve_host_proxy_base(proxy_base)?;
+    let endpoint = format!(
+        "{}/audio/transcriptions",
+        host_proxy_base.trim_end_matches('/')
+    );
+    let raw_model = venice_provider_model_id(model);
+
+    let mut transcripts = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let file_name = if attachment.file_name.trim().is_empty() {
+            format!(
+                "audio.{}",
+                audio_file_extension_from_name_or_mime(
+                    &attachment.file_name,
+                    &attachment.mime_type
+                )
+            )
+        } else {
+            attachment.file_name.trim().to_string()
+        };
+        let mime_type = if attachment.mime_type.trim().is_empty() {
+            "audio/webm"
+        } else {
+            attachment.mime_type.trim()
+        };
+        let bytes = STANDARD
+            .decode(attachment.content.trim())
+            .map_err(|e| format!("Invalid audio attachment '{}': {}", file_name, e))?;
+        let file_part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(file_name.clone())
+            .mime_str(mime_type)
+            .map_err(|e| format!("Invalid attachment MIME type '{}': {}", mime_type, e))?;
+        let form = reqwest::multipart::Form::new()
+            .text("model", format!("venice/{}", raw_model))
+            .text("response_format", "json".to_string())
+            .text("timestamps", "false".to_string())
+            .part("file", file_part);
+
+        let response = client
+            .post(&endpoint)
+            .bearer_auth(gateway_token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("Audio transcription request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_else(|_| String::new());
+            return Err(format_audio_transcription_http_error(status, body));
+        }
+
+        let payload = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| format!("Invalid audio transcription response: {}", e))?;
+        let transcript = extract_audio_transcription_text(&payload).ok_or_else(|| {
+            "The selected Venice audio model did not return a transcript.".to_string()
+        })?;
+        transcripts.push(format_chat_audio_transcription_segment(
+            attachment,
+            &transcript,
+            attachments.len() > 1,
+        ));
+    }
+
+    Ok(ChatAudioTranscriptionResult {
+        text: transcripts.join("\n\n"),
+    })
+}
+
 async fn transcribe_proxy_chat_audio(
     client: &reqwest::Client,
     model: &str,
@@ -1559,6 +1673,16 @@ async fn transcribe_proxy_chat_audio(
     let normalized_model = model.trim();
     if normalized_model.is_empty() {
         return Err("Audio understanding model is not configured.".to_string());
+    }
+    if model_base_ref(normalized_model).starts_with("venice/") {
+        return transcribe_proxy_venice_audio(
+            client,
+            &gateway_token,
+            &proxy_base,
+            normalized_model,
+            attachments,
+        )
+        .await;
     }
 
     let mut transcripts = Vec::with_capacity(attachments.len());
@@ -4448,6 +4572,11 @@ pub struct DesktopSettingsSnapshot {
     pub code_model: Option<String>,
     pub image_model: Option<String>,
     pub image_generation_model: Option<String>,
+    pub text_to_speech_model: Option<String>,
+    pub audio_understanding_model: Option<String>,
+    pub voice_shortcut: Option<String>,
+    pub voice_speech_rate: Option<f64>,
+    pub voice_speech_voice: Option<String>,
     pub desktop_wallpaper: Option<String>,
     pub desktop_custom_wallpaper: Option<String>,
 }
@@ -18842,6 +18971,8 @@ pub async fn generate_chat_audio(
     state: State<'_, AppState>,
     model: String,
     text: String,
+    voice_id: Option<String>,
+    speed: Option<f64>,
 ) -> Result<ChatAudioGenerationResult, String> {
     let _container = running_gateway_container_name()
         .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
@@ -18861,14 +18992,22 @@ pub async fn generate_chat_audio(
         .map_err(|e| format!("Failed to create audio generation client: {}", e))?;
 
     if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
-        return generate_proxy_chat_audio(&client, &model, &text).await;
+        return generate_proxy_chat_audio(&client, &model, &text, voice_id.as_deref(), speed).await;
     }
 
     let (provider, raw_model) = split_provider_model(&model, "Text to speech model")?;
     match provider {
         "openai" => {
             let api_key = read_local_text_to_speech_api_key(&state, "openai")?;
-            generate_openai_chat_audio(&client, &api_key, raw_model, &text).await
+            generate_openai_chat_audio(
+                &client,
+                &api_key,
+                raw_model,
+                &text,
+                voice_id.as_deref(),
+                speed,
+            )
+            .await
         }
         _ => Err(format!(
             "Local text to speech is not supported for {}. Choose an OpenAI TTS model in Settings.",

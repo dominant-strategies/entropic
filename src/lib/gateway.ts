@@ -194,6 +194,11 @@ export type TalkSpeakResult = {
   fileExtension?: string;
 };
 
+export type TalkSpeakOptions = {
+  voiceId?: string;
+  speed?: number;
+};
+
 type Session = {
   key: string;  // Session key used for API calls
   sessionId?: string;
@@ -716,8 +721,12 @@ export class GatewayClient {
     await this.rpc("sessions.patch", { key: sessionKey, ...patch });
   }
 
-  async talkSpeak(text: string): Promise<TalkSpeakResult> {
-    return this.rpc<TalkSpeakResult>("talk.speak", { text });
+  async talkSpeak(text: string, options: TalkSpeakOptions = {}): Promise<TalkSpeakResult> {
+    return this.rpc<TalkSpeakResult>("talk.speak", {
+      text,
+      ...(options.voiceId ? { voiceId: options.voiceId } : {}),
+      ...(Number.isFinite(options.speed) ? { speed: options.speed } : {}),
+    });
   }
 
   async deleteSession(sessionKey: string, deleteTranscript = true): Promise<boolean> {
