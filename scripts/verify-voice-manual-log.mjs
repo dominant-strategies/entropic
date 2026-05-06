@@ -196,7 +196,7 @@ for (const check of checks) {
 const failed = checks.filter((check) => !check.passed);
 if (failed.length > 0) {
   console.error(`\n${failed.length} manual voice validation check(s) failed for ${logPath}.`);
-  process.exit(1);
+  process.exitCode = 1;
+} else {
+  console.log(`\nAll manual voice validation log checks passed for ${logPath}.`);
 }
-
-console.log(`\nAll manual voice validation log checks passed for ${logPath}.`);
