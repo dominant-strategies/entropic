@@ -9346,6 +9346,9 @@ fn build_tools_markdown(capabilities: &[CapabilityState]) -> String {
         "- Use the AIO JSON objects for structured spreadsheet, document, and presentation edits; use legacy helpers only for quick blank/todo/document scaffolds.\n",
     );
     body.push_str(
+        "- For spreadsheet requests that mention formulas, write actual Excel formula cells such as `=D2*E2` and `=SUM(H2:H13)`, not precomputed static values.\n",
+    );
+    body.push_str(
         "- After creating an Office file, include its workspace path such as `/data/workspace/sales-plan.xlsx` or the relative `sales-plan.xlsx`; Entropic renders these as desktop links that open in the Office viewer.\n",
     );
     body.push_str(

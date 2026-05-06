@@ -62,6 +62,7 @@ const prompt = formatWorkspaceOfficeRoutingPrompt(
 assert.match(prompt, /Use the local Entropic workspace Office workflow/);
 assert.match(prompt, /\/data\/workspace\/sales-plan\.xlsx/);
 assert.match(prompt, /Do not use Google Workspace/);
+assert.match(prompt, /actual Excel formula cells/);
 assert.match(prompt, /entropic-office desktop open/);
 assert.match(prompt, /same successful `exec` command/);
 

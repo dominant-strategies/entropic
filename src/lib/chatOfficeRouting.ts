@@ -45,6 +45,7 @@ export function formatWorkspaceOfficeRoutingPrompt(message: string): string {
     "Use the local Entropic workspace Office workflow for this request.",
     targetLine,
     "Use the gateway/container execution environment with workdir `/data/workspace` for local file generation. Prefer Python libraries such as `openpyxl`, `python-docx`, or `python-pptx` for formatted Office artifacts; use `entropic-office api inspect-aio` and `entropic-office api apply-aio` for structured edits to existing `.xlsx`, `.docx`, and `.pptx` files.",
+    "For spreadsheet requests that mention formulas, write actual Excel formula cells such as `=D2*E2` and `=SUM(H2:H13)`, not precomputed static values.",
     "Do not use Google Workspace, Google Sheets, Google Docs, Google Drive, OneDrive, Microsoft Graph, Teams, or Outlook tools for a local workspace Office file unless the original user request explicitly asks for those external services.",
     "In the same successful `exec` command that creates or edits a `.xlsx`, `.docx`, or `.pptx` file, also run `entropic-office desktop open /data/workspace/<file>` so Entropic can validate and open it on the desktop. Do not leave the desktop-open command for a later assistant turn.",
     "Do not stop after saying you will create or open the file. Actually create/edit the workspace file, request the desktop open, then report the workspace path and any real tool error.",
