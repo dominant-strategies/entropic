@@ -1,7 +1,6 @@
 import { Loader2, Mic } from "lucide-react";
 import clsx from "clsx";
-
-export type VoiceMode = "dictation" | "command" | "conversation";
+import type { VoiceMode } from "./voiceActions";
 
 type VoiceOverlayProps = {
   state: "idle" | "listening" | "transcribing" | "thinking" | "speaking" | "confirming" | "error";

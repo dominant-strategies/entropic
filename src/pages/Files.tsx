@@ -116,7 +116,8 @@ import {
   workspacePathName,
   workspacePathParent,
 } from "../desktop/finder/workspacePaths";
-import { VoiceProvider, type VoiceDesktopContext } from "../desktop/voice/VoiceProvider";
+import { VoiceProvider } from "../desktop/voice/VoiceProvider";
+import type { VoiceDesktopContext } from "../desktop/voice/voiceActions";
 
 type WorkspaceFileEntry = {
   name: string;
