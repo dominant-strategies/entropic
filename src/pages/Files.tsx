@@ -5307,6 +5307,8 @@ export function Files({
                       onModelChange={onModelChange}
                       imageModel={imageModel}
                       imageGenerationModel={imageGenerationModel}
+                      textToSpeechModel={textToSpeechModel}
+                      audioUnderstandingModel={audioUnderstandingModel}
                       integrationsSyncing={integrationsSyncing}
                       integrationsMissing={integrationsMissing}
                       onNavigate={handleDesktopChatNavigate}

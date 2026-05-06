@@ -2389,6 +2389,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         onModelChange={handleModelChange}
         imageModel={imageModel}
         imageGenerationModel={imageGenerationModel}
+        textToSpeechModel={textToSpeechModel}
+        audioUnderstandingModel={audioUnderstandingModel}
         integrationsSyncing={integrationsSyncing}
         integrationsMissing={integrationsMissing}
         onNavigate={setCurrentPage}
