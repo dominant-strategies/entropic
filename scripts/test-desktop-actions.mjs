@@ -99,7 +99,11 @@ rejects("Local browser URLs must use a trusted Entropic preview URL.", () =>
 
 sameJson(
   validateDesktopAction({ type: "new_chat_task", prompt: "  hello  ", sessionId: "abc" }),
-  { type: "new_chat_task", prompt: "hello", sessionId: "abc" },
+  { type: "new_chat_task", prompt: "hello", sessionId: "abc", autoSubmit: false },
+);
+sameJson(
+  validateDesktopAction({ type: "new_chat_task", prompt: "  run it  ", autoSubmit: true }),
+  { type: "new_chat_task", prompt: "run it", autoSubmit: true },
 );
 rejects("Chat task prompt is empty.", () =>
   validateDesktopAction({ type: "new_chat_task", prompt: "   " }),

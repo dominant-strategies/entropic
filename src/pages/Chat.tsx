@@ -141,7 +141,7 @@ export type ChatSessionActionRequest =
   | { id: string; type: "delete"; key: string }
   | { id: string; type: "pin"; key: string; pinned: boolean }
   | { id: string; type: "rename"; key: string; label: string }
-  | { id: string; type: "compose"; key?: string; prompt: string };
+  | { id: string; type: "compose"; key?: string; prompt: string; submit?: boolean };
 type Provider = { id: string; name: string; icon: string; placeholder: string; keyUrl: string };
 type PendingAttachment = {
   id: string;
@@ -3603,15 +3603,19 @@ export function Chat({
       }
       if (!targetKey) return;
       setComposerModeForSession(targetKey, "chat");
-      setDraftsBySession((prev) => {
-        const existing = (prev[targetKey] || "").trim();
-        const nextValue = existing ? `${existing}\n\n${action.prompt}` : action.prompt;
-        if (prev[targetKey] === nextValue) return prev;
-        return { ...prev, [targetKey]: nextValue };
-      });
-      requestAnimationFrame(() => {
-        textareaRef.current?.focus();
-      });
+      if (action.submit) {
+        void handleSend(action.prompt, { mode: "chat" });
+      } else {
+        setDraftsBySession((prev) => {
+          const existing = (prev[targetKey] || "").trim();
+          const nextValue = existing ? `${existing}\n\n${action.prompt}` : action.prompt;
+          if (prev[targetKey] === nextValue) return prev;
+          return { ...prev, [targetKey]: nextValue };
+        });
+        requestAnimationFrame(() => {
+          textareaRef.current?.focus();
+        });
+      }
       return;
     }
     if (!action?.key) return;

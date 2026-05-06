@@ -10584,6 +10584,8 @@ pub enum DesktopActionPayload {
         prompt: String,
         #[serde(rename = "sessionId")]
         session_id: Option<String>,
+        #[serde(rename = "autoSubmit", default)]
+        auto_submit: bool,
     },
 }
 
@@ -10679,12 +10681,20 @@ fn validate_desktop_action(action: DesktopActionPayload) -> Result<DesktopAction
             }
             Ok(DesktopActionPayload::CloseWindow { window })
         }
-        DesktopActionPayload::NewChatTask { prompt, session_id } => {
+        DesktopActionPayload::NewChatTask {
+            prompt,
+            session_id,
+            auto_submit,
+        } => {
             let prompt = prompt.trim().to_string();
             if prompt.is_empty() {
                 return Err("Chat task prompt is empty".to_string());
             }
-            Ok(DesktopActionPayload::NewChatTask { prompt, session_id })
+            Ok(DesktopActionPayload::NewChatTask {
+                prompt,
+                session_id,
+                auto_submit,
+            })
         }
     }
 }
