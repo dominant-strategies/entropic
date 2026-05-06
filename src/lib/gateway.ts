@@ -185,6 +185,15 @@ export type GatewayMessage = {
   [key: string]: unknown;
 };
 
+export type TalkSpeakResult = {
+  audioBase64: string;
+  provider: string;
+  outputFormat?: string;
+  voiceCompatible?: boolean;
+  mimeType?: string;
+  fileExtension?: string;
+};
+
 type Session = {
   key: string;  // Session key used for API calls
   sessionId?: string;
@@ -705,6 +714,10 @@ export class GatewayClient {
     patch: { model?: string | null; label?: string | null },
   ): Promise<void> {
     await this.rpc("sessions.patch", { key: sessionKey, ...patch });
+  }
+
+  async talkSpeak(text: string): Promise<TalkSpeakResult> {
+    return this.rpc<TalkSpeakResult>("talk.speak", { text });
   }
 
   async deleteSession(sessionKey: string, deleteTranscript = true): Promise<boolean> {

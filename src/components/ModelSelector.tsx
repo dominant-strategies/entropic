@@ -136,6 +136,12 @@ export const PROXY_AUDIO_UNDERSTANDING_MODELS: Model[] = [
 
 export const PROXY_TEXT_TO_SPEECH_MODELS: Model[] = [
   {
+    id: "hexgrad/kokoro-82m",
+    name: "Kokoro 82M",
+    provider: "OpenRouter",
+    tier: "recommended",
+  },
+  {
     id: "openai/gpt-4o-audio-preview",
     name: "GPT-4o Audio Preview",
     provider: "OpenAI",

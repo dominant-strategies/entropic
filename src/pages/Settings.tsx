@@ -1173,7 +1173,7 @@ export function Settings({
           <h1 className="text-lg font-bold text-[var(--text-primary)] px-3 mb-5">Settings</h1>
           {SETTINGS_SIDEBAR_CATEGORIES.map((category) => (
             <div key={category.label} className="mb-4">
-              <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] px-3 mb-1">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-secondary)] px-3 mb-1">
                 {category.label}
               </div>
               {category.items.map((item) => {
@@ -1187,7 +1187,7 @@ export function Settings({
                       "w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-[13px] font-medium transition-colors mb-0.5",
                       isActive
                         ? "bg-[var(--border-subtle)] text-[var(--text-primary)]"
-                        : "text-[var(--text-secondary)] hover:bg-[var(--border-subtle)]/50 hover:text-[var(--text-primary)]"
+                        : "text-[var(--text-primary)] hover:bg-[var(--border-subtle)]/50"
                     )}
                   >
                     <Icon className={clsx("w-4 h-4 flex-shrink-0", isActive && "text-[var(--system-blue)]")} />

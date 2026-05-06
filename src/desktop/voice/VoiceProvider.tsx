@@ -4,7 +4,7 @@ import clsx from "clsx";
 import type { DesktopAction } from "../actions";
 import { validateDesktopAction } from "../actions";
 import { useAudioRecorder, type RecordedAudioAttachment } from "./useAudioRecorder";
-import { useAudioTranscription } from "./useAudioTranscription";
+import { cleanRecordedVoiceTranscript, useAudioTranscription } from "./useAudioTranscription";
 import { VoiceOverlay } from "./VoiceOverlay";
 import { clientLog } from "../../lib/clientLog";
 import {
@@ -25,6 +25,10 @@ type VoiceProviderProps = {
   dispatchAction: (action: DesktopAction) => Promise<void>;
 };
 
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function voiceActionLogPayload(action: DesktopAction): Record<string, string | boolean | undefined> {
   switch (action.type) {
     case "open_workspace_file":
@@ -36,7 +40,11 @@ function voiceActionLogPayload(action: DesktopAction): Record<string, string | b
     case "close_window":
       return { type: action.type, window: action.window };
     case "new_chat_task":
-      return { type: action.type, autoSubmit: action.autoSubmit === true };
+      return {
+        type: action.type,
+        autoSubmit: action.autoSubmit === true,
+        speakResponse: action.speakResponse === true,
+      };
   }
 }
 
@@ -87,6 +95,7 @@ export function VoiceProvider({
   const [state, setState] = useState<VoiceState>("idle");
   const [mode, setMode] = useState<VoiceMode>("command");
   const [message, setMessage] = useState<string | null>(null);
+  const [transcript, setTranscript] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<DesktopAction | null>(null);
   const [confirmLabel, setConfirmLabel] = useState("Continue");
   const { isTranscribing, transcribeAudio } = useAudioTranscription(audioUnderstandingModel);
@@ -94,6 +103,7 @@ export function VoiceProvider({
   function clearVoiceState() {
     setState("idle");
     setMessage(null);
+    setTranscript(null);
     setPendingAction(null);
     setConfirmLabel("Continue");
   }
@@ -115,20 +125,23 @@ export function VoiceProvider({
     setState("transcribing");
     setMessage(mode === "dictation" ? "Transcribing dictation..." : "Transcribing voice command...");
     try {
-      const transcript = await transcribeAudio([attachment]);
+      const transcriptText = cleanRecordedVoiceTranscript(await transcribeAudio([attachment]));
+      setTranscript(transcriptText);
 
       if (mode === "dictation") {
-        setMessage(`Dictation: ${transcript}`);
-        await dispatchVoiceAction({ type: "new_chat_task", prompt: transcript, autoSubmit: false });
+        setMessage("Adding dictation to chat...");
+        await wait(600);
+        await dispatchVoiceAction({ type: "new_chat_task", prompt: transcriptText, autoSubmit: false });
         return;
       }
 
-      let action = validateDesktopAction(resolveVoiceAction(transcript));
+      let action = validateDesktopAction(resolveVoiceAction(transcriptText));
       if (action.type === "new_chat_task") {
         action = {
           ...action,
           prompt: formatVoiceTaskPrompt(action.prompt, mode, desktopContext),
           autoSubmit: true,
+          speakResponse: mode === "conversation",
         };
       }
       const preview = previewForVoiceAction(action);
@@ -140,7 +153,8 @@ export function VoiceProvider({
         setMessage(preview.message);
         return;
       }
-      setMessage(`Voice: ${transcript}`);
+      setMessage("Running voice command...");
+      await wait(600);
       await dispatchVoiceAction(action);
     } catch (error) {
       setState("error");
@@ -162,6 +176,7 @@ export function VoiceProvider({
       setMessage(error);
       setPendingAction(null);
     },
+    autoStopOnSilence: true,
   });
 
   const busy =
@@ -170,8 +185,16 @@ export function VoiceProvider({
   function startVoiceCapture() {
     setState("listening");
     setMessage(messageForMode(mode));
+    setTranscript(null);
     setPendingAction(null);
+    window.dispatchEvent(new Event("entropic-voice-capture-started"));
     void recorder.startRecording();
+  }
+
+  function stopVoiceCapture() {
+    setState("transcribing");
+    setMessage(mode === "dictation" ? "Finalizing dictation..." : "Finalizing voice command...");
+    recorder.stopRecording();
   }
 
   useEffect(() => {
@@ -206,7 +229,7 @@ export function VoiceProvider({
           type="button"
           onClick={() => {
             if (recorder.isRecording) {
-              recorder.stopRecording();
+              stopVoiceCapture();
               return;
             }
             startVoiceCapture();
@@ -217,8 +240,8 @@ export function VoiceProvider({
             recorder.isRecording && "border-red-300/60 bg-red-500/30 text-red-100",
             !recorder.isSupported && "cursor-not-allowed opacity-50",
           )}
-          title={recorder.isSupported ? `Voice ${mode}` : "Microphone unavailable"}
-          aria-label={`Voice ${mode}`}
+          title={recorder.isSupported ? (recorder.isRecording ? "Stop" : `Voice ${mode}`) : "Microphone unavailable"}
+          aria-label={recorder.isRecording ? "Stop recording" : `Voice ${mode}`}
         >
           {busy && !recorder.isRecording ? (
             <Loader2 className="h-5 w-5 animate-spin" />
@@ -231,7 +254,9 @@ export function VoiceProvider({
         state={state === "error" || state === "listening" || state === "confirming" ? state : busy ? "transcribing" : "idle"}
         mode={mode}
         message={message}
+        transcript={transcript}
         confirmLabel={confirmLabel}
+        cancelLabel={recorder.isRecording ? "Stop" : "Cancel"}
         onModeChange={(nextMode) => {
           if (recorder.isRecording || busy) return;
           setMode(nextMode);
@@ -247,10 +272,7 @@ export function VoiceProvider({
           pendingAction
             ? clearVoiceState
             : recorder.isRecording
-            ? () => {
-                recorder.stopRecording();
-                clearVoiceState();
-              }
+            ? stopVoiceCapture
             : undefined
         }
       />

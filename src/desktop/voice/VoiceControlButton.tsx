@@ -26,8 +26,8 @@ export function VoiceControlButton({
         "btn-secondary !p-2.5",
         isRecording && "!border-red-400/50 !bg-red-500/15 !text-red-300",
       )}
-      title={isSupported ? (isRecording ? "Stop recording" : "Record voice note") : "Microphone unavailable"}
-      aria-label={isRecording ? "Stop recording" : "Record voice note"}
+      title={isSupported ? (isRecording ? "Stop" : "Record") : "Microphone unavailable"}
+      aria-label={isRecording ? "Stop recording" : "Record"}
     >
       {isRecording ? <Square className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
     </button>

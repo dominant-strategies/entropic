@@ -1192,216 +1192,9 @@ async fn generate_google_chat_image(
 
 const DEFAULT_TTS_VOICE: &str = "alloy";
 const DEFAULT_TTS_FORMAT: &str = "mp3";
-const STREAMING_PROXY_TTS_FORMAT: &str = "pcm16";
-const PCM16_SAMPLE_RATE_HZ: u32 = 24_000;
-const PCM16_CHANNELS: u16 = 1;
-const PCM16_BITS_PER_SAMPLE: u16 = 16;
-
-fn extract_generated_audio_data(payload: &serde_json::Value) -> Option<String> {
-    if let Some(data) = payload
-        .get("audio")
-        .and_then(|audio| audio.get("data"))
-        .and_then(|value| value.as_str())
-    {
-        let trimmed = data.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    if let Some(data) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("audio"))
-        .and_then(|audio| audio.get("data"))
-        .and_then(|value| value.as_str())
-    {
-        let trimmed = data.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    None
-}
-
-fn extract_generated_audio_transcript(payload: &serde_json::Value) -> Option<String> {
-    if let Some(transcript) = payload
-        .get("audio")
-        .and_then(|audio| audio.get("transcript"))
-        .and_then(|value| value.as_str())
-    {
-        let trimmed = transcript.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    if let Some(transcript) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("audio"))
-        .and_then(|audio| audio.get("transcript"))
-        .and_then(|value| value.as_str())
-    {
-        let trimmed = transcript.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    None
-}
-
-fn extract_generated_text_content(payload: &serde_json::Value) -> Option<String> {
-    if let Some(text) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(|value| value.as_str())
-    {
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    if let Some(parts) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(|value| value.as_array())
-    {
-        let chunks: Vec<String> = parts
-            .iter()
-            .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
-        if !chunks.is_empty() {
-            return Some(chunks.join("\n\n"));
-        }
-    }
-
-    None
-}
-
-fn append_streamed_audio_fields(
-    payload: &serde_json::Value,
-    audio_chunks: &mut String,
-    transcript_chunks: &mut String,
-    text_chunks: &mut String,
-) {
-    if let Some(data) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("audio"))
-        .and_then(|audio| audio.get("data"))
-        .and_then(|value| value.as_str())
-    {
-        audio_chunks.push_str(data.trim());
-    }
-
-    if let Some(transcript) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("audio"))
-        .and_then(|audio| audio.get("transcript"))
-        .and_then(|value| value.as_str())
-    {
-        transcript_chunks.push_str(transcript);
-    }
-
-    if let Some(audio_delta) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("audio_data"))
-        .and_then(|value| value.as_str())
-    {
-        audio_chunks.push_str(audio_delta.trim());
-    }
-
-    if let Some(transcript_delta) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("audio_transcript"))
-        .and_then(|value| value.as_str())
-    {
-        transcript_chunks.push_str(transcript_delta);
-    }
-
-    if let Some(text_delta) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("content"))
-        .and_then(|value| value.as_str())
-    {
-        text_chunks.push_str(text_delta);
-    }
-
-    if let Some(parts) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("content"))
-        .and_then(|value| value.as_array())
-    {
-        for part in parts {
-            if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
-                text_chunks.push_str(text);
-            }
-        }
-    }
-
-    if let Some(data) = extract_generated_audio_data(payload) {
-        audio_chunks.push_str(data.trim());
-    }
-
-    if let Some(transcript) = extract_generated_audio_transcript(payload) {
-        transcript_chunks.push_str(&transcript);
-    }
-
-    if let Some(text) = extract_generated_text_content(payload) {
-        text_chunks.push_str(&text);
-    }
-}
-
-fn process_sse_event_data(
-    event_data: &str,
-    audio_chunks: &mut String,
-    transcript_chunks: &mut String,
-    text_chunks: &mut String,
-) -> Result<(), String> {
-    let trimmed = event_data.trim();
-    if trimmed.is_empty() || trimmed == "[DONE]" {
-        return Ok(());
-    }
-
-    let payload = serde_json::from_str::<serde_json::Value>(trimmed)
-        .map_err(|e| format!("Invalid streamed audio generation response: {}", e))?;
-    append_streamed_audio_fields(&payload, audio_chunks, transcript_chunks, text_chunks);
-    Ok(())
-}
+const MANAGED_PROXY_TTS_MODEL: &str = "hexgrad/kokoro-82m";
+const MANAGED_PROXY_TTS_VOICE: &str = "af_alloy";
+const MANAGED_PROXY_TTS_RESPONSE_FORMAT: &str = "mp3";
 
 fn format_audio_generation_http_error(status: reqwest::StatusCode, body: String) -> String {
     let detail = extract_image_generation_error_detail(&body);
@@ -1411,33 +1204,6 @@ fn format_audio_generation_http_error(status: reqwest::StatusCode, body: String)
         format!(": {}", detail)
     };
     format!("Audio generation failed ({}{})", status, suffix)
-}
-
-fn pcm16_base64_to_wav_data_url(raw_base64: &str) -> Result<String, String> {
-    let pcm_bytes = STANDARD
-        .decode(raw_base64.trim())
-        .map_err(|e| format!("Invalid streamed PCM audio payload: {}", e))?;
-    let data_len = pcm_bytes.len() as u32;
-    let block_align = PCM16_CHANNELS * (PCM16_BITS_PER_SAMPLE / 8);
-    let byte_rate = PCM16_SAMPLE_RATE_HZ * u32::from(block_align);
-
-    let mut wav = Vec::with_capacity(44 + pcm_bytes.len());
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&PCM16_CHANNELS.to_le_bytes());
-    wav.extend_from_slice(&PCM16_SAMPLE_RATE_HZ.to_le_bytes());
-    wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&block_align.to_le_bytes());
-    wav.extend_from_slice(&PCM16_BITS_PER_SAMPLE.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_len.to_le_bytes());
-    wav.extend_from_slice(&pcm_bytes);
-
-    Ok(format!("data:audio/wav;base64,{}", STANDARD.encode(wav)))
 }
 
 async fn generate_openai_chat_audio(
@@ -1492,29 +1258,22 @@ async fn generate_proxy_chat_audio(
         "Proxy base URL is unavailable. Restart the sandbox and try again.".to_string()
     })?;
     let host_proxy_base = resolve_host_proxy_base(&proxy_base)?;
-    let endpoint = format!("{}/chat/completions", host_proxy_base.trim_end_matches('/'));
+    let endpoint = format!("{}/audio/speech", host_proxy_base.trim_end_matches('/'));
+    let requested_model = model.trim();
+    let speech_model = if requested_model.eq_ignore_ascii_case("openai/gpt-4o-audio-preview") {
+        MANAGED_PROXY_TTS_MODEL
+    } else {
+        requested_model
+    };
 
     let response = client
         .post(&endpoint)
         .bearer_auth(&gateway_token)
         .json(&serde_json::json!({
-            "model": model.trim(),
-            "modalities": ["text", "audio"],
-            "audio": {
-                "voice": DEFAULT_TTS_VOICE,
-                "format": STREAMING_PROXY_TTS_FORMAT,
-            },
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a text-to-speech engine. Convert the user's text into spoken audio verbatim. Do not add or remove words."
-                },
-                {
-                    "role": "user",
-                    "content": text,
-                }
-            ],
-            "stream": true
+            "model": speech_model,
+            "voice": MANAGED_PROXY_TTS_VOICE,
+            "response_format": MANAGED_PROXY_TTS_RESPONSE_FORMAT,
+            "input": text,
         }))
         .send()
         .await
@@ -1526,94 +1285,21 @@ async fn generate_proxy_chat_audio(
         return Err(format_audio_generation_http_error(status, body));
     }
 
-    let mut response = response;
-    let mut pending = String::new();
-    let mut audio_chunks = String::new();
-    let mut transcript_chunks = String::new();
-    let mut text_chunks = String::new();
-
-    while let Some(chunk) = response
-        .chunk()
+    let bytes = response
+        .bytes()
         .await
-        .map_err(|e| format!("Failed to read streamed audio response: {}", e))?
-    {
-        pending.push_str(&String::from_utf8_lossy(&chunk));
-
-        while let Some(idx) = pending.find("\n\n") {
-            let raw_event = pending[..idx].to_string();
-            pending.drain(..idx + 2);
-
-            let mut data_lines = Vec::new();
-            for line in raw_event.lines() {
-                let trimmed = line.trim();
-                if let Some(rest) = trimmed.strip_prefix("data:") {
-                    data_lines.push(rest.trim_start());
-                }
-            }
-            if data_lines.is_empty() {
-                continue;
-            }
-            process_sse_event_data(
-                &data_lines.join("\n"),
-                &mut audio_chunks,
-                &mut transcript_chunks,
-                &mut text_chunks,
-            )?;
-        }
+        .map_err(|e| format!("Failed to read generated audio response: {}", e))?;
+    if bytes.is_empty() {
+        return Err("The selected proxy model returned empty audio.".to_string());
     }
-
-    if !pending.trim().is_empty() {
-        let mut data_lines = Vec::new();
-        for line in pending.lines() {
-            let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("data:") {
-                data_lines.push(rest.trim_start());
-            }
-        }
-        if !data_lines.is_empty() {
-            process_sse_event_data(
-                &data_lines.join("\n"),
-                &mut audio_chunks,
-                &mut transcript_chunks,
-                &mut text_chunks,
-            )?;
-        }
-    }
-
-    if audio_chunks.trim().is_empty() {
-        let text_fallback = text_chunks.trim();
-        if !text_fallback.is_empty() {
-            let snippet = text_fallback.chars().take(220).collect::<String>();
-            eprintln!(
-                "[Entropic] Proxy TTS returned text-only output instead of audio (model={}): {}",
-                model.trim(),
-                snippet
-            );
-            return Err(format!(
-                "The proxy model returned text instead of audio. Snippet: {}",
-                snippet
-            ));
-        }
-        eprintln!(
-            "[Entropic] Proxy TTS returned no audio chunks and no text fallback (model={})",
-            model.trim()
-        );
-        return Err("The selected proxy model did not return audio.".to_string());
-    }
-    let transcript = if transcript_chunks.trim().is_empty() {
-        "Generated audio from your text.".to_string()
-    } else {
-        transcript_chunks.trim().to_string()
-    };
-
-    let wav_data_url = pcm16_base64_to_wav_data_url(&audio_chunks)?;
+    let encoded = STANDARD.encode(bytes);
 
     Ok(ChatAudioGenerationResult {
-        text: transcript,
+        text: "Generated audio from your text.".to_string(),
         audio: vec![ChatGeneratedAudio {
-            file_name: "generated-speech.wav".to_string(),
-            mime_type: "audio/wav".to_string(),
-            url: wav_data_url,
+            file_name: "generated-speech.mp3".to_string(),
+            mime_type: "audio/mpeg".to_string(),
+            url: format!("data:audio/mpeg;base64,{}", encoded),
         }],
     })
 }
@@ -1729,6 +1415,26 @@ fn format_audio_transcription_http_error(status: reqwest::StatusCode, body: Stri
     format!("Audio transcription failed ({}{})", status, suffix)
 }
 
+const CHAT_AUDIO_TRANSCRIPTION_PROMPT: &str = "Transcribe the audio verbatim. For short microphone commands, assume there is one user speaking and return only what that user said. Do not invent additional speakers, replies, or conversation turns. Do not add speaker labels unless the audio clearly contains multiple real speakers. If a word is unclear, write [unclear].";
+
+fn format_chat_audio_transcription_segment(
+    attachment: &ChatAudioTranscriptionAttachment,
+    transcript: &str,
+    include_filename: bool,
+) -> String {
+    let transcript = transcript.trim();
+    if !include_filename {
+        return transcript.to_string();
+    }
+
+    let file_name = attachment.file_name.trim();
+    if file_name.is_empty() {
+        transcript.to_string()
+    } else {
+        format!("{}:\n{}", file_name, transcript)
+    }
+}
+
 async fn transcribe_openai_audio(
     client: &reqwest::Client,
     endpoint: &str,
@@ -1759,6 +1465,7 @@ async fn transcribe_openai_audio(
     let form = reqwest::multipart::Form::new()
         .text("model", raw_model.to_string())
         .text("response_format", "json".to_string())
+        .text("prompt", CHAT_AUDIO_TRANSCRIPTION_PROMPT.to_string())
         .part("file", file_part);
 
     let response = client
@@ -1801,7 +1508,7 @@ async fn transcribe_google_audio(
                 "role": "user",
                 "parts": [
                     {
-                        "text": "Transcribe this audio verbatim. Preserve speaker turns when possible, and mark unclear portions as [unclear]."
+                        "text": CHAT_AUDIO_TRANSCRIPTION_PROMPT
                     },
                     {
                         "inlineData": {
@@ -1866,7 +1573,7 @@ async fn transcribe_proxy_chat_audio(
                     "content": [
                         {
                             "type": "text",
-                            "text": "Transcribe this audio verbatim. Preserve speaker turns when possible, and mark unclear portions as [unclear].",
+                            "text": CHAT_AUDIO_TRANSCRIPTION_PROMPT,
                         },
                         {
                             "type": "input_audio",
@@ -1910,7 +1617,11 @@ async fn transcribe_proxy_chat_audio(
         if transcript.trim().is_empty() {
             return Err("The selected proxy audio model did not return a transcript.".to_string());
         }
-        transcripts.push(format!("{}:\n{}", attachment.file_name.trim(), transcript));
+        transcripts.push(format_chat_audio_transcription_segment(
+            attachment,
+            &transcript,
+            attachments.len() > 1,
+        ));
     }
 
     Ok(ChatAudioTranscriptionResult {
@@ -1956,7 +1667,11 @@ async fn transcribe_local_chat_audio(
                 ))
             }
         };
-        transcripts.push(format!("{}:\n{}", attachment.file_name.trim(), transcript));
+        transcripts.push(format_chat_audio_transcription_segment(
+            attachment,
+            &transcript,
+            attachments.len() > 1,
+        ));
     }
 
     Ok(ChatAudioTranscriptionResult {
@@ -9665,6 +9380,18 @@ fn gateway_post_start_reconcile_reasons(
         if current_base_url != expected_base_url {
             reasons.push("proxy base URL mismatch".to_string());
         }
+        let current_talk_provider = config_string_at_path(&cfg, "/talk/provider");
+        if current_talk_provider.as_deref() != Some("openai") {
+            reasons.push("talk provider mismatch".to_string());
+        }
+        let current_talk_base_url = config_string_at_path(&cfg, "/talk/providers/openai/baseUrl");
+        if current_talk_base_url != expected_base_url {
+            reasons.push("talk proxy base URL mismatch".to_string());
+        }
+        let current_talk_model = config_string_at_path(&cfg, "/talk/providers/openai/modelId");
+        if current_talk_model.as_deref() != Some(MANAGED_PROXY_TTS_MODEL) {
+            reasons.push("talk model mismatch".to_string());
+        }
     }
 
     let current_auth_profiles =
@@ -9962,6 +9689,47 @@ fn remove_openclaw_config_value(cfg: &mut serde_json::Value, path: &[&str]) {
     if let Some(last_parent) = current.as_object_mut() {
         last_parent.remove(path[path.len() - 1]);
     }
+}
+
+fn apply_managed_proxy_talk_config(
+    cfg: &mut serde_json::Value,
+    proxy_base_url: &str,
+    proxy_gateway_token: &str,
+) {
+    let tts_provider_config = serde_json::json!({
+        "apiKey": proxy_gateway_token,
+        "baseUrl": proxy_base_url,
+        "model": MANAGED_PROXY_TTS_MODEL,
+        "voice": MANAGED_PROXY_TTS_VOICE,
+        "responseFormat": MANAGED_PROXY_TTS_RESPONSE_FORMAT,
+    });
+    let talk_provider_config = serde_json::json!({
+        "apiKey": proxy_gateway_token,
+        "baseUrl": proxy_base_url,
+        "modelId": MANAGED_PROXY_TTS_MODEL,
+        "voiceId": MANAGED_PROXY_TTS_VOICE,
+        "responseFormat": MANAGED_PROXY_TTS_RESPONSE_FORMAT,
+    });
+
+    set_openclaw_config_value(
+        cfg,
+        &["messages", "tts", "auto"],
+        serde_json::json!("always"),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["messages", "tts", "provider"],
+        serde_json::json!("openai"),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["messages", "tts", "providers", "openai"],
+        tts_provider_config,
+    );
+    set_openclaw_config_value(cfg, &["talk", "provider"], serde_json::json!("openai"));
+    set_openclaw_config_value(cfg, &["talk", "providers", "openai"], talk_provider_config);
+    set_openclaw_config_value(cfg, &["talk", "interruptOnSpeech"], serde_json::json!(true));
+    set_openclaw_config_value(cfg, &["talk", "silenceTimeoutMs"], serde_json::json!(900));
 }
 
 fn append_unique_openclaw_config_array_strings(
@@ -11428,6 +11196,16 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
         .collect();
     let proxy_mode = read_container_env("ENTROPIC_PROXY_MODE").is_some();
     let base_url = read_container_env("ENTROPIC_PROXY_BASE_URL");
+    let proxy_gateway_token = if proxy_mode {
+        read_container_env("OPENROUTER_API_KEY")
+    } else {
+        None
+    };
+    let proxy_gateway_token_hash = proxy_gateway_token.as_deref().map(|token| {
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        format!("{:x}", hasher.finalize())
+    });
     let model = desired_selection.config_model.clone();
     let alias_model = desired_selection.alias_model.clone();
     let image_model = desired_selection.config_image_model.clone();
@@ -11490,6 +11268,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
         "container_id": container_id,
         "proxy_mode": proxy_mode,
         "base_url": &base_url,
+        "proxy_gateway_token_hash": &proxy_gateway_token_hash,
         "model": &model,
         "image_model": &image_model,
         "web_base_url": &web_base_url,
@@ -11711,6 +11490,13 @@ Use it for durable decisions, preferences, and facts that should persist across 
                 &mut cfg,
                 &["plugins", "entries", "duckduckgo", "config", "webSearch"],
             );
+        }
+    }
+    if proxy_mode {
+        if let (Some(base_url), Some(proxy_gateway_token)) =
+            (base_url.as_deref(), proxy_gateway_token.as_deref())
+        {
+            apply_managed_proxy_talk_config(&mut cfg, base_url, proxy_gateway_token);
         }
     }
     let memory_enabled = settings.memory_enabled;

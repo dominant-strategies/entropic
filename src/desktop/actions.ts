@@ -8,7 +8,7 @@ export type DesktopAction =
   | { type: "open_browser_url"; url: string }
   | { type: "focus_window"; window: WindowKey }
   | { type: "close_window"; window: WindowKey }
-  | { type: "new_chat_task"; prompt: string; sessionId?: string; autoSubmit?: boolean };
+  | { type: "new_chat_task"; prompt: string; sessionId?: string; autoSubmit?: boolean; speakResponse?: boolean };
 
 export type DesktopActionHandlers = {
   openWorkspaceFile: (path: string) => void | Promise<void>;
@@ -16,7 +16,12 @@ export type DesktopActionHandlers = {
   openBrowserUrl: (url: string) => void | Promise<void>;
   focusWindow: (window: WindowKey) => void | Promise<void>;
   closeWindow: (window: WindowKey) => void | Promise<void>;
-  newChatTask: (prompt: string, sessionId?: string, autoSubmit?: boolean) => void | Promise<void>;
+  newChatTask: (
+    prompt: string,
+    sessionId?: string,
+    autoSubmit?: boolean,
+    speakResponse?: boolean,
+  ) => void | Promise<void>;
 };
 
 export type DesktopActionValidationOptions = {
@@ -136,7 +141,15 @@ export function validateDesktopAction(
       if (!prompt) {
         throw new Error("Chat task prompt is empty.");
       }
-      return { ...action, prompt, autoSubmit: action.autoSubmit === true };
+      const validated: DesktopAction = {
+        ...action,
+        prompt,
+        autoSubmit: action.autoSubmit === true,
+      };
+      if (action.speakResponse === true) {
+        return { ...validated, speakResponse: true };
+      }
+      return validated;
     }
     default: {
       const neverAction: never = action;
@@ -168,7 +181,12 @@ export async function dispatchDesktopAction(
       await handlers.closeWindow(validated.window);
       return;
     case "new_chat_task":
-      await handlers.newChatTask(validated.prompt, validated.sessionId, validated.autoSubmit);
+      await handlers.newChatTask(
+        validated.prompt,
+        validated.sessionId,
+        validated.autoSubmit,
+        validated.speakResponse,
+      );
       return;
   }
 }

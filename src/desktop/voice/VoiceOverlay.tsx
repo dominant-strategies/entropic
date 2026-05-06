@@ -10,6 +10,8 @@ type VoiceOverlayProps = {
   onConfirm?: () => void;
   onModeChange?: (mode: VoiceMode) => void;
   confirmLabel?: string;
+  cancelLabel?: string;
+  transcript?: string | null;
 };
 
 const MODE_LABELS: Record<VoiceMode, string> = {
@@ -26,6 +28,8 @@ export function VoiceOverlay({
   onConfirm,
   onModeChange,
   confirmLabel = "Continue",
+  cancelLabel = "Cancel",
+  transcript,
 }: VoiceOverlayProps) {
   if (state === "idle") {
     return null;
@@ -51,6 +55,16 @@ export function VoiceOverlay({
             </button>
           ))}
         </div>
+        {transcript ? (
+          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-2">
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-secondary)]">
+              Heard
+            </div>
+            <div className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-[var(--text-primary)]">
+              {transcript}
+            </div>
+          </div>
+        ) : null}
         <div className="flex items-center gap-3">
           {state === "listening" ? (
             <Mic className="h-4 w-4 text-red-300" />
@@ -73,7 +87,7 @@ export function VoiceOverlay({
               onClick={onCancel}
               className="rounded-md px-2 py-1 text-xs text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
             >
-              Cancel
+              {cancelLabel}
             </button>
           ) : null}
         </div>

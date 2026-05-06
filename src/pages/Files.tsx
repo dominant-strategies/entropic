@@ -3390,7 +3390,12 @@ export function Files({
     }
   }
 
-  function startDesktopChatTask(prompt: string, sessionId?: string, autoSubmit?: boolean) {
+  function startDesktopChatTask(
+    prompt: string,
+    sessionId?: string,
+    autoSubmit?: boolean,
+    speakResponse?: boolean,
+  ) {
     setChatOpen(true);
     focusWindow("chat");
     setChatRequestedSession(sessionId || null);
@@ -3400,6 +3405,7 @@ export function Files({
       key: sessionId,
       prompt,
       submit: autoSubmit === true,
+      speakResponse: speakResponse === true,
     });
   }
 

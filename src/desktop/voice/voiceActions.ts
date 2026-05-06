@@ -220,11 +220,11 @@ export function formatVoiceTaskPrompt(
 export function messageForMode(mode: VoiceMode): string {
   switch (mode) {
     case "dictation":
-      return "Listening for dictation...";
+      return "Listening for dictation.";
     case "conversation":
-      return "Listening for a conversation turn...";
+      return "Listening.";
     case "command":
     default:
-      return "Listening for a desktop command...";
+      return "Listening for a desktop command.";
   }
 }

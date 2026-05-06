@@ -111,9 +111,9 @@ sameJson(resolveVoiceAction("Open Settings"), {
   window: "settings",
 });
 
-assert.equal(messageForMode("dictation"), "Listening for dictation...");
-assert.equal(messageForMode("command"), "Listening for a desktop command...");
-assert.equal(messageForMode("conversation"), "Listening for a conversation turn...");
+assert.equal(messageForMode("dictation"), "Listening for dictation.");
+assert.equal(messageForMode("command"), "Listening for a desktop command.");
+assert.equal(messageForMode("conversation"), "Listening.");
 
 assert.equal(chatTaskNeedsConfirmation("Voice command: send Alan an Outlook email"), true);
 assert.equal(chatTaskNeedsConfirmation("Voice command: move the Asana task to done"), true);

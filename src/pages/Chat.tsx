@@ -136,7 +136,10 @@ import {
 } from "../lib/chatMessageUtils";
 import { VoiceControlButton } from "../desktop/voice/VoiceControlButton";
 import { useAudioRecorder, type RecordedAudioAttachment } from "../desktop/voice/useAudioRecorder";
-import { useAudioTranscription } from "../desktop/voice/useAudioTranscription";
+import {
+  cleanRecordedVoiceTranscript,
+  useAudioTranscription,
+} from "../desktop/voice/useAudioTranscription";
 import { useTextToSpeech } from "../desktop/voice/useTextToSpeech";
 
 type GatewayMutationResult = {
@@ -148,7 +151,7 @@ export type ChatSessionActionRequest =
   | { id: string; type: "delete"; key: string }
   | { id: string; type: "pin"; key: string; pinned: boolean }
   | { id: string; type: "rename"; key: string; label: string }
-  | { id: string; type: "compose"; key?: string; prompt: string; submit?: boolean };
+  | { id: string; type: "compose"; key?: string; prompt: string; submit?: boolean; speakResponse?: boolean };
 type Provider = { id: string; name: string; icon: string; placeholder: string; keyUrl: string };
 type PendingAttachment = {
   id: string;
@@ -202,6 +205,26 @@ const CHAT_WORKSPACE_PREFIXES = [
 const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/node\/\.openclaw\/workspace)(?:\/[^\s`"'<>]+)?)/g;
 const FINAL_RESPONSE_RECOVERY_RETRY_MS = 1200;
 const FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS = 2;
+const MAX_VOICE_RESPONSE_SPEECH_CHARS = 1800;
+
+function formatAssistantResponseForSpeech(text: string): string {
+  const normalized = text
+    .replace(/```[\s\S]*?```/g, "Code block omitted.")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s{0,3}[-*+]\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length <= MAX_VOICE_RESPONSE_SPEECH_CHARS) {
+    return normalized;
+  }
+  return `${normalized.slice(0, MAX_VOICE_RESPONSE_SPEECH_CHARS).trim()}...`;
+}
+
+function audioDataUrlFromBase64(base64: string, mimeType?: string | null): string {
+  return `data:${mimeType?.trim() || "audio/mpeg"};base64,${base64.trim()}`;
+}
 
 function trimChatWorkspaceToken(raw: string): string {
   return raw
@@ -1215,6 +1238,10 @@ export function Chat({
   const outboxDispatchInFlightRef = useRef<Set<string>>(new Set());
   const outboxWakeTimerRef = useRef<number | null>(null);
   const connectingScreenTimerRef = useRef<number | null>(null);
+  const voiceSpeakResponseBySendIdRef = useRef<Set<string>>(new Set());
+  const voiceSpeakResponseByRunIdRef = useRef<Set<string>>(new Set());
+  const voiceReplyAudioRef = useRef<HTMLAudioElement | null>(null);
+  const voiceSpeakingRunIdRef = useRef<string | null>(null);
   const workspaceOfficeOpenBySendIdRef = useRef<Record<string, { path: string }>>({});
   const workspaceOfficeOpenByRunIdRef = useRef<Record<string, { path: string }>>({});
   const [outboxWakeTick, setOutboxWakeTick] = useState(0);
@@ -1224,11 +1251,14 @@ export function Chat({
   const activeTerminalState = currentSession
     ? terminalStateBySession[currentSession] || { cwd: TERMINAL_DEFAULT_CWD }
     : { cwd: TERMINAL_DEFAULT_CWD };
-  function handleRecordedAudio(attachment: RecordedAudioAttachment) {
+  const { isTranscribing, transcribeAudio } = useAudioTranscription(audioUnderstandingModel);
+  const { isGeneratingAudio, generateSpeech } = useTextToSpeech(textToSpeechModel);
+
+  function attachRecordedAudio(attachment: RecordedAudioAttachment) {
     setPendingAttachments((prev) => {
       if (prev.length >= MAX_ATTACHMENTS_PER_MESSAGE) {
         setError(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`);
-        URL.revokeObjectURL(attachment.previewUrl);
+        revokeAttachmentPreviewUrl(attachment);
         return prev;
       }
       return [
@@ -1244,13 +1274,29 @@ export function Chat({
     });
   }
 
+  async function handleRecordedAudio(attachment: RecordedAudioAttachment) {
+    try {
+      setThinkingStatus("Transcribing recording");
+      setError(null);
+      const transcript = cleanRecordedVoiceTranscript(await transcribeAudio([attachment]));
+      insertTextIntoChatDraft(transcript);
+      revokeAttachmentPreviewUrl(attachment);
+    } catch (error) {
+      attachRecordedAudio(attachment);
+      setError(
+        `${formatUnknownUiError(error, "Failed to transcribe recording.")} The audio was attached so you can retry.`,
+      );
+    } finally {
+      setThinkingStatus(null);
+    }
+  }
+
   const audioRecorder = useAudioRecorder({
     maxBytes: MAX_ATTACHMENT_BYTES,
     onRecorded: handleRecordedAudio,
     onError: setError,
+    autoStopOnSilence: true,
   });
-  const { isTranscribing, transcribeAudio } = useAudioTranscription(audioUnderstandingModel);
-  const { isGeneratingAudio, generateSpeech } = useTextToSpeech(textToSpeechModel);
   const pendingAudioAttachments = pendingAttachments.filter((attachment) =>
     attachment.mimeType.startsWith("audio/"),
   );
@@ -1604,6 +1650,147 @@ export function Chat({
     } finally {
       setThinkingStatus(null);
     }
+  }
+
+  async function speakAssistantResponseForRun(runId: string, text: string) {
+    if (!runId || !voiceSpeakResponseByRunIdRef.current.has(runId)) return;
+    voiceSpeakResponseByRunIdRef.current.delete(runId);
+
+    const speechText = formatAssistantResponseForSpeech(text);
+    if (!speechText) return;
+
+    const previousAudio = voiceReplyAudioRef.current;
+    if (previousAudio) {
+      previousAudio.pause();
+      previousAudio.removeAttribute("src");
+      voiceReplyAudioRef.current = null;
+    }
+
+    voiceSpeakingRunIdRef.current = runId;
+    setThinkingStatus("Speaking response");
+    try {
+      const liveClient = clientRef.current;
+      if (!liveClient || !liveClient.isConnected()) {
+        throw new Error("OpenClaw is not connected, so the response could not be read back.");
+      }
+      const result = await liveClient.talkSpeak(speechText);
+      if (voiceSpeakingRunIdRef.current !== runId) {
+        return;
+      }
+      if (!result.audioBase64?.trim()) {
+        throw new Error("OpenClaw talk.speak did not return audio.");
+      }
+
+      clientLog("voice.reply.openclaw_tts", {
+        runId,
+        provider: result.provider,
+        outputFormat: result.outputFormat,
+        mimeType: result.mimeType,
+      });
+      const audio = new Audio(audioDataUrlFromBase64(result.audioBase64, result.mimeType));
+      voiceReplyAudioRef.current = audio;
+      audio.addEventListener(
+        "ended",
+        () => {
+          if (voiceSpeakingRunIdRef.current !== runId) return;
+          voiceSpeakingRunIdRef.current = null;
+          voiceReplyAudioRef.current = null;
+          setThinkingStatus((current) => (current === "Speaking response" ? null : current));
+        },
+        { once: true },
+      );
+      await audio.play();
+    } catch (openClawError) {
+      const openClawMessage = formatUnknownUiError(
+        openClawError,
+        "OpenClaw talk.speak failed.",
+      );
+      addDiag(`voice reply OpenClaw TTS failed runId=${runId}: ${openClawMessage}`);
+      if (voiceSpeakingRunIdRef.current !== runId) {
+        return;
+      }
+
+      try {
+        const fallback = await generateSpeech(speechText);
+        if (voiceSpeakingRunIdRef.current !== runId) {
+          return;
+        }
+        const generatedAudio = fallback.audio[0];
+        if (!generatedAudio?.previewUrl) {
+          throw new Error("Managed speech fallback did not return audio.");
+        }
+
+        clientLog("voice.reply.managed_tts_fallback", {
+          runId,
+          mimeType: generatedAudio.mimeType,
+        });
+        const audio = new Audio(generatedAudio.previewUrl);
+        voiceReplyAudioRef.current = audio;
+        audio.addEventListener(
+          "ended",
+          () => {
+            if (voiceSpeakingRunIdRef.current !== runId) return;
+            voiceSpeakingRunIdRef.current = null;
+            voiceReplyAudioRef.current = null;
+            setThinkingStatus((current) => (current === "Speaking response" ? null : current));
+          },
+          { once: true },
+        );
+        await audio.play();
+      } catch (fallbackError) {
+        if (voiceSpeakingRunIdRef.current === runId) {
+          voiceSpeakingRunIdRef.current = null;
+          voiceReplyAudioRef.current = null;
+          setThinkingStatus((current) => (current === "Speaking response" ? null : current));
+        }
+        const fallbackMessage = formatUnknownUiError(
+          fallbackError,
+          "Managed speech fallback failed.",
+        );
+        addDiag(`voice reply fallback failed runId=${runId}: ${fallbackMessage}`);
+        setError(`${openClawMessage} ${fallbackMessage}`);
+      }
+    }
+  }
+
+  function scheduleSpeakAssistantResponseForRun(
+    runId: string,
+    sessionKey: string | null | undefined,
+    fallbackText: string,
+  ) {
+    if (!runId || !voiceSpeakResponseByRunIdRef.current.has(runId)) return;
+
+    let attempts = 0;
+    const maxAttempts = 10;
+    const scheduleAttempt = () => {
+      window.setTimeout(() => {
+        if (!voiceSpeakResponseByRunIdRef.current.has(runId)) return;
+        attempts += 1;
+
+        const sessionMessages = sessionKey ? sessionMessagesRef.current[sessionKey] || [] : [];
+        const visibleMessages = messagesRef.current;
+        const visibleAssistantText = [...sessionMessages, ...visibleMessages]
+          .reverse()
+          .find((message) => message.id === runId && message.role === "assistant")
+          ?.content
+          ?.trim();
+        if (!visibleAssistantText && attempts < maxAttempts) {
+          scheduleAttempt();
+          return;
+        }
+
+        const assistantText = visibleAssistantText || fallbackText.trim();
+        if (!assistantText) return;
+        clientLog("voice.reply.speak", {
+          runId,
+          chars: assistantText.length,
+          source: visibleAssistantText ? "chat_state" : "final_event",
+        });
+        void speakAssistantResponseForRun(runId, assistantText);
+      }, 100);
+    };
+
+    scheduleAttempt();
   }
 
   async function handleQuickAddCredits() {
@@ -2178,6 +2365,10 @@ export function Chat({
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   // Keep session messages ref in sync with current messages state
   useEffect(() => {
@@ -2219,6 +2410,12 @@ export function Chat({
       if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current);
       if (streamPersistTimerRef.current) clearTimeout(streamPersistTimerRef.current);
       clearActiveRunTracking();
+      if (voiceReplyAudioRef.current) {
+        voiceReplyAudioRef.current.pause();
+        voiceReplyAudioRef.current.removeAttribute("src");
+        voiceReplyAudioRef.current = null;
+      }
+      voiceSpeakingRunIdRef.current = null;
       const sessionsSnap = sessionsRef.current;
       const currentSnap = currentSessionRef.current;
       const messagesSnap = { ...sessionMessagesRef.current };
@@ -2245,6 +2442,23 @@ export function Chat({
         window.clearTimeout(outboxWakeTimerRef.current);
         outboxWakeTimerRef.current = null;
       }
+    };
+  }, []);
+
+  useEffect(() => {
+    function stopVoiceReplyAudio() {
+      if (!voiceReplyAudioRef.current) return;
+      voiceReplyAudioRef.current.pause();
+      voiceReplyAudioRef.current.removeAttribute("src");
+      voiceReplyAudioRef.current = null;
+      voiceSpeakingRunIdRef.current = null;
+      setThinkingStatus((current) => (current === "Speaking response" ? null : current));
+      clientLog("voice.reply.stopped_for_capture");
+    }
+
+    window.addEventListener("entropic-voice-capture-started", stopVoiceReplyAudio);
+    return () => {
+      window.removeEventListener("entropic-voice-capture-started", stopVoiceReplyAudio);
     };
   }, []);
 
@@ -3131,6 +3345,9 @@ export function Chat({
             setError(BILLING_RECOVERY_MESSAGE);
             setShowOutOfCreditsModal(true);
           }
+          if (text.trim()) {
+            scheduleSpeakAssistantResponseForRun(runId, sessionKey, text);
+          }
           addDiag(`recovered final response from history runId=${runId} attempt=${attempt + 1}`);
           return;
         } catch (err) {
@@ -3306,6 +3523,9 @@ export function Chat({
         if (timings && !timings.finalAt) {
           timings.finalAt = Date.now();
           addDiag(`timing final runId=${eventRunId} t=${timings.finalAt - timings.startedAt}ms`);
+        }
+        if (text.trim()) {
+          scheduleSpeakAssistantResponseForRun(eventRunId, knownSessionKey || currentSessionRef.current, text);
         }
         const pendingOfficeOpen = workspaceOfficeOpenByRunIdRef.current[eventRunId];
         if (pendingOfficeOpen) {
@@ -3627,7 +3847,10 @@ export function Chat({
       if (!targetKey) return;
       setComposerModeForSession(targetKey, "chat");
       if (action.submit) {
-        void handleSend(action.prompt, { mode: "chat" });
+        void handleSend(action.prompt, {
+          mode: "chat",
+          speakResponse: action.speakResponse === true,
+        });
       } else {
         setDraftsBySession((prev) => {
           const existing = (prev[targetKey] || "").trim();
@@ -4031,6 +4254,10 @@ export function Chat({
       workspaceOfficeOpenByRunIdRef.current[runId] = pendingOfficeOpen;
       delete workspaceOfficeOpenBySendIdRef.current[entry.id];
     }
+    if (voiceSpeakResponseBySendIdRef.current.has(entry.id)) {
+      voiceSpeakResponseByRunIdRef.current.add(runId);
+      voiceSpeakResponseBySendIdRef.current.delete(entry.id);
+    }
 
     scheduleActiveRunTimeout(runId, entry.sessionKey);
     removeOutboxEntry(entry.id);
@@ -4086,6 +4313,7 @@ export function Chat({
         setThinkingStatus("Waiting for reconnect");
       } else {
         removeOutboxEntry(entry.id);
+        voiceSpeakResponseBySendIdRef.current.delete(entry.id);
         setError(errorMessage);
         setIsLoading(false);
         setThinkingStatus(null);
@@ -4097,7 +4325,10 @@ export function Chat({
     }
   }
 
-  async function handleSend(content?: string, options?: { mode?: ComposerMode }) {
+  async function handleSend(
+    content?: string,
+    options?: { mode?: ComposerMode; speakResponse?: boolean },
+  ) {
     let sendSession = currentSessionRef.current;
     if (!sendSession) {
       createNewSession({ force: true });
@@ -4565,6 +4796,9 @@ export function Chat({
       attemptCount: 0,
       nextAttemptAt: Date.now(),
     };
+    if (options?.speakResponse) {
+      voiceSpeakResponseBySendIdRef.current.add(pendingSend.id);
+    }
     if (workspaceOfficeAutoOpenPath) {
       workspaceOfficeOpenBySendIdRef.current[pendingSend.id] = {
         path: workspaceOfficeAutoOpenPath,
@@ -4621,6 +4855,7 @@ export function Chat({
         setThinkingStatus("Waiting for reconnect");
       } else {
         removeOutboxEntry(pendingSend.id);
+        voiceSpeakResponseBySendIdRef.current.delete(pendingSend.id);
         if (!handledProviderOAuth) {
           setError(errorMessage);
         }
