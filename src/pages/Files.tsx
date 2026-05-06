@@ -6,7 +6,6 @@ import {
   useRef,
   lazy,
   Suspense,
-  type ReactNode,
   type ClipboardEvent as ReactClipboardEvent,
   type MouseEvent as ReactMouseEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -19,7 +18,6 @@ import { Store } from "@tauri-apps/plugin-store";
 import {
   Folder,
   FileText,
-  LayoutGrid,
   Trash2,
   Eye,
   Plus,
@@ -109,6 +107,7 @@ import {
   getFileIcon,
 } from "../desktop/finder/FileIcons";
 import { FinderApp } from "../desktop/finder/FinderApp";
+import { DesktopDock } from "../desktop/dock/DesktopDock";
 import {
   workspaceBrowserUrl,
   workspaceFileCanOpenInBrowser,
@@ -882,43 +881,6 @@ function extractChatWorkspaceReferences(content: string): ChatWorkspaceReference
   }
 
   return refs;
-}
-
-function DockIconButton({
-  label,
-  active = false,
-  onClick,
-  children,
-}: {
-  label: string;
-  active?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="group relative flex flex-col items-center"
-      aria-label={label}
-    >
-      <div
-        className="pointer-events-none absolute bottom-full mb-2 rounded-lg border px-2.5 py-1 text-[11px] font-medium whitespace-nowrap opacity-0 translate-y-1 transition-all duration-150 group-hover:translate-y-0 group-hover:opacity-100"
-        style={{
-          background: "rgba(17,24,39,0.88)",
-          color: "rgba(255,255,255,0.96)",
-          borderColor: "rgba(255,255,255,0.16)",
-          boxShadow: "0 10px 24px rgba(0,0,0,0.28)",
-          backdropFilter: "blur(18px)",
-          WebkitBackdropFilter: "blur(18px)",
-        }}
-      >
-        {label}
-      </div>
-      {children}
-      <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${active ? "bg-white/80" : "opacity-0"}`} />
-    </button>
-  );
 }
 
 // ═════════════════════════════════════════════════════════════════════
@@ -5408,249 +5370,36 @@ export function Files({
             dispatchAction={runDesktopAction}
           />
 
-          {/* ── FLOATING DOCK ─────────────────────────────────────────── */}
-          <div
-            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex items-end justify-center gap-2 px-2.5 py-1.5 rounded-[22px]"
-            style={{
-              background: "rgba(255,255,255,0.18)",
-              backdropFilter: "blur(40px)",
-              WebkitBackdropFilter: "blur(40px)",
-              border: "1px solid rgba(255,255,255,0.25)",
-              boxShadow: "0 8px 32px rgba(0,0,0,0.35), inset 0 0.5px 0 rgba(255,255,255,0.2)",
+          <DesktopDock
+            active={{
+              finder: finderOpen,
+              chat: chatOpen,
+              browser: browserOpen,
+              sheets: sheetsOpen,
+              docs: docsOpen,
+              slides: slidesOpen,
+              terminal: terminalOpen,
+              skills: skillsOpen,
+              channels: channelsOpen,
+              tasks: tasksOpen,
+              jobs: jobsOpen,
+              logs: logsOpen,
+              billing: billingOpen,
+              settings: settingsOpen,
             }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Finder */}
-            <DockIconButton
-              label="Finder"
-              active={finderOpen}
-              onClick={() => requestDesktopWindowFocus("finder")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #4dc7f0 0%, #1a9ad7 100%)", boxShadow: "0 3px 10px rgba(26,154,215,0.4)" }}
-              >
-                <Folder className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Chat */}
-            <DockIconButton
-              label="Chat"
-              active={chatOpen}
-              onClick={() => requestDesktopWindowFocus("chat")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #5be579 0%, #32b350 100%)", boxShadow: "0 3px 10px rgba(50,179,80,0.4)" }}
-              >
-                <MessageSquare className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Browser */}
-            <DockIconButton
-              label="Browser"
-              active={browserOpen}
-              onClick={() => {
-                if (!browserOpen) {
-                  openFreshBrowserWindow(DEFAULT_BROWSER_URL);
-                  return;
-                }
-                focusWindow("browser");
-              }}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #0ea5e9 0%, #0284c7 100%)", boxShadow: "0 3px 10px rgba(2,132,199,0.4)" }}
-              >
-                <Globe className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            <DockIconButton
-              label="Sheets"
-              active={sheetsOpen}
-              onClick={() => requestDesktopWindowFocus("sheets")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #34d399 0%, #059669 100%)", boxShadow: "0 3px 10px rgba(5,150,105,0.38)" }}
-              >
-                <LayoutGrid className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            <DockIconButton
-              label="Docs"
-              active={docsOpen}
-              onClick={() => requestDesktopWindowFocus("docs")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #60a5fa 0%, #2563eb 100%)", boxShadow: "0 3px 10px rgba(37,99,235,0.38)" }}
-              >
-                <FileText className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            <DockIconButton
-              label="Slides"
-              active={slidesOpen}
-              onClick={() => requestDesktopWindowFocus("slides")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #fbbf24 0%, #f97316 100%)", boxShadow: "0 3px 10px rgba(249,115,22,0.34)" }}
-              >
-                <Image className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Terminal */}
-            <DockIconButton
-              label="Terminal"
-              active={terminalOpen}
-              onClick={() => requestDesktopWindowFocus("terminal")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #1f2937 0%, #0f172a 100%)", boxShadow: "0 3px 10px rgba(15,23,42,0.45)" }}
-              >
-                <Terminal className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Skills */}
-            <DockIconButton
-              label="Skills"
-              active={skillsOpen}
-              onClick={() => requestDesktopWindowFocus("skills")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #22d3ee 0%, #0ea5e9 100%)", boxShadow: "0 3px 10px rgba(14,165,233,0.4)" }}
-              >
-                <Sparkles className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Messaging */}
-            <DockIconButton
-              label="Messaging"
-              active={channelsOpen}
-              onClick={() => requestDesktopWindowFocus("channels")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #60a5fa 0%, #2563eb 100%)", boxShadow: "0 3px 10px rgba(37,99,235,0.4)" }}
-              >
-                <Radio className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Tasks */}
-            <DockIconButton
-              label="Tasks"
-              active={tasksOpen}
-              onClick={() => requestDesktopWindowFocus("tasks")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #22c55e 0%, #16a34a 100%)", boxShadow: "0 3px 10px rgba(22,163,74,0.35)" }}
-              >
-                <ListTodo className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Jobs */}
-            <DockIconButton
-              label="Jobs"
-              active={jobsOpen}
-              onClick={() => requestDesktopWindowFocus("jobs")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #f97316 0%, #ea580c 100%)", boxShadow: "0 3px 10px rgba(234,88,12,0.35)" }}
-              >
-                <CalendarClock className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Logs */}
-            <DockIconButton
-              label="Logs"
-              active={logsOpen}
-              onClick={() => requestDesktopWindowFocus("logs")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #94a3b8 0%, #475569 100%)", boxShadow: "0 3px 10px rgba(71,85,105,0.4)" }}
-              >
-                <ScrollText className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Billing */}
-            {billingEnabled && (
-              <DockIconButton
-                label="Billing"
-                active={billingOpen}
-                onClick={() => requestDesktopWindowFocus("billing")}
-              >
-                <div
-                  className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                  style={{ background: "linear-gradient(180deg, #22c55e 0%, #16a34a 100%)", boxShadow: "0 3px 10px rgba(34,197,94,0.35)" }}
-                >
-                  <CreditCard className="w-6 h-6 text-white" />
-                </div>
-              </DockIconButton>
-            )}
-
-            {/* Settings */}
-            <DockIconButton
-              label="Settings"
-              active={settingsOpen}
-              onClick={() => requestDesktopWindowFocus("settings")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #f3f4f6 0%, #d1d5db 100%)", boxShadow: "0 3px 10px rgba(148,163,184,0.35)" }}
-              >
-                <SettingsIcon className="w-6 h-6 text-[#111827]" />
-              </div>
-            </DockIconButton>
-
-            <div className="w-px self-stretch my-1.5 mx-0.5" style={{ background: "rgba(255,255,255,0.25)" }} />
-
-            {/* Wallpaper */}
-            <DockIconButton
-              label="Wallpaper"
-              onClick={() => setShowWallpaperPicker(!showWallpaperPicker)}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #c084fc 0%, #9333ea 100%)", boxShadow: "0 3px 10px rgba(147,51,234,0.4)" }}
-              >
-                <Image className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Add Files */}
-            <DockIconButton
-              label="Add Files"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #fbbf24 0%, #f59e0b 100%)", boxShadow: "0 3px 10px rgba(245,158,11,0.4)" }}
-              >
-                <Plus className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileInputChange} multiple />
-          </div>
+            billingEnabled={billingEnabled}
+            onFocusWindow={requestDesktopWindowFocus}
+            onOpenBrowser={() => {
+              if (!browserOpen) {
+                openFreshBrowserWindow(DEFAULT_BROWSER_URL);
+                return;
+              }
+              focusWindow("browser");
+            }}
+            onToggleWallpaper={() => setShowWallpaperPicker(!showWallpaperPicker)}
+            onAddFiles={() => fileInputRef.current?.click()}
+          />
+          <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileInputChange} multiple />
         </div>
       </div>
 
