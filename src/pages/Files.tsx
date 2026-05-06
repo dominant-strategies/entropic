@@ -70,13 +70,7 @@ import {
   type OfficeAppSession,
   type OfficeRecentEntry,
 } from "../desktop/office/OfficeApps";
-import {
-  DesktopFileIcon,
-  DesktopImagePreviewIcon,
-  FolderIcon,
-  getFileColor,
-  getFileIcon,
-} from "../desktop/finder/FileIcons";
+import { DesktopIconGrid } from "../desktop/finder/DesktopIconGrid";
 import { FinderApp } from "../desktop/finder/FinderApp";
 import { FilePreviewWindow, type FilePreviewState } from "../desktop/finder/FilePreviewWindow";
 import { CreateWorkspaceEntryModal } from "../desktop/finder/CreateWorkspaceEntryModal";
@@ -4116,123 +4110,33 @@ export function Files({
           {/* Wallpaper */}
           <div className="absolute inset-0" style={isWpImage ? { backgroundImage: wallpaperCss, backgroundSize: "cover", backgroundPosition: "center" } : { background: wallpaperCss }} />
 
-          {/* Desktop icons */}
-          <div className="relative flex-1 pt-4 px-0 pb-0 h-full">
-            {(() => {
-              const icon = desktopIcons.workspace;
-              return (
-                <div
-                  className="absolute flex flex-col items-center w-20 p-2 rounded-xl cursor-grab active:cursor-grabbing transition-colors duration-100 select-none"
-                  data-desktop-drop-target=""
-                  style={{
-                    left: icon?.x ?? 28,
-                    top: icon?.y ?? 72,
-                    background: selected === "__user_folder"
-                      ? "rgba(255,255,255,0.18)"
-                      : dragDropTarget === ""
-                        ? "rgba(84,163,247,0.18)"
-                        : "transparent",
-                    outline: dragDropTarget === "" ? "1px solid rgba(122,184,245,0.6)" : "none",
-                  }}
-                  onMouseDown={(e) => handleIconMouseDown("workspace", e)}
-                  onDragOver={(e) => handleUploadDragOver(e, "")}
-                  onDragLeave={(e) => handleUploadDragLeave(e, "")}
-                  onDrop={(e) => { void handleUploadDropToPath(e, ""); }}
-                  onClick={(e) => {
-                    if (iconClickGuardRef.current) return;
-                    e.stopPropagation();
-                    setSelected("__user_folder");
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setSelected("__user_folder");
-                    setContextMenu({ x: e.clientX, y: e.clientY });
-                  }}
-                  onDoubleClick={() => openFolder("")}
-                >
-                  <FolderIcon size={56} selected={selected === "__user_folder"} />
-                  <span
-                    className="text-[11px] text-center leading-tight mt-1 w-full truncate"
-                    style={{
-                      color: "white",
-                      textShadow: "0 1px 3px rgba(0,0,0,0.6)",
-                      fontWeight: selected === "__user_folder" ? 600 : 400,
-                    }}
-                  >
-                    {agentName}&apos;s Files
-                  </span>
-                </div>
-              );
-            })()}
-            {desktopEntries.map((entry) => {
-              const iconKey = desktopIconIdForPath(entry.path);
-              const icon = desktopIcons[iconKey];
-              const Icon = getFileIcon(entry.name, entry.is_directory);
-              const iconColor = getFileColor(entry.name, entry.is_directory);
-              const imagePreview = isImageWorkspaceEntry(entry) ? desktopImagePreviews[entry.path] : undefined;
-              const isSelected = selected === entry.path;
-              const isDropTarget = dragDropTarget === entry.path;
-              return (
-                <div
-                  key={entry.path}
-                  className="absolute flex flex-col items-center w-20 p-2 rounded-xl cursor-grab active:cursor-grabbing transition-colors duration-100 select-none"
-                  data-desktop-drop-target={entry.is_directory ? entry.path : undefined}
-                  style={{
-                    left: icon?.x ?? 28,
-                    top: icon?.y ?? 192,
-                    background: isSelected
-                      ? "rgba(255,255,255,0.18)"
-                      : isDropTarget
-                        ? "rgba(84,163,247,0.18)"
-                        : "transparent",
-                    outline: isDropTarget ? "1px solid rgba(122,184,245,0.6)" : "none",
-                  }}
-                  onMouseDown={(e) => handleIconMouseDown(iconKey, e)}
-                  onDragOver={entry.is_directory ? (e) => handleUploadDragOver(e, entry.path) : undefined}
-                  onDragLeave={entry.is_directory ? (e) => handleUploadDragLeave(e, entry.path) : undefined}
-                  onDrop={entry.is_directory ? ((e) => { void handleUploadDropToPath(e, entry.path); }) : undefined}
-                  onClick={(e) => {
-                    if (iconClickGuardRef.current) return;
-                    e.stopPropagation();
-                    setSelected(entry.path);
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setSelected(entry.path);
-                    setContextMenu({ x: e.clientX, y: e.clientY, entry });
-                  }}
-                  onDoubleClick={() => handleDesktopEntryOpen(entry)}
-                >
-                  {entry.is_directory ? (
-                    <FolderIcon size={56} selected={isSelected || isDropTarget} />
-                  ) : imagePreview ? (
-                    <DesktopImagePreviewIcon src={imagePreview} active={isSelected || isDropTarget} />
-                  ) : (
-                    <div className="w-14 h-14 flex items-center justify-center">
-                      <DesktopFileIcon icon={Icon} color={iconColor} active={isSelected || isDropTarget} />
-                    </div>
-                  )}
-                  <span
-                    className="text-[11px] text-center leading-tight mt-1 w-full"
-                    style={{
-                      color: "white",
-                      textShadow: "0 1px 3px rgba(0,0,0,0.6)",
-                      fontWeight: isSelected ? 600 : 400,
-                      display: "-webkit-box",
-                      WebkitLineClamp: 2,
-                      WebkitBoxOrient: "vertical",
-                      overflow: "hidden",
-                      wordBreak: "break-word",
-                    }}
-                  >
-                    {entry.name}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
+          <DesktopIconGrid
+            agentName={agentName}
+            entries={desktopEntries}
+            desktopIcons={desktopIcons}
+            imagePreviews={desktopImagePreviews}
+            selected={selected}
+            dragDropTarget={dragDropTarget}
+            iconClickGuardRef={iconClickGuardRef}
+            iconIdForPath={desktopIconIdForPath}
+            isImageEntry={isImageWorkspaceEntry}
+            onIconMouseDown={handleIconMouseDown}
+            onUploadDragOver={handleUploadDragOver}
+            onUploadDragLeave={handleUploadDragLeave}
+            onUploadDropToPath={(e, path) => { void handleUploadDropToPath(e, path); }}
+            onSelectWorkspace={() => setSelected("__user_folder")}
+            onWorkspaceContextMenu={(e) => {
+              setSelected("__user_folder");
+              setContextMenu({ x: e.clientX, y: e.clientY });
+            }}
+            onOpenWorkspace={() => openFolder("")}
+            onSelectEntry={(entry) => setSelected(entry.path)}
+            onEntryContextMenu={(entry, e) => {
+              setSelected(entry.path);
+              setContextMenu({ x: e.clientX, y: e.clientY, entry });
+            }}
+            onOpenEntry={handleDesktopEntryOpen}
+          />
 
           {/* Drag overlay */}
           {dragOver && (
