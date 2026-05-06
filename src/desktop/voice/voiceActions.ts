@@ -16,6 +16,8 @@ export type VoiceDesktopContext = {
 const WINDOW_ALIASES: Record<string, WindowKey> = {
   chat: "chat",
   browser: "browser",
+  email: "browser",
+  mail: "browser",
   finder: "finder",
   files: "finder",
   settings: "settings",
@@ -124,8 +126,15 @@ export function resolveVoiceAction(transcript: string): DesktopAction {
     }
   }
 
+  const activeOfficeMatch = lower.match(
+    /\b(?:focus|show|switch to|open)\s+(?:the\s+|this\s+)?(spreadsheet|document|presentation)(?:\s+in\s+(sheets|docs|slides))?\b/,
+  );
+  if (activeOfficeMatch?.[1]) {
+    return { type: "focus_window", window: WINDOW_ALIASES[activeOfficeMatch[2] || activeOfficeMatch[1]] ?? "sheets" };
+  }
+
   const focusMatch = lower.match(
-    /\b(?:focus|show|switch to|open)\s+(chat|browser|finder|files|settings|integrations|skills|plugins|terminal|shell|tasks|jobs|sheets|spreadsheet|docs|document|slides|presentation)\b/,
+    /\b(?:focus|show|switch to|open)\s+(?:the\s+)?(chat|browser|email|mail|finder|files|settings|integrations|skills|plugins|terminal|shell|tasks|jobs|sheets|spreadsheet|docs|document|slides|presentation)(?:\s+window)?\b/,
   );
   if (focusMatch?.[1]) {
     return { type: "focus_window", window: WINDOW_ALIASES[focusMatch[1]] ?? "chat" };
