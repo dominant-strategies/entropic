@@ -5565,8 +5565,12 @@ fn gateway_health_error_suggests_control_ui_auth(error: &str) -> bool {
         || (lowered.contains("origin") && lowered.contains("allow"))
 }
 
+fn docker_exact_name_filter(name: &str) -> String {
+    format!("name=^/{}$", name)
+}
+
 fn named_gateway_container_exists(name: &str, running_only: bool) -> bool {
-    let name_filter = format!("name={}", name);
+    let name_filter = docker_exact_name_filter(name);
     let mut args = vec!["ps"];
     if !running_only {
         args.push("-a");
@@ -10815,6 +10819,15 @@ pub fn start_desktop_action_bridge(app: &AppHandle) {
 #[cfg(test)]
 mod desktop_action_tests {
     use super::*;
+
+    #[test]
+    fn docker_name_filter_matches_exact_container_name_only() {
+        assert_eq!(
+            docker_exact_name_filter(OPENCLAW_CONTAINER),
+            "name=^/entropic-openclaw$"
+        );
+        assert!(!docker_exact_name_filter(OPENCLAW_CONTAINER).contains("entropic-openclaw-harness"));
+    }
 
     #[test]
     fn validates_workspace_file_paths() {
