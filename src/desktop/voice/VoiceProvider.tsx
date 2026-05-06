@@ -6,6 +6,7 @@ import { validateDesktopAction } from "../actions";
 import { useAudioRecorder, type RecordedAudioAttachment } from "./useAudioRecorder";
 import { useAudioTranscription } from "./useAudioTranscription";
 import { VoiceOverlay } from "./VoiceOverlay";
+import { clientLog } from "../../lib/clientLog";
 import {
   chatTaskNeedsConfirmation,
   formatVoiceTaskPrompt,
@@ -39,6 +40,21 @@ function previewForAction(action: DesktopAction): { message: string; confirmLabe
       return null;
     default:
       return null;
+  }
+}
+
+function voiceActionLogPayload(action: DesktopAction): Record<string, string | boolean | undefined> {
+  switch (action.type) {
+    case "open_workspace_file":
+    case "open_workspace_folder":
+      return { type: action.type, path: action.path };
+    case "open_browser_url":
+      return { type: action.type, url: action.url };
+    case "focus_window":
+    case "close_window":
+      return { type: action.type, window: action.window };
+    case "new_chat_task":
+      return { type: action.type, autoSubmit: action.autoSubmit === true };
   }
 }
 
@@ -103,6 +119,7 @@ export function VoiceProvider({
   async function dispatchVoiceAction(action: DesktopAction) {
     setState("thinking");
     setPendingAction(null);
+    clientLog("voice.action.dispatch", voiceActionLogPayload(action));
     try {
       await dispatchAction(action);
       clearVoiceState();
@@ -134,6 +151,7 @@ export function VoiceProvider({
       }
       const preview = previewForAction(action);
       if (preview) {
+        clientLog("voice.action.confirmation_required", voiceActionLogPayload(action));
         setPendingAction(action);
         setConfirmLabel(preview.confirmLabel);
         setState("confirming");

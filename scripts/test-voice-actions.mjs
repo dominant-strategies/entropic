@@ -45,9 +45,17 @@ sameJson(resolveVoiceAction("open sales-plan.xlsx"), {
   type: "open_workspace_file",
   path: "sales-plan.xlsx",
 });
+sameJson(resolveVoiceAction("open roadmap.pptx"), {
+  type: "open_workspace_file",
+  path: "roadmap.pptx",
+});
 sameJson(resolveVoiceAction("focus Settings"), {
   type: "focus_window",
   window: "settings",
+});
+sameJson(resolveVoiceAction("show spreadsheet"), {
+  type: "focus_window",
+  window: "sheets",
 });
 sameJson(resolveVoiceAction("Open browser and go to Gmail"), {
   type: "open_browser_url",
@@ -67,6 +75,7 @@ assert.equal(messageForMode("command"), "Listening for a desktop command...");
 assert.equal(messageForMode("conversation"), "Listening for a conversation turn...");
 
 assert.equal(chatTaskNeedsConfirmation("Voice command: send Alan an Outlook email"), true);
+assert.equal(chatTaskNeedsConfirmation("Voice command: move the Asana task to done"), true);
 assert.equal(
   chatTaskNeedsConfirmation("Voice command: summarize this note\n- Integrations: Gmail connected"),
   false,
