@@ -443,9 +443,9 @@ const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_PROXY_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
 const DEFAULT_LOCAL_OPENAI_IMAGE_GENERATION_MODEL = "openai/gpt-image-1";
 const DEFAULT_LOCAL_GOOGLE_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
-const DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL = "google/gemini-3-flash-preview";
+const DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL = "venice/nvidia/parakeet-tdt-0.6b-v3";
 const DEFAULT_LOCAL_AUDIO_UNDERSTANDING_MODEL = "google/gemini-3-flash-preview";
-const DEFAULT_PROXY_TEXT_TO_SPEECH_MODEL = "hexgrad/kokoro-82m";
+const DEFAULT_PROXY_TEXT_TO_SPEECH_MODEL = "venice/tts-kokoro";
 const DEFAULT_LOCAL_TEXT_TO_SPEECH_MODEL = "openai/gpt-4o-mini-tts";
 const GATEWAY_FAILURE_THRESHOLD = 3;
 const FEEDBACK_FORM_URL = entropicSitePath("/feedback");
@@ -605,9 +605,6 @@ function remapAudioUnderstandingModelForMode(model: string, useLocalKeys: boolea
   const base = stripModelParams(model);
   if (PROXY_AUDIO_UNDERSTANDING_MODEL_IDS.has(base)) {
     return base;
-  }
-  if (base.startsWith("openai/")) {
-    return "openai/gpt-4o-transcribe";
   }
   return DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL;
 }

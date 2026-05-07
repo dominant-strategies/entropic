@@ -93,6 +93,13 @@ function preferredRecordingMimeType(): string {
   return "";
 }
 
+function shouldPreferPcmRecording(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const userAgent = navigator.userAgent || "";
+  const platform = navigator.platform || "";
+  return /linux/i.test(`${platform} ${userAgent}`) && /webkit/i.test(userAgent) && !/chrome|chromium/i.test(userAgent);
+}
+
 function recordingExtensionForMimeType(mimeType: string): string {
   if (mimeType.includes("mp4")) return "m4a";
   if (mimeType.includes("ogg")) return "ogg";
@@ -481,7 +488,7 @@ export function useAudioRecorder({
 
       let recorder: MediaRecorder | null = null;
       let mimeType = "";
-      if (typeof MediaRecorder !== "undefined") {
+      if (!shouldPreferPcmRecording() && typeof MediaRecorder !== "undefined") {
         try {
           mimeType = preferredRecordingMimeType();
           recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);

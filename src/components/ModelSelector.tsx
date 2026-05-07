@@ -140,18 +140,6 @@ export const PROXY_AUDIO_UNDERSTANDING_MODELS: Model[] = [
     provider: "Venice",
     tier: "premium",
   },
-  {
-    id: "google/gemini-3-flash-preview",
-    name: "Gemini 3 Flash Audio",
-    provider: "Google",
-    tier: "recommended",
-  },
-  {
-    id: "openai/gpt-4o-transcribe",
-    name: "GPT-4o Transcribe",
-    provider: "OpenAI",
-    tier: "premium",
-  },
 ];
 
 export const PROXY_TEXT_TO_SPEECH_MODELS: Model[] = [
@@ -160,18 +148,6 @@ export const PROXY_TEXT_TO_SPEECH_MODELS: Model[] = [
     name: "Kokoro TTS (Private)",
     provider: "Venice",
     tier: "recommended",
-  },
-  {
-    id: "hexgrad/kokoro-82m",
-    name: "Kokoro 82M",
-    provider: "OpenRouter",
-    tier: "recommended",
-  },
-  {
-    id: "openai/gpt-4o-audio-preview",
-    name: "GPT-4o Audio Preview",
-    provider: "OpenAI",
-    tier: "premium",
   },
 ];
 

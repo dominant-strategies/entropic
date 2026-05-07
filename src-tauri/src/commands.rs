@@ -659,9 +659,10 @@ fn openrouter_provider_model_id(model: &str) -> String {
 }
 
 fn venice_provider_model_id(model: &str) -> String {
-    model_base_ref(model)
-        .strip_prefix("venice/")
-        .unwrap_or(model_base_ref(model))
+    let base = model_base_ref(model);
+    base.strip_prefix("openrouter/venice/")
+        .or_else(|| base.strip_prefix("venice/"))
+        .unwrap_or(base)
         .to_string()
 }
 
@@ -1199,9 +1200,9 @@ async fn generate_google_chat_image(
 
 const DEFAULT_TTS_VOICE: &str = "alloy";
 const DEFAULT_TTS_FORMAT: &str = "mp3";
-const MANAGED_PROXY_TTS_MODEL: &str = "hexgrad/kokoro-82m";
+const MANAGED_PROXY_TTS_MODEL: &str = "venice/tts-kokoro";
 const MANAGED_PROXY_TTS_VOICE: &str = "af_alloy";
-const MANAGED_PROXY_TTS_RESPONSE_FORMAT: &str = "mp3";
+const MANAGED_PROXY_TTS_RESPONSE_FORMAT: &str = "wav";
 
 fn normalize_tts_speed(speed: Option<f64>) -> Option<f64> {
     let speed = speed?;
@@ -1219,6 +1220,30 @@ fn format_audio_generation_http_error(status: reqwest::StatusCode, body: String)
         format!(": {}", detail)
     };
     format!("Audio generation failed ({}{})", status, suffix)
+}
+
+fn audio_mime_type_for_tts_format(format: &str) -> &'static str {
+    match format.trim().to_ascii_lowercase().as_str() {
+        "aac" => "audio/aac",
+        "flac" => "audio/flac",
+        "opus" => "audio/ogg; codecs=opus",
+        "pcm" => "audio/pcm",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        _ => "audio/mpeg",
+    }
+}
+
+fn audio_file_extension_for_tts_format(format: &str) -> &'static str {
+    match format.trim().to_ascii_lowercase().as_str() {
+        "aac" => "aac",
+        "flac" => "flac",
+        "opus" => "opus",
+        "pcm" => "pcm",
+        "wav" => "wav",
+        "mp3" => "mp3",
+        _ => "mp3",
+    }
 }
 
 async fn generate_openai_chat_audio(
@@ -1256,6 +1281,14 @@ async fn generate_openai_chat_audio(
         return Err(format_audio_generation_http_error(status, body));
     }
 
+    let mime_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| audio_mime_type_for_tts_format(DEFAULT_TTS_FORMAT))
+        .to_string();
     let bytes = response
         .bytes()
         .await
@@ -1264,9 +1297,12 @@ async fn generate_openai_chat_audio(
     Ok(ChatAudioGenerationResult {
         text: "Generated audio from your text.".to_string(),
         audio: vec![ChatGeneratedAudio {
-            file_name: "generated-speech.mp3".to_string(),
-            mime_type: "audio/mpeg".to_string(),
-            url: format!("data:audio/mpeg;base64,{}", encoded),
+            file_name: format!(
+                "generated-speech.{}",
+                audio_file_extension_for_tts_format(DEFAULT_TTS_FORMAT)
+            ),
+            mime_type: mime_type.clone(),
+            url: format!("data:{};base64,{}", mime_type, encoded),
         }],
     })
 }
@@ -1321,6 +1357,14 @@ async fn generate_proxy_chat_audio(
         return Err(format_audio_generation_http_error(status, body));
     }
 
+    let mime_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| audio_mime_type_for_tts_format(MANAGED_PROXY_TTS_RESPONSE_FORMAT))
+        .to_string();
     let bytes = response
         .bytes()
         .await
@@ -1333,9 +1377,12 @@ async fn generate_proxy_chat_audio(
     Ok(ChatAudioGenerationResult {
         text: "Generated audio from your text.".to_string(),
         audio: vec![ChatGeneratedAudio {
-            file_name: "generated-speech.mp3".to_string(),
-            mime_type: "audio/mpeg".to_string(),
-            url: format!("data:audio/mpeg;base64,{}", encoded),
+            file_name: format!(
+                "generated-speech.{}",
+                audio_file_extension_for_tts_format(MANAGED_PROXY_TTS_RESPONSE_FORMAT)
+            ),
+            mime_type: mime_type.clone(),
+            url: format!("data:{};base64,{}", mime_type, encoded),
         }],
     })
 }

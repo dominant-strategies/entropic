@@ -57,6 +57,13 @@ function preferredStreamingMimeType() {
   return "";
 }
 
+function shouldPreferPcmRecording(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const userAgent = navigator.userAgent || "";
+  const platform = navigator.platform || "";
+  return /linux/i.test(`${platform} ${userAgent}`) && /webkit/i.test(userAgent) && !/chrome|chromium/i.test(userAgent);
+}
+
 function audioExtensionForMimeType(mimeType: string) {
   if (mimeType.includes("wav")) return "wav";
   if (mimeType.includes("mp4")) return "m4a";
@@ -393,7 +400,7 @@ export function useStreamingAudioTranscription(callbacks: StreamingAudioTranscri
       });
       streamRef.current = stream;
 
-      if (typeof MediaRecorder !== "undefined") {
+      if (!shouldPreferPcmRecording() && typeof MediaRecorder !== "undefined") {
         try {
           startLevelMonitor(stream);
           const mimeType = preferredStreamingMimeType();
