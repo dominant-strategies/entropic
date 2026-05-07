@@ -436,7 +436,7 @@ type Props = {
 };
 
 // Default models per mode
-const DEFAULT_PROXY_MODEL = "openai/gpt-5.4";
+const DEFAULT_PROXY_MODEL = "venice/kimi-k2-6";
 const DEFAULT_PROXY_ANTHROPIC_MODEL = "anthropic/claude-opus-4-6";
 const DEFAULT_PROXY_GOOGLE_MODEL = "google/gemini-3.1-pro-preview";
 const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";

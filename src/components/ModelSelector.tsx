@@ -5,28 +5,28 @@ import { Model } from "../lib/auth";
 
 // Proxy-mode models (routed through Entropic backend)
 export const PROXY_MODELS: Model[] = [
-  { id: "openrouter/free", name: "OpenRouter Free (Router)", provider: "OpenRouter", tier: "fast" },
   { id: "venice/kimi-k2-6", name: "Kimi K2.6 (Private)", provider: "Venice", tier: "premium" },
-  { id: "venice/claude-opus-4-7", name: "Claude Opus 4.7 (Venice)", provider: "Venice", tier: "premium" },
-  { id: "venice/openai-gpt-55", name: "GPT-5.5 (Venice)", provider: "Venice", tier: "premium" },
+  { id: "venice/claude-opus-4-7", name: "Claude Opus 4.7 (Deanonymized)", provider: "Venice", tier: "premium" },
+  { id: "venice/openai-gpt-55", name: "GPT-5.5 (Deanonymized)", provider: "Venice", tier: "premium" },
   { id: "venice/deepseek-v3.2", name: "DeepSeek V3.2 (Private)", provider: "Venice", tier: "reasoning" },
   { id: "venice/zai-org-glm-4.7-flash", name: "GLM 4.7 Flash (Private)", provider: "Venice", tier: "fast" },
-  { id: "venice/venice-uncensored-1-2", name: "Venice Uncensored 1.2", provider: "Venice", tier: "fast" },
+  { id: "venice/venice-uncensored-1-2", name: "Venice Uncensored 1.2 (Private)", provider: "Venice", tier: "fast" },
   { id: "venice/openai-gpt-oss-120b", name: "GPT OSS 120B (Private)", provider: "Venice", tier: "fast" },
-  { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6", provider: "MoonshotAI", tier: "premium" },
-  { id: "anthropic/claude-opus-4.7", name: "Claude Opus 4.7", provider: "Anthropic", tier: "premium" },
-  { id: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6", provider: "Anthropic", tier: "premium" },
-  { id: "anthropic/claude-opus-4.5", name: "Claude Opus 4.5", provider: "Anthropic", tier: "premium" },
-  { id: "openai/gpt-5.5", name: "GPT-5.5", provider: "OpenAI", tier: "recommended" },
-  { id: "openai/gpt-5.4", name: "GPT-5.4", provider: "OpenAI", tier: "recommended" },
-  { id: "openai/gpt-5.3-codex", name: "GPT-5.3 Codex", provider: "OpenAI", tier: "reasoning" },
-  { id: "openai/gpt-5.2", name: "GPT-5.2", provider: "OpenAI", tier: "recommended" },
-  { id: "openai/gpt-5.2-codex", name: "GPT-5.2 Codex", provider: "OpenAI", tier: "reasoning" },
-  { id: "tencent/hy3-preview:free", name: "HY3 Preview (free)", provider: "Tencent", tier: "fast" },
-  { id: "deepseek/deepseek-v3.2", name: "DeepSeek V3.2", provider: "DeepSeek", tier: "reasoning" },
-  { id: "google/gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview", provider: "Google", tier: "premium" },
-  { id: "google/gemini-3.1-flash-image-preview", name: "Gemini 3.1 Flash Image Preview", provider: "Google", tier: "premium" },
-  { id: "google/gemini-3-pro-image-preview", name: "Gemini 3 Pro Image (Nano Banana 3)", provider: "Google", tier: "premium" },
+  { id: "openrouter/free", name: "OpenRouter Free (Router)", provider: "OpenRouter", tier: "fast", group: "OpenRouter" },
+  { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6", provider: "MoonshotAI", tier: "premium", group: "OpenRouter" },
+  { id: "anthropic/claude-opus-4.7", name: "Claude Opus 4.7", provider: "Anthropic", tier: "premium", group: "OpenRouter" },
+  { id: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6", provider: "Anthropic", tier: "premium", group: "OpenRouter" },
+  { id: "anthropic/claude-opus-4.5", name: "Claude Opus 4.5", provider: "Anthropic", tier: "premium", group: "OpenRouter" },
+  { id: "openai/gpt-5.5", name: "GPT-5.5", provider: "OpenAI", tier: "recommended", group: "OpenRouter" },
+  { id: "openai/gpt-5.4", name: "GPT-5.4", provider: "OpenAI", tier: "recommended", group: "OpenRouter" },
+  { id: "openai/gpt-5.3-codex", name: "GPT-5.3 Codex", provider: "OpenAI", tier: "reasoning", group: "OpenRouter" },
+  { id: "openai/gpt-5.2", name: "GPT-5.2", provider: "OpenAI", tier: "recommended", group: "OpenRouter" },
+  { id: "openai/gpt-5.2-codex", name: "GPT-5.2 Codex", provider: "OpenAI", tier: "reasoning", group: "OpenRouter" },
+  { id: "tencent/hy3-preview:free", name: "HY3 Preview (free)", provider: "Tencent", tier: "fast", group: "OpenRouter" },
+  { id: "deepseek/deepseek-v3.2", name: "DeepSeek V3.2", provider: "DeepSeek", tier: "reasoning", group: "OpenRouter" },
+  { id: "google/gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview", provider: "Google", tier: "premium", group: "OpenRouter" },
+  { id: "google/gemini-3.1-flash-image-preview", name: "Gemini 3.1 Flash Image Preview", provider: "Google", tier: "premium", group: "OpenRouter" },
+  { id: "google/gemini-3-pro-image-preview", name: "Gemini 3 Pro Image (Nano Banana 3)", provider: "Google", tier: "premium", group: "OpenRouter" },
 ];
 
 // Local-keys models (direct provider API access)
@@ -289,10 +289,11 @@ export function ModelSelector({
 
   // Group models by provider
   const groupedModels = availableModels.reduce((acc, model) => {
-    if (!acc[model.provider]) {
-      acc[model.provider] = [];
+    const group = model.group ?? model.provider;
+    if (!acc[group]) {
+      acc[group] = [];
     }
-    acc[model.provider].push(model);
+    acc[group].push(model);
     return acc;
   }, {} as Record<string, Model[]>);
 
