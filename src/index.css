@@ -13,9 +13,13 @@
   --system-gray-6: #F2F2F7;
 
   /* Accent */
-  --purple-accent: #8B5CF6;
-  --purple-accent-hover: #7C3AED;
-  --purple-accent-subtle: rgba(139, 92, 246, 0.12);
+  --entropic-logo-purple: #6B2FA0;
+  --entropic-logo-purple-hover: #5B248B;
+  --entropic-logo-purple-subtle: rgba(107, 47, 160, 0.14);
+  --purple-accent: var(--entropic-logo-purple);
+  --purple-accent-hover: var(--entropic-logo-purple-hover);
+  --purple-accent-subtle: var(--entropic-logo-purple-subtle);
+  --chat-link-accent: #7C39B6;
 
   /* Backgrounds — warm tint instead of pure gray */
   --bg-app: #F4F2EF;
@@ -31,7 +35,7 @@
   --text-secondary: #5C5C5C;
   --text-tertiary: #8A8A8A;
   --text-quaternary: #AEAEB2;
-  --text-accent: #7C3AED;
+  --text-accent: var(--entropic-logo-purple);
 
   /* Borders & Shadows */
   --border-subtle: rgba(0, 0, 0, 0.06);
@@ -48,7 +52,7 @@
   --glass-border-subtle: rgba(0, 0, 0, 0.05);
 
   /* Chat-specific */
-  --chat-user-bg: var(--text-accent);
+  --chat-user-bg: var(--entropic-logo-purple);
   --chat-user-text: #FFFFFF;
   --chat-assistant-bg: var(--bg-card);
   --chat-assistant-text: var(--text-primary);
@@ -56,7 +60,7 @@
 
   /* Composer */
   --composer-bg: var(--bg-card);
-  --composer-border: var(--border-default);
+  --composer-border: rgba(91, 36, 139, 0.26);
 
   /* Status */
   --status-success: #22C55E;
@@ -85,9 +89,13 @@
     --system-gray-5: #17171A;
     --system-gray-6: #101012;
 
-    --purple-accent: #A78BFA;
-    --purple-accent-hover: #8B5CF6;
-    --purple-accent-subtle: rgba(167, 139, 250, 0.15);
+    --entropic-logo-purple: #6B2FA0;
+    --entropic-logo-purple-hover: #5B248B;
+    --entropic-logo-purple-subtle: rgba(107, 47, 160, 0.24);
+    --purple-accent: var(--entropic-logo-purple);
+    --purple-accent-hover: var(--entropic-logo-purple-hover);
+    --purple-accent-subtle: var(--entropic-logo-purple-subtle);
+    --chat-link-accent: #A15CE0;
 
     --bg-app: #030304;
     --bg-primary: #030304;
@@ -101,7 +109,7 @@
     --text-secondary: #A0A0A0;
     --text-tertiary: #6B6B6B;
     --text-quaternary: #4A4A4A;
-    --text-accent: #A78BFA;
+    --text-accent: var(--entropic-logo-purple);
 
     --border-subtle: rgba(255, 255, 255, 0.07);
     --border-default: rgba(255, 255, 255, 0.11);
@@ -114,14 +122,14 @@
     --glass-border: rgba(255, 255, 255, 0.07);
     --glass-border-subtle: rgba(255, 255, 255, 0.05);
 
-    --chat-user-bg: var(--purple-accent-hover);
+    --chat-user-bg: var(--entropic-logo-purple);
     --chat-user-text: #FFFFFF;
     --chat-assistant-bg: #101012;
     --chat-assistant-text: #F0F0F0;
     --chat-assistant-border: rgba(255, 255, 255, 0.08);
 
     --composer-bg: #0A0A0C;
-    --composer-border: rgba(255, 255, 255, 0.10);
+    --composer-border: rgba(91, 36, 139, 0.42);
 
     color-scheme: dark;
   }
@@ -136,9 +144,13 @@
   --system-gray-5: #17171A;
   --system-gray-6: #101012;
 
-  --purple-accent: #A78BFA;
-  --purple-accent-hover: #8B5CF6;
-  --purple-accent-subtle: rgba(167, 139, 250, 0.10);
+  --entropic-logo-purple: #6B2FA0;
+  --entropic-logo-purple-hover: #5B248B;
+  --entropic-logo-purple-subtle: rgba(107, 47, 160, 0.24);
+  --purple-accent: var(--entropic-logo-purple);
+  --purple-accent-hover: var(--entropic-logo-purple-hover);
+  --purple-accent-subtle: var(--entropic-logo-purple-subtle);
+  --chat-link-accent: #A15CE0;
 
   --bg-app: #030304;
   --bg-primary: #030304;
@@ -152,7 +164,7 @@
   --text-secondary: #A0A0A0;
   --text-tertiary: #6B6B6B;
   --text-quaternary: #4A4A4A;
-  --text-accent: #A78BFA;
+  --text-accent: var(--entropic-logo-purple);
 
   --border-subtle: rgba(255, 255, 255, 0.07);
   --border-default: rgba(255, 255, 255, 0.11);
@@ -165,14 +177,14 @@
   --glass-border: rgba(255, 255, 255, 0.07);
   --glass-border-subtle: rgba(255, 255, 255, 0.05);
 
-  --chat-user-bg: var(--purple-accent-hover);
+  --chat-user-bg: var(--entropic-logo-purple);
   --chat-user-text: #FFFFFF;
   --chat-assistant-bg: #101012;
   --chat-assistant-text: #F0F0F0;
   --chat-assistant-border: rgba(255, 255, 255, 0.08);
 
   --composer-bg: #0A0A0C;
-  --composer-border: rgba(255, 255, 255, 0.10);
+  --composer-border: rgba(91, 36, 139, 0.42);
 
   color-scheme: dark;
 }
@@ -265,7 +277,7 @@ body {
     @apply w-full px-3 py-2 rounded-lg border-transparent text-[var(--text-primary)];
     background-color: var(--bg-tertiary);
     font-size: 13px;
-    transition: background-color 0.15s, box-shadow 0.15s;
+    transition: background-color 0.15s, border-color 0.15s, box-shadow 0.15s;
   }
   .form-input:focus {
     @apply outline-none;

@@ -72,13 +72,25 @@ sameJson(resolveVoiceAction("focus Settings"), {
   type: "focus_window",
   window: "settings",
 });
-sameJson(resolveVoiceAction("show spreadsheet"), {
+sameJson(resolveVoiceAction("show spreadsheet window"), {
   type: "focus_window",
   window: "sheets",
 });
 sameJson(resolveVoiceAction("Open this spreadsheet in Sheets"), {
   type: "focus_window",
   window: "sheets",
+});
+sameJson(resolveVoiceAction("open slides"), {
+  type: "focus_window",
+  window: "slides",
+});
+sameJson(resolveVoiceAction("open presentation"), {
+  type: "new_chat_task",
+  prompt: "open presentation",
+});
+sameJson(resolveVoiceAction("show presentation ideas"), {
+  type: "new_chat_task",
+  prompt: "show presentation ideas",
 });
 sameJson(resolveVoiceAction("Focus the email window"), {
   type: "focus_window",

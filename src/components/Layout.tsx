@@ -323,11 +323,20 @@ export function Layout({
                           className={clsx(
                             "flex-1 flex items-center gap-2 px-3 py-1 rounded-md text-[12px] transition-colors text-left min-w-0",
                             currentChatSession === session.key
-                              ? "bg-[rgba(147,51,234,0.08)] text-[var(--purple-accent)] font-medium"
+                              ? "bg-[var(--purple-accent)] text-white font-medium shadow-sm"
                               : "text-[var(--text-primary)] hover:bg-[var(--border-subtle)]"
                           )}
                         >
-                          {session.pinned ? <Pin className="w-3 h-3 text-[var(--text-secondary)]" /> : null}
+                          {session.pinned ? (
+                            <Pin
+                              className={clsx(
+                                "w-3 h-3",
+                                currentChatSession === session.key
+                                  ? "text-white/85"
+                                  : "text-[var(--text-secondary)]",
+                              )}
+                            />
+                          ) : null}
                           <span className="truncate flex-1">{sessionTitle(session)}</span>
                         </button>
                         <button

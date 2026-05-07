@@ -23,7 +23,7 @@ import {
   User,
   FileText,
   Music2,
-  Volume2,
+  Mic,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
@@ -134,7 +134,6 @@ import {
   isChannelOriginGatewayMessage,
   normalizeGatewayMessage,
 } from "../lib/chatMessageUtils";
-import { VoiceControlButton } from "../desktop/voice/VoiceControlButton";
 import {
   recordedAudioHasDetectedSpeech,
   useAudioRecorder,
@@ -144,6 +143,8 @@ import {
   cleanRecordedVoiceTranscript,
   useAudioTranscription,
 } from "../desktop/voice/useAudioTranscription";
+import { useLiveSpeechRecognition } from "../desktop/voice/useLiveSpeechRecognition";
+import { useStreamingAudioTranscription } from "../desktop/voice/useStreamingAudioTranscription";
 import { useTextToSpeech } from "../desktop/voice/useTextToSpeech";
 import {
   DEFAULT_VOICE_SPEECH_RATE,
@@ -1333,6 +1334,8 @@ export function Chat({
   const voiceReplyAudioRef = useRef<HTMLAudioElement | null>(null);
   const voiceSpeakingRunIdRef = useRef<string | null>(null);
   const voiceSpeechRunStateByRunIdRef = useRef<Record<string, VoiceSpeechRunState>>({});
+  const liveVoiceDraftBaseRef = useRef<{ sessionKey: string; baseText: string } | null>(null);
+  const sendAfterLiveVoiceStopRef = useRef(false);
   const workspaceOfficeOpenBySendIdRef = useRef<Record<string, { path: string }>>({});
   const workspaceOfficeOpenByRunIdRef = useRef<Record<string, { path: string }>>({});
   const [outboxWakeTick, setOutboxWakeTick] = useState(0);
@@ -1351,6 +1354,122 @@ export function Chat({
   const { isGeneratingAudio, generateSpeech } = useTextToSpeech(textToSpeechModel, {
     voiceId: voiceSpeechProviderVoiceId,
     speed: normalizedVoiceSpeechRate,
+  });
+
+  function resizeChatComposer() {
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.style.height = "auto";
+      const lineHeight = parseInt(getComputedStyle(textarea).lineHeight) || 20;
+      const maxHeight = lineHeight * 5;
+      textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+    });
+  }
+
+  async function startChatVoiceCapture() {
+    const sessionKey = currentSession || ensureComposerSession();
+    if (!sessionKey) return;
+    setComposerModeForSession(sessionKey, "chat");
+    sendAfterLiveVoiceStopRef.current = false;
+    setError(null);
+    if (liveSpeech.isSupported) {
+      liveVoiceDraftBaseRef.current = {
+        sessionKey,
+        baseText: draftsRef.current[sessionKey] || "",
+      };
+      setThinkingStatus("Listening");
+      if (liveSpeech.start({ continuous: true, autoRestart: true })) {
+        resizeChatComposer();
+        return;
+      }
+      liveVoiceDraftBaseRef.current = null;
+      setThinkingStatus(null);
+    }
+    if (streamingSpeech.isSupported) {
+      liveVoiceDraftBaseRef.current = {
+        sessionKey,
+        baseText: draftsRef.current[sessionKey] || "",
+      };
+      setThinkingStatus("Listening");
+      if (await streamingSpeech.start()) {
+        resizeChatComposer();
+        return;
+      }
+      liveVoiceDraftBaseRef.current = null;
+      setThinkingStatus(null);
+    }
+    setError("Live dictation is not available in this WebView.");
+  }
+
+  function handleComposerSend() {
+    if (liveSpeech.isListening) {
+      sendAfterLiveVoiceStopRef.current = true;
+      liveSpeech.stop();
+      return;
+    }
+    if (streamingSpeech.isRecording) {
+      sendAfterLiveVoiceStopRef.current = true;
+      streamingSpeech.stop();
+      return;
+    }
+    void handleSend();
+  }
+
+  function setChatDraftForSession(sessionKey: string, nextValue: string) {
+    setDraftsBySession((prev) => {
+      if (prev[sessionKey] === nextValue) return prev;
+      return { ...prev, [sessionKey]: nextValue };
+    });
+    resizeChatComposer();
+  }
+
+  function updateLiveVoiceDraft(transcript: string) {
+    const normalized = cleanRecordedVoiceTranscript(transcript).trim();
+    const base = liveVoiceDraftBaseRef.current;
+    if (!base) return;
+    const nextValue = normalized
+      ? base.baseText.trim()
+        ? `${base.baseText.trimEnd()}\n\n${normalized}`
+        : normalized
+      : base.baseText;
+    setComposerModeForSession(base.sessionKey, "chat");
+    setChatDraftForSession(base.sessionKey, nextValue);
+  }
+
+  function finishLiveVoiceCapture(text: string) {
+    updateLiveVoiceDraft(text);
+    liveVoiceDraftBaseRef.current = null;
+    setThinkingStatus(null);
+    if (sendAfterLiveVoiceStopRef.current) {
+      sendAfterLiveVoiceStopRef.current = false;
+      window.setTimeout(() => {
+        void handleSend();
+      }, 0);
+    }
+  }
+
+  function handleLiveVoiceError(message: string) {
+    sendAfterLiveVoiceStopRef.current = false;
+    setError(message);
+    setThinkingStatus(null);
+  }
+
+  const liveSpeech = useLiveSpeechRecognition({
+    onPartial: updateLiveVoiceDraft,
+    onFinal: updateLiveVoiceDraft,
+    onEnd: finishLiveVoiceCapture,
+    onError: handleLiveVoiceError,
+  });
+
+  const streamingSpeech = useStreamingAudioTranscription({
+    model: audioUnderstandingModel,
+    maxBytes: MAX_ATTACHMENT_BYTES,
+    onPartial: updateLiveVoiceDraft,
+    onEnd: finishLiveVoiceCapture,
+    onError: handleLiveVoiceError,
   });
 
   function attachRecordedAudio(attachment: RecordedAudioAttachment) {
@@ -1399,7 +1518,15 @@ export function Chat({
     maxBytes: MAX_ATTACHMENT_BYTES,
     onRecorded: handleRecordedAudio,
     onError: setError,
-    autoStopOnSilence: true,
+    autoStopOnSilence: {
+      levelThreshold: 0.0035,
+      silenceLevelThreshold: 0.0025,
+      peakSilenceRatio: 0.18,
+      noiseFloorMultiplier: 1.35,
+      silenceMs: 750,
+      minRecordingMs: 500,
+      checkIntervalMs: 60,
+    },
   });
   const pendingAudioAttachments = pendingAttachments.filter((attachment) =>
     attachment.mimeType.startsWith("audio/"),
@@ -1727,30 +1854,6 @@ export function Chat({
       insertTextIntoChatDraft(transcript);
     } catch (error) {
       setError(formatUnknownUiError(error, "Failed to transcribe audio."));
-    } finally {
-      setThinkingStatus(null);
-    }
-  }
-
-  async function generateAudioFromDraft() {
-    try {
-      const sessionKey = currentSession || ensureComposerSession();
-      if (!sessionKey) return;
-      setThinkingStatus("Generating audio");
-      setError(null);
-      const result = await generateSpeech(activeDraft);
-      appendLocalMessage(
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: result.text || "Generated audio from your text.",
-          sentAt: Date.now(),
-          attachments: result.audio,
-        },
-        sessionKey,
-      );
-    } catch (error) {
-      setError(formatUnknownUiError(error, "Failed to generate audio."));
     } finally {
       setThinkingStatus(null);
     }
@@ -6688,6 +6791,21 @@ export function Chat({
         ? imageDraftsBySession[currentSession] || ""
         : draftsBySession[currentSession] || ""
     : "";
+  const chatVoiceCaptureActive = liveSpeech.isListening || streamingSpeech.isRecording;
+  const chatHasSendableContent = activeDraft.trim().length > 0 || pendingAttachments.length > 0;
+  const chatComposerControlIsSend = chatVoiceCaptureActive || chatHasSendableContent;
+  const composerSendDisabled =
+    (!activeDraft.trim() &&
+      pendingAttachments.length === 0 &&
+      !liveSpeech.isListening &&
+      !streamingSpeech.isRecording) ||
+    isLoading ||
+    audioRecorder.isRecording ||
+    audioRecorder.isFinalizing ||
+    (streamingSpeech.isProcessing && !streamingSpeech.isRecording) ||
+    isTranscribing ||
+    isGeneratingAudio;
+  const chatMicDisabled = isLoading || isTranscribing || isGeneratingAudio;
 
   useEffect(() => {
     if (!textareaRef.current) return;
@@ -6925,15 +7043,6 @@ export function Chat({
             ) : null}
           </div>
           <div className="flex items-end gap-2">
-            {activeComposerMode === "chat" ? (
-              <VoiceControlButton
-                isRecording={audioRecorder.isRecording}
-                isSupported={audioRecorder.isSupported}
-                disabled={isLoading || isTranscribing || isGeneratingAudio}
-                onStart={() => void audioRecorder.startRecording()}
-                onStop={audioRecorder.stopRecording}
-              />
-            ) : null}
             {activeComposerMode !== "shell" ? (
               <button
                 onClick={() => fileInputRef.current?.click()}
@@ -6978,7 +7087,7 @@ export function Chat({
                 ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
                 ta.style.overflowY = ta.scrollHeight > maxHeight ? 'auto' : 'hidden';
               }}
-              onKeyDown={e => {if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }}}
+              onKeyDown={e => {if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleComposerSend(); }}}
               placeholder={
                 activeComposerMode === "shell"
                   ? "Run a command in the workspace shell"
@@ -6987,32 +7096,66 @@ export function Chat({
                     : "Message your assistant"
               }
               rows={1}
-              className="form-input flex-1 resize-none leading-tight"
+              className="form-input flex-1 resize-none leading-tight !border-[var(--composer-border)] focus:!border-[var(--purple-accent)]"
               style={{ overflow: 'hidden' }}
             />
             {activeComposerMode === "chat" ? (
               <button
                 type="button"
-                onClick={() => void generateAudioFromDraft()}
-                disabled={!activeDraft.trim() || isLoading || isGeneratingAudio || isTranscribing}
-                className="btn-secondary !p-2.5"
-                title="Generate speech from draft"
-                aria-label="Generate speech from draft"
-              >
-                {isGeneratingAudio ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Volume2 className="w-4 h-4" />
+                onClick={
+                  chatComposerControlIsSend
+                    ? handleComposerSend
+                    : () => void startChatVoiceCapture()
+                }
+                disabled={
+                  chatComposerControlIsSend
+                    ? composerSendDisabled
+                    : chatMicDisabled || !(liveSpeech.isSupported || streamingSpeech.isSupported)
+                }
+                className={clsx(
+                  "relative inline-flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl border font-medium shadow-sm transition-all duration-200 ease-out active:scale-95 disabled:cursor-not-allowed disabled:opacity-50",
+                  chatComposerControlIsSend
+                    ? "border-[var(--purple-accent-hover)]/70 bg-[var(--purple-accent)] text-white shadow-[0_10px_26px_rgba(91,36,139,0.26)] hover:bg-[var(--purple-accent-hover)] hover:shadow-[0_12px_30px_rgba(91,36,139,0.34)]"
+                    : "border-[var(--border-default)] bg-[var(--bg-card)] text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]",
                 )}
+                title={
+                  chatComposerControlIsSend
+                    ? "Send"
+                    : liveSpeech.isSupported || streamingSpeech.isSupported
+                      ? "Record"
+                      : "Microphone unavailable"
+                }
+                aria-label={chatComposerControlIsSend ? "Send" : "Record"}
+              >
+                <span className="relative h-5 w-5">
+                  <Mic
+                    className={clsx(
+                      "absolute inset-0 m-auto h-[18px] w-[18px] transition-all duration-200 ease-out",
+                      chatComposerControlIsSend
+                        ? "scale-75 rotate-12 opacity-0"
+                        : "scale-100 rotate-0 opacity-100",
+                    )}
+                  />
+                  <Send
+                    className={clsx(
+                      "absolute inset-0 m-auto h-[18px] w-[18px] transition-all duration-200 ease-out",
+                      chatComposerControlIsSend
+                        ? "scale-100 translate-x-0 opacity-100"
+                        : "scale-75 -translate-x-1 opacity-0",
+                    )}
+                  />
+                </span>
               </button>
-            ) : null}
-            <button
-              onClick={() => handleSend()}
-              disabled={(!activeDraft.trim() && pendingAttachments.length === 0) || isLoading || isTranscribing || isGeneratingAudio}
-              className="btn-primary !p-2.5 !bg-[var(--purple-accent)] hover:!bg-[var(--purple-accent-hover)] !text-white"
-            >
-              <Send className="w-5 h-5" />
-            </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleComposerSend}
+                disabled={composerSendDisabled}
+                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[var(--purple-accent-hover)]/70 bg-[var(--purple-accent)] text-white shadow-sm transition-all duration-200 ease-out hover:bg-[var(--purple-accent-hover)] active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Send className="h-[18px] w-[18px]" />
+              </button>
+            )}
           </div>
         </div>
         {dragActive && activeComposerMode !== "shell" && (

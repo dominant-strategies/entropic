@@ -142,15 +142,22 @@ export function resolveVoiceAction(transcript: string): DesktopAction {
     }
   }
 
+  const officeAppMatch = lower.match(
+    /^(?:focus|show|switch to|open)\s+(?:the\s+)?(sheets|docs|slides)(?:\s+(?:window|app|page))?$/,
+  );
+  if (officeAppMatch?.[1]) {
+    return { type: "focus_window", window: WINDOW_ALIASES[officeAppMatch[1]] ?? "sheets" };
+  }
+
   const activeOfficeMatch = lower.match(
-    /\b(?:focus|show|switch to|open)\s+(?:the\s+|this\s+)?(spreadsheet|document|presentation)(?:\s+in\s+(sheets|docs|slides))?\b/,
+    /^(?:focus|show|switch to|open)\s+(?:the\s+|this\s+)?(spreadsheet|document|presentation)\s+(?:(?:window|app|page)|in\s+(sheets|docs|slides))$/,
   );
   if (activeOfficeMatch?.[1]) {
     return { type: "focus_window", window: WINDOW_ALIASES[activeOfficeMatch[2] || activeOfficeMatch[1]] ?? "sheets" };
   }
 
   const focusMatch = lower.match(
-    /\b(?:focus|show|switch to|open)\s+(?:the\s+)?(chat|browser|email|mail|finder|files|settings|integrations|skills|plugins|terminal|shell|tasks|jobs|sheets|spreadsheet|docs|document|slides|presentation)(?:\s+window)?\b/,
+    /^(?:focus|show|switch to|open)\s+(?:the\s+)?(chat|browser|email|mail|finder|files|settings|integrations|skills|plugins|terminal|shell|tasks|jobs)(?:\s+window)?$/,
   );
   if (focusMatch?.[1]) {
     return { type: "focus_window", window: WINDOW_ALIASES[focusMatch[1]] ?? "chat" };

@@ -28,7 +28,7 @@ export function recordedAudioHasDetectedSpeech(attachment: RecordedAudioAttachme
 
 type UseAudioRecorderOptions = {
   maxBytes: number;
-  onRecorded: (attachment: RecordedAudioAttachment) => void;
+  onRecorded: (attachment: RecordedAudioAttachment) => void | Promise<void>;
   onError: (message: string) => void;
   autoStopOnSilence?: boolean | Partial<AudioSilenceAutoStopOptions>;
 };
@@ -191,12 +191,14 @@ export function useAudioRecorder({
   autoStopOnSilence,
 }: UseAudioRecorderOptions) {
   const [isRecording, setIsRecording] = useState(false);
+  const [isFinalizing, setIsFinalizing] = useState(false);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const pcmRecorderRef = useRef<PcmRecorderState | null>(null);
   const silenceDetectorRef = useRef<SilenceDetectorState | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const recordingStartedAtRef = useRef<number | null>(null);
+  const discardRecordingRef = useRef(false);
 
   const isSupported =
     typeof navigator !== "undefined" &&
@@ -423,32 +425,37 @@ export function useAudioRecorder({
     const capture = captureRecordingStats();
     const pcmRecorder = cleanupPcmRecorder();
     setIsRecording(false);
+    setIsFinalizing(true);
     stopStream();
     recordingStartedAtRef.current = null;
 
-    if (!pcmRecorder || pcmRecorder.totalSamples === 0) {
-      onError("No audio was captured. Try again.");
-      return;
-    }
+    try {
+      if (!pcmRecorder || pcmRecorder.totalSamples === 0) {
+        onError("No audio was captured. Try again.");
+        return;
+      }
 
-    const blob = encodePcmChunksAsWav(
-      pcmRecorder.chunks,
-      pcmRecorder.totalSamples,
-      pcmRecorder.sampleRate,
-    );
-    if (blob.size > maxBytes) {
-      onError("Recorded audio is too large. Keep recordings under 5 MB.");
-      return;
-    }
+      const blob = encodePcmChunksAsWav(
+        pcmRecorder.chunks,
+        pcmRecorder.totalSamples,
+        pcmRecorder.sampleRate,
+      );
+      if (blob.size > maxBytes) {
+        onError("Recorded audio is too large. Keep recordings under 5 MB.");
+        return;
+      }
 
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    onRecorded({
-      fileName: `voice-note-${stamp}.wav`,
-      mimeType: "audio/wav",
-      content: await blobToBase64(blob),
-      previewUrl: URL.createObjectURL(blob),
-      capture,
-    });
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      await onRecorded({
+        fileName: `voice-note-${stamp}.wav`,
+        mimeType: "audio/wav",
+        content: await blobToBase64(blob),
+        previewUrl: URL.createObjectURL(blob),
+        capture,
+      });
+    } finally {
+      setIsFinalizing(false);
+    }
   }
 
   async function startRecording() {
@@ -459,6 +466,8 @@ export function useAudioRecorder({
     if (isRecording) {
       return;
     }
+    setIsFinalizing(false);
+    discardRecordingRef.current = false;
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -496,6 +505,7 @@ export function useAudioRecorder({
       };
       recorder.onerror = () => {
         setIsRecording(false);
+        setIsFinalizing(false);
         stopStream();
         recordingStartedAtRef.current = null;
         chunksRef.current = [];
@@ -506,32 +516,45 @@ export function useAudioRecorder({
         const chunks = chunksRef.current;
         const resolvedMimeType = recorder.mimeType || mimeType || "audio/webm";
         const capture = captureRecordingStats();
+        const shouldDiscard = discardRecordingRef.current;
+        discardRecordingRef.current = false;
         chunksRef.current = [];
         recorderRef.current = null;
         setIsRecording(false);
         stopStream();
         recordingStartedAtRef.current = null;
 
+        if (shouldDiscard) {
+          setIsFinalizing(false);
+          return;
+        }
+
         if (chunks.length === 0) {
           onError("No audio was captured. Try again.");
           return;
         }
 
+        setIsFinalizing(true);
         void (async () => {
-          const blob = new Blob(chunks, { type: resolvedMimeType });
-          if (blob.size > maxBytes) {
-            onError("Recorded audio is too large. Keep recordings under 5 MB.");
-            return;
+          try {
+            const blob = new Blob(chunks, { type: resolvedMimeType });
+            if (blob.size > maxBytes) {
+              onError("Recorded audio is too large. Keep recordings under 5 MB.");
+              return;
+            }
+            const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+            await onRecorded({
+              fileName: `voice-note-${stamp}.${recordingExtensionForMimeType(resolvedMimeType)}`,
+              mimeType: resolvedMimeType,
+              content: await blobToBase64(blob),
+              previewUrl: URL.createObjectURL(blob),
+              capture,
+            });
+          } finally {
+            setIsFinalizing(false);
           }
-          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-          onRecorded({
-            fileName: `voice-note-${stamp}.${recordingExtensionForMimeType(resolvedMimeType)}`,
-            mimeType: resolvedMimeType,
-            content: await blobToBase64(blob),
-            previewUrl: URL.createObjectURL(blob),
-            capture,
-          });
         })().catch((error: unknown) => {
+          setIsFinalizing(false);
           onError(error instanceof Error ? error.message : "Failed to read recorded audio.");
         });
       };
@@ -550,9 +573,25 @@ export function useAudioRecorder({
       }
     } catch (error) {
       setIsRecording(false);
+      setIsFinalizing(false);
       cleanupPcmRecorder();
       stopStream();
       onError(error instanceof Error ? error.message : "Microphone access was denied.");
+    }
+  }
+
+  function cancelRecording() {
+    discardRecordingRef.current = true;
+    cleanupPcmRecorder();
+    chunksRef.current = [];
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    setIsRecording(false);
+    setIsFinalizing(false);
+    stopStream();
+    recordingStartedAtRef.current = null;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop();
     }
   }
 
@@ -566,6 +605,7 @@ export function useAudioRecorder({
     }
     if (!recorder) {
       setIsRecording(false);
+      setIsFinalizing(false);
       stopStream();
       recordingStartedAtRef.current = null;
       return;
@@ -590,8 +630,10 @@ export function useAudioRecorder({
 
   return {
     isRecording,
+    isFinalizing,
     isSupported,
     startRecording,
     stopRecording,
+    cancelRecording,
   };
 }

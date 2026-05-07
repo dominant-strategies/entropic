@@ -205,9 +205,9 @@ function renderWorkspaceChip(
         display: "inline-flex",
         alignItems: "center",
         gap: "0.5rem",
-        borderColor: isBrowser ? "rgba(56,189,248,0.38)" : "rgba(148,163,184,0.38)",
-        background: isBrowser ? "rgba(56,189,248,0.14)" : "rgba(148,163,184,0.18)",
-        color: "inherit",
+        borderColor: "color-mix(in srgb, var(--chat-link-accent) 42%, transparent)",
+        background: "color-mix(in srgb, var(--chat-link-accent) 12%, transparent)",
+        color: "var(--chat-link-accent)",
         textDecoration: "none",
         verticalAlign: "middle",
       }}
@@ -219,8 +219,8 @@ function renderWorkspaceChip(
       <span
         className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full"
         style={{
-          background: isBrowser ? "rgba(56,189,248,0.22)" : "rgba(148,163,184,0.24)",
-          color: isBrowser ? "#0f766e" : "#475569",
+          background: "color-mix(in srgb, var(--chat-link-accent) 18%, transparent)",
+          color: "var(--chat-link-accent)",
         }}
       >
         <Icon className="h-3 w-3" />
@@ -287,7 +287,11 @@ function buildComponents(
           href={href}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-[var(--purple-accent)] underline underline-offset-2 hover:opacity-80"
+          className="underline underline-offset-2 hover:opacity-80"
+          style={{
+            color: "var(--chat-link-accent)",
+            textDecorationColor: "var(--chat-link-accent)",
+          }}
         >
           {children}
         </a>

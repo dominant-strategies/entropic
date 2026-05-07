@@ -567,6 +567,18 @@ export function parseUtcBracketTimestamp(raw: string): { text: string; sentAt: n
   };
 }
 
+function extractVoicePromptDisplayContent(raw: string): string | null {
+  const text = raw.trim();
+  if (!text || !/\bDesktop context:\s*/i.test(text)) {
+    return null;
+  }
+  const match = text.match(
+    /^\s*(?:Spoken request|Voice command):\s*([\s\S]*?)(?:\r?\nVoice mode:|\r?\n\s*\r?\nDesktop context:)/i,
+  );
+  const spoken = match?.[1]?.trim();
+  return spoken || null;
+}
+
 export function toTimestampMs(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value) && value > 0) {
     return value < 1_000_000_000_000 ? Math.round(value * 1000) : Math.round(value);
@@ -610,8 +622,9 @@ export function normalizeUserContent(content: string, fallbackTimestamp?: number
     };
   }
   const parsedPrefix = parseUtcBracketTimestamp(withoutMeta);
+  const voicePromptDisplayContent = extractVoicePromptDisplayContent(parsedPrefix.text);
   return {
-    content: parsedPrefix.text.trim(),
+    content: voicePromptDisplayContent ?? parsedPrefix.text.trim(),
     sentAt: fallbackTimestamp ?? parsedPrefix.sentAt ?? null,
   };
 }
