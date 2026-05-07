@@ -1064,9 +1064,11 @@ export function Files({
       if (typeof saved.chatNavCollapsed === "boolean") setChatNavCollapsed(saved.chatNavCollapsed);
       const savedBrowserOpen = saved.browserOpen === true;
       if (typeof saved.terminalOpen === "boolean") setTerminalOpen(saved.terminalOpen);
-      if (typeof saved.sheetsOpen === "boolean") setSheetsOpen(saved.sheetsOpen);
-      if (typeof saved.docsOpen === "boolean") setDocsOpen(saved.docsOpen);
-      if (typeof saved.slidesOpen === "boolean") setSlidesOpen(saved.slidesOpen);
+      // Office document sessions are intentionally not persisted. Restoring only
+      // the open booleans reopens an empty app shell on Desktop startup.
+      setSheetsOpen(false);
+      setDocsOpen(false);
+      setSlidesOpen(false);
       if (typeof saved.pluginsOpen === "boolean") setPluginsOpen(saved.pluginsOpen);
       if (typeof saved.skillsOpen === "boolean") setSkillsOpen(saved.skillsOpen);
       if (typeof saved.channelsOpen === "boolean") setChannelsOpen(saved.channelsOpen);
@@ -1486,9 +1488,10 @@ export function Files({
       chatNavCollapsed,
       browserOpen,
       terminalOpen,
-      sheetsOpen,
-      docsOpen,
-      slidesOpen,
+      // Persist Office geometry/recents, but not transient document windows.
+      sheetsOpen: false,
+      docsOpen: false,
+      slidesOpen: false,
       pluginsOpen,
       skillsOpen,
       channelsOpen,

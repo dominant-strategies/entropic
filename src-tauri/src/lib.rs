@@ -73,6 +73,30 @@ fn managed_build_profile_enabled() -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn apply_linux_webkit_stability_env() {
+    let defaults = [
+        ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
+        ("WEBKIT_DISABLE_COMPOSITING_MODE", "1"),
+        ("GSK_RENDERER", "cairo"),
+    ];
+    let mut applied = Vec::new();
+
+    for (key, value) in defaults {
+        if std::env::var_os(key).is_none() {
+            std::env::set_var(key, value);
+            applied.push(key);
+        }
+    }
+
+    if !applied.is_empty() {
+        append_startup_log(&format!(
+            "Linux WebKit stability env applied: {}",
+            applied.join(", ")
+        ));
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn install_linux_webview_media_permissions(app: &tauri::App) {
     let Some(window) = app.get_webview_window("main") else {
         append_startup_log("Linux WebView media permissions skipped: main window unavailable");
@@ -110,6 +134,8 @@ pub fn maybe_handle_cli_mode() -> Option<i32> {
 
 pub fn run() {
     install_startup_panic_logger();
+    #[cfg(target_os = "linux")]
+    apply_linux_webkit_stability_env();
 
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
