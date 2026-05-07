@@ -1,4 +1,4 @@
-import type { MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { FileText, Image, LayoutGrid } from "lucide-react";
 import { AppWindow } from "../AppWindow";
 import {
@@ -185,6 +185,33 @@ export function OfficeApps({
   onOpenRecent,
   onOpenChat,
 }: OfficeAppsProps) {
+  const iframeRefs = useRef<Record<OfficeAppKind, HTMLIFrameElement | null>>({
+    sheets: null,
+    docs: null,
+    slides: null,
+  });
+
+  useEffect(() => {
+    const focusActiveOfficeIframe = () => {
+      window.setTimeout(() => {
+        const activeElement = document.activeElement;
+        for (const kind of OFFICE_KINDS) {
+          if (open[kind] && iframeRefs.current[kind] === activeElement) {
+            onFocus(kind);
+            return;
+          }
+        }
+      }, 0);
+    };
+
+    window.addEventListener("blur", focusActiveOfficeIframe, true);
+    window.addEventListener("focusin", focusActiveOfficeIframe, true);
+    return () => {
+      window.removeEventListener("blur", focusActiveOfficeIframe, true);
+      window.removeEventListener("focusin", focusActiveOfficeIframe, true);
+    };
+  }, [onFocus, open]);
+
   return (
     <>
       {OFFICE_KINDS.map((kind) => {
@@ -208,11 +235,15 @@ export function OfficeApps({
             <div className="h-full bg-white">
               {session ? (
                 <iframe
+                  ref={(node) => {
+                    iframeRefs.current[kind] = node;
+                  }}
                   key={`${session.path}:${session.launchToken}`}
                   src={session.url}
                   title={session.name}
                   className="block h-full w-full border-0 bg-white"
                   allow="clipboard-read; clipboard-write; fullscreen"
+                  onFocus={() => onFocus(kind)}
                 />
               ) : (
                 <OfficeHomePanel
