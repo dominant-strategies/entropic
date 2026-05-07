@@ -2408,6 +2408,23 @@ fn docker_command() -> Command {
 }
 
 fn tokio_docker_command() -> tokio::process::Command {
+    if windows_use_managed_wsl_docker() {
+        let mut cmd = tokio::process::Command::new("wsl.exe");
+        cmd.args([
+            "--distribution",
+            windows_runtime_distro_name(),
+            "--user",
+            "root",
+            "--exec",
+            "env",
+            "-u",
+            "DOCKER_CONTEXT",
+            "DOCKER_HOST=unix:///var/run/docker.sock",
+            "docker",
+        ]);
+        return cmd;
+    }
+
     let docker = find_docker_binary();
     let mut cmd = tokio::process::Command::new(docker);
     if let Some(host) = get_docker_host() {
@@ -9331,13 +9348,9 @@ async fn run_whatsapp_login_script(script: &str) -> Result<serde_json::Value, St
         start.elapsed().as_secs_f64()
     );
     let script = script.to_string();
-    let docker_host = get_docker_host();
     let output = tokio::task::spawn_blocking(move || {
         eprintln!("[WA-DEBUG] [inside spawn_blocking] Running docker exec now...");
-        let mut cmd = Command::new("docker");
-        if let Some(host) = docker_host {
-            cmd.env("DOCKER_HOST", host);
-        }
+        let mut cmd = docker_command();
         let result = cmd
             .args([
                 "exec",
