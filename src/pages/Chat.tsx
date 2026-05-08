@@ -7050,11 +7050,11 @@ export function Chat({
     if (msg.role === "assistant") {
       return (
         <div key={msg.id} className="group flex w-full min-w-0 justify-start py-2">
-          <div className="flex w-full min-w-0 gap-3.5">
+          <div className="flex w-full min-w-0 items-start gap-3.5">
             <button
               type="button"
               onClick={openAgentProfileSettings}
-              className="mt-0.5 shrink-0 rounded-full transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/30"
+              className="mt-0.5 shrink-0 self-start rounded-full transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/30"
               aria-label={`Edit ${chatAgentName} profile`}
               title={`Edit ${chatAgentName} profile`}
             >
@@ -7143,11 +7143,11 @@ export function Chat({
     const loadingWord = THINKING_WORDS[loadingWordIndex % THINKING_WORDS.length] ?? "Thinking";
     return (
       <div className="flex w-full min-w-0 justify-start py-2">
-        <div className="flex w-full min-w-0 gap-3.5">
+        <div className="flex w-full min-w-0 items-start gap-3.5">
           <button
             type="button"
             onClick={openAgentProfileSettings}
-            className="mt-0.5 shrink-0 rounded-full transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/30"
+            className="mt-0.5 shrink-0 self-start rounded-full transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/30"
             aria-label={`Edit ${chatAgentName} profile`}
             title={`Edit ${chatAgentName} profile`}
           >
