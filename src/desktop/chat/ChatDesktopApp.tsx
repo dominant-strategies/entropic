@@ -44,6 +44,7 @@ type ChatDesktopAppProps = {
   position: WindowPoint;
   size: WindowSize;
   zIndex: number;
+  active?: boolean;
   open: boolean;
   navCollapsed: boolean;
   sessions: SharedChatSession[];
@@ -105,6 +106,7 @@ export function ChatDesktopApp({
   position,
   size,
   zIndex,
+  active = true,
   open,
   navCollapsed,
   sessions,
@@ -161,6 +163,7 @@ export function ChatDesktopApp({
       position={position}
       size={size}
       zIndex={zIndex}
+      active={active}
       glass={false}
       onClose={onClose}
       onFocus={onFocus}

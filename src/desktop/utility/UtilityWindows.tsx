@@ -49,6 +49,7 @@ type UtilityWindowFrame = {
 type DesktopUtilityWindowsProps = {
   windowZ: Record<string, number>;
   windows: Record<UtilityWindowKey, UtilityWindowFrame>;
+  active?: Partial<Record<UtilityWindowKey, boolean>>;
   billingEnabled: boolean;
   gatewayRunning: boolean;
   integrationsSyncing?: boolean;
@@ -88,6 +89,7 @@ type DesktopUtilityWindowsProps = {
 export function DesktopUtilityWindows({
   windowZ,
   windows,
+  active = {},
   billingEnabled,
   gatewayRunning,
   integrationsSyncing,
@@ -129,6 +131,7 @@ export function DesktopUtilityWindows({
           position={windows.plugins.position}
           size={windows.plugins.size}
           zIndex={getWindowZ(windowZ, "plugins")}
+          active={active.plugins ?? true}
           onClose={onClose.plugins}
           onFocus={() => onFocus("plugins")}
           onDragStart={onDragStart.plugins}
@@ -150,6 +153,7 @@ export function DesktopUtilityWindows({
           position={windows.skills.position}
           size={windows.skills.size}
           zIndex={getWindowZ(windowZ, "skills")}
+          active={active.skills ?? true}
           onClose={onClose.skills}
           onFocus={() => onFocus("skills")}
           onDragStart={onDragStart.skills}
@@ -172,6 +176,7 @@ export function DesktopUtilityWindows({
           position={windows.channels.position}
           size={windows.channels.size}
           zIndex={getWindowZ(windowZ, "channels")}
+          active={active.channels ?? true}
           onClose={onClose.channels}
           onFocus={() => onFocus("channels")}
           onDragStart={onDragStart.channels}
@@ -189,6 +194,7 @@ export function DesktopUtilityWindows({
           position={windows.tasks.position}
           size={windows.tasks.size}
           zIndex={getWindowZ(windowZ, "tasks")}
+          active={active.tasks ?? true}
           onClose={onClose.tasks}
           onFocus={() => onFocus("tasks")}
           onDragStart={onDragStart.tasks}
@@ -206,6 +212,7 @@ export function DesktopUtilityWindows({
           position={windows.jobs.position}
           size={windows.jobs.size}
           zIndex={getWindowZ(windowZ, "jobs")}
+          active={active.jobs ?? true}
           onClose={onClose.jobs}
           onFocus={() => onFocus("jobs")}
           onDragStart={onDragStart.jobs}
@@ -223,6 +230,7 @@ export function DesktopUtilityWindows({
           position={windows.logs.position}
           size={windows.logs.size}
           zIndex={getWindowZ(windowZ, "logs")}
+          active={active.logs ?? true}
           onClose={onClose.logs}
           onFocus={() => onFocus("logs")}
           onDragStart={onDragStart.logs}
@@ -240,6 +248,7 @@ export function DesktopUtilityWindows({
           position={windows.billing.position}
           size={windows.billing.size}
           zIndex={getWindowZ(windowZ, "billing")}
+          active={active.billing ?? true}
           onClose={onClose.billing}
           onFocus={() => onFocus("billing")}
           onDragStart={onDragStart.billing}
@@ -257,6 +266,7 @@ export function DesktopUtilityWindows({
           position={windows.settings.position}
           size={windows.settings.size}
           zIndex={getWindowZ(windowZ, "settings")}
+          active={active.settings ?? true}
           onClose={onClose.settings}
           onFocus={() => onFocus("settings")}
           onDragStart={onDragStart.settings}

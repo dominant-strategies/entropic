@@ -25,6 +25,7 @@ type AppWindowProps = {
   ) => void;
   onFocus: () => void;
   zIndex: number;
+  active?: boolean;
   glass?: boolean;
   children: ReactNode;
 };
@@ -53,18 +54,21 @@ export function AppWindow({
   onResizeStart,
   onFocus,
   zIndex,
+  active = true,
   glass = true,
   children,
 }: AppWindowProps) {
   return (
     <div
-      className="absolute flex flex-col rounded-xl overflow-hidden animate-scale-in bg-[var(--bg-card)]"
+      className="desktop-app-window absolute flex flex-col rounded-xl overflow-hidden animate-scale-in bg-[var(--bg-card)]"
+      data-window-active={active ? "true" : "false"}
       style={{
         top: position.y,
         left: position.x,
         width: size.w,
         height: size.h,
         zIndex,
+        isolation: "isolate",
         backdropFilter: glass ? "blur(18px)" : "none",
         WebkitBackdropFilter: glass ? "blur(18px)" : "none",
         boxShadow: "0 24px 70px rgba(0,0,0,0.28), 0 0 0 0.5px var(--border-subtle)",

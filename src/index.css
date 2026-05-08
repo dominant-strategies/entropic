@@ -275,6 +275,17 @@ body {
   background: var(--border-primary);
 }
 
+.desktop-app-window[data-window-active="false"],
+.desktop-app-window[data-window-active="false"] * {
+  scrollbar-width: none;
+}
+
+.desktop-app-window[data-window-active="false"]::-webkit-scrollbar,
+.desktop-app-window[data-window-active="false"] *::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
 @layer components {
   /* Buttons */
   .btn {
