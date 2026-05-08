@@ -24,12 +24,12 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { platform } from "@tauri-apps/plugin-os";
 import { hostedFeaturesEnabled } from "../lib/buildProfile";
 import {
-  getProfileInitials,
   isRenderableAvatarDataUrl,
   loadProfile,
   sanitizeProfileName,
   type AgentProfile,
 } from "../lib/profile";
+import { AgentAvatar } from "./AgentAvatar";
 
 function startDrag(e: React.MouseEvent) {
   if (e.button !== 0) return;
@@ -431,15 +431,11 @@ export function Layout({
              )}
              {...(sidebarCollapsed ? { title: profileName, "aria-label": profileName } : {})}
           >
-            <div className="w-8 h-8 rounded-full bg-[var(--system-gray-5)] overflow-hidden flex-shrink-0 border border-[var(--border-subtle)]">
-              {profileAvatarUrl ? (
-                <img src={profileAvatarUrl} alt="Avatar" className="w-full h-full object-cover" />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center text-xs font-medium text-[var(--text-secondary)]">
-                  {getProfileInitials(profileName, 1)}
-                </div>
-              )}
-            </div>
+            <AgentAvatar
+              name={profileName}
+              avatarUrl={profileAvatarUrl}
+              className="h-8 w-8 flex-shrink-0 border border-[var(--border-subtle)]"
+            />
             {!sidebarCollapsed && (
               <div className="flex-1 min-w-0">
                 <div className="text-[13px] font-medium text-[var(--text-primary)] truncate group-hover:text-[var(--text-primary)]">

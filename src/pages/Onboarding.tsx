@@ -4,18 +4,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Loader2, Sparkles } from "lucide-react";
 import { saveProfile, saveOnboardingData, setOnboardingComplete } from "../lib/profile";
 import { clientLog } from "../lib/clientLog";
+import { DEFAULT_AGENT_NAME, DEFAULT_SOUL } from "../lib/agentDefaults";
 
 type Props = {
   onComplete: () => void;
 };
-
-const DEFAULT_AGENT_NAME = "Joulie";
-
-const DEFAULT_SOUL = `# About Joulie
-
-You are Joulie, a helpful AI assistant for coding, research, and execution tasks.
-Be concise, practical, and action-oriented.
-`;
 
 async function withTimeout<T>(
   promise: Promise<T>,

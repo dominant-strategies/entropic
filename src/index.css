@@ -3,6 +3,9 @@
 @tailwind utilities;
 
 :root {
+  --font-sans: "Geist Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "Geist Mono", "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+
   /* Apple System Colors */
   --system-blue: #007AFF;
   --system-gray-1: #8E8E93;
@@ -69,7 +72,7 @@
   --status-info: var(--system-blue);
 
   /* Typography */
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.4;
   font-weight: 400;
@@ -201,11 +204,46 @@ body.platform-macos {
 }
 
 body {
+  font-family: var(--font-sans);
   background-color: var(--bg-app);
   min-height: 100vh;
   min-height: 100dvh;
   border-radius: var(--window-radius);
   overflow: hidden;
+}
+
+@keyframes entropic-text-shimmer {
+  0% {
+    background-position: 180% 50%;
+  }
+  100% {
+    background-position: -180% 50%;
+  }
+}
+
+.entropic-thinking-shimmer {
+  display: inline-block;
+  color: transparent;
+  background:
+    linear-gradient(
+      90deg,
+      var(--text-tertiary) 0%,
+      var(--text-secondary) 34%,
+      var(--text-primary) 50%,
+      var(--text-secondary) 66%,
+      var(--text-tertiary) 100%
+    );
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: entropic-text-shimmer 1.35s ease-in-out infinite;
+  transition: opacity 180ms ease, transform 180ms ease, filter 180ms ease;
+}
+
+.entropic-thinking-shimmer[data-changing="true"] {
+  opacity: 0.45;
+  transform: translateY(2px);
+  filter: blur(0.2px);
 }
 
 #root {

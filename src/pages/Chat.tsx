@@ -37,7 +37,6 @@ import {
   type GatewayMessage,
 } from "../lib/gateway";
 import {
-  getProfileInitials,
   isRenderableAvatarDataUrl,
   loadOnboardingData,
   loadProfile,
@@ -49,6 +48,7 @@ import {
 import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
 import { TelegramSetupModal } from "../components/TelegramSetupModal";
 import { MarkdownContent } from "../components/MarkdownContent";
+import { AgentAvatar } from "../components/AgentAvatar";
 import { useAuth } from "../contexts/AuthContext";
 import {
   syncAllIntegrationsToGateway,
@@ -396,24 +396,6 @@ function extractWorkspaceChatReferences(content: string): WorkspaceChatReference
 // OAuth icons imported from shared component
 import { GoogleIcon, DiscordIcon } from "../components/OAuthIcons";
 
-// ── Default avatar colors ──────────────────────────────────────
-const AVATAR_COLORS = [
-  "#8b5cf6", "#6366f1", "#3b82f6", "#06b6d4", "#14b8a6",
-  "#10b981", "#f59e0b", "#f97316", "#ef4444", "#ec4899",
-];
-
-function getAvatarColor(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = name.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
-}
-
-function getInitials(name: string): string {
-  return getProfileInitials(name, 2);
-}
-
 function GoogleCalendarLogo({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
@@ -491,6 +473,112 @@ type ChatToolActivity = {
   seq: number;
   ts: number;
 };
+
+const SETTINGS_PROFILE_REQUEST_EVENT = "entropic-settings-open-profile";
+const SETTINGS_PROFILE_REQUEST_KEY = "entropic.settings.requestedSection";
+
+const THINKING_WORDS = [
+  "Thinking",
+  "Reasoning",
+  "Synthesizing",
+  "Mapping",
+  "Parsing",
+  "Weighing",
+  "Composing",
+  "Drafting",
+  "Inspecting",
+  "Solving",
+  "Planning",
+  "Tracing",
+  "Checking",
+  "Refining",
+  "Structuring",
+  "Connecting",
+  "Searching",
+  "Reading",
+  "Calculating",
+  "Evaluating",
+  "Designing",
+  "Building",
+  "Testing",
+  "Verifying",
+  "Aligning",
+  "Debugging",
+  "Organizing",
+  "Clarifying",
+  "Comparing",
+  "Integrating",
+  "Sequencing",
+  "Modeling",
+  "Projecting",
+  "Exploring",
+  "Distilling",
+  "Interpreting",
+  "Reframing",
+  "Balancing",
+  "Prioritizing",
+  "Simulating",
+  "Navigating",
+  "Scanning",
+  "Reviewing",
+  "Assembling",
+  "Optimizing",
+  "Polishing",
+  "Resolving",
+  "Translating",
+  "Summarizing",
+  "Generating",
+  "Coordinating",
+  "Validating",
+  "Triaging",
+  "Investigating",
+  "Unpacking",
+  "Filtering",
+  "Ranking",
+  "Selecting",
+  "Expanding",
+  "Condensing",
+  "Calibrating",
+  "Inferring",
+  "Contextualizing",
+  "Grounding",
+  "Focusing",
+  "Sharpening",
+  "Iterating",
+  "Routing",
+  "Synchronizing",
+  "Preparing",
+  "Forming",
+  "Linking",
+  "Measuring",
+  "Rendering",
+  "Updating",
+  "Adapting",
+  "Tuning",
+  "Compressing",
+  "Indexing",
+  "Sampling",
+  "Estimating",
+  "Scheduling",
+  "Threading",
+  "Merging",
+  "Sorting",
+  "Staging",
+  "Cataloging",
+  "Fetching",
+  "Querying",
+  "Crosschecking",
+  "Harmonizing",
+  "Orchestrating",
+  "Reconciling",
+  "Segmenting",
+  "Annotating",
+  "Comprehending",
+  "Forecasting",
+  "Curating",
+  "Evolving",
+  "Finalizing",
+] as const;
 
 function normalizeSessionsList(list: ChatSession[]): ChatSession[] {
   const byKey = new Map<string, ChatSession>();
@@ -666,12 +754,6 @@ function toolActivityFromAgentEvent(event: AgentEvent): ChatToolActivity | null 
     seq: event.seq,
     ts: event.ts || Date.now(),
   };
-}
-
-function displayThinkingStatus(status: string | null): string {
-  if (!status) return "Thinking";
-  if (/^starting$/i.test(status)) return "Preparing response";
-  return status;
 }
 
 async function persistChatData(data: PersistedChatData): Promise<void> {
@@ -1334,6 +1416,8 @@ export function Chat({
   const [savedWorkspaceImagePaths, setSavedWorkspaceImagePaths] = useState<Record<string, string>>({});
   const [toolActivityByRunId, setToolActivityByRunId] = useState<Record<string, ChatToolActivity[]>>({});
   const [activeToolRunId, setActiveToolRunId] = useState<string | null>(null);
+  const [loadingWordIndex, setLoadingWordIndex] = useState(0);
+  const [loadingWordChanging, setLoadingWordChanging] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [onboardingData, setOnboardingData] = useState<OnboardingData | null>(null);
   const [agentProfile, setAgentProfile] = useState<AgentProfile | null>(null);
@@ -1409,6 +1493,7 @@ export function Chat({
   const avatarUploadDataUrlByFileNameRef = useRef<Map<string, string>>(new Map());
   const wasVisibleRef = useRef(isVisible !== false);
   const outboxReplayInFlightRef = useRef(false);
+  const streamedAssistantRunIdsRef = useRef<Set<string>>(new Set());
   const outboxDispatchInFlightRef = useRef<Set<string>>(new Set());
   const outboxWakeTimerRef = useRef<number | null>(null);
   const connectingScreenTimerRef = useRef<number | null>(null);
@@ -3113,6 +3198,7 @@ export function Chat({
     activeRunIdRef.current = runId;
     activeRunSessionRef.current = sessionKey;
     setActiveToolRunId(runId);
+    streamedAssistantRunIdsRef.current.delete(runId);
     setToolActivityByRunId((prev) => ({ ...prev, [runId]: [] }));
     runSessionKeyRef.current[runId] = sessionKey;
     lastEventByRunIdRef.current[runId] = Date.now();
@@ -3155,6 +3241,32 @@ export function Chat({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: isLoading ? "auto" : "smooth" });
   }, [messages, isLoading, integrationSetup, quickSuggestion]);
+
+  useEffect(() => {
+    if (!isLoading) {
+      setLoadingWordIndex(0);
+      setLoadingWordChanging(false);
+      return;
+    }
+    let settleTimer: number | null = null;
+    const intervalId = window.setInterval(() => {
+      setLoadingWordChanging(true);
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+      settleTimer = window.setTimeout(() => {
+        setLoadingWordIndex((current) => (current + 1) % THINKING_WORDS.length);
+        setLoadingWordChanging(false);
+        settleTimer = null;
+      }, 180);
+    }, 3_000);
+    return () => {
+      window.clearInterval(intervalId);
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+    };
+  }, [isLoading]);
 
   useEffect(() => {
     currentSessionRef.current = currentSession;
@@ -3971,6 +4083,9 @@ export function Chat({
       );
       if (text || hasRenderableAssistantPayload) {
         setThinkingStatus(null);
+        if (eventRunId) {
+          streamedAssistantRunIdsRef.current.add(eventRunId);
+        }
         if (isProxyAuthFailure(text)) {
           triggerProxyAuthRecovery("chat message");
         }
@@ -6905,6 +7020,19 @@ export function Chat({
     ? agentProfile?.avatarDataUrl.trim()
     : undefined;
 
+  const openAgentProfileSettings = useCallback(() => {
+    try {
+      window.localStorage.setItem(SETTINGS_PROFILE_REQUEST_KEY, "profile");
+    } catch {
+      // Best-effort hint for Settings if it mounts after navigation.
+    }
+    onNavigate?.("settings");
+    window.dispatchEvent(new Event(SETTINGS_PROFILE_REQUEST_EVENT));
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new Event(SETTINGS_PROFILE_REQUEST_EVENT));
+    });
+  }, [onNavigate]);
+
   // Memoize the message list so typing in the composer doesn't re-render
   // every message (and re-parse markdown) on each keystroke.
   // These hooks must be before early returns to satisfy Rules of Hooks.
@@ -6922,25 +7050,30 @@ export function Chat({
     if (msg.role === "assistant") {
       return (
         <div key={msg.id} className="group flex w-full min-w-0 justify-start py-2">
-          <div className="flex w-full min-w-0 gap-3">
-            <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">
-              {chatAgentAvatarUrl ? (
-                <img
-                  src={chatAgentAvatarUrl}
-                  alt={chatAgentName}
-                  className="h-full w-full object-cover"
-                />
-              ) : (
-                <span className="text-[10px] font-medium text-[var(--text-secondary)]">
-                  {getProfileInitials(chatAgentName)}
-                </span>
-              )}
-            </div>
+          <div className="flex w-full min-w-0 gap-3.5">
+            <button
+              type="button"
+              onClick={openAgentProfileSettings}
+              className="mt-0.5 shrink-0 rounded-full transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/30"
+              aria-label={`Edit ${chatAgentName} profile`}
+              title={`Edit ${chatAgentName} profile`}
+            >
+              <AgentAvatar
+                name={chatAgentName}
+                avatarUrl={chatAgentAvatarUrl}
+                className="h-11 w-11 border border-[var(--border-subtle)] transition hover:border-[var(--border-primary)]"
+              />
+            </button>
             <div className="min-w-0 flex-1 pb-3">
               <div className="mb-2 flex min-w-0 items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
-                <span className="truncate font-normal text-[var(--text-secondary)]">
+                <button
+                  type="button"
+                  onClick={openAgentProfileSettings}
+                  className="min-w-0 truncate rounded-sm font-normal text-[var(--text-secondary)] transition hover:text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/20"
+                  title={`Edit ${chatAgentName} profile`}
+                >
                   {chatAgentName}
-                </span>
+                </button>
               </div>
               <div className="min-w-0 text-[var(--chat-assistant-text)]">
                 {renderAssistantContent(msg)}
@@ -7000,35 +7133,53 @@ export function Chat({
         </div>
       </div>
     );
-  }), [chatAgentAvatarUrl, chatAgentName, messages, copiedMessageId, toolActivityByRunId]);
+  }), [chatAgentAvatarUrl, chatAgentName, copiedMessageId, messages, openAgentProfileSettings, toolActivityByRunId]);
 
   const loadingIndicator = useMemo(() => {
     if (!isLoading) return null;
-    const activities = activeToolRunId ? toolActivityByRunId[activeToolRunId] ?? [] : [];
+    if (activeToolRunId && streamedAssistantRunIdsRef.current.has(activeToolRunId)) {
+      return null;
+    }
+    const loadingWord = THINKING_WORDS[loadingWordIndex % THINKING_WORDS.length] ?? "Thinking";
     return (
       <div className="flex w-full min-w-0 justify-start py-2">
-        <div className="flex w-full min-w-0 gap-3">
-          <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[var(--purple-accent)]/25 bg-[var(--purple-accent)]/10 text-[var(--purple-accent)]">
-            <span className="relative flex h-2.5 w-2.5">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--purple-accent)] opacity-50" />
-              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-[var(--purple-accent)]" />
-            </span>
-          </div>
+        <div className="flex w-full min-w-0 gap-3.5">
+          <button
+            type="button"
+            onClick={openAgentProfileSettings}
+            className="mt-0.5 shrink-0 rounded-full transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/30"
+            aria-label={`Edit ${chatAgentName} profile`}
+            title={`Edit ${chatAgentName} profile`}
+          >
+            <AgentAvatar
+              name={chatAgentName}
+              avatarUrl={chatAgentAvatarUrl}
+              className="h-11 w-11 border border-[var(--border-subtle)] transition hover:border-[var(--border-primary)]"
+            />
+          </button>
           <div className="min-w-0 flex-1 pb-3">
-            <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-[var(--text-tertiary)]">
-              <Activity className="h-3.5 w-3.5 text-[var(--purple-accent)]" />
-              <span>{displayThinkingStatus(thinkingStatus)}</span>
+            <div className="mb-2 flex min-w-0 items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
+              <button
+                type="button"
+                onClick={openAgentProfileSettings}
+                className="min-w-0 truncate rounded-sm font-normal text-[var(--text-secondary)] transition hover:text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/20"
+                title={`Edit ${chatAgentName} profile`}
+              >
+                {chatAgentName}
+              </button>
             </div>
-            {activities.length > 0 ? renderToolActivityList(activities) : (
-              <div className="h-1.5 w-28 overflow-hidden rounded-full bg-[var(--bg-tertiary)]">
-                <div className="h-full w-1/2 animate-pulse rounded-full bg-[var(--purple-accent)]/70" />
-              </div>
-            )}
+            <span
+              key={loadingWord}
+              className="entropic-thinking-shimmer inline-block text-sm font-normal"
+              data-changing={loadingWordChanging ? "true" : "false"}
+            >
+              {loadingWord}
+            </span>
           </div>
         </div>
       </div>
     );
-  }, [activeToolRunId, isLoading, thinkingStatus, toolActivityByRunId]);
+  }, [activeToolRunId, chatAgentAvatarUrl, chatAgentName, isLoading, loadingWordChanging, loadingWordIndex, messages, openAgentProfileSettings]);
 
   const activeDraft = currentSession
     ? activeComposerMode === "shell"
