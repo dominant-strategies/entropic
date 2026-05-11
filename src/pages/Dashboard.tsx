@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import { Cpu, Image, Loader2, Shield, User } from "lucide-react";
 import { Layout, Page } from "../components/Layout";
@@ -49,6 +50,8 @@ import {
   updateDesktopSettings,
 } from "../lib/settingsStore";
 import { loadSettingsWarmState } from "../lib/settingsWarmState";
+import { DESKTOP_ACTION_EVENT, type DesktopAction } from "../desktop/actions";
+import { clientLog } from "../lib/clientLog";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -86,6 +89,11 @@ type DashboardBootstrapAction =
       gatewayLaunchMode?: GatewayLaunchMode;
       gatewayHealthStatus?: string;
     };
+
+type PendingDesktopAction = {
+  id: string;
+  action: DesktopAction;
+};
 
 let settingsPagePrefetchPromise: Promise<unknown> | null = null;
 
@@ -671,6 +679,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [currentChatSession, setCurrentChatSession] = useState<string | null>(null);
   const [pendingChatSession, setPendingChatSession] = useState<string | null>(null);
   const [pendingChatAction, setPendingChatAction] = useState<ChatSessionActionRequest | null>(null);
+  const [pendingDesktopAction, setPendingDesktopAction] =
+    useState<PendingDesktopAction | null>(null);
   const [localCreditBalanceCents, setLocalCreditBalanceCents] = useState<number | null>(null);
   const gatewayTokenRef = useRef<string | null>(null);
   const selectedModelRef = useRef(selectedModel);
@@ -1012,6 +1022,29 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     window.addEventListener("entropic-open-page", handleOpenPage as EventListener);
     return () => {
       window.removeEventListener("entropic-open-page", handleOpenPage as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<DesktopAction>(DESKTOP_ACTION_EVENT, (event) => {
+      clientLog("desktop_action.received", { type: event.payload.type });
+      setPendingDesktopAction({
+        id: crypto.randomUUID(),
+        action: event.payload,
+      });
+      setCurrentPage("files");
+    }).then((dispose) => {
+      if (disposed) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
@@ -2526,6 +2559,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             onAudioUnderstandingModelChange={handleAudioUnderstandingModelChange}
             onVoiceShortcutChange={handleVoiceShortcutChange}
             onImageModelChange={handleImageModelChange}
+            pendingDesktopAction={pendingDesktopAction}
+            onDesktopActionHandled={(id) => {
+              setPendingDesktopAction((current) => (current?.id === id ? null : current));
+            }}
           />
         );
       case "tasks":

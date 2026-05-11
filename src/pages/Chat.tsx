@@ -67,6 +67,12 @@ import {
   type SuggestionTaskPreset,
 } from "../lib/chatQuickActions";
 import {
+  extractWorkspaceOfficeFileName,
+  formatWorkspaceOfficeRoutingPrompt,
+  shouldRouteWorkspaceOfficeRequest,
+  workspaceOfficeRequestWantsDesktopOpen,
+} from "../lib/chatOfficeRouting";
+import {
   addTaskBoardItem,
   formatTaskBoardOwnerLabel,
   formatTaskBoardStatusLabel,
@@ -1208,6 +1214,8 @@ export function Chat({
   const outboxDispatchInFlightRef = useRef<Set<string>>(new Set());
   const outboxWakeTimerRef = useRef<number | null>(null);
   const connectingScreenTimerRef = useRef<number | null>(null);
+  const workspaceOfficeOpenBySendIdRef = useRef<Record<string, { path: string }>>({});
+  const workspaceOfficeOpenByRunIdRef = useRef<Record<string, { path: string }>>({});
   const [outboxWakeTick, setOutboxWakeTick] = useState(0);
   const activeComposerMode = currentSession
     ? composerModeBySession[currentSession] || DEFAULT_COMPOSER_MODE
@@ -3298,6 +3306,16 @@ export function Chat({
           timings.finalAt = Date.now();
           addDiag(`timing final runId=${eventRunId} t=${timings.finalAt - timings.startedAt}ms`);
         }
+        const pendingOfficeOpen = workspaceOfficeOpenByRunIdRef.current[eventRunId];
+        if (pendingOfficeOpen) {
+          delete workspaceOfficeOpenByRunIdRef.current[eventRunId];
+          addDiag(`workspace office auto-open path=${pendingOfficeOpen.path}`);
+          void handoffWorkspacePathToDesktop({
+            path: pendingOfficeOpen.path,
+            action: "open",
+            looksLikeFile: true,
+          });
+        }
         const revertModel = runRevertModelRef.current[eventRunId];
         if (revertModel && currentSessionRef.current && clientRef.current) {
           clientRef.current
@@ -4003,6 +4021,12 @@ export function Chat({
       throw new Error("Failed to start response stream");
     }
 
+    const pendingOfficeOpen = workspaceOfficeOpenBySendIdRef.current[entry.id];
+    if (pendingOfficeOpen) {
+      workspaceOfficeOpenByRunIdRef.current[runId] = pendingOfficeOpen;
+      delete workspaceOfficeOpenBySendIdRef.current[entry.id];
+    }
+
     scheduleActiveRunTimeout(runId, entry.sessionKey);
     removeOutboxEntry(entry.id);
     runTimingsRef.current[runId] = { startedAt: sendStart, ackAt: Date.now() };
@@ -4456,8 +4480,23 @@ export function Chat({
       addDiag(`x intent detected; routing via X integration topic=${xIntent.topic ? "yes" : "no"}`);
     }
 
+    const workspaceOfficeIntent =
+      !xIntent &&
+      !hasAttachments &&
+      !messageContent.startsWith(INTERNAL_USER_PROMPT_PREFIX) &&
+      shouldRouteWorkspaceOfficeRequest(messageContent);
+    if (workspaceOfficeIntent) {
+      outboundMessageContent = formatWorkspaceOfficeRoutingPrompt(messageContent);
+      addDiag("workspace office intent detected; routing via local Office workflow");
+    }
+    const workspaceOfficeAutoOpenPath =
+      workspaceOfficeIntent && workspaceOfficeRequestWantsDesktopOpen(messageContent)
+        ? extractWorkspaceOfficeFileName(messageContent)
+        : null;
+
     const gmailIntent =
       !xIntent &&
+      !workspaceOfficeIntent &&
       shouldCheckXIntent &&
       parseGmailIntent(messageContent);
     if (gmailIntent && sendSession) {
@@ -4521,6 +4560,11 @@ export function Chat({
       attemptCount: 0,
       nextAttemptAt: Date.now(),
     };
+    if (workspaceOfficeAutoOpenPath) {
+      workspaceOfficeOpenBySendIdRef.current[pendingSend.id] = {
+        path: workspaceOfficeAutoOpenPath,
+      };
+    }
     upsertOutboxEntry(pendingSend);
     clearPendingAttachments();
 

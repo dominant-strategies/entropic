@@ -1,5 +1,6 @@
-The AIO smoke tests generate seed `.xlsx`, `.docx`, and `.pptx` files in
-`tmp_path` at runtime instead of committing binary Office fixtures.
+This directory contains small seed `.xlsx`, `.docx`, and `.pptx` files used
+by the AIO smoke tests for read-only inspection assertions.
 
-This keeps the fixtures auditable while still exercising the public
-`inspect_aio(path)` -> edit `object` -> `apply_aio(path, payload)` workflow.
+The roundtrip tests still generate editable files in `tmp_path` so they can
+exercise `inspect_aio(path)` -> edit `object` -> `apply_aio(path, payload)`
+without mutating these fixtures.

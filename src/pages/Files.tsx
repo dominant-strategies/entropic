@@ -16,24 +16,16 @@ import { Store } from "@tauri-apps/plugin-store";
 import {
   Folder,
   FileText,
-  Trash2,
-  Plus,
   ArrowUp,
-  MessageSquare,
   Loader2,
   Image,
-  MoreHorizontal,
-  Pin,
-  PanelLeftClose,
-  PanelLeftOpen,
 } from "lucide-react";
 import { loadOnboardingData } from "../lib/profile";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
 import { loadDesktopSettings, updateDesktopSettings } from "../lib/settingsStore";
-import {
-  Chat,
-  type ChatSession as SharedChatSession,
-  type ChatSessionActionRequest,
+import type {
+  ChatSession as SharedChatSession,
+  ChatSessionActionRequest,
 } from "./Chat";
 import { ModelSelector } from "../components/ModelSelector";
 import { useAuth } from "../contexts/AuthContext";
@@ -46,6 +38,7 @@ import {
   syncEmbeddedPreviewWebview,
 } from "../lib/nativePreview";
 import { hostedFeaturesEnabled } from "../lib/buildProfile";
+import { clientLog } from "../lib/clientLog";
 import { createOnlyOfficeSession } from "../lib/office";
 import {
   clampWindowFrame,
@@ -64,11 +57,12 @@ import {
 } from "../desktop/windowManager";
 import { AppWindow } from "../desktop/AppWindow";
 import { BrowserApp } from "../desktop/browser/BrowserApp";
+import { ChatDesktopApp } from "../desktop/chat/ChatDesktopApp";
 import {
-  DESKTOP_ACTION_EVENT,
   dispatchDesktopAction,
   type DesktopAction,
 } from "../desktop/actions";
+import { resolveDesktopHandoff, type DesktopHandoff } from "../desktop/handoff";
 import {
   OfficeApps,
   officeAppKindForPath,
@@ -77,13 +71,7 @@ import {
   type OfficeAppSession,
   type OfficeRecentEntry,
 } from "../desktop/office/OfficeApps";
-import {
-  DesktopFileIcon,
-  DesktopImagePreviewIcon,
-  FolderIcon,
-  getFileColor,
-  getFileIcon,
-} from "../desktop/finder/FileIcons";
+import { DesktopIconGrid } from "../desktop/finder/DesktopIconGrid";
 import { FinderApp } from "../desktop/finder/FinderApp";
 import { FilePreviewWindow, type FilePreviewState } from "../desktop/finder/FilePreviewWindow";
 import { CreateWorkspaceEntryModal } from "../desktop/finder/CreateWorkspaceEntryModal";
@@ -142,6 +130,8 @@ type Props = {
   onAudioUnderstandingModelChange: (model: string) => void;
   onVoiceShortcutChange: (shortcut: string) => void | Promise<void>;
   onImageModelChange: (model: string) => void;
+  pendingDesktopAction?: { id: string; action: DesktopAction } | null;
+  onDesktopActionHandled?: (id: string) => void;
 };
 type ViewMode = "grid" | "list";
 type DesktopIcon = { id: string; x: number; y: number };
@@ -211,7 +201,6 @@ const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
 const DESKTOP_HANDOFF_EVENT = "entropic-desktop-handoff";
 const DESKTOP_SESSION_STORAGE_KEY = "entropic.desktop.session.v1";
-const DEFAULT_DESKTOP_CHAT_TITLE = "New chat";
 const DESKTOP_WORKSPACE_PATH = "Desktop";
 const CHAT_WORKSPACE_PREFIXES = [
   "/data/.openclaw/workspace",
@@ -251,12 +240,6 @@ type ChatWorkspaceReference = {
   name: string;
   isHtml: boolean;
   looksLikeFile: boolean;
-};
-type DesktopHandoff = {
-  path?: string;
-  url?: string;
-  action: "open" | "preview" | "browser";
-  looksLikeFile?: boolean;
 };
 type DesktopDropTarget = string | null;
 type NativeDragDropPayload = {
@@ -462,21 +445,6 @@ function asWindowSize(value: unknown): WindowSize | null {
   const h = Number(value.h);
   if (!Number.isFinite(w) || !Number.isFinite(h)) return null;
   return { w, h };
-}
-
-function desktopChatSessionTitle(session: SharedChatSession): string {
-  return session.label || session.derivedTitle || session.displayName || DEFAULT_DESKTOP_CHAT_TITLE;
-}
-
-function sortDesktopChatSessions(list: SharedChatSession[]): SharedChatSession[] {
-  return [...list].sort((a, b) => {
-    const aPinned = a.pinned ? 1 : 0;
-    const bPinned = b.pinned ? 1 : 0;
-    if (aPinned !== bPinned) return bPinned - aPinned;
-    const aUpdated = typeof a.updatedAt === "number" ? a.updatedAt : 0;
-    const bUpdated = typeof b.updatedAt === "number" ? b.updatedAt : 0;
-    return bUpdated - aUpdated;
-  });
 }
 
 function workspaceEntriesEqual(a: WorkspaceFileEntry[], b: WorkspaceFileEntry[]): boolean {
@@ -871,11 +839,14 @@ export function Files({
   onAudioUnderstandingModelChange,
   onVoiceShortcutChange,
   onImageModelChange,
+  pendingDesktopAction,
+  onDesktopActionHandled,
 }: Props) {
   const initialDesktopWarmCache = useMemo(() => readDesktopWarmCache(), []);
   const { balance, isAuthenticated, isAuthConfigured } = useAuth();
   const billingEnabled = hostedFeaturesEnabled;
   const [agentName, setAgentName] = useState("Joulie");
+  const handledDesktopActionIdsRef = useRef<Set<string>>(new Set());
 
   // Wallpaper
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
@@ -3024,6 +2995,7 @@ export function Files({
     if (!officeKind) return false;
     try {
       setError(null);
+      clientLog("office.open.start", { appKind: officeKind, path: entry.path });
       const session = await createOnlyOfficeSession(entry.path);
       const nextSession: OfficeAppSession = {
         path: entry.path,
@@ -3049,7 +3021,13 @@ export function Files({
           openOfficeWindow("slides");
           break;
       }
+      clientLog("office.open.ready", { appKind: officeKind, path: entry.path });
     } catch (e) {
+      clientLog("office.open.failed", {
+        appKind: officeKind,
+        path: entry.path,
+        error: e instanceof Error ? e.message : String(e),
+      });
       setError(`Failed to start ONLYOFFICE: ${e instanceof Error ? e.message : String(e)}`);
     }
     return true;
@@ -3204,30 +3182,30 @@ export function Files({
   }
 
   async function applyDesktopHandoff(handoff: DesktopHandoff | null) {
-    if (!handoff || typeof handoff.action !== "string") {
-      return;
+    const resolution = resolveDesktopHandoff(handoff);
+    switch (resolution.type) {
+      case "ignore":
+        return;
+      case "open_browser_url":
+        await openBrowserUrlInDesktop(resolution.url);
+        return;
+      case "open_workspace_in_browser":
+        await openWorkspacePathInBrowser(resolution.path);
+        return;
+      case "preview_workspace_path":
+        showWorkspacePathInDesktop(resolution.path, true);
+        await previewWorkspacePath(resolution.path);
+        return;
+      case "open_workspace_file":
+        await openWorkspaceFilePath(resolution.path);
+        return;
+      case "open_workspace_folder":
+        openFolder(resolution.path);
+        return;
+      case "show_workspace_path":
+        showWorkspacePathInDesktop(resolution.path, resolution.looksLikeFile);
+        return;
     }
-    if (handoff.action === "browser" && typeof handoff.url === "string" && handoff.url.trim()) {
-      await openBrowserUrlInDesktop(handoff.url);
-      return;
-    }
-    if (typeof handoff.path !== "string") {
-      return;
-    }
-    const looksLikeFile =
-      typeof handoff.looksLikeFile === "boolean"
-        ? handoff.looksLikeFile
-        : Boolean(handoff.path && workspacePathName(handoff.path).includes("."));
-    if (handoff.action === "browser") {
-      await openWorkspacePathInBrowser(handoff.path);
-      return;
-    }
-    if (handoff.action === "preview") {
-      showWorkspacePathInDesktop(handoff.path, true);
-      await previewWorkspacePath(handoff.path);
-      return;
-    }
-    showWorkspacePathInDesktop(handoff.path, looksLikeFile);
   }
 
   useEffect(() => {
@@ -3239,26 +3217,6 @@ export function Files({
     window.addEventListener(DESKTOP_HANDOFF_EVENT, handleDesktopHandoff);
     return () => {
       window.removeEventListener(DESKTOP_HANDOFF_EVENT, handleDesktopHandoff);
-    };
-  }, []);
-
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void listen<DesktopAction>(DESKTOP_ACTION_EVENT, (event) => {
-      void desktopActionHandlerRef.current?.(event.payload).catch((error) => {
-        setError(error instanceof Error ? error.message : String(error));
-      });
-    }).then((dispose) => {
-      if (disposed) {
-        dispose();
-        return;
-      }
-      unlisten = dispose;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
     };
   }, []);
 
@@ -3460,6 +3418,28 @@ export function Files({
     );
   }
   desktopActionHandlerRef.current = runDesktopAction;
+
+  useEffect(() => {
+    if (!pendingDesktopAction) return;
+    const handler = desktopActionHandlerRef.current;
+    if (!handler) return;
+    const { id, action } = pendingDesktopAction;
+    if (handledDesktopActionIdsRef.current.has(id)) return;
+    handledDesktopActionIdsRef.current.add(id);
+    clientLog("desktop_action.replay", { id, type: action.type });
+    void handler(action)
+      .catch((error) => {
+        clientLog("desktop_action.replay.failed", {
+          id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        setError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        clientLog("desktop_action.replay.done", { id });
+        onDesktopActionHandled?.(id);
+      });
+  }, [pendingDesktopAction, onDesktopActionHandled]);
 
   function requestDesktopWindowFocus(window: WindowKey) {
     void runDesktopAction({ type: "focus_window", window });
@@ -3799,16 +3779,6 @@ export function Files({
   const wallpaperCss = getWallpaperCss();
   const currentWp = getWallpaperById(wallpaperId);
   const isWpImage = (wallpaperId === "custom" && customWallpaper) || currentWp?.type === "photo";
-  const normalizedChatQuery = chatSessionQuery.trim().toLowerCase();
-  const sortedChatSessions = sortDesktopChatSessions(chatSessions);
-  const activeChatSession = chatCurrentSession
-    ? chatSessions.find((session) => session.key === chatCurrentSession) || null
-    : null;
-  const visibleChatSessions = normalizedChatQuery
-    ? sortedChatSessions.filter((session) => (
-      desktopChatSessionTitle(session).toLowerCase().includes(normalizedChatQuery)
-    ))
-    : sortedChatSessions;
   const browserWindowZ = getWindowZ(windowZ, "browser");
   const embeddedPreviewForegroundWindows = useMemo(() => {
     const frames: Array<{ z: number; rect: WindowRect }> = [];
@@ -4149,123 +4119,33 @@ export function Files({
           {/* Wallpaper */}
           <div className="absolute inset-0" style={isWpImage ? { backgroundImage: wallpaperCss, backgroundSize: "cover", backgroundPosition: "center" } : { background: wallpaperCss }} />
 
-          {/* Desktop icons */}
-          <div className="relative flex-1 pt-4 px-0 pb-0 h-full">
-            {(() => {
-              const icon = desktopIcons.workspace;
-              return (
-                <div
-                  className="absolute flex flex-col items-center w-20 p-2 rounded-xl cursor-grab active:cursor-grabbing transition-colors duration-100 select-none"
-                  data-desktop-drop-target=""
-                  style={{
-                    left: icon?.x ?? 28,
-                    top: icon?.y ?? 72,
-                    background: selected === "__user_folder"
-                      ? "rgba(255,255,255,0.18)"
-                      : dragDropTarget === ""
-                        ? "rgba(84,163,247,0.18)"
-                        : "transparent",
-                    outline: dragDropTarget === "" ? "1px solid rgba(122,184,245,0.6)" : "none",
-                  }}
-                  onMouseDown={(e) => handleIconMouseDown("workspace", e)}
-                  onDragOver={(e) => handleUploadDragOver(e, "")}
-                  onDragLeave={(e) => handleUploadDragLeave(e, "")}
-                  onDrop={(e) => { void handleUploadDropToPath(e, ""); }}
-                  onClick={(e) => {
-                    if (iconClickGuardRef.current) return;
-                    e.stopPropagation();
-                    setSelected("__user_folder");
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setSelected("__user_folder");
-                    setContextMenu({ x: e.clientX, y: e.clientY });
-                  }}
-                  onDoubleClick={() => openFolder("")}
-                >
-                  <FolderIcon size={56} selected={selected === "__user_folder"} />
-                  <span
-                    className="text-[11px] text-center leading-tight mt-1 w-full truncate"
-                    style={{
-                      color: "white",
-                      textShadow: "0 1px 3px rgba(0,0,0,0.6)",
-                      fontWeight: selected === "__user_folder" ? 600 : 400,
-                    }}
-                  >
-                    {agentName}&apos;s Files
-                  </span>
-                </div>
-              );
-            })()}
-            {desktopEntries.map((entry) => {
-              const iconKey = desktopIconIdForPath(entry.path);
-              const icon = desktopIcons[iconKey];
-              const Icon = getFileIcon(entry.name, entry.is_directory);
-              const iconColor = getFileColor(entry.name, entry.is_directory);
-              const imagePreview = isImageWorkspaceEntry(entry) ? desktopImagePreviews[entry.path] : undefined;
-              const isSelected = selected === entry.path;
-              const isDropTarget = dragDropTarget === entry.path;
-              return (
-                <div
-                  key={entry.path}
-                  className="absolute flex flex-col items-center w-20 p-2 rounded-xl cursor-grab active:cursor-grabbing transition-colors duration-100 select-none"
-                  data-desktop-drop-target={entry.is_directory ? entry.path : undefined}
-                  style={{
-                    left: icon?.x ?? 28,
-                    top: icon?.y ?? 192,
-                    background: isSelected
-                      ? "rgba(255,255,255,0.18)"
-                      : isDropTarget
-                        ? "rgba(84,163,247,0.18)"
-                        : "transparent",
-                    outline: isDropTarget ? "1px solid rgba(122,184,245,0.6)" : "none",
-                  }}
-                  onMouseDown={(e) => handleIconMouseDown(iconKey, e)}
-                  onDragOver={entry.is_directory ? (e) => handleUploadDragOver(e, entry.path) : undefined}
-                  onDragLeave={entry.is_directory ? (e) => handleUploadDragLeave(e, entry.path) : undefined}
-                  onDrop={entry.is_directory ? ((e) => { void handleUploadDropToPath(e, entry.path); }) : undefined}
-                  onClick={(e) => {
-                    if (iconClickGuardRef.current) return;
-                    e.stopPropagation();
-                    setSelected(entry.path);
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setSelected(entry.path);
-                    setContextMenu({ x: e.clientX, y: e.clientY, entry });
-                  }}
-                  onDoubleClick={() => handleDesktopEntryOpen(entry)}
-                >
-                  {entry.is_directory ? (
-                    <FolderIcon size={56} selected={isSelected || isDropTarget} />
-                  ) : imagePreview ? (
-                    <DesktopImagePreviewIcon src={imagePreview} active={isSelected || isDropTarget} />
-                  ) : (
-                    <div className="w-14 h-14 flex items-center justify-center">
-                      <DesktopFileIcon icon={Icon} color={iconColor} active={isSelected || isDropTarget} />
-                    </div>
-                  )}
-                  <span
-                    className="text-[11px] text-center leading-tight mt-1 w-full"
-                    style={{
-                      color: "white",
-                      textShadow: "0 1px 3px rgba(0,0,0,0.6)",
-                      fontWeight: isSelected ? 600 : 400,
-                      display: "-webkit-box",
-                      WebkitLineClamp: 2,
-                      WebkitBoxOrient: "vertical",
-                      overflow: "hidden",
-                      wordBreak: "break-word",
-                    }}
-                  >
-                    {entry.name}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
+          <DesktopIconGrid
+            agentName={agentName}
+            entries={desktopEntries}
+            desktopIcons={desktopIcons}
+            imagePreviews={desktopImagePreviews}
+            selected={selected}
+            dragDropTarget={dragDropTarget}
+            iconClickGuardRef={iconClickGuardRef}
+            iconIdForPath={desktopIconIdForPath}
+            isImageEntry={isImageWorkspaceEntry}
+            onIconMouseDown={handleIconMouseDown}
+            onUploadDragOver={handleUploadDragOver}
+            onUploadDragLeave={handleUploadDragLeave}
+            onUploadDropToPath={(e, path) => { void handleUploadDropToPath(e, path); }}
+            onSelectWorkspace={() => setSelected("__user_folder")}
+            onWorkspaceContextMenu={(e) => {
+              setSelected("__user_folder");
+              setContextMenu({ x: e.clientX, y: e.clientY });
+            }}
+            onOpenWorkspace={() => openFolder("")}
+            onSelectEntry={(entry) => setSelected(entry.path)}
+            onEntryContextMenu={(entry, e) => {
+              setSelected(entry.path);
+              setContextMenu({ x: e.clientX, y: e.clientY, entry });
+            }}
+            onOpenEntry={handleDesktopEntryOpen}
+          />
 
           {/* Drag overlay */}
           {dragOver && (
@@ -4420,15 +4300,31 @@ export function Files({
             onSubmit={submitCreateFile}
           />
 
-          {/* ── FLOATING CHAT WINDOW (draggable) ────────────────────── */}
           {chatOpen && (
-            <AppWindow
-              title="Chat"
-              icon={MessageSquare}
+            <ChatDesktopApp
+              open={chatOpen}
               position={chatPos}
               size={chatSize}
               zIndex={getWindowZ(windowZ, "chat")}
-              glass={false}
+              navCollapsed={chatNavCollapsed}
+              sessions={chatSessions}
+              currentSession={chatCurrentSession}
+              query={chatSessionQuery}
+              requestedSession={chatRequestedSession}
+              requestedSessionAction={chatRequestedAction}
+              openSessionMenuKey={openChatSessionMenuKey}
+              gatewayRunning={gatewayRunning}
+              gatewayStarting={Boolean(gatewayRetryIn) || (isTogglingGateway && !gatewayRunning)}
+              gatewayRetryIn={gatewayRetryIn ?? null}
+              useLocalKeys={useLocalKeys}
+              selectedModel={selectedModel}
+              imageModel={imageModel}
+              imageGenerationModel={imageGenerationModel}
+              textToSpeechModel={textToSpeechModel}
+              audioUnderstandingModel={audioUnderstandingModel}
+              integrationsSyncing={integrationsSyncing}
+              integrationsMissing={integrationsMissing}
+              formatDate={formatDate}
               onClose={() => setChatOpen(false)}
               onFocus={() => focusWindow("chat")}
               onDragStart={handleChatDragStart}
@@ -4445,207 +4341,29 @@ export function Files({
                   chatMinSize,
                 )
               }
-            >
-              <div className="h-full min-w-0 flex bg-[var(--bg-app)] text-[var(--text-primary)]">
-                {!chatNavCollapsed && (
-                  <aside
-                    className="w-[280px] shrink-0 border-r flex flex-col"
-                    style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
-                  >
-                  <div className="p-3 border-b" style={{ borderColor: "var(--border-subtle)" }}>
-                    <div className="flex items-center justify-between gap-2 mb-3">
-                      <div className="min-w-0">
-                        <button
-                          type="button"
-                          onClick={() => setChatNavCollapsed((prev) => !prev)}
-                          className="h-8 w-8 rounded-xl border flex items-center justify-center transition-colors hover:bg-[var(--border-subtle)]"
-                          style={{ borderColor: "var(--border-subtle)", color: "var(--text-primary)" }}
-                          title="Collapse conversations"
-                          aria-label="Collapse conversations"
-                        >
-                          <PanelLeftClose className="w-4 h-4" />
-                        </button>
-                        <p className="text-[11px] uppercase tracking-[0.24em]" style={{ color: "var(--text-tertiary)" }}>
-                          Conversations
-                        </p>
-                        <p className="text-[12px] mt-1" style={{ color: "var(--text-secondary)" }}>
-                          {activeChatSession ? desktopChatSessionTitle(activeChatSession) : "Shared with main chat"}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={createNewChatSession}
-                        className="h-8 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 px-3"
-                        style={{ background: "var(--text-primary)", color: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}
-                        title="New chat"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        New
-                      </button>
-                    </div>
-                    <input
-                      type="text"
-                      value={chatSessionQuery}
-                      onChange={(e) => setChatSessionQuery(e.target.value)}
-                      placeholder="Search history"
-                      className="w-full h-9 px-3 rounded-xl text-xs outline-none"
-                      style={{ background: "var(--bg-card)", color: "var(--text-primary)", border: "1px solid var(--border-subtle)" }}
-                    />
-                  </div>
-                  <div className="flex-1 overflow-auto p-2 space-y-1.5">
-                    {visibleChatSessions.length === 0 ? (
-                      <div className="px-3 py-5 text-center">
-                        <p className="text-xs" style={{ color: "var(--text-tertiary)" }}>No matching chats</p>
-                      </div>
-                    ) : visibleChatSessions.map((session) => {
-                      const isActive = session.key === chatCurrentSession;
-                      return (
-                        <div key={session.key} className="relative flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => selectChatSession(session.key)}
-                            className="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-2xl text-left transition-colors min-w-0"
-                            style={{
-                              background: isActive ? "rgba(139,92,246,0.15)" : "var(--bg-tertiary)",
-                              border: isActive ? "1px solid rgba(139,92,246,0.25)" : "1px solid var(--border-subtle)",
-                            }}
-                          >
-                            {session.pinned ? (
-                              <Pin className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--text-secondary)" }} />
-                            ) : (
-                              <MessageSquare className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--text-secondary)" }} />
-                            )}
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-[12px] font-semibold" style={{ color: "var(--text-primary)" }}>
-                                {desktopChatSessionTitle(session)}
-                              </p>
-                              <p className="mt-1 text-[10px]" style={{ color: "var(--text-tertiary)" }}>
-                                {typeof session.updatedAt === "number"
-                                  ? formatDate(Math.floor(session.updatedAt / 1000))
-                                  : "Saved conversation"}
-                              </p>
-                            </div>
-                          </button>
-                          <button
-                            data-desktop-chat-session-trigger
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setOpenChatSessionMenuKey((prev) => (prev === session.key ? null : session.key));
-                            }}
-                            className="p-1.5 rounded-lg transition-colors hover:bg-[var(--border-subtle)]"
-                            style={{ color: "var(--text-secondary)" }}
-                            title="Chat options"
-                            aria-label="Chat options"
-                          >
-                            <MoreHorizontal className="w-3.5 h-3.5" />
-                          </button>
-                          {openChatSessionMenuKey === session.key && (
-                            <div
-                              data-desktop-chat-session-menu
-                              className="absolute right-0 top-10 z-30 w-40 rounded-xl border p-1.5 shadow-lg"
-                              style={{
-                                background: "var(--bg-card)",
-                                borderColor: "var(--border-subtle)",
-                              }}
-                            >
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  requestChatSessionAction({
-                                    type: "pin",
-                                    key: session.key,
-                                    pinned: !session.pinned,
-                                  });
-                                  setOpenChatSessionMenuKey(null);
-                                }}
-                                className="w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] text-left transition-colors hover:bg-[var(--border-subtle)]"
-                                style={{ color: "var(--text-primary)" }}
-                              >
-                                <Pin className="w-3.5 h-3.5" />
-                                {session.pinned ? "Unpin" : "Pin"}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  requestChatSessionAction({ type: "delete", key: session.key });
-                                  setOpenChatSessionMenuKey(null);
-                                }}
-                                className="w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] text-left transition-colors hover:bg-red-500/10"
-                                style={{ color: "#dc2626" }}
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                Delete
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                  </aside>
-                )}
-
-                <div className="min-w-0 flex-1 flex flex-col bg-[var(--bg-app)] relative">
-                  {chatNavCollapsed && (
-                    <button
-                      type="button"
-                      onClick={() => setChatNavCollapsed(false)}
-                      className="absolute left-3 top-3 z-20 h-9 w-9 rounded-xl border shadow-sm flex items-center justify-center transition-colors hover:bg-[var(--bg-secondary)]"
-                      style={{
-                        borderColor: "var(--border-subtle)",
-                        background: "color-mix(in srgb, var(--bg-card) 92%, transparent)",
-                        color: "var(--text-primary)",
-                        backdropFilter: "blur(10px)",
-                        WebkitBackdropFilter: "blur(10px)",
-                      }}
-                      title="Show conversations"
-                      aria-label="Show conversations"
-                    >
-                      <PanelLeftOpen className="w-4 h-4" />
-                    </button>
-                  )}
-                  <div className="min-w-0 flex-1 overflow-hidden">
-                    <Chat
-                      isVisible={chatOpen}
-                      gatewayRunning={gatewayRunning}
-                      gatewayStarting={Boolean(gatewayRetryIn) || (isTogglingGateway && !gatewayRunning)}
-                      gatewayRetryIn={gatewayRetryIn ?? null}
-                      gatewayLifecycleLabel={null}
-                      onStartGateway={onGatewayToggle}
-                      onRecoverProxyAuth={onRecoverProxyAuth}
-                      useLocalKeys={useLocalKeys}
-                      selectedModel={selectedModel}
-                      onModelChange={onModelChange}
-                      imageModel={imageModel}
-                      imageGenerationModel={imageGenerationModel}
-                      textToSpeechModel={textToSpeechModel}
-                      audioUnderstandingModel={audioUnderstandingModel}
-                      integrationsSyncing={integrationsSyncing}
-                      integrationsMissing={integrationsMissing}
-                      onNavigate={handleDesktopChatNavigate}
-                      onSessionsChange={(sessions, currentKey) => {
-                        setChatSessions(sessions);
-                        setChatCurrentSession((prev) => currentKey ?? prev);
-                        setChatRequestedSession((pending) => {
-                          if (!pending) return pending;
-                          if (pending === "__new__") {
-                            return currentKey ? null : pending;
-                          }
-                          return pending === currentKey ? null : pending;
-                        });
-                        setChatRequestedAction(null);
-                      }}
-                      requestedSession={chatRequestedSession}
-                      requestedSessionAction={chatRequestedAction}
-                      wideLayout={chatNavCollapsed}
-                    />
-                  </div>
-                </div>
-              </div>
-            </AppWindow>
+              onNavCollapsedChange={setChatNavCollapsed}
+              onQueryChange={setChatSessionQuery}
+              onCreateSession={createNewChatSession}
+              onSelectSession={selectChatSession}
+              onRequestSessionAction={requestChatSessionAction}
+              onOpenSessionMenuKeyChange={setOpenChatSessionMenuKey}
+              onStartGateway={onGatewayToggle}
+              onRecoverProxyAuth={onRecoverProxyAuth}
+              onModelChange={onModelChange}
+              onNavigate={handleDesktopChatNavigate}
+              onSessionsChange={(sessions, currentKey) => {
+                setChatSessions(sessions);
+                setChatCurrentSession((prev) => currentKey ?? prev);
+                setChatRequestedSession((pending) => {
+                  if (!pending) return pending;
+                  if (pending === "__new__") {
+                    return currentKey ? null : pending;
+                  }
+                  return pending === currentKey ? null : pending;
+                });
+                setChatRequestedAction(null);
+              }}
+            />
           )}
 
           {browserOpen && (

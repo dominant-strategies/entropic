@@ -3822,9 +3822,7 @@ def presentation_body_from_paragraphs(paragraphs: List[Dict[str, object]]) -> Di
         return {"kind": "text", "text": ""}
     if len(cleaned) == 1 and int(cleaned[0].get("level") or 0) == 0:
         return {"kind": "text", "text": str(cleaned[0].get("text") or "")}
-    if any(int(item.get("level") or 0) != 0 for item in cleaned):
-        return {"kind": "outline", "items": cleaned}
-    return {"kind": "bullets", "bullets": [str(item.get("text") or "") for item in cleaned]}
+    return {"kind": "outline", "items": cleaned}
 
 
 def normalize_presentation_notes(notes: object) -> List[str]:
@@ -4789,6 +4787,9 @@ def presentation_shape_object(shape, z_index: Optional[int] = None) -> Optional[
         else:
             result["kind"] = "text_box"
             result["body"] = body
+            text = presentation_text_value(body)
+            if text:
+                result["text"] = text
         return result
 
     if getattr(shape, "has_chart", False):
@@ -5264,8 +5265,6 @@ def shape_matches_payload(shape, payload: Dict[str, object], used_ids: set[str])
     if desired_placeholder and placeholder_kind == desired_placeholder:
         return True
     if desired_kind == "title" and placeholder_kind in PPTX_TITLE_PLACEHOLDER_TYPES:
-        return True
-    if desired_kind == "text_box" and placeholder_kind in PPTX_BODY_PLACEHOLDER_TYPES:
         return True
     return False
 

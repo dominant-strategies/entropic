@@ -5565,8 +5565,12 @@ fn gateway_health_error_suggests_control_ui_auth(error: &str) -> bool {
         || (lowered.contains("origin") && lowered.contains("allow"))
 }
 
+fn docker_exact_name_filter(name: &str) -> String {
+    format!("name=^/{}$", name)
+}
+
 fn named_gateway_container_exists(name: &str, running_only: bool) -> bool {
-    let name_filter = format!("name={}", name);
+    let name_filter = docker_exact_name_filter(name);
     let mut args = vec!["ps"];
     if !running_only {
         args.push("-a");
@@ -9342,10 +9346,13 @@ fn build_tools_markdown(capabilities: &[CapabilityState]) -> String {
         "- Use the AIO JSON objects for structured spreadsheet, document, and presentation edits; use legacy helpers only for quick blank/todo/document scaffolds.\n",
     );
     body.push_str(
+        "- For spreadsheet requests that mention formulas, write actual Excel formula cells such as `=D2*E2` and `=SUM(H2:H13)`, not precomputed static values.\n",
+    );
+    body.push_str(
         "- After creating an Office file, include its workspace path such as `/data/workspace/sales-plan.xlsx` or the relative `sales-plan.xlsx`; Entropic renders these as desktop links that open in the Office viewer.\n",
     );
     body.push_str(
-        "- To ask the Entropic desktop to open a created file immediately, run `entropic-office desktop open /data/workspace/file.xlsx`. Entropic validates the queued workspace-relative request before opening it; the sandbox bridge only accepts low-risk file/folder/window actions.\n",
+        "- To ask the Entropic desktop to open a created file immediately, run `entropic-office desktop open /data/workspace/file.xlsx` in the same successful `exec` command that creates or edits the file. Entropic validates the queued workspace-relative request before opening it; the sandbox bridge only accepts low-risk file/folder/window actions.\n",
     );
     body
 }
@@ -10815,6 +10822,15 @@ pub fn start_desktop_action_bridge(app: &AppHandle) {
 #[cfg(test)]
 mod desktop_action_tests {
     use super::*;
+
+    #[test]
+    fn docker_name_filter_matches_exact_container_name_only() {
+        assert_eq!(
+            docker_exact_name_filter(OPENCLAW_CONTAINER),
+            "name=^/entropic-openclaw$"
+        );
+        assert!(!docker_exact_name_filter(OPENCLAW_CONTAINER).contains("entropic-openclaw-harness"));
+    }
 
     #[test]
     fn validates_workspace_file_paths() {
