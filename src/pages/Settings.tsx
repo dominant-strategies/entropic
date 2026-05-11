@@ -63,10 +63,12 @@ type Props = {
   imageGenerationModel: string;
   textToSpeechModel: string;
   audioUnderstandingModel: string;
+  voiceShortcut: string;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onTextToSpeechModelChange: (model: string) => void;
   onAudioUnderstandingModelChange: (model: string) => void;
+  onVoiceShortcutChange: (shortcut: string) => void | Promise<void>;
   onImageModelChange: (model: string) => void;
 };
 
@@ -272,10 +274,12 @@ export function Settings({
   imageGenerationModel,
   textToSpeechModel,
   audioUnderstandingModel,
+  voiceShortcut,
   onCodeModelChange,
   onImageGenerationModelChange,
   onTextToSpeechModelChange,
   onAudioUnderstandingModelChange,
+  onVoiceShortcutChange,
   onImageModelChange,
 }: Props) {
   const cachedWarmState = getCachedSettingsWarmState();
@@ -1535,6 +1539,28 @@ export function Settings({
               Connect an OpenAI or Google API key to transcribe local audio attachments.
             </div>
           )}
+          <SettingsRow
+            label="Global Voice Shortcut"
+            icon={Key}
+            description="Optional. Use a modifier-based chord like Ctrl+Shift+Space."
+          >
+            <input
+              type="text"
+              value={voiceShortcut}
+              onChange={(event) => { void onVoiceShortcutChange(event.target.value); }}
+              placeholder="Unbound"
+              className="h-9 min-w-[220px] rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-3 text-[13px] text-[var(--text-primary)] outline-none focus:border-[var(--system-blue)]"
+            />
+            {voiceShortcut ? (
+              <button
+                type="button"
+                onClick={() => { void onVoiceShortcutChange(""); }}
+                className="h-9 rounded-lg px-3 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
+              >
+                Clear
+              </button>
+            ) : null}
+          </SettingsRow>
         </SettingsGroup>
       </div>
       )}

@@ -1,18 +1,30 @@
 import { Loader2, Mic } from "lucide-react";
+import clsx from "clsx";
+import type { VoiceMode } from "./voiceActions";
 
 type VoiceOverlayProps = {
   state: "idle" | "listening" | "transcribing" | "thinking" | "speaking" | "confirming" | "error";
+  mode: VoiceMode;
   message?: string | null;
   onCancel?: () => void;
   onConfirm?: () => void;
+  onModeChange?: (mode: VoiceMode) => void;
   confirmLabel?: string;
+};
+
+const MODE_LABELS: Record<VoiceMode, string> = {
+  dictation: "Dictation",
+  command: "Command",
+  conversation: "Conversation",
 };
 
 export function VoiceOverlay({
   state,
+  mode,
   message,
   onCancel,
   onConfirm,
+  onModeChange,
   confirmLabel = "Continue",
 }: VoiceOverlayProps) {
   if (state === "idle") {
@@ -21,31 +33,50 @@ export function VoiceOverlay({
 
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-20 z-[100] flex justify-center px-4">
-      <div className="pointer-events-auto flex max-w-xl items-center gap-3 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-card)] px-4 py-3 text-sm text-[var(--text-primary)] shadow-2xl">
-        {state === "listening" ? (
-          <Mic className="h-4 w-4 text-red-300" />
-        ) : (
-          <Loader2 className="h-4 w-4 animate-spin text-[var(--text-secondary)]" />
-        )}
-        <span>{message || state}</span>
-        {onConfirm ? (
-          <button
-            type="button"
-            onClick={onConfirm}
-            className="ml-2 rounded-md bg-[var(--text-primary)] px-2 py-1 text-xs font-medium text-[var(--bg-card)] hover:opacity-90"
-          >
-            {confirmLabel}
-          </button>
-        ) : null}
-        {onCancel ? (
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded-md px-2 py-1 text-xs text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
-          >
-            Cancel
-          </button>
-        ) : null}
+      <div className="pointer-events-auto flex max-w-2xl flex-col gap-3 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-card)] px-4 py-3 text-sm text-[var(--text-primary)] shadow-2xl">
+        <div className="flex flex-wrap items-center gap-2">
+          {(Object.keys(MODE_LABELS) as VoiceMode[]).map((candidate) => (
+            <button
+              key={candidate}
+              type="button"
+              onClick={() => onModeChange?.(candidate)}
+              className={clsx(
+                "rounded-full px-2.5 py-1 text-[11px] font-medium transition",
+                candidate === mode
+                  ? "bg-[var(--text-primary)] text-[var(--bg-card)]"
+                  : "bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]",
+              )}
+            >
+              {MODE_LABELS[candidate]}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-3">
+          {state === "listening" ? (
+            <Mic className="h-4 w-4 text-red-300" />
+          ) : (
+            <Loader2 className="h-4 w-4 animate-spin text-[var(--text-secondary)]" />
+          )}
+          <span className="min-w-0 flex-1">{message || state}</span>
+          {onConfirm ? (
+            <button
+              type="button"
+              onClick={onConfirm}
+              className="ml-2 rounded-md bg-[var(--text-primary)] px-2 py-1 text-xs font-medium text-[var(--bg-card)] hover:opacity-90"
+            >
+              {confirmLabel}
+            </button>
+          ) : null}
+          {onCancel ? (
+            <button
+              type="button"
+              onClick={onCancel}
+              className="rounded-md px-2 py-1 text-xs text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
+            >
+              Cancel
+            </button>
+          ) : null}
+        </div>
       </div>
     </div>
   );

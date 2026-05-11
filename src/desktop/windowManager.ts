@@ -58,6 +58,10 @@ function maxWindowZ(windowZ: Record<string, number>): number {
   return Math.max(...Object.values(DEFAULT_WINDOW_Z), ...Object.values(windowZ));
 }
 
+export function getWindowZ(windowZ: Record<string, number>, key: WindowKey): number {
+  return windowZ[key] ?? DEFAULT_WINDOW_Z[key];
+}
+
 export function useWindowZStack(initialWindowZ: Record<string, number> = DEFAULT_WINDOW_Z) {
   const zCounter = useRef(maxWindowZ(initialWindowZ));
   const [windowZ, setWindowZ] = useState<Record<string, number>>(initialWindowZ);

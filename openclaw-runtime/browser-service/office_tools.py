@@ -7,10 +7,12 @@ import json
 import os
 import posixpath
 import re
+import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from typing import Dict, Iterable, List, Optional, Tuple
 from xml.etree import ElementTree as ET
@@ -40,6 +42,7 @@ except ImportError:  # pragma: no cover - runtime dependency may be absent in de
     DocumentConverter = None
 
 WORKSPACE_ROOT = os.environ.get("ENTROPIC_WORKSPACE_PATH", "/data/workspace")
+DESKTOP_ACTION_QUEUE_DIR = os.environ.get("ENTROPIC_DESKTOP_ACTION_QUEUE_DIR", "/data/browser/desktop-actions")
 
 AIO_SPEC = "agent-interpretable-object"
 AIO_ROOT = "Agent-Interpretable-Object"
@@ -162,6 +165,14 @@ def resolve_workspace_path(raw_path: str) -> str:
     if full_path != root and not full_path.startswith(f"{root}/"):
         raise ValueError("The requested path is outside /data/workspace.")
     return full_path
+
+
+def workspace_relative_path(raw_path: str) -> str:
+    full_path = resolve_workspace_path(raw_path)
+    root = normalize_workspace_root()
+    if full_path == root:
+        return ""
+    return full_path[len(root) + 1 :]
 
 
 def path_metadata(path: str) -> Dict[str, object]:
@@ -6206,6 +6217,44 @@ def blank_document_payload(lines: Iterable[str]) -> Dict[str, object]:
     return {"paragraphs": [str(value) for value in lines]}
 
 
+def request_desktop_action(payload: Dict[str, object]) -> Dict[str, object]:
+    if not isinstance(payload, dict):
+        raise RuntimeError("Desktop action payload must be a JSON object.")
+    action_type = payload.get("type")
+    allowed_types = {
+        "open_workspace_file",
+        "open_workspace_folder",
+        "focus_window",
+        "close_window",
+    }
+    if action_type not in allowed_types:
+        raise RuntimeError("Unsupported desktop action type for the sandbox-to-desktop bridge.")
+
+    action = dict(payload)
+    if action_type in {"open_workspace_file", "open_workspace_folder"}:
+        path = workspace_relative_path(str(action.get("path") or ""))
+        if action_type == "open_workspace_file" and not path:
+            raise RuntimeError("Workspace file path is required.")
+        action["path"] = path
+
+    os.makedirs(DESKTOP_ACTION_QUEUE_DIR, exist_ok=True)
+    final_name = f"{int(time.time() * 1000)}-{os.getpid()}-{secrets.token_hex(8)}.json"
+    final_path = os.path.join(DESKTOP_ACTION_QUEUE_DIR, final_name)
+    fd, temp_path = tempfile.mkstemp(prefix=".desktop-action-", suffix=".tmp", dir=DESKTOP_ACTION_QUEUE_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(action, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.write("\n")
+        os.replace(temp_path, final_path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+    return {"queued": True, "action": action}
+
+
 def cli_usage() -> str:
     return """Usage:
   # Preferred Office/AIO workflow for .xlsx / .docx / .pptx and text documents
@@ -6232,9 +6281,11 @@ def cli_usage() -> str:
   # Pandoc text adapter when available. PDF and image inspection route through
   # the Docling adapter and are currently read-only.
   #
-  # After creating or editing an Office file, return a workspace-relative link
-  # or request request_desktop_action({"type":"open_workspace_file","path":"..."})
-  # so Entropic can validate the path and open it through a signed desktop session.
+  # After creating or editing an Office file, return a workspace-relative link,
+  # or queue a safe desktop open request:
+  entropic-office desktop open <path>
+  # Advanced low-risk action queue API:
+  printf '{"type":"open_workspace_file","path":"file.xlsx"}' | entropic-office api request-desktop-action
 
   # Legacy compatibility helpers
   entropic-office spreadsheet new <path>
@@ -6257,6 +6308,12 @@ def emit_json(payload: Dict[str, object]) -> None:
 
 
 def run_api(argv: List[str]) -> Dict[str, object]:
+    if len(argv) >= 3 and argv[2] == "request-desktop-action":
+        if len(argv) >= 4:
+            payload = json.loads(argv[3])
+        else:
+            payload = json.load(sys.stdin)
+        return request_desktop_action(payload)
     if len(argv) < 4:
         raise RuntimeError(cli_usage().strip())
     command = argv[2]
@@ -6286,6 +6343,8 @@ def run_cli(argv: List[str]) -> Dict[str, object]:
         raise RuntimeError(cli_usage().strip())
     category = argv[1]
     command = argv[2]
+    if category == "desktop" and command == "open":
+        return request_desktop_action({"type": "open_workspace_file", "path": argv[3]})
     path = resolve_workspace_path(argv[3])
     if category == "spreadsheet" and command == "new":
         return save_spreadsheet(path, blank_spreadsheet_payload())

@@ -4,9 +4,6 @@ import {
   useCallback,
   useMemo,
   useRef,
-  lazy,
-  Suspense,
-  type ReactNode,
   type ClipboardEvent as ReactClipboardEvent,
   type MouseEvent as ReactMouseEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -19,32 +16,12 @@ import { Store } from "@tauri-apps/plugin-store";
 import {
   Folder,
   FileText,
-  FileImage,
-  FileCode,
-  FileJson,
-  File,
-  ChevronLeft,
-  ChevronRight,
-  LayoutGrid,
-  List,
   Trash2,
-  Eye,
   Plus,
-  X,
   ArrowUp,
   MessageSquare,
   Loader2,
   Image,
-  Puzzle,
-  Sparkles,
-  Globe,
-  Radio,
-  ScrollText,
-  Settings as SettingsIcon,
-  CalendarClock,
-  ListTodo,
-  CreditCard,
-  Terminal,
   MoreHorizontal,
   Pin,
   PanelLeftClose,
@@ -53,14 +30,6 @@ import {
 import { loadOnboardingData } from "../lib/profile";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
 import { loadDesktopSettings, updateDesktopSettings } from "../lib/settingsStore";
-const PluginStore = lazy(() => import("./Store").then((m) => ({ default: m.Store })));
-const SkillsStore = lazy(() => import("./Store").then((m) => ({ default: m.Store })));
-const Channels = lazy(() => import("./Channels").then((m) => ({ default: m.Channels })));
-const Logs = lazy(() => import("./Logs").then((m) => ({ default: m.Logs })));
-const Settings = lazy(() => import("./Settings").then((m) => ({ default: m.Settings })));
-const Tasks = lazy(() => import("./Tasks").then((m) => ({ default: m.Tasks })));
-const Jobs = lazy(() => import("./Jobs").then((m) => ({ default: m.Jobs })));
-const BillingPage = lazy(() => import("./BillingPage").then((m) => ({ default: m.BillingPage })));
 import {
   Chat,
   type ChatSession as SharedChatSession,
@@ -79,8 +48,8 @@ import {
 import { hostedFeaturesEnabled } from "../lib/buildProfile";
 import { createOnlyOfficeSession } from "../lib/office";
 import {
-  DEFAULT_WINDOW_Z,
   clampWindowFrame,
+  getWindowZ,
   startDesktopWindowDrag,
   startDesktopWindowResize,
   useWindowZStack,
@@ -93,12 +62,52 @@ import {
   type WindowResizeState,
   type WindowSize,
 } from "../desktop/windowManager";
+import { AppWindow } from "../desktop/AppWindow";
+import { BrowserApp } from "../desktop/browser/BrowserApp";
 import {
   DESKTOP_ACTION_EVENT,
   dispatchDesktopAction,
   type DesktopAction,
 } from "../desktop/actions";
+import {
+  OfficeApps,
+  officeAppKindForPath,
+  pushOfficeRecentEntry,
+  type OfficeAppKind,
+  type OfficeAppSession,
+  type OfficeRecentEntry,
+} from "../desktop/office/OfficeApps";
+import {
+  DesktopFileIcon,
+  DesktopImagePreviewIcon,
+  FolderIcon,
+  getFileColor,
+  getFileIcon,
+} from "../desktop/finder/FileIcons";
+import { FinderApp } from "../desktop/finder/FinderApp";
+import { FilePreviewWindow, type FilePreviewState } from "../desktop/finder/FilePreviewWindow";
+import { CreateWorkspaceEntryModal } from "../desktop/finder/CreateWorkspaceEntryModal";
+import { DesktopDock } from "../desktop/dock/DesktopDock";
+import { DesktopContextMenus } from "../desktop/contextMenus/DesktopContextMenus";
+import {
+  DESKTOP_TERMINAL_EVENT,
+  TerminalApp,
+  type DesktopTerminalEventPayload,
+  type DesktopTerminalSnapshot,
+  type DesktopTerminalStatus,
+} from "../desktop/terminal/TerminalApp";
+import { DesktopUtilityWindows } from "../desktop/utility/UtilityWindows";
+import { WallpaperPicker } from "../desktop/wallpaper/WallpaperPicker";
+import {
+  workspaceBrowserUrl,
+  workspaceFileCanOpenInBrowser,
+  workspaceFileIsHtml,
+  workspaceFileUsesOnlyOffice,
+  workspacePathName,
+  workspacePathParent,
+} from "../desktop/finder/workspacePaths";
 import { VoiceProvider } from "../desktop/voice/VoiceProvider";
+import type { VoiceDesktopContext } from "../desktop/voice/voiceActions";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -126,10 +135,12 @@ type Props = {
   imageGenerationModel: string;
   textToSpeechModel: string;
   audioUnderstandingModel: string;
+  voiceShortcut: string;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onTextToSpeechModelChange: (model: string) => void;
   onAudioUnderstandingModelChange: (model: string) => void;
+  onVoiceShortcutChange: (shortcut: string) => void | Promise<void>;
   onImageModelChange: (model: string) => void;
 };
 type ViewMode = "grid" | "list";
@@ -173,22 +184,6 @@ type EmbeddedPreviewState = {
   title: string | null;
 };
 
-type OfficeAppKind = "sheets" | "docs" | "slides";
-
-type OfficeAppSession = {
-  path: string;
-  name: string;
-  url: string;
-  appKind: OfficeAppKind;
-  launchToken: string;
-};
-
-type OfficeRecentEntry = {
-  path: string;
-  name: string;
-  openedAt: number;
-};
-
 type BrowserTabState = {
   id: string;
   title: string | null;
@@ -210,30 +205,9 @@ type PersistedBrowserTab = {
   embeddedPreviewTitle: string | null;
 };
 
-type DesktopTerminalStatus = "disconnected" | "ready" | "exited" | "error";
-
-type DesktopTerminalSnapshot = {
-  session_id: string;
-  output: string;
-  status: Exclude<DesktopTerminalStatus, "disconnected">;
-  exit_code: number | null;
-  container_name: string;
-  workspace_path: string;
-};
-
-type DesktopTerminalEventPayload = {
-  session_id: string;
-  chunk: string;
-  stream: "stdout" | "stderr" | "system";
-  status: Exclude<DesktopTerminalStatus, "disconnected">;
-  exit_code: number | null;
-};
-
 const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md"]);
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
-const HTML_EXTS = new Set(["html", "htm"]);
-const ONLYOFFICE_BROWSER_EXTS = new Set(["docx", "xlsx", "pptx"]);
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
 const DESKTOP_HANDOFF_EVENT = "entropic-desktop-handoff";
 const DESKTOP_SESSION_STORAGE_KEY = "entropic.desktop.session.v1";
@@ -247,7 +221,6 @@ const CHAT_WORKSPACE_PREFIXES = [
 const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/node\/\.openclaw\/workspace)(?:\/[^\s`"'<>]+)?)/g;
 const DEFAULT_BROWSER_URL = "https://www.google.com";
 const DEFAULT_BROWSER_LIVE_WS_BASE = "ws://127.0.0.1:19792/live";
-const CONTAINER_LOCAL_BROWSER_BASE = "http://container.localhost:19791";
 const WORKSPACE_FOLDER_REFRESH_MS = 4000;
 const DESKTOP_CACHE_STALE_MS = 12000;
 const DESKTOP_WARM_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -272,16 +245,6 @@ const BROWSER_DESKTOP_MIN_VIEWPORT_WIDTH = 1180;
 const BROWSER_DESKTOP_MIN_VIEWPORT_HEIGHT = 760;
 const BROWSER_DESKTOP_VIEWPORT_SCALE = 1.08;
 const EMBEDDED_PREVIEW_FRAME_INSET = 8;
-const DESKTOP_TERMINAL_EVENT = "desktop-terminal-output";
-const PANEL_FALLBACK = (
-  <div className="p-4 text-xs text-[var(--text-tertiary)]">Loading…</div>
-);
-
-type PreviewState =
-  | { kind: "text"; name: string; path: string; content: string }
-  | { kind: "image"; name: string; path: string; dataUrl: string }
-  | { kind: "binary"; name: string; path: string; size: number };
-
 type ChatWorkspaceReference = {
   key: string;
   path: string;
@@ -777,27 +740,6 @@ function formatDate(epochSec: number): string {
   });
 }
 
-function getFileIcon(name: string, isDir: boolean) {
-  if (isDir) return Folder;
-  const ext = name.split(".").pop()?.toLowerCase() || "";
-  if (["png","jpg","jpeg","gif","svg","webp","ico","bmp"].includes(ext)) return FileImage;
-  if (["js","ts","jsx","tsx","py","rs","go","c","cpp","h","rb","sh","bash","zsh","css","html","xml"].includes(ext)) return FileCode;
-  if (["json","yaml","yml","toml"].includes(ext)) return FileJson;
-  if (["md","txt","log","csv","rtf"].includes(ext)) return FileText;
-  return File;
-}
-
-function getFileColor(name: string, isDir: boolean): string {
-  if (isDir) return "#54a3f7";
-  const ext = name.split(".").pop()?.toLowerCase() || "";
-  if (["png","jpg","jpeg","gif","svg","webp"].includes(ext)) return "#e879a8";
-  if (["js","ts","jsx","tsx"].includes(ext)) return "#f0c94d";
-  if (["py"].includes(ext)) return "#5b9bd5";
-  if (["json","yaml","yml","toml"].includes(ext)) return "#a78bfa";
-  if (["md","txt"].includes(ext)) return "#8c8c8c";
-  return "#8c8c8c";
-}
-
 function imageMimeTypeForName(name: string): string {
   const ext = name.split(".").pop()?.toLowerCase() || "";
   if (ext === "svg") return "image/svg+xml";
@@ -861,56 +803,6 @@ function requestedBrowserViewportSize(width: number, height: number) {
   };
 }
 
-function workspaceBrowserUrl(path: string): string {
-  const normalized = path
-    .split("/")
-    .filter(Boolean)
-    .map((part) => encodeURIComponent(part))
-    .join("/");
-  return normalized
-    ? `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace__/${normalized}`
-    : `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace__/`;
-}
-
-function workspaceFileCanOpenInBrowser(path: string): boolean {
-  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
-  return HTML_EXTS.has(ext);
-}
-
-function workspaceFileUsesOnlyOffice(path: string): boolean {
-  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
-  return ONLYOFFICE_BROWSER_EXTS.has(ext);
-}
-
-function officeAppKindForPath(path: string): OfficeAppKind | null {
-  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
-  if (ext === "xlsx") return "sheets";
-  if (ext === "docx") return "docs";
-  if (ext === "pptx") return "slides";
-  return null;
-}
-
-function officeAppLabel(kind: OfficeAppKind): string {
-  switch (kind) {
-    case "sheets":
-      return "Sheets";
-    case "docs":
-      return "Docs";
-    case "slides":
-      return "Slides";
-  }
-}
-
-function pushOfficeRecentEntry(
-  current: OfficeRecentEntry[],
-  nextEntry: OfficeRecentEntry,
-): OfficeRecentEntry[] {
-  return [
-    nextEntry,
-    ...current.filter((entry) => entry.path !== nextEntry.path),
-  ].slice(0, 8);
-}
-
 function trimChatWorkspaceToken(raw: string): string {
   return raw
     .replace(/^[("'`\[]+/, "")
@@ -930,17 +822,6 @@ function normalizeChatWorkspacePath(raw: string): string | null {
   return null;
 }
 
-function workspacePathName(path: string): string {
-  const parts = path.split("/").filter(Boolean);
-  return parts[parts.length - 1] || "Workspace";
-}
-
-function workspacePathParent(path: string): string {
-  const parts = path.split("/").filter(Boolean);
-  parts.pop();
-  return parts.join("/");
-}
-
 function extractChatWorkspaceReferences(content: string): ChatWorkspaceReference[] {
   const refs: ChatWorkspaceReference[] = [];
   const seen = new Set<string>();
@@ -949,12 +830,11 @@ function extractChatWorkspaceReferences(content: string): ChatWorkspaceReference
     const path = normalizeChatWorkspacePath(match[1] || "");
     if (path === null) continue;
     const name = workspacePathName(path);
-    const ext = name.split(".").pop()?.toLowerCase() || "";
     const ref: ChatWorkspaceReference = {
       key: path || "__workspace__",
       path,
       name,
-      isHtml: HTML_EXTS.has(ext),
+      isHtml: workspaceFileIsHtml(path),
       looksLikeFile: Boolean(path) && name.includes("."),
     };
     if (seen.has(ref.key)) continue;
@@ -963,293 +843,6 @@ function extractChatWorkspaceReferences(content: string): ChatWorkspaceReference
   }
 
   return refs;
-}
-
-function FolderIcon({ size = 64, selected = false }: { size?: number; selected?: boolean }) {
-  return (
-    <svg viewBox="0 0 64 52" width={size} height={size * (52 / 64)} fill="none">
-      <path d="M2 8C2 5.79 3.79 4 6 4H22L28 10H58C60.21 10 62 11.79 62 14V46C62 48.21 60.21 50 58 50H6C3.79 50 2 48.21 2 46V8Z" fill={selected ? "#4d94f7" : "#54a3f7"} />
-      <path d="M2 14H62V46C62 48.21 60.21 50 58 50H6C3.79 50 2 48.21 2 46V14Z" fill={selected ? "#6ab0ff" : "#7ab8f5"} />
-    </svg>
-  );
-}
-
-function DesktopFileIcon({
-  icon: Icon,
-  color,
-  active = false,
-}: {
-  icon: typeof File;
-  color: string;
-  active?: boolean;
-}) {
-  return (
-    <div className="relative h-14 w-12" aria-hidden="true">
-      <div
-        className="absolute inset-x-0 bottom-0 top-1 rounded-[12px] border"
-        style={{
-          background: active ? "rgba(244,248,255,0.98)" : "rgba(248,250,253,0.95)",
-          borderColor: active ? "rgba(118,176,247,0.75)" : "rgba(207,215,226,0.92)",
-          boxShadow: "0 12px 26px rgba(0,0,0,0.18)",
-        }}
-      />
-      <div
-        className="absolute right-0 top-1 h-4 w-4 rounded-bl-[10px] rounded-tr-[12px]"
-        style={{
-          background: active ? "rgba(214,231,255,0.95)" : "rgba(229,235,243,0.98)",
-          borderLeft: "1px solid rgba(207,215,226,0.92)",
-          borderBottom: "1px solid rgba(207,215,226,0.92)",
-        }}
-      />
-      <Icon
-        className="absolute left-1/2 top-[55%] h-6 w-6 -translate-x-1/2 -translate-y-1/2"
-        style={{ color }}
-        strokeWidth={1.9}
-      />
-    </div>
-  );
-}
-
-function DesktopImagePreviewIcon({
-  src,
-  active = false,
-}: {
-  src: string;
-  active?: boolean;
-}) {
-  return (
-    <div className="relative h-14 w-14" aria-hidden="true">
-      <img
-        src={src}
-        alt=""
-        draggable={false}
-        className="absolute inset-0 h-full w-full rounded-[16px] object-cover"
-        style={{
-          boxShadow: active
-            ? "0 0 0 1px rgba(122,184,245,0.8), 0 14px 28px rgba(0,0,0,0.24)"
-            : "0 14px 28px rgba(0,0,0,0.2)",
-        }}
-      />
-    </div>
-  );
-}
-
-function AppWindow({
-  title,
-  icon: Icon,
-  position,
-  size,
-  onClose,
-  onDragStart,
-  onResizeStart,
-  onFocus,
-  zIndex,
-  glass = true,
-  children,
-}: {
-  title: string;
-  icon: typeof Folder;
-  position: { x: number; y: number };
-  size: { w: number; h: number };
-  onClose: () => void;
-  onDragStart: (e: ReactMouseEvent<HTMLDivElement>) => void;
-  onResizeStart?: (direction: WindowResizeDirection, e: ReactMouseEvent<HTMLDivElement>) => void;
-  onFocus: () => void;
-  zIndex: number;
-  glass?: boolean;
-  children: ReactNode;
-}) {
-  const resizeHandles: Array<{
-    direction: WindowResizeDirection;
-    className: string;
-  }> = [
-    { direction: "n", className: "absolute left-4 right-4 top-0 z-20 h-3 cursor-ns-resize" },
-    { direction: "s", className: "absolute bottom-0 left-4 right-4 z-20 h-3 cursor-ns-resize" },
-    { direction: "e", className: "absolute right-0 top-4 bottom-4 z-20 w-3 cursor-ew-resize" },
-    { direction: "w", className: "absolute left-0 top-4 bottom-4 z-20 w-3 cursor-ew-resize" },
-    { direction: "nw", className: "absolute left-0 top-0 z-20 h-4 w-4 cursor-nwse-resize" },
-    { direction: "ne", className: "absolute right-0 top-0 z-20 h-4 w-4 cursor-nesw-resize" },
-    { direction: "se", className: "absolute bottom-0 right-0 z-20 h-4 w-4 cursor-nwse-resize" },
-    { direction: "sw", className: "absolute bottom-0 left-0 z-20 h-4 w-4 cursor-nesw-resize" },
-  ];
-
-  return (
-    <div
-      className="absolute flex flex-col rounded-xl overflow-hidden animate-scale-in bg-[var(--bg-card)]"
-      style={{
-        top: position.y,
-        left: position.x,
-        width: size.w,
-        height: size.h,
-        zIndex,
-        backdropFilter: glass ? "blur(18px)" : "none",
-        WebkitBackdropFilter: glass ? "blur(18px)" : "none",
-        boxShadow: "0 24px 70px rgba(0,0,0,0.28), 0 0 0 0.5px var(--border-subtle)",
-        border: "1px solid var(--border-subtle)",
-      }}
-      onMouseDownCapture={onFocus}
-      onClick={(e) => e.stopPropagation()}
-    >
-      <div
-        className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing bg-[var(--bg-secondary)] select-none"
-        style={{
-          borderBottom: "1px solid var(--border-subtle)",
-        }}
-        onMouseDown={onDragStart}
-      >
-        <div className="flex items-center gap-2 z-10">
-          <button
-            onClick={onClose}
-            className="w-3 h-3 rounded-full hover:opacity-80 group relative"
-            style={{ background: "#ff5f57" }}
-            title="Close"
-          >
-            <X className="w-2 h-2 absolute inset-0.5 opacity-0 group-hover:opacity-100 text-black/60" />
-          </button>
-          <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} />
-          <div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
-        </div>
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="flex items-center gap-2">
-            <Icon className="w-3.5 h-3.5" style={{ color: "var(--purple-accent)" }} />
-            <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>
-              {title}
-            </span>
-          </div>
-        </div>
-      </div>
-      <div
-        className="flex-1 overflow-hidden bg-[var(--bg-app)]"
-      >
-        <div className="h-full overflow-auto">{children}</div>
-      </div>
-      {onResizeStart && (
-        <>
-          {resizeHandles.map((handle) => (
-            <div
-              key={handle.direction}
-              className={handle.className}
-              onMouseDown={(e) => onResizeStart(handle.direction, e)}
-            />
-          ))}
-          <div className="pointer-events-none absolute bottom-1 right-1 z-10 h-3 w-3 rounded-sm border-r-2 border-b-2 border-black/25" />
-        </>
-      )}
-    </div>
-  );
-}
-
-function DockIconButton({
-  label,
-  active = false,
-  onClick,
-  children,
-}: {
-  label: string;
-  active?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="group relative flex flex-col items-center"
-      aria-label={label}
-    >
-      <div
-        className="pointer-events-none absolute bottom-full mb-2 rounded-lg border px-2.5 py-1 text-[11px] font-medium whitespace-nowrap opacity-0 translate-y-1 transition-all duration-150 group-hover:translate-y-0 group-hover:opacity-100"
-        style={{
-          background: "rgba(17,24,39,0.88)",
-          color: "rgba(255,255,255,0.96)",
-          borderColor: "rgba(255,255,255,0.16)",
-          boxShadow: "0 10px 24px rgba(0,0,0,0.28)",
-          backdropFilter: "blur(18px)",
-          WebkitBackdropFilter: "blur(18px)",
-        }}
-      >
-        {label}
-      </div>
-      {children}
-      <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${active ? "bg-white/80" : "opacity-0"}`} />
-    </button>
-  );
-}
-
-function OfficeHomePanel({
-  kind,
-  recent,
-  onOpenRecent,
-  onOpenChat,
-}: {
-  kind: OfficeAppKind;
-  recent: OfficeRecentEntry[];
-  onOpenRecent: (path: string) => void;
-  onOpenChat: () => void;
-}) {
-  const title = officeAppLabel(kind);
-  const subtitle =
-    kind === "sheets"
-      ? "Create spreadsheets with chat or reopen recent work."
-      : kind === "docs"
-        ? "Create documents with chat or reopen recent work."
-        : "Create presentations with chat or reopen recent work.";
-
-  return (
-    <div className="h-full overflow-auto bg-[linear-gradient(180deg,#f8fafc_0%,#eef5ff_100%)] px-8 py-8">
-      <div className="mx-auto flex h-full max-w-3xl flex-col">
-        <div className="mb-8">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
-            {title}
-          </div>
-          <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-900">{title}</h2>
-          <p className="mt-2 max-w-xl text-sm text-slate-600">{subtitle}</p>
-        </div>
-
-        {recent.length > 0 ? (
-          <div className="rounded-[24px] border border-slate-200 bg-white/85 p-4 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur">
-            <div className="mb-3 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
-              Recent
-            </div>
-            <div className="space-y-2">
-              {recent.map((entry) => (
-                <button
-                  key={entry.path}
-                  type="button"
-                  onClick={() => onOpenRecent(entry.path)}
-                  className="flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-slate-300 hover:bg-slate-50"
-                >
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium text-slate-900">{entry.name}</div>
-                    <div className="truncate text-xs text-slate-500">{entry.path}</div>
-                  </div>
-                  <div className="ml-4 shrink-0 text-[11px] text-slate-400">
-                    {formatDate(Math.floor(entry.openedAt / 1000))}
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="flex flex-1 items-center justify-center">
-            <div className="max-w-md rounded-[28px] border border-slate-200 bg-white/92 px-8 py-9 text-center shadow-[0_24px_80px_rgba(15,23,42,0.1)] backdrop-blur">
-              <div className="text-lg font-semibold text-slate-900">No recent {title.toLowerCase()} yet</div>
-              <p className="mt-2 text-sm text-slate-600">
-                Open chat and ask Entropic to create one for you, then it will appear here.
-              </p>
-              <button
-                type="button"
-                onClick={onOpenChat}
-                className="mt-5 inline-flex h-11 items-center justify-center rounded-2xl bg-slate-900 px-5 text-sm font-semibold text-white transition hover:bg-slate-800"
-              >
-                Create With Chat
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
 }
 
 // ═════════════════════════════════════════════════════════════════════
@@ -1271,10 +864,12 @@ export function Files({
   imageGenerationModel,
   textToSpeechModel,
   audioUnderstandingModel,
+  voiceShortcut,
   onCodeModelChange,
   onImageGenerationModelChange,
   onTextToSpeechModelChange,
   onAudioUnderstandingModelChange,
+  onVoiceShortcutChange,
   onImageModelChange,
 }: Props) {
   const initialDesktopWarmCache = useMemo(() => readDesktopWarmCache(), []);
@@ -1378,7 +973,7 @@ export function Files({
   const [historyIndex, setHistoryIndex] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [preview, setPreview] = useState<FilePreviewState | null>(null);
   const [sheetsSession, setSheetsSession] = useState<OfficeAppSession | null>(null);
   const [docsSession, setDocsSession] = useState<OfficeAppSession | null>(null);
   const [slidesSession, setSlidesSession] = useState<OfficeAppSession | null>(null);
@@ -2247,24 +1842,6 @@ export function Files({
     browserSnapshot?.title ||
     browserSnapshot?.url ||
     browserCurrentUrl;
-  const terminalStatusLabel = terminalBootstrapping
-    ? "Connecting"
-    : terminalStatus === "ready"
-      ? "Live"
-      : terminalStatus === "exited"
-        ? terminalExitCode === null
-          ? "Exited"
-          : `Exited (${terminalExitCode})`
-        : terminalStatus === "error"
-          ? "Error"
-          : "Idle";
-  const terminalStatusTone = terminalBootstrapping
-    ? "#f59e0b"
-    : terminalStatus === "ready"
-      ? "#22c55e"
-      : terminalStatus === "error"
-        ? "#ef4444"
-        : "rgba(148,163,184,0.95)";
   function buildActiveBrowserTabState(base?: BrowserTabState | null): BrowserTabState {
     return {
       id: base?.id ?? activeBrowserTabId ?? makeBrowserTabId(),
@@ -3855,7 +3432,7 @@ export function Files({
     }
   }
 
-  function startDesktopChatTask(prompt: string, sessionId?: string) {
+  function startDesktopChatTask(prompt: string, sessionId?: string, autoSubmit?: boolean) {
     setChatOpen(true);
     focusWindow("chat");
     setChatRequestedSession(sessionId || null);
@@ -3864,6 +3441,7 @@ export function Files({
       type: "compose",
       key: sessionId,
       prompt,
+      submit: autoSubmit === true,
     });
   }
 
@@ -4231,54 +3809,54 @@ export function Files({
       desktopChatSessionTitle(session).toLowerCase().includes(normalizedChatQuery)
     ))
     : sortedChatSessions;
-  const browserWindowZ = windowZ.browser ?? DEFAULT_WINDOW_Z.browser;
+  const browserWindowZ = getWindowZ(windowZ, "browser");
   const embeddedPreviewForegroundWindows = useMemo(() => {
     const frames: Array<{ z: number; rect: WindowRect }> = [];
     if (finderOpen) {
-      frames.push({ z: windowZ.finder ?? DEFAULT_WINDOW_Z.finder, rect: { x: finderPos.x, y: finderPos.y, w: finderSize.w, h: finderSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "finder"), rect: { x: finderPos.x, y: finderPos.y, w: finderSize.w, h: finderSize.h } });
     }
     if (chatOpen) {
-      frames.push({ z: windowZ.chat ?? DEFAULT_WINDOW_Z.chat, rect: { x: chatPos.x, y: chatPos.y, w: chatSize.w, h: chatSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "chat"), rect: { x: chatPos.x, y: chatPos.y, w: chatSize.w, h: chatSize.h } });
     }
     if (terminalOpen) {
-      frames.push({ z: windowZ.terminal ?? DEFAULT_WINDOW_Z.terminal, rect: { x: terminalPos.x, y: terminalPos.y, w: terminalSize.w, h: terminalSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "terminal"), rect: { x: terminalPos.x, y: terminalPos.y, w: terminalSize.w, h: terminalSize.h } });
     }
     if (sheetsOpen) {
-      frames.push({ z: windowZ.sheets ?? DEFAULT_WINDOW_Z.sheets, rect: { x: sheetsPos.x, y: sheetsPos.y, w: sheetsSize.w, h: sheetsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "sheets"), rect: { x: sheetsPos.x, y: sheetsPos.y, w: sheetsSize.w, h: sheetsSize.h } });
     }
     if (docsOpen) {
-      frames.push({ z: windowZ.docs ?? DEFAULT_WINDOW_Z.docs, rect: { x: docsPos.x, y: docsPos.y, w: docsSize.w, h: docsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "docs"), rect: { x: docsPos.x, y: docsPos.y, w: docsSize.w, h: docsSize.h } });
     }
     if (slidesOpen) {
-      frames.push({ z: windowZ.slides ?? DEFAULT_WINDOW_Z.slides, rect: { x: slidesPos.x, y: slidesPos.y, w: slidesSize.w, h: slidesSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "slides"), rect: { x: slidesPos.x, y: slidesPos.y, w: slidesSize.w, h: slidesSize.h } });
     }
     if (pluginsOpen) {
-      frames.push({ z: windowZ.plugins ?? DEFAULT_WINDOW_Z.plugins, rect: { x: pluginsPos.x, y: pluginsPos.y, w: pluginsSize.w, h: pluginsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "plugins"), rect: { x: pluginsPos.x, y: pluginsPos.y, w: pluginsSize.w, h: pluginsSize.h } });
     }
     if (skillsOpen) {
-      frames.push({ z: windowZ.skills ?? DEFAULT_WINDOW_Z.skills, rect: { x: skillsPos.x, y: skillsPos.y, w: skillsSize.w, h: skillsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "skills"), rect: { x: skillsPos.x, y: skillsPos.y, w: skillsSize.w, h: skillsSize.h } });
     }
     if (channelsOpen) {
-      frames.push({ z: windowZ.channels ?? DEFAULT_WINDOW_Z.channels, rect: { x: channelsPos.x, y: channelsPos.y, w: channelsSize.w, h: channelsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "channels"), rect: { x: channelsPos.x, y: channelsPos.y, w: channelsSize.w, h: channelsSize.h } });
     }
     if (tasksOpen) {
-      frames.push({ z: windowZ.tasks ?? DEFAULT_WINDOW_Z.tasks, rect: { x: tasksPos.x, y: tasksPos.y, w: tasksSize.w, h: tasksSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "tasks"), rect: { x: tasksPos.x, y: tasksPos.y, w: tasksSize.w, h: tasksSize.h } });
     }
     if (jobsOpen) {
-      frames.push({ z: windowZ.jobs ?? DEFAULT_WINDOW_Z.jobs, rect: { x: jobsPos.x, y: jobsPos.y, w: jobsSize.w, h: jobsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "jobs"), rect: { x: jobsPos.x, y: jobsPos.y, w: jobsSize.w, h: jobsSize.h } });
     }
     if (logsOpen) {
-      frames.push({ z: windowZ.logs ?? DEFAULT_WINDOW_Z.logs, rect: { x: logsPos.x, y: logsPos.y, w: logsSize.w, h: logsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "logs"), rect: { x: logsPos.x, y: logsPos.y, w: logsSize.w, h: logsSize.h } });
     }
     if (billingEnabled && billingOpen) {
-      frames.push({ z: windowZ.billing ?? DEFAULT_WINDOW_Z.billing, rect: { x: billingPos.x, y: billingPos.y, w: billingSize.w, h: billingSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "billing"), rect: { x: billingPos.x, y: billingPos.y, w: billingSize.w, h: billingSize.h } });
     }
     if (settingsOpen) {
-      frames.push({ z: windowZ.settings ?? DEFAULT_WINDOW_Z.settings, rect: { x: settingsPos.x, y: settingsPos.y, w: settingsSize.w, h: settingsSize.h } });
+      frames.push({ z: getWindowZ(windowZ, "settings"), rect: { x: settingsPos.x, y: settingsPos.y, w: settingsSize.w, h: settingsSize.h } });
     }
     if (preview) {
       frames.push({
-        z: windowZ.preview ?? DEFAULT_WINDOW_Z.preview,
+        z: getWindowZ(windowZ, "preview"),
         rect: { x: 0, y: 0, w: desktopBounds.width, h: desktopBounds.height },
       });
     }
@@ -4503,6 +4081,51 @@ export function Files({
     desktopBounds.height,
   ]);
 
+  const voiceOpenWindows: WindowKey[] = [];
+  if (finderOpen) voiceOpenWindows.push("finder");
+  if (chatOpen) voiceOpenWindows.push("chat");
+  if (browserOpen) voiceOpenWindows.push("browser");
+  if (terminalOpen) voiceOpenWindows.push("terminal");
+  if (sheetsOpen) voiceOpenWindows.push("sheets");
+  if (docsOpen) voiceOpenWindows.push("docs");
+  if (slidesOpen) voiceOpenWindows.push("slides");
+  if (pluginsOpen) voiceOpenWindows.push("plugins");
+  if (skillsOpen) voiceOpenWindows.push("skills");
+  if (channelsOpen) voiceOpenWindows.push("channels");
+  if (tasksOpen) voiceOpenWindows.push("tasks");
+  if (jobsOpen) voiceOpenWindows.push("jobs");
+  if (logsOpen) voiceOpenWindows.push("logs");
+  if (billingEnabled && billingOpen) voiceOpenWindows.push("billing");
+  if (settingsOpen) voiceOpenWindows.push("settings");
+  if (preview) voiceOpenWindows.push("preview");
+
+  const focusedVoiceWindow = voiceOpenWindows.reduce<WindowKey | null>((current, key) => {
+    if (!current) return key;
+    return getWindowZ(windowZ, key) > getWindowZ(windowZ, current) ? key : current;
+  }, null);
+  const activeOffice = [
+    { appKind: "sheets" as const, open: sheetsOpen, session: sheetsSession },
+    { appKind: "docs" as const, open: docsOpen, session: docsSession },
+    { appKind: "slides" as const, open: slidesOpen, session: slidesSession },
+  ]
+    .filter((entry) => entry.open)
+    .sort((a, b) => getWindowZ(windowZ, b.appKind) - getWindowZ(windowZ, a.appKind))[0] ?? null;
+  const voiceDesktopContext: VoiceDesktopContext = {
+    focusedWindow: focusedVoiceWindow,
+    openWindows: voiceOpenWindows,
+    finderPath: currentPath || "/",
+    selectedWorkspaceFile: selected && !selected.startsWith("__") ? selected : null,
+    browser: browserOpen ? { url: browserCurrentUrl, title: browserTitle || null } : null,
+    office: activeOffice
+      ? {
+          appKind: activeOffice.appKind,
+          path: activeOffice.session?.path ?? null,
+          name: activeOffice.session?.name ?? null,
+        }
+      : null,
+    integrations: integrationsMissing ? "missing configuration" : integrationsSyncing ? "syncing" : "ready",
+  };
+
   // ═══════════════════════════════════════════════════════════════════
   // RENDER
   // ═══════════════════════════════════════════════════════════════════
@@ -4669,305 +4292,96 @@ export function Files({
             </div>
           )}
 
-          {/* ── FLOATING FINDER WINDOW (draggable) ────────────────────── */}
           {finderOpen && (
-            <div
-              className="absolute flex flex-col rounded-xl overflow-hidden animate-scale-in"
-              data-desktop-drop-target={currentPath}
-              style={{
-                top: finderPos.y, left: finderPos.x,
-                width: finderSize.w, height: finderSize.h,
-                boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56), 0 0 0 0.5px rgba(255,255,255,0.1)",
-                border: "0.5px solid rgba(255,255,255,0.08)",
-                zIndex: windowZ.finder ?? DEFAULT_WINDOW_Z.finder,
+            <FinderApp
+              position={finderPos}
+              size={finderSize}
+              zIndex={getWindowZ(windowZ, "finder")}
+              currentPath={currentPath}
+              pathSegments={pathSegments}
+              folderName={folderName}
+              entries={entries}
+              loading={loading}
+              viewMode={viewMode}
+              selected={selected}
+              dragDropTarget={dragDropTarget}
+              historyIndex={historyIndex}
+              historyLength={history.length}
+              itemCount={itemCount}
+              formatDate={formatDate}
+              formatSize={formatSize}
+              onClose={() => setFinderOpen(false)}
+              onFocus={() => focusWindow("finder")}
+              onDragStart={handleFinderDragStart}
+              onBack={goBack}
+              onForward={goForward}
+              onNavigate={navigateTo}
+              onViewModeChange={setViewMode}
+              onCreateFile={handleCreateFile}
+              onCreateFolder={handleCreateFolder}
+              onChooseFiles={() => fileInputRef.current?.click()}
+              onClearSelection={() => {
+                setSelected(null);
+                setContextMenu(null);
+                setDragDropTarget(null);
               }}
-              onMouseDownCapture={() => focusWindow("finder")}
-              onClick={(e) => e.stopPropagation()}
-            >
-              {/* Title bar — drag handle */}
-              <div
-                className="flex items-center px-3 py-2 flex-shrink-0 relative cursor-grab active:cursor-grabbing select-none"
-                style={{ background: "#2d2d2d", borderBottom: "1px solid #1a1a1a" }}
-                onMouseDown={handleFinderDragStart}
-              >
-                <div className="flex items-center gap-2 z-10">
-                  <button onClick={() => setFinderOpen(false)} className="w-3 h-3 rounded-full hover:opacity-80 group relative" style={{ background: "#ff5f57" }} title="Close">
-                    <X className="w-2 h-2 absolute inset-0.5 opacity-0 group-hover:opacity-100 text-black/60" />
-                  </button>
-                  <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} />
-                  <div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
-                </div>
-                <div className="flex items-center gap-0.5 ml-3 z-10">
-                  <button onClick={goBack} disabled={historyIndex <= 0} className="p-1 rounded disabled:opacity-30 hover:bg-white/10"><ChevronLeft className="w-3.5 h-3.5" style={{ color: "#aaa" }} /></button>
-                  <button onClick={goForward} disabled={historyIndex >= history.length - 1} className="p-1 rounded disabled:opacity-30 hover:bg-white/10"><ChevronRight className="w-3.5 h-3.5" style={{ color: "#aaa" }} /></button>
-                </div>
-                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                  <div className="flex items-center gap-2">
-                    {currentPath && <button onClick={() => navigateTo(pathSegments.slice(0, -1).join("/"))} className="pointer-events-auto p-0.5 rounded hover:bg-white/10"><ArrowUp className="w-3 h-3" style={{ color: "#888" }} /></button>}
-                    <Folder className="w-3.5 h-3.5" style={{ color: "#54a3f7" }} />
-                    <span className="text-xs font-medium" style={{ color: "#ccc" }}>{folderName}</span>
-                  </div>
-                </div>
-                <div className="flex items-center gap-0.5 ml-auto z-10">
-                  <button onClick={() => setViewMode("grid")} className="p-1 rounded" style={{ color: viewMode === "grid" ? "#fff" : "#666", background: viewMode === "grid" ? "rgba(255,255,255,0.1)" : "transparent" }}><LayoutGrid className="w-3.5 h-3.5" /></button>
-                  <button onClick={() => setViewMode("list")} className="p-1 rounded" style={{ color: viewMode === "list" ? "#fff" : "#666", background: viewMode === "list" ? "rgba(255,255,255,0.1)" : "transparent" }}><List className="w-3.5 h-3.5" /></button>
-                  <div className="w-px h-3.5 mx-1" style={{ background: "rgba(255,255,255,0.1)" }} />
-                  <button onClick={() => handleCreateFile(finderOpen ? currentPath : DESKTOP_WORKSPACE_PATH)} className="p-1 rounded hover:bg-white/10" title="New file"><FileText className="w-3.5 h-3.5" style={{ color: "#aaa" }} /></button>
-                  <button onClick={() => handleCreateFolder(finderOpen ? currentPath : DESKTOP_WORKSPACE_PATH)} className="p-1 rounded hover:bg-white/10"><Plus className="w-3.5 h-3.5" style={{ color: "#aaa" }} /></button>
-                </div>
-              </div>
-
-              {/* Path bar */}
-              <div className="flex items-center gap-0.5 px-3 py-1 text-[11px] flex-shrink-0 overflow-x-auto" style={{ background: "#252526", borderBottom: "1px solid #1a1a1a", color: "#888" }}>
-                <button onClick={() => navigateTo("")} className="px-1.5 py-0.5 rounded hover:bg-white/10 flex-shrink-0" style={{ color: pathSegments.length === 0 ? "#ddd" : "#888" }}>Workspace</button>
-                {pathSegments.map((seg, i) => {
-                  const segPath = pathSegments.slice(0, i + 1).join("/");
-                  return (
-                    <span key={segPath} className="flex items-center gap-0.5 flex-shrink-0">
-                      <ChevronRight className="w-3 h-3" style={{ color: "#555" }} />
-                      <button onClick={() => navigateTo(segPath)} className="px-1.5 py-0.5 rounded hover:bg-white/10" style={{ color: i === pathSegments.length - 1 ? "#ddd" : "#888" }}>{seg}</button>
-                    </span>
-                  );
-                })}
-              </div>
-
-              {/* File area */}
-              <div
-                className="flex-1 overflow-auto relative"
-                onClick={() => { setSelected(null); setContextMenu(null); setDragDropTarget(null); }}
-                onDragOver={(e) => handleUploadDragOver(e, currentPath)}
-                onDragLeave={(e) => handleUploadDragLeave(e, currentPath)}
-                onDrop={(e) => { void handleUploadDropToPath(e, currentPath); }}
-                style={{ background: "#1e1e1e" }}
-              >
-                {loading && entries.length === 0 ? (
-                  <div className="flex items-center justify-center h-full"><div className="text-center"><div className="w-8 h-8 rounded-full border-2 border-t-transparent animate-spin mx-auto mb-3" style={{ borderColor: "#555", borderTopColor: "transparent" }} /><p className="text-xs" style={{ color: "#888" }}>Loading...</p></div></div>
-                ) : entries.length === 0 ? (
-                  <div className="flex items-center justify-center h-full"><div className="text-center max-w-xs"><Folder className="w-16 h-16 mx-auto mb-4" style={{ color: "#54a3f7", opacity: 0.3 }} /><p className="text-sm font-medium mb-1" style={{ color: "#ddd" }}>This folder is empty</p><p className="text-xs mb-4" style={{ color: "#888" }}>Drag files here or click + to add</p><button onClick={() => fileInputRef.current?.click()} className="text-xs px-4 py-2 rounded-lg" style={{ background: "rgba(255,255,255,0.1)", color: "#ccc" }}>Choose Files</button></div></div>
-                ) : viewMode === "grid" ? (
-                  <div className="p-3 grid gap-1" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(84px, 1fr))" }}>
-                    {entries.map((entry) => {
-                      const Icon = getFileIcon(entry.name, entry.is_directory);
-                      const iconColor = getFileColor(entry.name, entry.is_directory);
-                      const isSel = selected === entry.path;
-                      const isDropTarget = dragDropTarget === entry.path;
-                      return (
-                        <div
-                          key={entry.path}
-                          className="flex flex-col items-center p-2 rounded-lg cursor-default"
-                          data-desktop-drop-target={entry.is_directory ? entry.path : undefined}
-                          style={{
-                            background: isSel
-                              ? "rgba(59,130,246,0.2)"
-                              : isDropTarget
-                                ? "rgba(84,163,247,0.18)"
-                                : "transparent",
-                            outline: isDropTarget ? "1px solid rgba(122,184,245,0.55)" : "none",
-                          }}
-                          onClick={(e) => handleEntryClick(entry, e)}
-                          onDoubleClick={() => handleEntryDoubleClick(entry)}
-                          onContextMenu={(e) => handleContextMenuEntry(entry, e)}
-                          onDragOver={entry.is_directory ? (e) => handleUploadDragOver(e, entry.path) : undefined}
-                          onDragLeave={entry.is_directory ? (e) => handleUploadDragLeave(e, entry.path) : undefined}
-                          onDrop={entry.is_directory ? ((e) => { void handleUploadDropToPath(e, entry.path); }) : undefined}
-                        >
-                          {entry.is_directory ? <div className="w-11 h-11 flex items-center justify-center mb-1"><FolderIcon size={44} selected={isSel || isDropTarget} /></div> : <div className="w-11 h-11 flex items-center justify-center mb-1"><Icon className="w-8 h-8" style={{ color: iconColor }} strokeWidth={1.2} /></div>}
-                          <span className="text-[10px] text-center leading-tight w-full px-0.5" style={{ color: isSel ? "#fff" : "#ccc", fontWeight: isSel ? 500 : 400, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", wordBreak: "break-all" }}>{entry.name}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="flex flex-col">
-                    <div className="flex items-center gap-3 px-4 py-1.5 text-[11px] font-medium sticky top-0 z-10" style={{ color: "#888", background: "#252526", borderBottom: "1px solid #1a1a1a" }}><span className="flex-1">Name</span><span className="w-28 text-right">Date Modified</span><span className="w-20 text-right">Size</span></div>
-                    {entries.map((entry) => {
-                      const Icon = getFileIcon(entry.name, entry.is_directory);
-                      const iconColor = getFileColor(entry.name, entry.is_directory);
-                      const isSel = selected === entry.path;
-                      const isDropTarget = dragDropTarget === entry.path;
-                      return (
-                        <div
-                          key={entry.path}
-                          className="flex items-center gap-3 px-4 py-1.5 cursor-default"
-                          data-desktop-drop-target={entry.is_directory ? entry.path : undefined}
-                          style={{
-                            background: isSel
-                              ? "rgba(59,130,246,0.15)"
-                              : isDropTarget
-                                ? "rgba(84,163,247,0.18)"
-                                : "transparent",
-                            borderBottom: "1px solid #2a2a2a",
-                            outline: isDropTarget ? "1px solid rgba(122,184,245,0.55)" : "none",
-                          }}
-                          onClick={(e) => handleEntryClick(entry, e)}
-                          onDoubleClick={() => handleEntryDoubleClick(entry)}
-                          onContextMenu={(e) => handleContextMenuEntry(entry, e)}
-                          onDragOver={entry.is_directory ? (e) => handleUploadDragOver(e, entry.path) : undefined}
-                          onDragLeave={entry.is_directory ? (e) => handleUploadDragLeave(e, entry.path) : undefined}
-                          onDrop={entry.is_directory ? ((e) => { void handleUploadDropToPath(e, entry.path); }) : undefined}
-                        >
-                          <Icon className="w-4 h-4 flex-shrink-0" style={{ color: iconColor }} />
-                          <span className="flex-1 text-xs truncate" style={{ color: isSel ? "#fff" : "#ccc", fontWeight: isSel ? 500 : 400 }}>{entry.name}</span>
-                          <span className="w-28 text-right text-[11px]" style={{ color: "#666" }}>{formatDate(entry.modified_at)}</span>
-                          <span className="w-20 text-right text-[11px]" style={{ color: "#666" }}>{entry.is_directory ? "\u2014" : formatSize(entry.size)}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Status bar */}
-              <div className="flex items-center justify-between px-3 py-1 flex-shrink-0 text-[11px]" style={{ background: "#252526", borderTop: "1px solid #1a1a1a", color: "#888" }}>
-                <span>{itemCount} item{itemCount !== 1 ? "s" : ""}</span>
-                <button onClick={() => fileInputRef.current?.click()} className="hover:underline" style={{ color: "#aaa" }}>Add files...</button>
-              </div>
-            </div>
+              onDragOverPath={handleUploadDragOver}
+              onDragLeavePath={handleUploadDragLeave}
+              onDropToPath={(e, path) => { void handleUploadDropToPath(e, path); }}
+              onEntryClick={handleEntryClick}
+              onEntryDoubleClick={handleEntryDoubleClick}
+              onEntryContextMenu={handleContextMenuEntry}
+            />
           )}
 
-          {/* Context menus */}
-          {contextMenu && !contextMenu.entry && (
-            <div className="fixed py-1 rounded-lg min-w-[180px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, zIndex: DESKTOP_CONTEXT_MENU_Z, background: "rgba(30,30,30,0.9)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.4)" }} onClick={(e) => e.stopPropagation()}>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFile(finderOpen ? currentPath : DESKTOP_WORKSPACE_PATH); setContextMenu(null); }}><FileText className="w-3.5 h-3.5" />New File</button>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFolder(finderOpen ? currentPath : DESKTOP_WORKSPACE_PATH); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" />New Folder</button>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openBrowserWindow(); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" />Open Browser</button>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openTerminalWindow(); setContextMenu(null); }}><Terminal className="w-3.5 h-3.5" />Open Terminal</button>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { setShowWallpaperPicker(true); setContextMenu(null); }}><Image className="w-3.5 h-3.5" />Change Wallpaper</button>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { fileInputRef.current?.click(); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" />Add Files</button>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { openFolder(""); setContextMenu(null); }}><Folder className="w-3.5 h-3.5" />Open Workspace</button>
-            </div>
-          )}
-          {contextMenu && contextMenu.entry && (
-            <div className="fixed py-1 rounded-lg min-w-[160px] animate-fade-in" style={{ left: contextMenu.x, top: contextMenu.y, zIndex: DESKTOP_CONTEXT_MENU_Z + 1, background: "rgba(30,30,30,0.95)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }} onClick={(e) => e.stopPropagation()}>
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleEntryDoubleClick(contextMenu.entry!); setContextMenu(null); }}><Folder className="w-3.5 h-3.5" style={{ color: "#888" }} />Open</button>
-              {contextMenu.entry.is_directory && (
-                <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFile(contextMenu.entry!.path); setContextMenu(null); }}><FileText className="w-3.5 h-3.5" style={{ color: "#888" }} />New File Here</button>
-              )}
-              {contextMenu.entry.is_directory && (
-                <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFolder(contextMenu.entry!.path); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" style={{ color: "#888" }} />New Folder Here</button>
-              )}
-              {!contextMenu.entry.is_directory && workspaceFileCanOpenInBrowser(contextMenu.entry.path) && (
-                <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void openWorkspaceFileInBrowser(contextMenu.entry!); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" style={{ color: "#888" }} />Open in Browser</button>
-              )}
-              {!contextMenu.entry.is_directory && <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleView(contextMenu.entry!); setContextMenu(null); }}><Eye className="w-3.5 h-3.5" style={{ color: "#888" }} />Quick Look</button>}
-              {!contextMenu.entry.is_directory && <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void exportWorkspaceEntry(contextMenu.entry!); setContextMenu(null); }}><ArrowUp className="w-3.5 h-3.5 rotate-45" style={{ color: "#888" }} />Export...</button>}
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void copyDesktopPath(contextMenu.entry!.path); setContextMenu(null); }}><FileText className="w-3.5 h-3.5" style={{ color: "#888" }} />Copy Path</button>
-              <div className="my-1" style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }} />
-              <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left" style={{ color: "#ff5f57" }} onClick={() => { handleDelete(contextMenu.entry!); setContextMenu(null); }}><Trash2 className="w-3.5 h-3.5" />Move to Trash</button>
-            </div>
-          )}
+          <DesktopContextMenus
+            contextMenu={contextMenu}
+            desktopBasePath={DESKTOP_WORKSPACE_PATH}
+            currentPath={currentPath}
+            finderOpen={finderOpen}
+            zIndex={DESKTOP_CONTEXT_MENU_Z}
+            onClose={() => setContextMenu(null)}
+            onCreateFile={handleCreateFile}
+            onCreateFolder={handleCreateFolder}
+            onOpenBrowser={openBrowserWindow}
+            onOpenTerminal={openTerminalWindow}
+            onChangeWallpaper={() => setShowWallpaperPicker(true)}
+            onAddFiles={() => fileInputRef.current?.click()}
+            onOpenWorkspace={() => openFolder("")}
+            onOpenEntry={handleEntryDoubleClick}
+            onOpenEntryInBrowser={openWorkspaceFileInBrowser}
+            onQuickLook={handleView}
+            onExport={exportWorkspaceEntry}
+            onCopyPath={copyDesktopPath}
+            onDelete={handleDelete}
+            canOpenInBrowser={workspaceFileCanOpenInBrowser}
+          />
 
-          {/* Wallpaper picker */}
-          {showWallpaperPicker && (
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-40 p-4 rounded-xl animate-fade-in" style={{ background: "rgba(20,20,20,0.92)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 12px 40px rgba(0,0,0,0.5)" }} onClick={(e) => e.stopPropagation()}>
-              <p className="text-xs font-medium mb-2" style={{ color: "rgba(255,255,255,0.6)" }}>Scenic</p>
-              <div className="grid grid-cols-4 gap-2 mb-3">
-                {WALLPAPERS.filter((wp) => wp.type === "photo").map((wp) => (
-                  <button key={wp.id} onClick={() => { saveWallpaper(wp.id, null); setShowWallpaperPicker(false); }} className="w-16 h-10 rounded-lg hover:scale-105 transition-transform overflow-hidden" style={{ backgroundImage: wp.thumbnail ? `url(${wp.thumbnail})` : wp.css, backgroundSize: "cover", backgroundPosition: "center", border: wallpaperId === wp.id ? "2px solid white" : "2px solid transparent", boxShadow: wallpaperId === wp.id ? "0 0 0 1px rgba(255,255,255,0.3)" : "none" }} title={wp.label} />
-                ))}
-              </div>
-              <p className="text-xs font-medium mb-2" style={{ color: "rgba(255,255,255,0.6)" }}>Gradients</p>
-              <div className="grid grid-cols-4 gap-2">
-                {WALLPAPERS.filter((wp) => wp.type === "gradient").map((wp) => (
-                  <button key={wp.id} onClick={() => { saveWallpaper(wp.id, null); setShowWallpaperPicker(false); }} className="w-16 h-10 rounded-lg hover:scale-105 transition-transform" style={{ background: wp.css, border: wallpaperId === wp.id ? "2px solid white" : "2px solid transparent", boxShadow: wallpaperId === wp.id ? "0 0 0 1px rgba(255,255,255,0.3)" : "none" }} title={wp.label} />
-                ))}
-                <button onClick={() => wallpaperInputRef.current?.click()} className="w-16 h-10 rounded-lg flex items-center justify-center hover:scale-105 transition-transform" style={{ background: customWallpaper ? `url(${customWallpaper})` : "rgba(255,255,255,0.1)", backgroundSize: "cover", backgroundPosition: "center", border: wallpaperId === "custom" ? "2px solid white" : "2px solid transparent" }} title="Custom">{!customWallpaper && <Image className="w-4 h-4" style={{ color: "rgba(255,255,255,0.4)" }} />}</button>
-              </div>
-              <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleCustomWallpaperUpload} />
-            </div>
-          )}
+          {showWallpaperPicker ? (
+            <WallpaperPicker
+              wallpaperId={wallpaperId}
+              customWallpaper={customWallpaper}
+              inputRef={wallpaperInputRef}
+              onSelectWallpaper={(id, custom) => {
+                void saveWallpaper(id, custom);
+                setShowWallpaperPicker(false);
+              }}
+              onChooseCustom={() => wallpaperInputRef.current?.click()}
+              onCustomUpload={handleCustomWallpaperUpload}
+            />
+          ) : null}
 
-          {/* File viewer */}
-          {preview !== null && (() => {
-            const ext = preview.name.split(".").pop()?.toLowerCase() || "";
-            const isCode = ["js","ts","jsx","tsx","py","rs","go","c","cpp","h","rb","sh","bash","zsh","css","html","xml","json","yaml","yml","toml","sql","java","kt","swift","php","lua","r","pl","ex","exs","hs","ml","scala","clj","dart","vue","svelte"].includes(ext);
-            const isMd = ext === "md";
-            const Icon = getFileIcon(preview.name, false);
-            const iconColor = getFileColor(preview.name, false);
-            const lines = preview.kind === "text" ? preview.content.split("\n") : [];
-            const lnw = String(lines.length || 1).length;
-            return (
-              <div
-                className="absolute inset-0 flex items-center justify-center"
-                style={{ zIndex: windowZ.preview ?? DEFAULT_WINDOW_Z.preview, background: "rgba(0,0,0,0.45)" }}
-                onMouseDownCapture={() => focusWindow("preview")}
-              >
-                <div
-                  className="w-full max-w-3xl mx-6 h-[min(85vh,720px)] flex flex-col rounded-xl overflow-hidden animate-fade-in"
-                  style={{ boxShadow: "0 22px 70px 4px rgba(0,0,0,0.56)" }}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <div className="flex items-center px-3 py-2.5 flex-shrink-0 relative" style={{ background: "#2d2d2d", borderBottom: "1px solid #1a1a1a" }}>
-                    <div className="flex items-center gap-2 z-10">
-                      <button onClick={() => setPreview(null)} className="w-3 h-3 rounded-full hover:opacity-80 group relative" style={{ background: "#ff5f57" }}><X className="w-2 h-2 absolute inset-0.5 opacity-0 group-hover:opacity-100 text-black/60" /></button>
-                      <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} /><div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
-                    </div>
-                    <div className="ml-auto flex items-center gap-2 z-10">
-                      {preview.kind === "text" && (
-                        <button
-                          type="button"
-                          onClick={() => { void copyPreviewText(); }}
-                          className="px-2.5 py-1 rounded-lg text-[11px] font-medium"
-                          style={{ background: "rgba(255,255,255,0.08)", color: "#d7d7d7" }}
-                        >
-                          Copy Text
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => { void exportPreviewFile(); }}
-                        className="px-2.5 py-1 rounded-lg text-[11px] font-medium"
-                        style={{ background: "rgba(84,163,247,0.18)", color: "#e9f3ff" }}
-                      >
-                        Export...
-                      </button>
-                    </div>
-                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none"><div className="flex items-center gap-2"><Icon className="w-3.5 h-3.5" style={{ color: iconColor }} /><span className="text-xs font-medium" style={{ color: "#ccc" }}>{preview.name}</span></div></div>
-                  </div>
-                  <div className="flex-1 min-h-0 overflow-auto" style={{ background: preview.kind === "text" && (isCode || isMd) ? "#1e1e1e" : "#252526" }}>
-                    {preview.kind === "image" && (
-                      <div className="p-4 flex items-center justify-center">
-                        <img
-                          src={preview.dataUrl}
-                          alt={preview.name}
-                          className="max-w-full max-h-[70vh] rounded-lg shadow-lg"
-                        />
-                      </div>
-                    )}
-                    {preview.kind === "binary" && (
-                      <div className="p-6 text-sm" style={{ color: "#d4d4d4" }}>
-                        <p className="font-medium mb-2">Preview not available</p>
-                        <p>This file type isn’t viewable yet.</p>
-                        <p className="text-xs mt-2" style={{ color: "#888" }}>
-                          {preview.name} · {formatSize(preview.size)}
-                        </p>
-                      </div>
-                    )}
-                    {preview.kind === "text" && (
-                      (isCode || isMd) ? (
-                        <div className="flex text-[13px] font-mono leading-[1.6] select-text">
-                          <div className="flex-shrink-0 text-right select-none py-3 pr-3 sticky left-0" style={{ color: "#858585", background: "#1e1e1e", paddingLeft: "12px", minWidth: `${lnw * 0.65 + 1.8}em`, borderRight: "1px solid #2d2d2d" }}>{lines.map((_, i) => <div key={i}>{i + 1}</div>)}</div>
-                          <pre className="flex-1 py-3 px-4 whitespace-pre-wrap break-words select-text cursor-text" style={{ color: "#d4d4d4", tabSize: 4 }}>{preview.content}</pre>
-                        </div>
-                      ) : (
-                        <pre className="p-5 text-[13px] font-mono whitespace-pre-wrap break-words leading-relaxed select-text cursor-text" style={{ color: "#d4d4d4" }}>{preview.content}</pre>
-                      )
-                    )}
-                  </div>
-                  <div className="flex items-center justify-between px-3 py-1 flex-shrink-0 text-[11px]" style={{ background: "#007acc", color: "rgba(255,255,255,0.9)" }}>
-                    <span>{ext.toUpperCase() || "TXT"}</span>
-                    {preview.kind === "text" ? (
-                      <span>{lines.length} lines · {formatSize(new Blob([preview.content]).size)}</span>
-                    ) : preview.kind === "image" ? (
-                      <span>Image preview</span>
-                    ) : (
-                      <span>{formatSize(preview.size)}</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
+          {preview !== null ? (
+            <FilePreviewWindow
+              preview={preview}
+              zIndex={getWindowZ(windowZ, "preview")}
+              formatSize={formatSize}
+              onFocus={() => focusWindow("preview")}
+              onClose={() => setPreview(null)}
+              onCopyText={copyPreviewText}
+              onExport={exportPreviewFile}
+            />
+          ) : null}
 
           {/* Error toast */}
           {error && (
@@ -4977,140 +4391,34 @@ export function Files({
             </div>
           )}
 
-          {createFolderOpen && (
-            <div
-              className="absolute inset-0 flex items-center justify-center"
-              style={{ zIndex: DESKTOP_MODAL_Z, background: "rgba(0,0,0,0.34)", backdropFilter: "blur(6px)" }}
-              onClick={() => { if (!creatingFolder) setCreateFolderOpen(false); }}
-            >
-              <div
-                className="w-full max-w-sm rounded-2xl p-4"
-                style={{
-                  background: "rgba(28,28,30,0.92)",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  boxShadow: "0 24px 60px rgba(0,0,0,0.45)",
-                }}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="mb-3">
-                  <p className="text-sm font-semibold" style={{ color: "#fff" }}>New Folder</p>
-                  <p className="text-xs mt-1" style={{ color: "#9a9a9a" }}>
-                    {createFolderBasePath ? `Create inside ${createFolderBasePath}` : "Create in Workspace"}
-                  </p>
-                </div>
-                <input
-                  ref={createFolderInputRef}
-                  type="text"
-                  value={createFolderName}
-                  disabled={creatingFolder}
-                  onChange={(e) => setCreateFolderName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      submitCreateFolder();
-                    }
-                    if (e.key === "Escape" && !creatingFolder) {
-                      setCreateFolderOpen(false);
-                    }
-                  }}
-                  className="w-full px-3 py-2 rounded-xl text-sm outline-none"
-                  style={{
-                    background: "rgba(255,255,255,0.08)",
-                    color: "#fff",
-                    border: "1px solid rgba(255,255,255,0.12)",
-                  }}
-                  placeholder="Folder name"
-                />
-                <div className="mt-4 flex items-center justify-end gap-2">
-                  <button
-                    onClick={() => setCreateFolderOpen(false)}
-                    disabled={creatingFolder}
-                    className="px-3 py-1.5 rounded-lg text-xs"
-                    style={{ background: "rgba(255,255,255,0.08)", color: "#d0d0d0" }}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={submitCreateFolder}
-                    disabled={!createFolderName.trim() || creatingFolder}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
-                    style={{ background: "#54a3f7", color: "#fff" }}
-                  >
-                    {creatingFolder ? "Creating..." : "Create"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+          <CreateWorkspaceEntryModal
+            kind="folder"
+            open={createFolderOpen}
+            basePath={createFolderBasePath}
+            value={createFolderName}
+            busy={creatingFolder}
+            inputRef={createFolderInputRef}
+            zIndex={DESKTOP_MODAL_Z}
+            placeholder="Folder name"
+            onValueChange={setCreateFolderName}
+            onCancel={() => setCreateFolderOpen(false)}
+            onSubmit={submitCreateFolder}
+          />
 
-          {createFileOpen && (
-            <div
-              className="absolute inset-0 flex items-center justify-center"
-              style={{ zIndex: DESKTOP_MODAL_Z, background: "rgba(0,0,0,0.34)", backdropFilter: "blur(6px)" }}
-              onClick={() => { if (!creatingFile) setCreateFileOpen(false); }}
-            >
-              <div
-                className="w-full max-w-sm rounded-2xl p-4"
-                style={{
-                  background: "rgba(28,28,30,0.92)",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  boxShadow: "0 24px 60px rgba(0,0,0,0.45)",
-                }}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="mb-3">
-                  <p className="text-sm font-semibold" style={{ color: "#fff" }}>New File</p>
-                  <p className="text-xs mt-1" style={{ color: "#9a9a9a" }}>
-                    {createFileBasePath ? `Create inside ${createFileBasePath}` : "Create in Workspace"}
-                  </p>
-                </div>
-                <input
-                  ref={createFileInputRef}
-                  type="text"
-                  value={createFileName}
-                  disabled={creatingFile}
-                  onChange={(e) => setCreateFileName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void submitCreateFile();
-                    }
-                    if (e.key === "Escape" && !creatingFile) {
-                      setCreateFileOpen(false);
-                    }
-                  }}
-                  className="w-full px-3 py-2 rounded-xl text-sm outline-none"
-                  style={{
-                    background: "rgba(255,255,255,0.08)",
-                    color: "#fff",
-                    border: "1px solid rgba(255,255,255,0.12)",
-                  }}
-                  placeholder="notes.md"
-                />
-                <p className="mt-2 text-[11px]" style={{ color: "#8f8f8f" }}>
-                  Markdown and text files can be copied directly from Quick Look after creation.
-                </p>
-                <div className="mt-4 flex items-center justify-end gap-2">
-                  <button
-                    onClick={() => setCreateFileOpen(false)}
-                    disabled={creatingFile}
-                    className="px-3 py-1.5 rounded-lg text-xs"
-                    style={{ background: "rgba(255,255,255,0.08)", color: "#d0d0d0" }}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => { void submitCreateFile(); }}
-                    disabled={!createFileName.trim() || creatingFile}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
-                    style={{ background: "#54a3f7", color: "#fff" }}
-                  >
-                    {creatingFile ? "Creating..." : "Create"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+          <CreateWorkspaceEntryModal
+            kind="file"
+            open={createFileOpen}
+            basePath={createFileBasePath}
+            value={createFileName}
+            busy={creatingFile}
+            inputRef={createFileInputRef}
+            zIndex={DESKTOP_MODAL_Z}
+            placeholder="notes.md"
+            helperText="Markdown and text files can be copied directly from Quick Look after creation."
+            onValueChange={setCreateFileName}
+            onCancel={() => setCreateFileOpen(false)}
+            onSubmit={submitCreateFile}
+          />
 
           {/* ── FLOATING CHAT WINDOW (draggable) ────────────────────── */}
           {chatOpen && (
@@ -5119,7 +4427,7 @@ export function Files({
               icon={MessageSquare}
               position={chatPos}
               size={chatSize}
-              zIndex={windowZ.chat ?? DEFAULT_WINDOW_Z.chat}
+              zIndex={getWindowZ(windowZ, "chat")}
               glass={false}
               onClose={() => setChatOpen(false)}
               onFocus={() => focusWindow("chat")}
@@ -5340,14 +4648,36 @@ export function Files({
             </AppWindow>
           )}
 
-          {/* ── BROWSER WINDOW ───────────────────────────────────────── */}
           {browserOpen && (
-            <AppWindow
-              title="Browser"
-              icon={Globe}
+            <BrowserApp
               position={browserPos}
               size={browserSize}
-              zIndex={windowZ.browser ?? DEFAULT_WINDOW_Z.browser}
+              zIndex={getWindowZ(windowZ, "browser")}
+              tabs={browserTabs}
+              activeTabId={activeBrowserTabId}
+              urlInput={browserUrlInput}
+              canGoBack={browserCanGoBack}
+              canGoForward={browserCanGoForward}
+              loading={browserLoading}
+              loadError={browserLoadError}
+              loadErrorSummary={browserLoadError ? firstMeaningfulLine(browserLoadError) : null}
+              usingEmbeddedPreview={browserUsingEmbeddedPreview}
+              embeddedPreviewCovered={browserEmbeddedPreviewCovered}
+              snapshotImage={browserSnapshotImage}
+              title={browserTitle}
+              liveConnected={browserLiveConnected}
+              hasRenderableImage={browserHasRenderableImage}
+              liveStatePresent={Boolean(browserLiveState)}
+              snapshotPresent={Boolean(browserSnapshot)}
+              snapshotWidth={browserSnapshot?.screenshot_width ?? 0}
+              snapshotHeight={browserSnapshot?.screenshot_height ?? 0}
+              viewportWidth={browserViewportWidth}
+              viewportHeight={browserViewportHeight}
+              interactiveElements={browserSnapshot?.interactive_elements ?? []}
+              clickingId={browserClickingId}
+              viewportRef={browserViewportRef}
+              liveImageRef={browserLiveImageRef}
+              labelTab={browserTabLabel}
               onClose={() => { void closeBrowserWindow(); }}
               onFocus={() => focusWindow("browser")}
               onDragStart={(e) =>
@@ -5366,290 +4696,56 @@ export function Files({
                   { w: 640, h: 420 },
                 )
               }
-            >
-              <div className="h-full flex flex-col bg-[var(--bg-card)]">
-                {browserTabs.length > 1 && (
-                  <div className="flex items-center gap-2 px-2 py-2 border-b border-[var(--border-subtle)] bg-[var(--bg-secondary)]">
-                    <div className="flex-1 min-w-0 flex items-center gap-2 overflow-x-auto">
-                      {browserTabs.map((tab) => {
-                        const isActive = tab.id === activeBrowserTabId;
-                        return (
-                          <button
-                            key={tab.id}
-                            type="button"
-                            onClick={() => selectBrowserTab(tab.id)}
-                            className={`group min-w-0 max-w-[240px] h-9 px-3 rounded-xl border flex items-center gap-2 text-sm transition-colors ${
-                              isActive
-                                ? "bg-[var(--bg-card)] text-[var(--text-primary)] shadow-sm"
-                                : "bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
-                            }`}
-                            style={{ borderColor: isActive ? "var(--border-default)" : "var(--border-subtle)" }}
-                            title={browserTabLabel(tab)}
-                          >
-                            <Globe className="w-3.5 h-3.5 shrink-0" />
-                            <span className="min-w-0 flex-1 truncate text-left">
-                              {browserTabLabel(tab)}
-                            </span>
-                            <span
-                              role="button"
-                              tabIndex={-1}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void closeBrowserTab(tab.id);
-                              }}
-                              className="shrink-0 rounded-md p-0.5 text-[var(--text-tertiary)] hover:bg-[var(--border-subtle)] hover:text-[var(--text-primary)]"
-                              aria-label={`Close ${browserTabLabel(tab)}`}
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-                <div className="px-3 py-2 border-b border-[var(--border-subtle)] bg-[var(--system-gray-6)]/70">
-                  <form
-                    className="flex items-center gap-2"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void navigateBrowser(browserUrlInput);
-                    }}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => { void goBrowserBack(); }}
-                      disabled={!browserCanGoBack || browserLoading}
-                      className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] disabled:opacity-40"
-                      title="Back"
-                    >
-                      <ChevronLeft className="w-4 h-4 mx-auto" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { void goBrowserForward(); }}
-                      disabled={!browserCanGoForward || browserLoading}
-                      className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] disabled:opacity-40"
-                      title="Forward"
-                    >
-                      <ChevronRight className="w-4 h-4 mx-auto" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { void reloadBrowser(); }}
-                      className="h-8 w-8 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)]"
-                      title="Reload"
-                    >
-                      {browserLoading ? (
-                        <Loader2 className="w-4 h-4 mx-auto animate-spin" />
-                      ) : (
-                        <ArrowUp className="w-4 h-4 mx-auto rotate-90" />
-                      )}
-                    </button>
-                    <input
-                      type="text"
-                      value={browserUrlInput}
-                      onChange={(e) => setBrowserUrlInput(e.target.value)}
-                      className="flex-1 h-8 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-sm outline-none"
-                      placeholder="Enter URL"
-                    />
-                    <button
-                      type="submit"
-                      className="h-8 px-3 rounded-lg bg-[var(--system-blue)] text-white text-sm font-semibold"
-                    >
-                      Go
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => openBrowserExternally(browserUrlInput)}
-                      className="h-8 px-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-sm font-medium text-[var(--text-primary)]"
-                    >
-                      Open
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => createBrowserTab()}
-                      className="h-8 w-8 shrink-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                      title="New tab"
-                      aria-label="New tab"
-                    >
-                      <Plus className="w-4 h-4 mx-auto" />
-                    </button>
-                  </form>
-                </div>
-                {browserLoadError && (
-                  <div className="px-3 py-3 border-b border-[var(--border-subtle)] bg-red-500/5">
-                    <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-semibold text-red-200">Browser unavailable</p>
-                          <p className="mt-1 text-xs leading-relaxed text-red-100/90 break-words">
-                            {firstMeaningfulLine(browserLoadError)}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => { void retryCurrentBrowserTarget(); }}
-                            className="h-8 px-3 rounded-lg bg-red-100 text-[11px] font-semibold text-red-900"
-                          >
-                            Retry
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => { void openBrowserExternally(browserUrlInput); }}
-                            className="h-8 px-3 rounded-lg border border-white/15 bg-black/10 text-[11px] font-medium text-white/90"
-                          >
-                            Open externally
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setBrowserLoadError(null)}
-                            className="h-8 px-3 rounded-lg border border-white/15 bg-transparent text-[11px] font-medium text-white/70"
-                          >
-                            Dismiss
-                          </button>
-                        </div>
-                      </div>
-                      {browserLoadError.includes("\n") && (
-                        <details className="mt-3">
-                          <summary className="cursor-pointer text-[11px] font-medium text-red-100/80">
-                            Error details
-                          </summary>
-                          <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-black/20 px-3 py-2 text-[11px] leading-relaxed text-red-50 select-text">
-                            {browserLoadError}
-                          </pre>
-                        </details>
-                      )}
-                    </div>
-                  </div>
-                )}
-                <div className="relative flex-1 bg-[var(--bg-card)]">
-                  {browserLoading && !browserSnapshot && !browserLiveState && !browserUsingEmbeddedPreview ? (
-                    <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
-                      <div className="flex items-center gap-2">
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Loading browser session...
-                      </div>
-                    </div>
-                  ) : (browserUsingEmbeddedPreview || browserSnapshot || browserLiveState) ? (
-                    <div className="h-full flex flex-col">
-                      <div
-                        ref={browserViewportRef}
-                        className={browserUsingEmbeddedPreview
-                          ? "flex-1 min-h-0 overflow-hidden bg-[var(--bg-card)]"
-                          : browserLiveConnected
-                          ? "flex-1 min-h-0 overflow-hidden bg-[#0b0b0c] flex items-center justify-center"
-                          : "flex-1 min-h-0 overflow-auto bg-[#f5f5f5]"}
-                      >
-                        {browserUsingEmbeddedPreview ? (
-                          <div className="relative w-full h-full overflow-hidden bg-[var(--bg-card)]">
-                            {browserEmbeddedPreviewCovered && browserSnapshotImage ? (
-                              <img
-                                src={browserSnapshotImage}
-                                alt={browserTitle}
-                                className="block h-full w-full object-contain select-none"
-                                draggable={false}
-                                decoding="async"
-                              />
-                            ) : browserLoading ? (
-                              <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
-                                Local preview is loading...
-                              </div>
-                            ) : null}
-                          </div>
-                        ) : browserHasRenderableImage ? (
-                          <div
-                            className={browserLiveConnected
-                              ? "relative w-full h-full flex items-center justify-center"
-                              : "relative w-full"}
-                          >
-                            <img
-                              ref={browserLiveImageRef}
-                              src={browserSnapshotImage || undefined}
-                              alt={browserTitle}
-                              className={browserLiveConnected
-                                ? "block max-w-full max-h-full object-contain select-none"
-                                : "w-full h-auto block cursor-pointer"}
-                              draggable={false}
-                              decoding="async"
-                              tabIndex={browserLiveConnected ? 0 : -1}
-                              onFocus={() => sendBrowserLiveMessage({ type: "focus" })}
-                              onMouseMove={handleBrowserViewportMouseMove}
-                              onMouseDown={handleBrowserViewportMouseDown}
-                              onMouseUp={handleBrowserViewportMouseUp}
-                              onClick={(event) => {
-                                if (!browserLiveConnected) {
-                                  void clickBrowserSnapshotAtPoint(event.clientX, event.clientY);
-                                }
-                              }}
-                              onWheel={handleBrowserViewportWheel}
-                              onKeyDown={handleBrowserViewportKeyDown}
-                              onPaste={handleBrowserViewportPaste}
-                              onCopy={handleBrowserViewportCopy}
-                              onContextMenu={(e) => e.preventDefault()}
-                            />
-                            {!browserLiveConnected && (
-                              <div className="pointer-events-none absolute bottom-3 left-3 rounded-full bg-black/70 px-3 py-1.5 text-[11px] font-medium text-white shadow-lg">
-                                Snapshot mode: click anywhere on the page if a button is not highlighted.
-                              </div>
-                            )}
-                            {!browserLiveConnected && (browserSnapshot?.interactive_elements ?? []).map((element) => (
-                              <button
-                                key={element.id}
-                                type="button"
-                                title={element.label || element.tag}
-                                onClick={() => { void clickBrowserElement(element); }}
-                                disabled={Boolean(browserClickingId) || browserLoading}
-                                className="absolute rounded border border-sky-500/80 bg-sky-400/10 hover:bg-sky-400/20 transition-colors disabled:cursor-wait"
-                                style={{
-                                  left: `${(element.x / Math.max(browserSnapshot?.screenshot_width ?? browserViewportWidth, 1)) * 100}%`,
-                                  top: `${(element.y / Math.max(browserSnapshot?.screenshot_height ?? browserViewportHeight, 1)) * 100}%`,
-                                  width: `${(element.width / Math.max(browserSnapshot?.screenshot_width ?? browserViewportWidth, 1)) * 100}%`,
-                                  height: `${(element.height / Math.max(browserSnapshot?.screenshot_height ?? browserViewportHeight, 1)) * 100}%`,
-                                }}
-                              >
-                                <span className="absolute left-0 top-0 -translate-y-full rounded bg-sky-600 px-1.5 py-0.5 text-[10px] font-medium text-white shadow-sm max-w-[240px] truncate">
-                                  {element.label || element.tag}
-                                </span>
-                              </button>
-                            ))}
-                          </div>
-                        ) : browserLiveConnected ? (
-                          <div className="h-full flex items-center justify-center text-sm text-white/60">
-                            Waiting for live browser frame...
-                          </div>
-                        ) : (
-                          <div className="h-full flex items-center justify-center text-sm text-[var(--text-secondary)]">
-                            No browser screenshot available.
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
-                      Enter a URL to start a browser session.
-                    </div>
-                  )}
-                </div>
-              </div>
-            </AppWindow>
+              onSelectTab={selectBrowserTab}
+              onCloseTab={(tabId) => { void closeBrowserTab(tabId); }}
+              onUrlInputChange={setBrowserUrlInput}
+              onNavigate={(target) => { void navigateBrowser(target); }}
+              onBack={() => { void goBrowserBack(); }}
+              onForward={() => { void goBrowserForward(); }}
+              onReload={() => { void reloadBrowser(); }}
+              onOpenExternal={(target) => { void openBrowserExternally(target); }}
+              onCreateTab={() => createBrowserTab()}
+              onRetry={() => { void retryCurrentBrowserTarget(); }}
+              onDismissError={() => setBrowserLoadError(null)}
+              onLiveFocus={() => sendBrowserLiveMessage({ type: "focus" })}
+              onViewportMouseMove={handleBrowserViewportMouseMove}
+              onViewportMouseDown={handleBrowserViewportMouseDown}
+              onViewportMouseUp={handleBrowserViewportMouseUp}
+              onViewportClick={(clientX, clientY) => {
+                void clickBrowserSnapshotAtPoint(clientX, clientY);
+              }}
+              onViewportWheel={handleBrowserViewportWheel}
+              onViewportKeyDown={handleBrowserViewportKeyDown}
+              onViewportPaste={handleBrowserViewportPaste}
+              onViewportCopy={handleBrowserViewportCopy}
+              onElementClick={(element) => { void clickBrowserElement(element); }}
+            />
           )}
 
-          {sheetsOpen && (
-            <AppWindow
-              title="Sheets"
-              icon={LayoutGrid}
-              position={sheetsPos}
-              size={sheetsSize}
-              zIndex={windowZ.sheets ?? DEFAULT_WINDOW_Z.sheets}
-              glass={false}
-              onClose={() => { setSheetsOpen(false); setSheetsSession(null); }}
-              onFocus={() => focusWindow("sheets")}
-              onDragStart={(e) =>
-                startWindowDrag(e, sheetsDragRef, sheetsPos, sheetsSize, setSheetsPos, "sheets")
+          <OfficeApps
+            open={{ sheets: sheetsOpen, docs: docsOpen, slides: slidesOpen }}
+            sessions={{ sheets: sheetsSession, docs: docsSession, slides: slidesSession }}
+            recent={{ sheets: sheetsRecent, docs: docsRecent, slides: slidesRecent }}
+            position={{ sheets: sheetsPos, docs: docsPos, slides: slidesPos }}
+            size={{ sheets: sheetsSize, docs: docsSize, slides: slidesSize }}
+            zIndex={{
+              sheets: getWindowZ(windowZ, "sheets"),
+              docs: getWindowZ(windowZ, "docs"),
+              slides: getWindowZ(windowZ, "slides"),
+            }}
+            onClose={(kind) => closeDesktopWindow(kind)}
+            onFocus={(kind) => focusWindow(kind)}
+            onDragStart={(kind, e) => {
+              if (kind === "sheets") {
+                startWindowDrag(e, sheetsDragRef, sheetsPos, sheetsSize, setSheetsPos, "sheets");
+              } else if (kind === "docs") {
+                startWindowDrag(e, docsDragRef, docsPos, docsSize, setDocsPos, "docs");
+              } else {
+                startWindowDrag(e, slidesDragRef, slidesPos, slidesSize, setSlidesPos, "slides");
               }
-              onResizeStart={(direction, e) =>
+            }}
+            onResizeStart={(kind, direction, e) => {
+              if (kind === "sheets") {
                 startWindowResize(
                   e,
                   direction,
@@ -5660,44 +4756,8 @@ export function Files({
                   setSheetsSize,
                   "sheets",
                   { w: 720, h: 480 },
-                )
-              }
-            >
-              <div className="h-full bg-white">
-                {sheetsSession ? (
-                  <iframe
-                    key={`${sheetsSession.path}:${sheetsSession.launchToken}`}
-                    src={sheetsSession.url}
-                    title={sheetsSession.name}
-                    className="block h-full w-full border-0 bg-white"
-                    allow="clipboard-read; clipboard-write; fullscreen"
-                  />
-                ) : (
-                  <OfficeHomePanel
-                    kind="sheets"
-                    recent={sheetsRecent}
-                    onOpenRecent={openRecentOfficePath}
-                    onOpenChat={openOfficeAppHomeInChat}
-                  />
-                )}
-              </div>
-            </AppWindow>
-          )}
-
-          {docsOpen && (
-            <AppWindow
-              title="Docs"
-              icon={FileText}
-              position={docsPos}
-              size={docsSize}
-              zIndex={windowZ.docs ?? DEFAULT_WINDOW_Z.docs}
-              glass={false}
-              onClose={() => { setDocsOpen(false); setDocsSession(null); }}
-              onFocus={() => focusWindow("docs")}
-              onDragStart={(e) =>
-                startWindowDrag(e, docsDragRef, docsPos, docsSize, setDocsPos, "docs")
-              }
-              onResizeStart={(direction, e) =>
+                );
+              } else if (kind === "docs") {
                 startWindowResize(
                   e,
                   direction,
@@ -5708,44 +4768,8 @@ export function Files({
                   setDocsSize,
                   "docs",
                   { w: 720, h: 480 },
-                )
-              }
-            >
-              <div className="h-full bg-white">
-                {docsSession ? (
-                  <iframe
-                    key={`${docsSession.path}:${docsSession.launchToken}`}
-                    src={docsSession.url}
-                    title={docsSession.name}
-                    className="block h-full w-full border-0 bg-white"
-                    allow="clipboard-read; clipboard-write; fullscreen"
-                  />
-                ) : (
-                  <OfficeHomePanel
-                    kind="docs"
-                    recent={docsRecent}
-                    onOpenRecent={openRecentOfficePath}
-                    onOpenChat={openOfficeAppHomeInChat}
-                  />
-                )}
-              </div>
-            </AppWindow>
-          )}
-
-          {slidesOpen && (
-            <AppWindow
-              title="Slides"
-              icon={Image}
-              position={slidesPos}
-              size={slidesSize}
-              zIndex={windowZ.slides ?? DEFAULT_WINDOW_Z.slides}
-              glass={false}
-              onClose={() => { setSlidesOpen(false); setSlidesSession(null); }}
-              onFocus={() => focusWindow("slides")}
-              onDragStart={(e) =>
-                startWindowDrag(e, slidesDragRef, slidesPos, slidesSize, setSlidesPos, "slides")
-              }
-              onResizeStart={(direction, e) =>
+                );
+              } else {
                 startWindowResize(
                   e,
                   direction,
@@ -5756,38 +4780,28 @@ export function Files({
                   setSlidesSize,
                   "slides",
                   { w: 720, h: 480 },
-                )
+                );
               }
-            >
-              <div className="h-full bg-white">
-                {slidesSession ? (
-                  <iframe
-                    key={`${slidesSession.path}:${slidesSession.launchToken}`}
-                    src={slidesSession.url}
-                    title={slidesSession.name}
-                    className="block h-full w-full border-0 bg-white"
-                    allow="clipboard-read; clipboard-write; fullscreen"
-                  />
-                ) : (
-                  <OfficeHomePanel
-                    kind="slides"
-                    recent={slidesRecent}
-                    onOpenRecent={openRecentOfficePath}
-                    onOpenChat={openOfficeAppHomeInChat}
-                  />
-                )}
-              </div>
-            </AppWindow>
-          )}
+            }}
+            onOpenRecent={openRecentOfficePath}
+            onOpenChat={openOfficeAppHomeInChat}
+          />
 
           {/* ── TERMINAL WINDOW ─────────────────────────────────────── */}
           {terminalOpen && (
-            <AppWindow
-              title="Terminal"
-              icon={Terminal}
+            <TerminalApp
               position={terminalPos}
               size={terminalSize}
-              zIndex={windowZ.terminal ?? DEFAULT_WINDOW_Z.terminal}
+              zIndex={getWindowZ(windowZ, "terminal")}
+              sessionId={terminalSessionId}
+              output={terminalOutput}
+              input={terminalInput}
+              status={terminalStatus}
+              exitCode={terminalExitCode}
+              error={terminalError}
+              bootstrapping={terminalBootstrapping}
+              outputRef={terminalOutputRef}
+              onInputChange={setTerminalInput}
               onClose={() => { void closeTerminalWindow(); }}
               onFocus={() => focusWindow("terminal")}
               onDragStart={(e) =>
@@ -5806,545 +4820,128 @@ export function Files({
                   { w: 680, h: 360 },
                 )
               }
-            >
-              <div className="h-full flex flex-col bg-[#060816] text-[#e5e7eb]">
-                <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-white/10 bg-[#0b1020]">
-                  <div className="min-w-0 flex items-center gap-3">
-                    <div
-                      className="inline-flex items-center gap-2 rounded-full px-2.5 py-1 text-[11px] font-medium"
-                      style={{ background: "rgba(255,255,255,0.06)", color: "#f8fafc" }}
-                    >
-                      <span className="h-2 w-2 rounded-full" style={{ background: terminalStatusTone }} />
-                      {terminalStatusLabel}
-                    </div>
-                    <span className="truncate text-[11px] text-slate-400">
-                      OpenClaw runtime shell in `/data/workspace`
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => { void clearTerminalBuffer(); }}
-                      className="h-8 px-3 rounded-lg border border-white/10 bg-white/5 text-xs font-medium text-slate-200 hover:bg-white/10"
-                    >
-                      Clear
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { void restartTerminalSession(); }}
-                      className="h-8 px-3 rounded-lg border border-white/10 bg-white/5 text-xs font-medium text-slate-200 hover:bg-white/10"
-                    >
-                      Restart
-                    </button>
-                  </div>
-                </div>
-                <div
-                  ref={terminalOutputRef}
-                  className="flex-1 overflow-auto px-4 py-3 font-mono text-[12px] leading-6 select-text"
-                >
-                  {terminalOutput ? (
-                    <pre className="whitespace-pre-wrap break-words text-[#e5e7eb]">{terminalOutput}</pre>
-                  ) : (
-                    <div className="text-[12px] text-slate-500">
-                      {terminalBootstrapping
-                        ? "Starting runtime shell..."
-                        : "Run commands inside the OpenClaw container workspace."}
-                    </div>
-                  )}
-                </div>
-                <div className="border-t border-white/10 bg-[#0b1020] px-4 py-3">
-                  {terminalError && (
-                    <div className="mb-2 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-[11px] text-red-100">
-                      {terminalError}
-                    </div>
-                  )}
-                  <div className="flex items-start gap-3 rounded-2xl border border-white/10 bg-black/25 px-3 py-3">
-                    <span className="pt-1 font-mono text-sm text-emerald-400">$</span>
-                    <textarea
-                      value={terminalInput}
-                      onChange={(e) => setTerminalInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          void submitTerminalInput();
-                        }
-                      }}
-                      disabled={terminalBootstrapping || terminalStatus !== "ready" || !terminalSessionId}
-                      placeholder={
-                        terminalBootstrapping
-                          ? "Starting shell…"
-                          : terminalStatus === "ready"
-                            ? "Enter a command"
-                            : "Restart the session to run more commands"
-                      }
-                      className="min-h-[78px] flex-1 resize-none bg-transparent font-mono text-[13px] leading-6 text-[#f8fafc] outline-none placeholder:text-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => { void submitTerminalInput(); }}
-                      disabled={terminalBootstrapping || terminalStatus !== "ready" || !terminalSessionId || !terminalInput.trim()}
-                      className="mt-1 h-9 px-4 rounded-xl bg-emerald-500 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      Run
-                    </button>
-                  </div>
-                  <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-slate-500">
-                    <span>`Enter` runs the command. `Shift+Enter` adds a new line.</span>
-                    <span>This shell runs inside the sandbox container, not on your host.</span>
-                  </div>
-                </div>
-              </div>
-            </AppWindow>
+              onClear={() => { void clearTerminalBuffer(); }}
+              onRestart={() => { void restartTerminalSession(); }}
+              onSubmit={() => { void submitTerminalInput(); }}
+            />
           )}
 
-          {/* ── PLUGINS WINDOW ───────────────────────────────────────── */}
-          {pluginsOpen && (
-            <AppWindow
-              title="Integrations"
-              icon={Puzzle}
-              position={pluginsPos}
-              size={pluginsSize}
-              zIndex={windowZ.plugins ?? DEFAULT_WINDOW_Z.plugins}
-              onClose={() => setPluginsOpen(false)}
-              onFocus={() => focusWindow("plugins")}
-              onDragStart={(e) =>
-                startWindowDrag(e, pluginsDragRef, pluginsPos, pluginsSize, setPluginsPos, "plugins")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <PluginStore
-                  view="integrations"
-                  integrationsSyncing={integrationsSyncing}
-                  integrationsMissing={integrationsMissing}
-                />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── SKILLS WINDOW ────────────────────────────────────────── */}
-          {skillsOpen && (
-            <AppWindow
-              title="Skills"
-              icon={Sparkles}
-              position={skillsPos}
-              size={skillsSize}
-              zIndex={windowZ.skills ?? DEFAULT_WINDOW_Z.skills}
-              onClose={() => setSkillsOpen(false)}
-              onFocus={() => focusWindow("skills")}
-              onDragStart={(e) =>
-                startWindowDrag(e, skillsDragRef, skillsPos, skillsSize, setSkillsPos, "skills")
-              }
-              onResizeStart={(direction, e) =>
-                startWindowResize(
-                  e,
-                  direction,
-                  skillsResizeRef,
-                  skillsPos,
-                  skillsSize,
-                  setSkillsPos,
-                  setSkillsSize,
-                  "skills",
-                  { w: 420, h: 360 },
-                )
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <SkillsStore
-                  view="skills"
-                  integrationsSyncing={integrationsSyncing}
-                  integrationsMissing={integrationsMissing}
-                />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── MESSAGING WINDOW ─────────────────────────────────────── */}
-          {channelsOpen && (
-            <AppWindow
-              title="Messaging"
-              icon={Radio}
-              position={channelsPos}
-              size={channelsSize}
-              zIndex={windowZ.channels ?? DEFAULT_WINDOW_Z.channels}
-              onClose={() => setChannelsOpen(false)}
-              onFocus={() => focusWindow("channels")}
-              onDragStart={(e) =>
-                startWindowDrag(e, channelsDragRef, channelsPos, channelsSize, setChannelsPos, "channels")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <Channels />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── TASKS WINDOW ──────────────────────────────────────── */}
-          {tasksOpen && (
-            <AppWindow
-              title="Tasks"
-              icon={ListTodo}
-              position={tasksPos}
-              size={tasksSize}
-              zIndex={windowZ.tasks ?? DEFAULT_WINDOW_Z.tasks}
-              onClose={() => setTasksOpen(false)}
-              onFocus={() => focusWindow("tasks")}
-              onDragStart={(e) =>
-                startWindowDrag(e, tasksDragRef, tasksPos, tasksSize, setTasksPos, "tasks")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <Tasks gatewayRunning={gatewayRunning} />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── JOBS WINDOW ───────────────────────────────────────── */}
-          {jobsOpen && (
-            <AppWindow
-              title="Jobs"
-              icon={CalendarClock}
-              position={jobsPos}
-              size={jobsSize}
-              zIndex={windowZ.jobs ?? DEFAULT_WINDOW_Z.jobs}
-              onClose={() => setJobsOpen(false)}
-              onFocus={() => focusWindow("jobs")}
-              onDragStart={(e) =>
-                startWindowDrag(e, jobsDragRef, jobsPos, jobsSize, setJobsPos, "jobs")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <Jobs gatewayRunning={gatewayRunning} />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── LOGS WINDOW ─────────────────────────────────────────── */}
-          {logsOpen && (
-            <AppWindow
-              title="Logs"
-              icon={ScrollText}
-              position={logsPos}
-              size={logsSize}
-              zIndex={windowZ.logs ?? DEFAULT_WINDOW_Z.logs}
-              onClose={() => setLogsOpen(false)}
-              onFocus={() => focusWindow("logs")}
-              onDragStart={(e) =>
-                startWindowDrag(e, logsDragRef, logsPos, logsSize, setLogsPos, "logs")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <Logs />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── BILLING WINDOW ─────────────────────────────────────── */}
-          {billingEnabled && billingOpen && (
-            <AppWindow
-              title="Billing"
-              icon={CreditCard}
-              position={billingPos}
-              size={billingSize}
-              zIndex={windowZ.billing ?? DEFAULT_WINDOW_Z.billing}
-              onClose={() => setBillingOpen(false)}
-              onFocus={() => focusWindow("billing")}
-              onDragStart={(e) =>
-                startWindowDrag(e, billingDragRef, billingPos, billingSize, setBillingPos, "billing")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <BillingPage />
-              </Suspense>
-            </AppWindow>
-          )}
-
-          {/* ── SETTINGS WINDOW ─────────────────────────────────────── */}
-          {settingsOpen && (
-            <AppWindow
-              title="Settings"
-              icon={SettingsIcon}
-              position={settingsPos}
-              size={settingsSize}
-              zIndex={windowZ.settings ?? DEFAULT_WINDOW_Z.settings}
-              onClose={() => setSettingsOpen(false)}
-              onFocus={() => focusWindow("settings")}
-              onDragStart={(e) =>
-                startWindowDrag(e, settingsDragRef, settingsPos, settingsSize, setSettingsPos, "settings")
-              }
-            >
-              <Suspense fallback={PANEL_FALLBACK}>
-                <Settings
-                  gatewayRunning={gatewayRunning}
-                  onGatewayToggle={onGatewayToggle}
-                  onApplyRuntimeResources={onApplyRuntimeResources}
-                  isTogglingGateway={isTogglingGateway}
-                  selectedModel={selectedModel}
-                  onModelChange={onModelChange}
-                  useLocalKeys={useLocalKeys}
-                  onUseLocalKeysChange={onUseLocalKeysChange}
-                  codeModel={codeModel}
-                  imageModel={imageModel}
-                  imageGenerationModel={imageGenerationModel}
-                  textToSpeechModel={textToSpeechModel}
-                  audioUnderstandingModel={audioUnderstandingModel}
-                  onCodeModelChange={onCodeModelChange}
-                  onImageGenerationModelChange={onImageGenerationModelChange}
-                  onTextToSpeechModelChange={onTextToSpeechModelChange}
-                  onAudioUnderstandingModelChange={onAudioUnderstandingModelChange}
-                  onImageModelChange={onImageModelChange}
-                />
-              </Suspense>
-            </AppWindow>
-          )}
+          <DesktopUtilityWindows
+            windowZ={windowZ}
+            windows={{
+              plugins: { open: pluginsOpen, position: pluginsPos, size: pluginsSize },
+              skills: { open: skillsOpen, position: skillsPos, size: skillsSize },
+              channels: { open: channelsOpen, position: channelsPos, size: channelsSize },
+              tasks: { open: tasksOpen, position: tasksPos, size: tasksSize },
+              jobs: { open: jobsOpen, position: jobsPos, size: jobsSize },
+              logs: { open: logsOpen, position: logsPos, size: logsSize },
+              billing: { open: billingOpen, position: billingPos, size: billingSize },
+              settings: { open: settingsOpen, position: settingsPos, size: settingsSize },
+            }}
+            billingEnabled={billingEnabled}
+            gatewayRunning={gatewayRunning}
+            integrationsSyncing={integrationsSyncing}
+            integrationsMissing={integrationsMissing}
+            onGatewayToggle={onGatewayToggle}
+            onApplyRuntimeResources={onApplyRuntimeResources}
+            isTogglingGateway={isTogglingGateway}
+            selectedModel={selectedModel}
+            onModelChange={onModelChange}
+            useLocalKeys={useLocalKeys}
+            onUseLocalKeysChange={onUseLocalKeysChange}
+            codeModel={codeModel}
+            imageModel={imageModel}
+            imageGenerationModel={imageGenerationModel}
+            textToSpeechModel={textToSpeechModel}
+            audioUnderstandingModel={audioUnderstandingModel}
+            voiceShortcut={voiceShortcut}
+            onCodeModelChange={onCodeModelChange}
+            onImageGenerationModelChange={onImageGenerationModelChange}
+            onTextToSpeechModelChange={onTextToSpeechModelChange}
+            onAudioUnderstandingModelChange={onAudioUnderstandingModelChange}
+            onVoiceShortcutChange={onVoiceShortcutChange}
+            onImageModelChange={onImageModelChange}
+            onClose={{
+              plugins: () => setPluginsOpen(false),
+              skills: () => setSkillsOpen(false),
+              channels: () => setChannelsOpen(false),
+              tasks: () => setTasksOpen(false),
+              jobs: () => setJobsOpen(false),
+              logs: () => setLogsOpen(false),
+              billing: () => setBillingOpen(false),
+              settings: () => setSettingsOpen(false),
+            }}
+            onFocus={focusWindow}
+            onDragStart={{
+              plugins: (e) =>
+                startWindowDrag(e, pluginsDragRef, pluginsPos, pluginsSize, setPluginsPos, "plugins"),
+              skills: (e) =>
+                startWindowDrag(e, skillsDragRef, skillsPos, skillsSize, setSkillsPos, "skills"),
+              channels: (e) =>
+                startWindowDrag(e, channelsDragRef, channelsPos, channelsSize, setChannelsPos, "channels"),
+              tasks: (e) =>
+                startWindowDrag(e, tasksDragRef, tasksPos, tasksSize, setTasksPos, "tasks"),
+              jobs: (e) =>
+                startWindowDrag(e, jobsDragRef, jobsPos, jobsSize, setJobsPos, "jobs"),
+              logs: (e) =>
+                startWindowDrag(e, logsDragRef, logsPos, logsSize, setLogsPos, "logs"),
+              billing: (e) =>
+                startWindowDrag(e, billingDragRef, billingPos, billingSize, setBillingPos, "billing"),
+              settings: (e) =>
+                startWindowDrag(e, settingsDragRef, settingsPos, settingsSize, setSettingsPos, "settings"),
+            }}
+            onSkillsResizeStart={(direction, e) =>
+              startWindowResize(
+                e,
+                direction,
+                skillsResizeRef,
+                skillsPos,
+                skillsSize,
+                setSkillsPos,
+                setSkillsSize,
+                "skills",
+                { w: 420, h: 360 },
+              )
+            }
+          />
 
           <VoiceProvider
             audioUnderstandingModel={audioUnderstandingModel}
+            desktopContext={voiceDesktopContext}
+            shortcut={voiceShortcut}
             dispatchAction={runDesktopAction}
           />
 
-          {/* ── FLOATING DOCK ─────────────────────────────────────────── */}
-          <div
-            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex items-end justify-center gap-2 px-2.5 py-1.5 rounded-[22px]"
-            style={{
-              background: "rgba(255,255,255,0.18)",
-              backdropFilter: "blur(40px)",
-              WebkitBackdropFilter: "blur(40px)",
-              border: "1px solid rgba(255,255,255,0.25)",
-              boxShadow: "0 8px 32px rgba(0,0,0,0.35), inset 0 0.5px 0 rgba(255,255,255,0.2)",
+          <DesktopDock
+            active={{
+              finder: finderOpen,
+              chat: chatOpen,
+              browser: browserOpen,
+              sheets: sheetsOpen,
+              docs: docsOpen,
+              slides: slidesOpen,
+              terminal: terminalOpen,
+              skills: skillsOpen,
+              channels: channelsOpen,
+              tasks: tasksOpen,
+              jobs: jobsOpen,
+              logs: logsOpen,
+              billing: billingOpen,
+              settings: settingsOpen,
             }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Finder */}
-            <DockIconButton
-              label="Finder"
-              active={finderOpen}
-              onClick={() => requestDesktopWindowFocus("finder")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #4dc7f0 0%, #1a9ad7 100%)", boxShadow: "0 3px 10px rgba(26,154,215,0.4)" }}
-              >
-                <Folder className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Chat */}
-            <DockIconButton
-              label="Chat"
-              active={chatOpen}
-              onClick={() => requestDesktopWindowFocus("chat")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #5be579 0%, #32b350 100%)", boxShadow: "0 3px 10px rgba(50,179,80,0.4)" }}
-              >
-                <MessageSquare className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Browser */}
-            <DockIconButton
-              label="Browser"
-              active={browserOpen}
-              onClick={() => {
-                if (!browserOpen) {
-                  openFreshBrowserWindow(DEFAULT_BROWSER_URL);
-                  return;
-                }
-                focusWindow("browser");
-              }}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #0ea5e9 0%, #0284c7 100%)", boxShadow: "0 3px 10px rgba(2,132,199,0.4)" }}
-              >
-                <Globe className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            <DockIconButton
-              label="Sheets"
-              active={sheetsOpen}
-              onClick={() => requestDesktopWindowFocus("sheets")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #34d399 0%, #059669 100%)", boxShadow: "0 3px 10px rgba(5,150,105,0.38)" }}
-              >
-                <LayoutGrid className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            <DockIconButton
-              label="Docs"
-              active={docsOpen}
-              onClick={() => requestDesktopWindowFocus("docs")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #60a5fa 0%, #2563eb 100%)", boxShadow: "0 3px 10px rgba(37,99,235,0.38)" }}
-              >
-                <FileText className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            <DockIconButton
-              label="Slides"
-              active={slidesOpen}
-              onClick={() => requestDesktopWindowFocus("slides")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #fbbf24 0%, #f97316 100%)", boxShadow: "0 3px 10px rgba(249,115,22,0.34)" }}
-              >
-                <Image className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Terminal */}
-            <DockIconButton
-              label="Terminal"
-              active={terminalOpen}
-              onClick={() => requestDesktopWindowFocus("terminal")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #1f2937 0%, #0f172a 100%)", boxShadow: "0 3px 10px rgba(15,23,42,0.45)" }}
-              >
-                <Terminal className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Skills */}
-            <DockIconButton
-              label="Skills"
-              active={skillsOpen}
-              onClick={() => requestDesktopWindowFocus("skills")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #22d3ee 0%, #0ea5e9 100%)", boxShadow: "0 3px 10px rgba(14,165,233,0.4)" }}
-              >
-                <Sparkles className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Messaging */}
-            <DockIconButton
-              label="Messaging"
-              active={channelsOpen}
-              onClick={() => requestDesktopWindowFocus("channels")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #60a5fa 0%, #2563eb 100%)", boxShadow: "0 3px 10px rgba(37,99,235,0.4)" }}
-              >
-                <Radio className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Tasks */}
-            <DockIconButton
-              label="Tasks"
-              active={tasksOpen}
-              onClick={() => requestDesktopWindowFocus("tasks")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #22c55e 0%, #16a34a 100%)", boxShadow: "0 3px 10px rgba(22,163,74,0.35)" }}
-              >
-                <ListTodo className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Jobs */}
-            <DockIconButton
-              label="Jobs"
-              active={jobsOpen}
-              onClick={() => requestDesktopWindowFocus("jobs")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #f97316 0%, #ea580c 100%)", boxShadow: "0 3px 10px rgba(234,88,12,0.35)" }}
-              >
-                <CalendarClock className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Logs */}
-            <DockIconButton
-              label="Logs"
-              active={logsOpen}
-              onClick={() => requestDesktopWindowFocus("logs")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #94a3b8 0%, #475569 100%)", boxShadow: "0 3px 10px rgba(71,85,105,0.4)" }}
-              >
-                <ScrollText className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Billing */}
-            {billingEnabled && (
-              <DockIconButton
-                label="Billing"
-                active={billingOpen}
-                onClick={() => requestDesktopWindowFocus("billing")}
-              >
-                <div
-                  className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                  style={{ background: "linear-gradient(180deg, #22c55e 0%, #16a34a 100%)", boxShadow: "0 3px 10px rgba(34,197,94,0.35)" }}
-                >
-                  <CreditCard className="w-6 h-6 text-white" />
-                </div>
-              </DockIconButton>
-            )}
-
-            {/* Settings */}
-            <DockIconButton
-              label="Settings"
-              active={settingsOpen}
-              onClick={() => requestDesktopWindowFocus("settings")}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #f3f4f6 0%, #d1d5db 100%)", boxShadow: "0 3px 10px rgba(148,163,184,0.35)" }}
-              >
-                <SettingsIcon className="w-6 h-6 text-[#111827]" />
-              </div>
-            </DockIconButton>
-
-            <div className="w-px self-stretch my-1.5 mx-0.5" style={{ background: "rgba(255,255,255,0.25)" }} />
-
-            {/* Wallpaper */}
-            <DockIconButton
-              label="Wallpaper"
-              onClick={() => setShowWallpaperPicker(!showWallpaperPicker)}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #c084fc 0%, #9333ea 100%)", boxShadow: "0 3px 10px rgba(147,51,234,0.4)" }}
-              >
-                <Image className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            {/* Add Files */}
-            <DockIconButton
-              label="Add Files"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <div
-                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
-                style={{ background: "linear-gradient(180deg, #fbbf24 0%, #f59e0b 100%)", boxShadow: "0 3px 10px rgba(245,158,11,0.4)" }}
-              >
-                <Plus className="w-6 h-6 text-white" />
-              </div>
-            </DockIconButton>
-
-            <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileInputChange} multiple />
-          </div>
+            billingEnabled={billingEnabled}
+            onFocusWindow={requestDesktopWindowFocus}
+            onOpenBrowser={() => {
+              if (!browserOpen) {
+                openFreshBrowserWindow(DEFAULT_BROWSER_URL);
+                return;
+              }
+              focusWindow("browser");
+            }}
+            onToggleWallpaper={() => setShowWallpaperPicker(!showWallpaperPicker)}
+            onAddFiles={() => fileInputRef.current?.click()}
+          />
+          <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileInputChange} multiple />
         </div>
       </div>
 
