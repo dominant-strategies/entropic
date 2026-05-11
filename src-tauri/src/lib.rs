@@ -72,6 +72,38 @@ fn managed_build_profile_enabled() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
+fn install_linux_webview_media_permissions(app: &tauri::App) {
+    let Some(window) = app.get_webview_window("main") else {
+        append_startup_log("Linux WebView media permissions skipped: main window unavailable");
+        return;
+    };
+
+    if let Err(err) = window.with_webview(|webview| {
+        use webkit2gtk::{
+            glib::prelude::*, PermissionRequestExt, UserMediaPermissionRequest,
+            UserMediaPermissionRequestExt, WebViewExt,
+        };
+
+        webview.inner().connect_permission_request(|_, request| {
+            let Some(user_media) = request.dynamic_cast_ref::<UserMediaPermissionRequest>() else {
+                return false;
+            };
+
+            if user_media.is_for_audio_device() && !user_media.is_for_video_device() {
+                request.allow();
+                return true;
+            }
+
+            false
+        });
+    }) {
+        append_startup_log(&format!(
+            "Linux WebView media permissions failed to install: {err}"
+        ));
+    }
+}
+
 pub fn maybe_handle_cli_mode() -> Option<i32> {
     windows_runtime_manager::maybe_handle_runtime_manager_cli()
 }
@@ -137,6 +169,8 @@ pub fn run() {
 
             let state = commands::init_state(app.handle());
             app.manage(state);
+            #[cfg(target_os = "linux")]
+            install_linux_webview_media_permissions(app);
             commands::start_desktop_action_bridge(app.handle());
             Ok(())
         })

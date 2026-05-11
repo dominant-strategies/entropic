@@ -16,6 +16,8 @@ export type VoiceDesktopContext = {
 const WINDOW_ALIASES: Record<string, WindowKey> = {
   chat: "chat",
   browser: "browser",
+  email: "browser",
+  mail: "browser",
   finder: "finder",
   files: "finder",
   settings: "settings",
@@ -43,12 +45,18 @@ const VOICE_URL_ALIASES: Record<string, string> = {
   teams: "https://teams.microsoft.com",
 };
 
+const SPOKEN_FILE_EXTENSIONS = ["xlsx", "xlsm", "docx", "pptx", "pdf", "txt", "md", "csv", "html", "htm"] as const;
+
 function cleanVoiceTarget(value: string): string {
   return value
     .trim()
     .replace(/^[`"']+/, "")
     .replace(/[`"'.]+$/, "")
     .trim();
+}
+
+function urlAliasKey(value: string): string {
+  return value.toLowerCase().replace(/[\s_-]+/g, "");
 }
 
 function urlFromVoiceTarget(target: string): string | null {
@@ -60,11 +68,45 @@ function urlFromVoiceTarget(target: string): string | null {
     return `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`;
   }
   if (VOICE_URL_ALIASES[lower]) return VOICE_URL_ALIASES[lower];
+  const normalizedAlias = urlAliasKey(cleaned);
+  if (VOICE_URL_ALIASES[normalizedAlias]) return VOICE_URL_ALIASES[normalizedAlias];
   if (/^https?:\/\//i.test(cleaned)) return cleaned;
   if (/^[a-z0-9.-]+\.[a-z]{2,}(?:\/\S*)?$/i.test(cleaned)) {
     return `https://${cleaned}`;
   }
   return null;
+}
+
+function workspaceFilePathFromVoiceTarget(target: string): string | null {
+  const hadSpokenDot = /\s+(?:dot|period)\s+/i.test(target);
+  const cleaned = cleanVoiceTarget(target)
+    .replace(/\s+(?:dot|period)\s+/gi, ".")
+    .replace(/\s+(?:dash|hyphen)\s+/gi, "-")
+    .replace(/\s+slash\s+/gi, "/")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return null;
+
+  const literalMatch = cleaned.match(/^(.+\.(?:xlsx|xlsm|docx|pptx|pdf|txt|md|csv|html?))$/i);
+  if (literalMatch?.[1]) {
+    const path = cleanVoiceTarget(literalMatch[1]);
+    if (!hadSpokenDot) return path;
+    const dotIndex = path.lastIndexOf(".");
+    const basename = path.slice(0, dotIndex).replace(/\s+/g, "-");
+    return `${basename}${path.slice(dotIndex).toLowerCase()}`;
+  }
+
+  const spokenExtensionMatch = cleaned.match(
+    new RegExp(`^(.+?)\\s+(${SPOKEN_FILE_EXTENSIONS.join("|")})$`, "i"),
+  );
+  if (!spokenExtensionMatch?.[1] || !spokenExtensionMatch[2]) return null;
+
+  const basename = cleanVoiceTarget(spokenExtensionMatch[1])
+    .replace(/\s+(?:dash|hyphen)\s+/gi, "-")
+    .replace(/\s+/g, "-");
+  const extension = spokenExtensionMatch[2].toLowerCase();
+  if (!basename) return null;
+  return `${basename}.${extension}`;
 }
 
 export function resolveVoiceAction(transcript: string): DesktopAction {
@@ -84,18 +126,28 @@ export function resolveVoiceAction(transcript: string): DesktopAction {
     }
   }
 
+  const activeOfficeMatch = lower.match(
+    /\b(?:focus|show|switch to|open)\s+(?:the\s+|this\s+)?(spreadsheet|document|presentation)(?:\s+in\s+(sheets|docs|slides))?\b/,
+  );
+  if (activeOfficeMatch?.[1]) {
+    return { type: "focus_window", window: WINDOW_ALIASES[activeOfficeMatch[2] || activeOfficeMatch[1]] ?? "sheets" };
+  }
+
   const focusMatch = lower.match(
-    /\b(?:focus|show|switch to|open)\s+(chat|browser|finder|files|settings|integrations|skills|plugins|terminal|shell|tasks|jobs|sheets|spreadsheet|docs|document|slides|presentation)\b/,
+    /\b(?:focus|show|switch to|open)\s+(?:the\s+)?(chat|browser|email|mail|finder|files|settings|integrations|skills|plugins|terminal|shell|tasks|jobs|sheets|spreadsheet|docs|document|slides|presentation)(?:\s+window)?\b/,
   );
   if (focusMatch?.[1]) {
     return { type: "focus_window", window: WINDOW_ALIASES[focusMatch[1]] ?? "chat" };
   }
 
   const fileMatch = text.match(
-    /\bopen\s+(?:the\s+)?(?:file\s+)?(.+\.(?:xlsx|xlsm|docx|pptx|pdf|txt|md|csv|html?))\b/i,
+    /\bopen\s+(?:the\s+)?(?:file\s+)?(.+)$/i,
   );
   if (fileMatch?.[1]) {
-    return { type: "open_workspace_file", path: cleanVoiceTarget(fileMatch[1]) };
+    const path = workspaceFilePathFromVoiceTarget(fileMatch[1]);
+    if (path) {
+      return { type: "open_workspace_file", path };
+    }
   }
 
   const browserMatch = text.match(
@@ -115,6 +167,26 @@ export function chatTaskNeedsConfirmation(prompt: string): boolean {
   return /\b(send|email|message|post|create|update|edit|delete|remove|move|rename|run|execute|asana|jira|linear|github|gmail|outlook|teams|slack)\b/i.test(
     riskText,
   );
+}
+
+export function previewForVoiceAction(
+  action: DesktopAction,
+): { message: string; confirmLabel: string } | null {
+  switch (action.type) {
+    case "open_workspace_file":
+      return { message: `Open workspace file: ${action.path}?`, confirmLabel: "Open" };
+    case "open_workspace_folder":
+      return { message: `Open workspace folder: ${action.path || "/"}?`, confirmLabel: "Open" };
+    case "open_browser_url":
+      return { message: `Open browser URL: ${action.url}?`, confirmLabel: "Open" };
+    case "new_chat_task":
+      if (action.autoSubmit && chatTaskNeedsConfirmation(action.prompt)) {
+        return { message: "Send this voice task to the agent now?", confirmLabel: "Send" };
+      }
+      return null;
+    default:
+      return null;
+  }
 }
 
 export function formatVoiceTaskPrompt(

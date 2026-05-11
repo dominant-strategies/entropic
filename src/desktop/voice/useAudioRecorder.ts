@@ -13,6 +13,17 @@ type UseAudioRecorderOptions = {
   onError: (message: string) => void;
 };
 
+type AudioContextConstructor = new () => AudioContext;
+
+type PcmRecorderState = {
+  audioContext: AudioContext;
+  source: MediaStreamAudioSourceNode;
+  processor: ScriptProcessorNode;
+  chunks: Float32Array[];
+  totalSamples: number;
+  sampleRate: number;
+};
+
 function preferredRecordingMimeType(): string {
   if (typeof MediaRecorder === "undefined") {
     return "";
@@ -44,6 +55,53 @@ async function blobToBase64(blob: Blob): Promise<string> {
   return btoa(binary);
 }
 
+function audioContextConstructor(): AudioContextConstructor | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const win = window as Window & typeof globalThis & { webkitAudioContext?: AudioContextConstructor };
+  return win.AudioContext || win.webkitAudioContext || null;
+}
+
+function writeAscii(view: DataView, offset: number, value: string) {
+  for (let i = 0; i < value.length; i += 1) {
+    view.setUint8(offset + i, value.charCodeAt(i));
+  }
+}
+
+function encodePcmChunksAsWav(chunks: Float32Array[], totalSamples: number, sampleRate: number): Blob {
+  const bytesPerSample = 2;
+  const channelCount = 1;
+  const dataLength = totalSamples * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(buffer);
+
+  writeAscii(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataLength, true);
+  writeAscii(view, 8, "WAVE");
+  writeAscii(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channelCount, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channelCount * bytesPerSample, true);
+  view.setUint16(32, channelCount * bytesPerSample, true);
+  view.setUint16(34, 16, true);
+  writeAscii(view, 36, "data");
+  view.setUint32(40, dataLength, true);
+
+  let offset = 44;
+  for (const chunk of chunks) {
+    for (let i = 0; i < chunk.length; i += 1) {
+      const sample = Math.max(-1, Math.min(1, chunk[i] || 0));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += bytesPerSample;
+    }
+  }
+
+  return new Blob([view], { type: "audio/wav" });
+}
+
 export function useAudioRecorder({
   maxBytes,
   onRecorded,
@@ -52,12 +110,13 @@ export function useAudioRecorder({
   const [isRecording, setIsRecording] = useState(false);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const pcmRecorderRef = useRef<PcmRecorderState | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
   const isSupported =
     typeof navigator !== "undefined" &&
     Boolean(navigator.mediaDevices?.getUserMedia) &&
-    typeof MediaRecorder !== "undefined";
+    (typeof MediaRecorder !== "undefined" || audioContextConstructor() !== null);
 
   function stopStream() {
     const stream = streamRef.current;
@@ -66,6 +125,87 @@ export function useAudioRecorder({
     for (const track of stream.getTracks()) {
       track.stop();
     }
+  }
+
+  function cleanupPcmRecorder() {
+    const pcmRecorder = pcmRecorderRef.current;
+    pcmRecorderRef.current = null;
+    if (!pcmRecorder) return null;
+
+    pcmRecorder.processor.onaudioprocess = null;
+    pcmRecorder.source.disconnect();
+    pcmRecorder.processor.disconnect();
+    void pcmRecorder.audioContext.close().catch(() => undefined);
+    return pcmRecorder;
+  }
+
+  async function startPcmRecording(stream: MediaStream) {
+    const AudioContextCtor = audioContextConstructor();
+    if (!AudioContextCtor) {
+      throw new Error("Microphone recording is not available in this environment.");
+    }
+
+    const audioContext = new AudioContextCtor();
+    const source = audioContext.createMediaStreamSource(stream);
+    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    const pcmRecorder: PcmRecorderState = {
+      audioContext,
+      source,
+      processor,
+      chunks: [],
+      totalSamples: 0,
+      sampleRate: audioContext.sampleRate,
+    };
+
+    processor.onaudioprocess = (event) => {
+      const current = pcmRecorderRef.current;
+      if (!current) return;
+
+      const input = event.inputBuffer.getChannelData(0);
+      current.chunks.push(new Float32Array(input));
+      current.totalSamples += input.length;
+
+      const output = event.outputBuffer.getChannelData(0);
+      output.fill(0);
+    };
+
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+    pcmRecorderRef.current = pcmRecorder;
+
+    if (audioContext.state === "suspended") {
+      await audioContext.resume();
+    }
+
+    setIsRecording(true);
+  }
+
+  async function finishPcmRecording() {
+    const pcmRecorder = cleanupPcmRecorder();
+    setIsRecording(false);
+    stopStream();
+
+    if (!pcmRecorder || pcmRecorder.totalSamples === 0) {
+      return;
+    }
+
+    const blob = encodePcmChunksAsWav(
+      pcmRecorder.chunks,
+      pcmRecorder.totalSamples,
+      pcmRecorder.sampleRate,
+    );
+    if (blob.size > maxBytes) {
+      onError("Recorded audio is too large. Keep recordings under 5 MB.");
+      return;
+    }
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    onRecorded({
+      fileName: `voice-note-${stamp}.wav`,
+      mimeType: "audio/wav",
+      content: await blobToBase64(blob),
+      previewUrl: URL.createObjectURL(blob),
+    });
   }
 
   async function startRecording() {
@@ -79,10 +219,24 @@ export function useAudioRecorder({
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mimeType = preferredRecordingMimeType();
-      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-
       streamRef.current = stream;
+
+      let recorder: MediaRecorder | null = null;
+      let mimeType = "";
+      if (typeof MediaRecorder !== "undefined") {
+        try {
+          mimeType = preferredRecordingMimeType();
+          recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+        } catch {
+          recorder = null;
+        }
+      }
+
+      if (!recorder) {
+        await startPcmRecording(stream);
+        return;
+      }
+
       recorderRef.current = recorder;
       chunksRef.current = [];
 
@@ -128,10 +282,17 @@ export function useAudioRecorder({
         });
       };
 
-      recorder.start();
-      setIsRecording(true);
+      try {
+        recorder.start();
+        setIsRecording(true);
+      } catch {
+        recorderRef.current = null;
+        chunksRef.current = [];
+        await startPcmRecording(stream);
+      }
     } catch (error) {
       setIsRecording(false);
+      cleanupPcmRecorder();
       stopStream();
       onError(error instanceof Error ? error.message : "Microphone access was denied.");
     }
@@ -139,6 +300,12 @@ export function useAudioRecorder({
 
   function stopRecording() {
     const recorder = recorderRef.current;
+    if (pcmRecorderRef.current) {
+      void finishPcmRecording().catch((error: unknown) => {
+        onError(error instanceof Error ? error.message : "Failed to read recorded audio.");
+      });
+      return;
+    }
     if (!recorder) {
       setIsRecording(false);
       stopStream();
@@ -155,6 +322,7 @@ export function useAudioRecorder({
       if (recorder && recorder.state !== "inactive") {
         recorder.stop();
       }
+      cleanupPcmRecorder();
       stopStream();
     };
   }, []);

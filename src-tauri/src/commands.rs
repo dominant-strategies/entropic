@@ -6561,7 +6561,8 @@ fn load_or_create_onlyoffice_jwt_secret(app: &AppHandle) -> Result<String, Strin
 
 const ONLYOFFICE_HOST_HTML: &str =
     include_str!("../../openclaw-runtime/browser-service/onlyoffice-host.html");
-const ONLYOFFICE_URL_TOKEN_TTL_SECS: u64 = 15 * 60;
+const ONLYOFFICE_OPEN_URL_TOKEN_TTL_SECS: u64 = 15 * 60;
+const ONLYOFFICE_ACTIVE_DOCUMENT_TOKEN_TTL_SECS: u64 = 12 * 60 * 60;
 
 #[derive(Debug, Clone, Copy)]
 struct OnlyOfficeFileSpec {
@@ -6704,11 +6705,12 @@ fn sign_onlyoffice_path_token(
     kind: &str,
     relative_path: &str,
 ) -> Result<String, String> {
+    let ttl_secs = onlyoffice_path_token_ttl_secs(kind);
     let exp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-        .saturating_add(ONLYOFFICE_URL_TOKEN_TTL_SECS);
+        .saturating_add(ttl_secs);
     sign_onlyoffice_jwt(
         secret,
         &serde_json::json!({
@@ -6717,6 +6719,13 @@ fn sign_onlyoffice_path_token(
             "exp": exp,
         }),
     )
+}
+
+fn onlyoffice_path_token_ttl_secs(kind: &str) -> u64 {
+    match kind {
+        "download" | "callback" => ONLYOFFICE_ACTIVE_DOCUMENT_TOKEN_TTL_SECS,
+        _ => ONLYOFFICE_OPEN_URL_TOKEN_TTL_SECS,
+    }
 }
 
 fn verify_onlyoffice_path_token(
@@ -6738,6 +6747,31 @@ fn verify_onlyoffice_path_token(
         return Err("ONLYOFFICE token does not match the requested file.".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod onlyoffice_token_tests {
+    use super::{
+        onlyoffice_path_token_ttl_secs, ONLYOFFICE_ACTIVE_DOCUMENT_TOKEN_TTL_SECS,
+        ONLYOFFICE_OPEN_URL_TOKEN_TTL_SECS,
+    };
+
+    #[test]
+    fn active_document_tokens_outlive_open_tokens() {
+        assert_eq!(
+            onlyoffice_path_token_ttl_secs("open"),
+            ONLYOFFICE_OPEN_URL_TOKEN_TTL_SECS
+        );
+        assert_eq!(
+            onlyoffice_path_token_ttl_secs("download"),
+            ONLYOFFICE_ACTIVE_DOCUMENT_TOKEN_TTL_SECS
+        );
+        assert_eq!(
+            onlyoffice_path_token_ttl_secs("callback"),
+            ONLYOFFICE_ACTIVE_DOCUMENT_TOKEN_TTL_SECS
+        );
+        assert!(ONLYOFFICE_ACTIVE_DOCUMENT_TOKEN_TTL_SECS > ONLYOFFICE_OPEN_URL_TOKEN_TTL_SECS);
+    }
 }
 
 fn onlyoffice_file_app_kind(relative_path: &str) -> Result<&'static str, String> {

@@ -6,10 +6,11 @@ import { validateDesktopAction } from "../actions";
 import { useAudioRecorder, type RecordedAudioAttachment } from "./useAudioRecorder";
 import { useAudioTranscription } from "./useAudioTranscription";
 import { VoiceOverlay } from "./VoiceOverlay";
+import { clientLog } from "../../lib/clientLog";
 import {
-  chatTaskNeedsConfirmation,
   formatVoiceTaskPrompt,
   messageForMode,
+  previewForVoiceAction,
   resolveVoiceAction,
   type VoiceDesktopContext,
   type VoiceMode,
@@ -24,21 +25,18 @@ type VoiceProviderProps = {
   dispatchAction: (action: DesktopAction) => Promise<void>;
 };
 
-function previewForAction(action: DesktopAction): { message: string; confirmLabel: string } | null {
+function voiceActionLogPayload(action: DesktopAction): Record<string, string | boolean | undefined> {
   switch (action.type) {
     case "open_workspace_file":
-      return { message: `Open workspace file: ${action.path}?`, confirmLabel: "Open" };
     case "open_workspace_folder":
-      return { message: `Open workspace folder: ${action.path || "/"}?`, confirmLabel: "Open" };
+      return { type: action.type, path: action.path };
     case "open_browser_url":
-      return { message: `Open browser URL: ${action.url}?`, confirmLabel: "Open" };
+      return { type: action.type, url: action.url };
+    case "focus_window":
+    case "close_window":
+      return { type: action.type, window: action.window };
     case "new_chat_task":
-      if (action.autoSubmit && chatTaskNeedsConfirmation(action.prompt)) {
-        return { message: "Send this voice task to the agent now?", confirmLabel: "Send" };
-      }
-      return null;
-    default:
-      return null;
+      return { type: action.type, autoSubmit: action.autoSubmit === true };
   }
 }
 
@@ -103,6 +101,7 @@ export function VoiceProvider({
   async function dispatchVoiceAction(action: DesktopAction) {
     setState("thinking");
     setPendingAction(null);
+    clientLog("voice.action.dispatch", voiceActionLogPayload(action));
     try {
       await dispatchAction(action);
       clearVoiceState();
@@ -132,8 +131,9 @@ export function VoiceProvider({
           autoSubmit: true,
         };
       }
-      const preview = previewForAction(action);
+      const preview = previewForVoiceAction(action);
       if (preview) {
+        clientLog("voice.action.confirmation_required", voiceActionLogPayload(action));
         setPendingAction(action);
         setConfirmLabel(preview.confirmLabel);
         setState("confirming");

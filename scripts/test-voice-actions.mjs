@@ -34,6 +34,7 @@ const {
   chatTaskNeedsConfirmation,
   formatVoiceTaskPrompt,
   messageForMode,
+  previewForVoiceAction,
   resolveVoiceAction,
 } = module.exports;
 
@@ -45,11 +46,39 @@ sameJson(resolveVoiceAction("open sales-plan.xlsx"), {
   type: "open_workspace_file",
   path: "sales-plan.xlsx",
 });
+sameJson(resolveVoiceAction("open roadmap.pptx"), {
+  type: "open_workspace_file",
+  path: "roadmap.pptx",
+});
+sameJson(resolveVoiceAction("open sales plan dot xlsx"), {
+  type: "open_workspace_file",
+  path: "sales-plan.xlsx",
+});
+sameJson(resolveVoiceAction("open ui smoke xlsx"), {
+  type: "open_workspace_file",
+  path: "ui-smoke.xlsx",
+});
 sameJson(resolveVoiceAction("focus Settings"), {
   type: "focus_window",
   window: "settings",
 });
+sameJson(resolveVoiceAction("show spreadsheet"), {
+  type: "focus_window",
+  window: "sheets",
+});
+sameJson(resolveVoiceAction("Open this spreadsheet in Sheets"), {
+  type: "focus_window",
+  window: "sheets",
+});
+sameJson(resolveVoiceAction("Focus the email window"), {
+  type: "focus_window",
+  window: "browser",
+});
 sameJson(resolveVoiceAction("Open browser and go to Gmail"), {
+  type: "open_browser_url",
+  url: "https://mail.google.com",
+});
+sameJson(resolveVoiceAction("Open browser and go to G mail"), {
   type: "open_browser_url",
   url: "https://mail.google.com",
 });
@@ -61,15 +90,67 @@ sameJson(resolveVoiceAction("summarize my inbox"), {
   type: "new_chat_task",
   prompt: "summarize my inbox",
 });
+sameJson(resolveVoiceAction("Create a presentation from this sales plan"), {
+  type: "new_chat_task",
+  prompt: "Create a presentation from this sales plan",
+});
+sameJson(resolveVoiceAction("Create an Asana task from this paragraph"), {
+  type: "new_chat_task",
+  prompt: "Create an Asana task from this paragraph",
+});
+sameJson(resolveVoiceAction("Use the Gmail integration to summarize my inbox"), {
+  type: "new_chat_task",
+  prompt: "Use the Gmail integration to summarize my inbox",
+});
+sameJson(resolveVoiceAction("Run the project tests"), {
+  type: "new_chat_task",
+  prompt: "Run the project tests",
+});
+sameJson(resolveVoiceAction("Open Settings"), {
+  type: "focus_window",
+  window: "settings",
+});
 
 assert.equal(messageForMode("dictation"), "Listening for dictation...");
 assert.equal(messageForMode("command"), "Listening for a desktop command...");
 assert.equal(messageForMode("conversation"), "Listening for a conversation turn...");
 
 assert.equal(chatTaskNeedsConfirmation("Voice command: send Alan an Outlook email"), true);
+assert.equal(chatTaskNeedsConfirmation("Voice command: move the Asana task to done"), true);
+assert.equal(chatTaskNeedsConfirmation("Voice command: create an Asana task from this paragraph"), true);
+assert.equal(chatTaskNeedsConfirmation("Voice command: use the Gmail integration to summarize my inbox"), true);
+assert.equal(chatTaskNeedsConfirmation("Voice command: run the project tests"), true);
 assert.equal(
   chatTaskNeedsConfirmation("Voice command: summarize this note\n- Integrations: Gmail connected"),
   false,
+);
+
+sameJson(previewForVoiceAction({ type: "open_workspace_file", path: "sales-plan.xlsx" }), {
+  message: "Open workspace file: sales-plan.xlsx?",
+  confirmLabel: "Open",
+});
+sameJson(previewForVoiceAction({ type: "open_browser_url", url: "https://mail.google.com" }), {
+  message: "Open browser URL: https://mail.google.com?",
+  confirmLabel: "Open",
+});
+sameJson(
+  previewForVoiceAction({
+    type: "new_chat_task",
+    prompt: "Voice command: send Alan an Outlook email",
+    autoSubmit: true,
+  }),
+  {
+    message: "Send this voice task to the agent now?",
+    confirmLabel: "Send",
+  },
+);
+assert.equal(
+  previewForVoiceAction({
+    type: "new_chat_task",
+    prompt: "Voice command: summarize this note",
+    autoSubmit: true,
+  }),
+  null,
 );
 
 const formatted = formatVoiceTaskPrompt("summarize this sheet", "command", {

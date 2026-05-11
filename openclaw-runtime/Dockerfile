@@ -54,6 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3 -m pip install --no-cache-dir --break-system-packages \
     'docling>=2.64,<3' \
     openpyxl==3.1.5 \
+    pytest==8.3.5 \
     python-pptx==1.0.2
 
 # Install patchright's patched Chromium:
