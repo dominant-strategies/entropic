@@ -2,6 +2,8 @@ import { useState, useRef, useEffect, useCallback, useMemo, type ComponentType, 
 import {
   Send,
   Paperclip,
+  Copy,
+  Check,
   Sparkles,
   Image as ImageIcon,
   Download,
@@ -1094,6 +1096,7 @@ export function Chat({
   const [providerStatus, setProviderStatus] = useState<AuthState["providers"]>([]);
   const [gatewayUrl, setGatewayUrl] = useState(DEFAULT_GATEWAY_URL);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [savingWorkspaceImageKeys, setSavingWorkspaceImageKeys] = useState<Record<string, boolean>>({});
   const [savedWorkspaceImagePaths, setSavedWorkspaceImagePaths] = useState<Record<string, string>>({});
   const [dragActive, setDragActive] = useState(false);
@@ -1135,6 +1138,7 @@ export function Chat({
   const shellDraftsRef = useRef<Record<string, string>>({});
   const imageDraftsRef = useRef<Record<string, string>>({});
   const outboxEntriesRef = useRef<PersistedPendingSend[]>([]);
+  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const composerModeBySessionRef = useRef<Record<string, ComposerMode>>({});
   const terminalStateBySessionRef = useRef<Record<string, ChatTerminalState>>({});
   const handledRequestedSessionRef = useRef<string | null>(null);
@@ -5656,6 +5660,48 @@ export function Chat({
     }
   }
 
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current) {
+        clearTimeout(copyResetTimerRef.current);
+      }
+    };
+  }, []);
+
+  async function copyMessageText(messageId: string, text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(trimmed);
+      setCopiedMessageId(messageId);
+      if (copyResetTimerRef.current) {
+        clearTimeout(copyResetTimerRef.current);
+      }
+      copyResetTimerRef.current = setTimeout(() => {
+        setCopiedMessageId((current) => (current === messageId ? null : current));
+      }, 1500);
+    } catch (e) {
+      setError(formatUnknownUiError(e, "Failed to copy message."));
+    }
+  }
+
+  function resolveMessageCopyText(message: Message): string {
+    if (message.role === "user") {
+      return normalizeUserContent(message.content, message.sentAt).content;
+    }
+    if (message.kind === "toolResult" && message.toolName === "/run" && message.terminalResult) {
+      const result = message.terminalResult;
+      return [`$ ${result.command}`, result.stdout.trimEnd(), result.stderr.trimEnd()]
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+    }
+    const payload = parseToolPayloads(message.content || "");
+    return payload.cleanText.trim() || message.content.trim();
+  }
+
   // Memoize the message list so typing in the composer doesn't re-render
   // every message (and re-parse markdown) on each keystroke.
   // These hooks must be before early returns to satisfy Rules of Hooks.
@@ -5663,6 +5709,10 @@ export function Chat({
     const normalizedUser = msg.role === "user" ? normalizeUserContent(msg.content, msg.sentAt) : null;
     const bodyContent = msg.role === "user" ? normalizedUser?.content ?? "" : msg.content;
     const messageTime = formatMessageTime(msg.role === "user" ? normalizedUser?.sentAt : msg.sentAt);
+    const copyText = resolveMessageCopyText(msg);
+    const canCopy = copyText.trim().length > 0;
+    const copyLabel = copiedMessageId === msg.id ? "Copied" : "Copy";
+    const copyIcon = copiedMessageId === msg.id ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />;
     if (msg.role === "user" && !bodyContent) {
       return null;
     }
@@ -5685,17 +5735,30 @@ export function Chat({
           {messageTime ? (
             <div
               className={clsx(
-                "mt-0.5 px-1 text-[11px] text-[var(--text-tertiary)]",
+                "mt-0.5 flex items-center gap-2 px-1 text-[11px] text-[var(--text-tertiary)]",
                 msg.role === "user" ? "text-right" : "text-left"
               )}
             >
-              {messageTime}
+              <span className={msg.role === "user" ? "ml-auto" : ""}>{messageTime}</span>
+              {canCopy ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void copyMessageText(msg.id, copyText);
+                  }}
+                  className="inline-flex h-5 w-5 items-center justify-center text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+                  aria-label={copyLabel}
+                  title={copyLabel}
+                >
+                  {copyIcon}
+                </button>
+              ) : null}
             </div>
           ) : null}
         </div>
       </div>
     );
-  }), [messages]);
+  }), [messages, copiedMessageId]);
 
   const loadingIndicator = useMemo(() => isLoading ? (
     <div className="flex justify-start">

@@ -22,7 +22,7 @@ use std::io::Read;
 #[cfg(target_os = "macos")]
 use std::os::raw::c_uchar;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -32,6 +32,7 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Webview, WebviewBuilder,
     WebviewUrl,
 };
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -65,6 +66,9 @@ const EMBEDDED_PREVIEW_WEBVIEW_LABEL: &str = "desktop-browser-preview";
 const EMBEDDED_PREVIEW_STATE_EVENT: &str = "embedded-preview-state";
 const DESKTOP_TERMINAL_EVENT: &str = "desktop-terminal-output";
 const DESKTOP_TERMINAL_BUFFER_MAX_BYTES: usize = 200_000;
+const HOST_DROP_PATH_TTL_MS: u64 = 60_000;
+const HOST_DROP_PATH_MAX_ENTRIES: usize = 256;
+const HOST_DROP_FILE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const ENTROPIC_NATIVE_API_ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1"];
 const ENTROPIC_NATIVE_API_ALLOWED_DOMAINS: &[&str] = &["entropic.qu.ai"];
 const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
@@ -1482,6 +1486,25 @@ fn resolve_container_proxy_base(proxy_url: &str) -> Result<String, String> {
 
     if trimmed.starts_with('/') {
         let path = trimmed.trim_start_matches('/');
+        let managed_target = std::env::var("VITE_API_PROXY_TARGET")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                let profile = std::env::var("ENTROPIC_BUILD_PROFILE").ok()?;
+                if profile.trim().eq_ignore_ascii_case("managed") {
+                    Some("https://entropic.qu.ai".to_string())
+                } else {
+                    None
+                }
+            });
+        if let Some(target) = managed_target {
+            return Ok(if path.is_empty() {
+                target
+            } else {
+                format!("{}/{}", target, path)
+            });
+        }
         return Ok(if path.is_empty() {
             ENTROPIC_PROXY_DEV_ORIGIN.trim_end_matches('/').to_string()
         } else {
@@ -3770,6 +3793,7 @@ pub struct AppState {
     pub anthropic_oauth_verifier: Mutex<Option<String>>,
     /// Opaque attachment IDs mapped to container temp upload paths.
     pending_attachments: Mutex<HashMap<String, PendingAttachmentRecord>>,
+    recent_host_drop_paths: Mutex<HashMap<String, RecentHostDropRecord>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, Default)]
@@ -3790,6 +3814,7 @@ impl Default for AppState {
             whatsapp_login: Mutex::new(WhatsAppLoginCache::default()),
             anthropic_oauth_verifier: Mutex::new(None),
             pending_attachments: Mutex::new(HashMap::new()),
+            recent_host_drop_paths: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -4029,6 +4054,12 @@ pub struct AttachmentInfo {
 struct PendingAttachmentRecord {
     file_name: String,
     temp_path: String,
+    created_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct RecentHostDropRecord {
+    path: PathBuf,
     created_at_ms: u64,
 }
 
@@ -4567,6 +4598,10 @@ fn running_gateway_container_name() -> Option<&'static str> {
     }
 }
 
+fn preferred_existing_gateway_container_name() -> &'static str {
+    existing_gateway_container_name().unwrap_or(OPENCLAW_CONTAINER)
+}
+
 fn existing_gateway_container_name() -> Option<&'static str> {
     if named_gateway_container_exists(OPENCLAW_CONTAINER, false) {
         Some(OPENCLAW_CONTAINER)
@@ -4760,6 +4795,29 @@ fn probe_proxy_backend_from_gateway_container() -> Result<(), String> {
     Err(format!(
         "Sandbox container could not reach {}: {}",
         url, detail
+    ))
+}
+
+fn probe_proxy_backend_from_host() -> Result<(), String> {
+    let proxy_base = read_container_env("ENTROPIC_PROXY_BASE_URL")
+        .ok_or_else(|| "Proxy sandbox is missing ENTROPIC_PROXY_BASE_URL".to_string())?;
+    let host_base = resolve_host_proxy_base(&proxy_base)?;
+    let url = proxy_backend_models_probe_url(&host_base)?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|e| format!("Failed to build host proxy probe client: {}", e))?;
+    let response = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("Host could not reach {}: {}", url, e))?;
+    if response.status().is_success() || response.status().is_redirection() {
+        return Ok(());
+    }
+    Err(format!(
+        "Host could not reach {}: HTTP {}",
+        url,
+        response.status()
     ))
 }
 
@@ -5052,8 +5110,9 @@ fn state_file(path: &str) -> String {
 }
 
 fn container_dir_exists(path: &str) -> Result<bool, String> {
+    let container = preferred_existing_gateway_container_name();
     Ok(docker_command()
-        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", path])
+        .args(["exec", container, "test", "-d", path])
         .output()
         .map_err(|e| format!("Failed to inspect container path: {}", e))?
         .status
@@ -5061,8 +5120,9 @@ fn container_dir_exists(path: &str) -> Result<bool, String> {
 }
 
 fn container_path_exists_checked(path: &str) -> Result<bool, String> {
+    let container = preferred_existing_gateway_container_name();
     Ok(docker_command()
-        .args(["exec", OPENCLAW_CONTAINER, "test", "-e", "--", path])
+        .args(["exec", container, "test", "-e", path])
         .output()
         .map_err(|e| format!("Failed to inspect container path: {}", e))?
         .status
@@ -5081,7 +5141,7 @@ fn resolve_skill_root_in_container(
 
     let direct_skill_md = format!("{}/SKILL.md", normalized_root);
     let has_direct = docker_command()
-        .args(["exec", container, "test", "-f", "--", &direct_skill_md])
+        .args(["exec", container, "test", "-f", &direct_skill_md])
         .output()
         .map_err(|e| format!("Failed to inspect skill directory: {}", e))?
         .status
@@ -5149,7 +5209,8 @@ fn list_container_subdirs(path: &str) -> Result<Vec<String>, String> {
         return Ok(vec![]);
     }
 
-    let listing = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "ls", "-1", "--", path])?;
+    let container = preferred_existing_gateway_container_name();
+    let listing = docker_exec_output(&["exec", container, "ls", "-1", "--", path])?;
     let mut out = Vec::new();
     for line in listing.lines() {
         let id = line.trim();
@@ -5165,16 +5226,15 @@ fn list_container_subdirs(path: &str) -> Result<Vec<String>, String> {
 }
 
 fn resolve_versioned_skill_dir(skill_id: &str) -> Result<Option<String>, String> {
+    let container = preferred_existing_gateway_container_name();
     let skill_root = format!("{}/{}", SKILLS_ROOT, skill_id);
     if !container_dir_exists(&skill_root)? {
         return Ok(None);
     }
 
     let current = format!("{}/current", skill_root);
-    if container_path_exists(&current) {
-        if let Some(path) =
-            resolve_skill_root_in_container(OPENCLAW_CONTAINER, &current, Some(skill_id))?
-        {
+    if container_path_exists_for(container, &current) {
+        if let Some(path) = resolve_skill_root_in_container(container, &current, Some(skill_id))? {
             return Ok(Some(path));
         }
         return Ok(Some(current));
@@ -5187,9 +5247,7 @@ fn resolve_versioned_skill_dir(skill_id: &str) -> Result<Option<String>, String>
     versions.sort();
     let version = versions.pop().unwrap_or_else(|| "latest".to_string());
     let version_root = format!("{}/{}", skill_root, version);
-    if let Some(path) =
-        resolve_skill_root_in_container(OPENCLAW_CONTAINER, &version_root, Some(skill_id))?
-    {
+    if let Some(path) = resolve_skill_root_in_container(container, &version_root, Some(skill_id))? {
         return Ok(Some(path));
     }
     Ok(Some(version_root))
@@ -5659,9 +5717,10 @@ fn clawhub_exec(args: &[&str]) -> Result<Output, String> {
         "CLAWHUB_BIN=/data/.local/bin/clawhub; \
          CLAWHUB_DIST=/data/.local/lib/node_modules/clawhub/dist/cli.js; \
          CLAWHUB_BUILDINFO=/data/.local/lib/node_modules/clawhub/dist/cli/buildInfo.js; \
-         if [ ! -x \"$CLAWHUB_BIN\" ] || [ ! -f \"$CLAWHUB_DIST\" ] || [ ! -f \"$CLAWHUB_BUILDINFO\" ]; then \
-           rm -rf /data/.local/lib/node_modules/clawhub /data/.local/bin/clawhub /data/.local/bin/clawdhub; \
-           npm install -g --prefix /data/.local clawhub@0.7.0; \
+         CLAWHUB_JSON5=/data/.local/lib/node_modules/json5/package.json; \
+         if [ ! -x \"$CLAWHUB_BIN\" ] || [ ! -f \"$CLAWHUB_DIST\" ] || [ ! -f \"$CLAWHUB_BUILDINFO\" ] || [ ! -f \"$CLAWHUB_JSON5\" ]; then \
+           rm -rf /data/.local/lib/node_modules/clawhub /data/.local/lib/node_modules/json5 /data/.local/bin/clawhub /data/.local/bin/clawdhub; \
+           npm install -g --prefix /data/.local clawhub@0.7.0 json5@2.2.3; \
          fi; \
          exec node \"$CLAWHUB_DIST\"",
     );
@@ -5691,12 +5750,50 @@ fn clawhub_exec(args: &[&str]) -> Result<Output, String> {
         .map_err(|e| format!("Failed to run ClawHub command: {}", e))
 }
 
+fn clawhub_output_suggests_broken_install(output: &Output) -> bool {
+    if output.status.success() {
+        return false;
+    }
+    let combined = command_output_error(output).to_ascii_lowercase();
+    combined.contains("err_module_not_found")
+        || combined.contains("module_not_found")
+        || combined.contains("cannot find package")
+}
+
+fn repair_clawhub_install() {
+    let repair_cmd =
+        "rm -rf /data/.local/lib/node_modules/clawhub /data/.local/lib/node_modules/json5 /data/.local/bin/clawhub /data/.local/bin/clawdhub && \
+         npm install -g --prefix /data/.local clawhub@0.7.0 json5@2.2.3";
+    let _ = docker_exec_output(&[
+        "exec",
+        OPENCLAW_CONTAINER,
+        "env",
+        "HOME=/data",
+        "TMPDIR=/data/tmp",
+        "XDG_CONFIG_HOME=/data/.config",
+        "XDG_CACHE_HOME=/data/.cache",
+        "npm_config_cache=/data/.npm",
+        "PLAYWRIGHT_BROWSERS_PATH=/data/playwright",
+        "sh",
+        "-c",
+        repair_cmd,
+    ]);
+}
+
 /// Run a ClawHub command with automatic retry on rate-limit errors.
-/// Retries up to `max_retries` times with exponential backoff (2s, 4s, 8s, …).
+/// Retries up to `max_retries` times with exponential backoff (2s, 4s, 8s, …),
+/// and performs one self-heal pass if the npm install looks partially broken.
 fn clawhub_exec_with_retry(args: &[&str], max_retries: u32) -> Result<Output, String> {
     let mut attempts = 0u32;
+    let mut repaired_broken_install = false;
     loop {
         let output = clawhub_exec(args)?;
+        if clawhub_output_suggests_broken_install(&output) && !repaired_broken_install {
+            repaired_broken_install = true;
+            eprintln!("[Entropic] ClawHub install looks broken (missing module); repairing and retrying once…");
+            repair_clawhub_install();
+            continue;
+        }
         let combined = format!(
             "{} {}",
             String::from_utf8_lossy(&output.stderr),
@@ -7950,6 +8047,9 @@ fn sanitize_filename(name: &str) -> String {
     if trimmed.is_empty() {
         return "file".to_string();
     }
+    if trimmed == "." || trimmed == ".." {
+        return "file".to_string();
+    }
     let mut out = String::with_capacity(trimmed.len());
     for ch in trimmed.chars() {
         if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
@@ -7958,7 +8058,7 @@ fn sanitize_filename(name: &str) -> String {
             out.push('_');
         }
     }
-    if out.is_empty() {
+    if out.is_empty() || out == "." || out == ".." {
         "file".to_string()
     } else {
         out
@@ -7985,6 +8085,31 @@ fn sanitize_directory_name(name: &str) -> Result<String, String> {
     let normalized = out.trim();
     if normalized.is_empty() {
         return Err("Folder name contains no valid characters".to_string());
+    }
+
+    Ok(normalized.to_string())
+}
+
+fn sanitize_file_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("File name is required".to_string());
+    }
+
+    if trimmed == "." || trimmed == ".." {
+        return Err("Invalid file name".to_string());
+    }
+
+    let mut out = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' || ch == ' ' {
+            out.push(ch);
+        }
+    }
+
+    let normalized = out.trim();
+    if normalized.is_empty() {
+        return Err("File name contains no valid characters".to_string());
     }
 
     Ok(normalized.to_string())
@@ -8054,6 +8179,54 @@ fn prune_pending_attachments(pending: &mut HashMap<String, PendingAttachmentReco
     }
 }
 
+fn prune_recent_host_drop_paths(pending: &mut HashMap<String, RecentHostDropRecord>) {
+    let now = now_ms_u64();
+    pending.retain(|_, record| {
+        now.saturating_sub(record.created_at_ms) <= HOST_DROP_PATH_TTL_MS && record.path.exists()
+    });
+    if pending.len() <= HOST_DROP_PATH_MAX_ENTRIES {
+        return;
+    }
+    let mut oldest: Vec<(String, u64)> = pending
+        .iter()
+        .map(|(path, record)| (path.clone(), record.created_at_ms))
+        .collect();
+    oldest.sort_by_key(|(_, created_at_ms)| *created_at_ms);
+    let remove_count = pending.len().saturating_sub(HOST_DROP_PATH_MAX_ENTRIES);
+    for (path, _) in oldest.into_iter().take(remove_count) {
+        pending.remove(&path);
+    }
+}
+
+pub fn remember_recent_host_drop_paths(app: &AppHandle, paths: &[PathBuf]) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let mut recent = match state.recent_host_drop_paths.lock() {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    prune_recent_host_drop_paths(&mut recent);
+    let now = now_ms_u64();
+    for raw_path in paths {
+        let canonical = match fs::canonicalize(raw_path) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if !canonical.is_file() {
+            continue;
+        }
+        let key = canonical.to_string_lossy().to_string();
+        recent.insert(
+            key,
+            RecentHostDropRecord {
+                path: canonical,
+                created_at_ms: now,
+            },
+        );
+    }
+}
+
 fn sanitize_workspace_path(path: &str) -> Result<String, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -8075,6 +8248,162 @@ fn sanitize_workspace_path(path: &str) -> Result<String, String> {
         }
     }
     Ok(parts.join("/"))
+}
+
+fn validate_host_output_path(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Destination path is required".to_string());
+    }
+    if trimmed.contains('\0') || trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err("Destination path is invalid".to_string());
+    }
+
+    let path = PathBuf::from(trimmed);
+    if path.as_os_str().is_empty() {
+        return Err("Destination path is invalid".to_string());
+    }
+    if path.is_dir() {
+        return Err("Destination path must be a file".to_string());
+    }
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.is_dir() {
+            return Err(format!(
+                "Export directory does not exist: {}",
+                parent.display()
+            ));
+        }
+    }
+
+    Ok(path)
+}
+
+fn resolve_workspace_regular_file_path(
+    container: &str,
+    full_path: &str,
+    not_found_message: &str,
+) -> Result<String, String> {
+    let script = r#"resolved="$(readlink -f "$1")" || exit 1
+workspace="$(readlink -f "$2")" || exit 1
+case "$resolved" in
+  "$workspace"|"$workspace"/*) ;;
+  *) exit 1 ;;
+esac
+[ -f "$resolved" ] || exit 1
+printf '%s' "$resolved"
+"#;
+    let resolved = docker_exec_output(&[
+        "exec",
+        container,
+        "sh",
+        "-lc",
+        script,
+        "sh",
+        full_path,
+        WORKSPACE_ROOT,
+    ])
+    .map_err(|_| not_found_message.to_string())?;
+    let trimmed = resolved.trim();
+    if trimmed.is_empty() {
+        return Err(not_found_message.to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn choose_workspace_export_path(
+    app: &AppHandle,
+    suggested_name: &str,
+) -> Result<Option<PathBuf>, String> {
+    let mut builder = app
+        .dialog()
+        .file()
+        .set_title(format!("Export {}", suggested_name))
+        .set_file_name(suggested_name.to_string());
+    if let Some(window) = app.get_webview_window("main") {
+        builder = builder.set_parent(&window);
+    }
+    let ext = suggested_name
+        .rsplit('.')
+        .next()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .filter(|ext| !ext.is_empty() && ext != &suggested_name.to_ascii_lowercase());
+    if let Some(ext) = ext.as_deref() {
+        builder = builder.add_filter(format!(".{} file", ext), &[ext]);
+    }
+    let Some(file_path) = builder.blocking_save_file() else {
+        return Ok(None);
+    };
+    let path = file_path
+        .into_path()
+        .map_err(|e| format!("Failed to resolve export path: {}", e))?;
+    Ok(Some(validate_host_output_path(
+        path.to_string_lossy().as_ref(),
+    )?))
+}
+
+#[cfg(unix)]
+fn open_host_drop_source_file(path: &Path) -> Result<fs::File, String> {
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| format!("Failed to read dropped file {}: {}", path.display(), e))
+}
+
+#[cfg(not(unix))]
+fn open_host_drop_source_file(path: &Path) -> Result<fs::File, String> {
+    fs::File::open(path)
+        .map_err(|e| format!("Failed to read dropped file {}: {}", path.display(), e))
+}
+
+fn stream_reader_to_container_file<R: Read>(
+    container: &str,
+    full_path: &str,
+    mut reader: R,
+    spawn_error: String,
+    stream_error: String,
+    finalize_error: String,
+    failure_error: String,
+) -> Result<(), String> {
+    let mut child = docker_command()
+        .args(["exec", "-i", container, "tee", "--", full_path])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{}: {}", spawn_error, e))?;
+
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(spawn_error);
+    };
+
+    if let Err(e) = std::io::copy(&mut reader, &mut stdin) {
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("{}: {}", stream_error, e));
+    }
+    drop(stdin);
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("{}: {}", finalize_error, e))?;
+    if !status.success() {
+        return Err(failure_error);
+    }
+
+    Ok(())
+}
+
+fn container_path_exists_for(container: &str, path: &str) -> bool {
+    docker_command()
+        .args(["exec", container, "test", "-e", path])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn unique_id() -> String {
@@ -8342,6 +8671,7 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
     let image_model = desired_selection.config_image_model.clone();
     let alias_image_model = desired_selection.alias_image_model.clone();
     let web_search_enabled = capability_enabled(&settings.capabilities, "web", true);
+    let browser_enabled = capability_enabled(&settings.capabilities, "browser", true);
     let web_base_url = read_container_env("ENTROPIC_WEB_BASE_URL");
     let container_id = container_instance_id();
     let openai_key_for_lancedb = {
@@ -8559,16 +8889,29 @@ Use it for durable decisions, preferences, and facts that should persist across 
                 );
                 set_openclaw_config_value(
                     &mut cfg,
-                    &["tools", "web", "search", "perplexity", "baseUrl"],
+                    &["plugins", "entries", "perplexity", "enabled"],
+                    serde_json::json!(true),
+                );
+                set_openclaw_config_value(
+                    &mut cfg,
+                    &[
+                        "plugins",
+                        "entries",
+                        "perplexity",
+                        "config",
+                        "webSearch",
+                        "baseUrl",
+                    ],
                     serde_json::json!(web_search_base_url),
                 );
-                remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "perplexity"]);
+                remove_openclaw_config_value(&mut cfg, &["tools", "web", "search", "perplexity"]);
                 remove_openclaw_config_value(
                     &mut cfg,
                     &["plugins", "entries", "duckduckgo", "config", "webSearch"],
                 );
             } else {
                 remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
+                remove_openclaw_config_value(&mut cfg, &["tools", "web", "search", "perplexity"]);
                 remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "perplexity"]);
                 remove_openclaw_config_value(
                     &mut cfg,
@@ -8823,6 +9166,22 @@ Use it for durable decisions, preferences, and facts that should persist across 
         });
     }
 
+    remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "browser"]);
+    if container_plugin_exists("browser") {
+        set_openclaw_config_value(
+            &mut cfg,
+            &["plugins", "entries", "browser", "enabled"],
+            serde_json::json!(browser_enabled),
+        );
+        if browser_enabled {
+            if bundled_plugin_entry_exists("browser") {
+                remove_bundled_plugin_load_paths(&mut cfg, "browser");
+            } else if let Some(path) = resolve_managed_plugin_path("browser") {
+                ensure_plugin_load_path(&mut cfg, path);
+            }
+        }
+    }
+
     if let Some(tools) = cfg["tools"].as_object_mut() {
         let allow_entry = tools.entry("alsoAllow").or_insert(serde_json::json!([]));
         if !allow_entry.is_array() {
@@ -8831,9 +9190,14 @@ Use it for durable decisions, preferences, and facts that should persist across 
         if let Some(list) = allow_entry.as_array_mut() {
             list.retain(|v| {
                 v.as_str()
-                    .map(|s| s != "entropic-integrations" && s != "nova-integrations")
+                    .map(|s| {
+                        s != "browser" && s != "entropic-integrations" && s != "nova-integrations"
+                    })
                     .unwrap_or(true)
             });
+            if browser_enabled {
+                list.push(serde_json::json!("browser"));
+            }
             for tool in ENTROPIC_INTEGRATION_TOOLS {
                 let exists = list.iter().any(|v| v.as_str() == Some(tool));
                 if !exists {
@@ -10112,6 +10476,13 @@ async fn ensure_proxy_backend_reachable(
         Err(err) => err,
     };
 
+    if let Err(host_error) = probe_proxy_backend_from_host() {
+        return Err(append_colima_runtime_hint(format!(
+            "{} host proxy backend is not reachable. {}. The sandbox probe also failed: {}. Ensure the managed dev server is still running on localhost:5174 (for example via `pnpm dev:runtime:up:managed`).",
+            label, host_error, initial_error
+        )));
+    }
+
     println!(
         "[Entropic] {} proxy backend probe failed; attempting automatic network repair: {}",
         label, initial_error
@@ -10137,10 +10508,19 @@ async fn ensure_proxy_backend_reachable(
             );
             Ok(())
         }
-        Err(final_error) => Err(append_colima_runtime_hint(format!(
-            "{} sandbox container is healthy but still cannot reach the Entropic backend from inside the managed Docker network after automatic repair. Initial probe failure: {}. Final probe failure: {}",
-            label, initial_error, final_error
-        ))),
+        Err(final_error) => {
+            if let Err(host_error) = probe_proxy_backend_from_host() {
+                return Err(append_colima_runtime_hint(format!(
+                    "{} host proxy backend became unreachable after automatic network repair. {}. Initial sandbox probe failure: {}. Final sandbox probe failure: {}. Ensure the managed dev server is still running on localhost:5174 (for example via `pnpm dev:runtime:up:managed`).",
+                    label, host_error, initial_error, final_error
+                )));
+            }
+
+            Err(append_colima_runtime_hint(format!(
+                "{} sandbox container is healthy but still cannot reach the Entropic backend from inside the managed Docker network after automatic repair. The host proxy backend is reachable, so this points to a Docker networking issue. Initial probe failure: {}. Final probe failure: {}",
+                label, initial_error, final_error
+            )))
+        }
     }
 }
 
@@ -10375,6 +10755,7 @@ pub fn init_state(app: &AppHandle) -> AppState {
         whatsapp_login: Mutex::new(WhatsAppLoginCache::default()),
         anthropic_oauth_verifier: Mutex::new(None),
         pending_attachments: Mutex::new(HashMap::new()),
+        recent_host_drop_paths: Mutex::new(HashMap::new()),
     }
 }
 
@@ -10907,6 +11288,8 @@ async fn start_gateway_inner(
         .map_err(|e| e.to_string())?
         .clone();
     let settings = load_agent_settings(app);
+    let browser_tool_enabled = capability_enabled(&settings.capabilities, "browser", true);
+    let browser_tool_enabled_env = if browser_tool_enabled { "1" } else { "0" };
     let gateway_bind = "127.0.0.1:19789:18789";
     let mut memory_slot = if !settings.memory_enabled {
         "none"
@@ -11147,6 +11530,7 @@ async fn start_gateway_inner(
         ),
         ("ENTROPIC_BROWSER_BIND", "0.0.0.0"),
         ("ENTROPIC_BROWSER_PROFILE", "/data/browser/profile"),
+        ("ENTROPIC_BROWSER_TOOL_ENABLED", browser_tool_enabled_env),
         ("ENTROPIC_TOOLS_PATH", "/data/tools"),
     ];
 
@@ -11401,6 +11785,9 @@ async fn start_gateway_with_proxy_inner(
     );
     summary.runtime_ready_ms = startup_started.elapsed().as_millis();
     let local_gateway_token = expected_gateway_token(app)?;
+    let settings = load_agent_settings(app);
+    let browser_tool_enabled = capability_enabled(&settings.capabilities, "browser", true);
+    let browser_tool_enabled_env = if browser_tool_enabled { "1" } else { "0" };
     let build_proxy_docker_args = || -> Result<(Vec<String>, GatewayEnvFile), String> {
         let mut env_entries: Vec<(&str, &str)> = vec![
             ("OPENCLAW_GATEWAY_TOKEN", local_gateway_token.as_str()),
@@ -11436,6 +11823,7 @@ async fn start_gateway_with_proxy_inner(
             ),
             ("ENTROPIC_BROWSER_BIND", "0.0.0.0"),
             ("ENTROPIC_BROWSER_PROFILE", "/data/browser/profile"),
+            ("ENTROPIC_BROWSER_TOOL_ENABLED", browser_tool_enabled_env),
             ("ENTROPIC_TOOLS_PATH", "/data/tools"),
         ];
         if let Some(image_model) = runtime_image_model_ref.as_deref() {
@@ -13401,6 +13789,8 @@ pub async fn upload_attachment(
     base64: String,
     state: State<'_, AppState>,
 ) -> Result<AttachmentInfo, String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
     let sanitized = sanitize_filename(&file_name);
     let id = {
         let mut pending = state
@@ -13423,37 +13813,27 @@ pub async fn upload_attachment(
     if size_estimate > 25 * 1024 * 1024 {
         return Err("Attachment too large (max 25MB)".to_string());
     }
-    docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "mkdir",
-        "-p",
-        "--",
-        ATTACHMENT_TMP_ROOT,
-    ])?;
+    docker_exec_output(&["exec", container, "mkdir", "-p", "--", ATTACHMENT_TMP_ROOT])?;
     let decoded = decode_base64_payload(&base64)?;
     let size_bytes = decoded.len() as u64;
     if size_bytes > 25 * 1024 * 1024 {
         return Err("Attachment too large (max 25MB)".to_string());
     }
-    let mut child = docker_command()
-        .args(["exec", "-i", OPENCLAW_CONTAINER, "tee", "--", &temp_path])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to upload file: {}", e))?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        stdin
-            .write_all(&decoded)
-            .map_err(|e| format!("Failed to upload file: {}", e))?;
-    }
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to finalize upload: {}", e))?;
-    if !status.success() {
-        return Err("Failed to upload file in container".to_string());
-    }
+    let temp_path_for_upload = temp_path.clone();
+    let container_name = container.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        stream_reader_to_container_file(
+            &container_name,
+            &temp_path_for_upload,
+            std::io::Cursor::new(decoded),
+            "Failed to upload file".to_string(),
+            "Failed to upload file".to_string(),
+            "Failed to finalize upload".to_string(),
+            "Failed to upload file in container".to_string(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Failed to run attachment upload task: {}", e))??;
     {
         let mut pending = state
             .pending_attachments
@@ -13461,7 +13841,7 @@ pub async fn upload_attachment(
             .map_err(|e| e.to_string())?;
         prune_pending_attachments(&mut pending);
         if pending.contains_key(&id) {
-            let _ = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-f", "--", &temp_path]);
+            let _ = docker_exec_output(&["exec", container, "rm", "-f", "--", &temp_path]);
             return Err("Failed to store attachment metadata; retry upload".to_string());
         }
         pending.insert(
@@ -13488,6 +13868,8 @@ pub async fn save_attachment(
     attachment_id: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
     let attachment_id = normalize_attachment_id(&attachment_id)?;
     let pending = {
         let mut attachments = state
@@ -13504,22 +13886,15 @@ pub async fn save_attachment(
 
     let file_name = sanitize_filename(&pending.file_name);
     let mut dest_path = format!("{}/{}", ATTACHMENT_SAVE_ROOT, file_name);
-    docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "mkdir",
-        "-p",
-        "--",
-        ATTACHMENT_SAVE_ROOT,
-    ])?;
+    docker_exec_output(&["exec", container, "mkdir", "-p", "--", ATTACHMENT_SAVE_ROOT])?;
     // Avoid overwrite: add suffix if exists
-    if docker_exec_output(&["exec", OPENCLAW_CONTAINER, "test", "-e", &dest_path]).is_ok() {
+    if docker_exec_output(&["exec", container, "test", "-e", &dest_path]).is_ok() {
         let ts = unique_id();
         dest_path = format!("{}/{}_{}", ATTACHMENT_SAVE_ROOT, ts, file_name);
     }
     docker_exec_output(&[
         "exec",
-        OPENCLAW_CONTAINER,
+        container,
         "mv",
         "--",
         &pending.temp_path,
@@ -13540,6 +13915,8 @@ pub async fn delete_attachment(
     attachment_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
     let attachment_id = normalize_attachment_id(&attachment_id)?;
     let pending = {
         let mut attachments = state
@@ -13553,14 +13930,7 @@ pub async fn delete_attachment(
             .ok_or_else(|| "Attachment not found or expired".to_string())?
     };
     validate_attachment_temp_path(&attachment_id, &pending.temp_path)?;
-    docker_exec_output(&[
-        "exec",
-        OPENCLAW_CONTAINER,
-        "rm",
-        "-f",
-        "--",
-        &pending.temp_path,
-    ])?;
+    docker_exec_output(&["exec", container, "rm", "-f", "--", &pending.temp_path])?;
     {
         let mut attachments = state
             .pending_attachments
@@ -13696,6 +14066,7 @@ pub async fn remove_workspace_skill(id: String) -> Result<(), String> {
     if let Ok(Some(path)) = resolve_installed_skill_dir(&skill_id) {
         config_removal_paths.push(path);
     }
+    let container = preferred_existing_gateway_container_name();
 
     let observed_skill = collect_skill_ids()?.iter().any(|value| value == &skill_id)
         || container_dir_exists(&format!("{}/{}", SKILL_MANIFESTS_ROOT, skill_id)).unwrap_or(false)
@@ -13718,7 +14089,7 @@ pub async fn remove_workspace_skill(id: String) -> Result<(), String> {
         if container_path_exists_checked(&full_path).unwrap_or(false) {
             removed_any = true;
         }
-        docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-rf", "--", &full_path])?;
+        docker_exec_output(&["exec", container, "rm", "-rf", "--", &full_path])?;
         if !config_removal_paths.contains(&full_path) {
             config_removal_paths.push(full_path);
         }
@@ -14911,6 +15282,8 @@ pub struct WorkspaceFileEntry {
 
 #[tauri::command]
 pub async fn list_workspace_files(path: String) -> Result<Vec<WorkspaceFileEntry>, String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
     let sanitized = sanitize_workspace_path(&path)?;
     let full_path = if sanitized.is_empty() {
         WORKSPACE_ROOT.to_string()
@@ -14919,11 +15292,11 @@ pub async fn list_workspace_files(path: String) -> Result<Vec<WorkspaceFileEntry
     };
 
     // Ensure the directory exists
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", &full_path])?;
+    docker_exec_output(&["exec", container, "mkdir", "-p", "--", &full_path])?;
 
     let output = docker_exec_output(&[
         "exec",
-        OPENCLAW_CONTAINER,
+        container,
         "ls",
         "-la",
         "--time-style=+%s",
@@ -14967,6 +15340,8 @@ pub async fn create_workspace_directory(
     parent_path: String,
     name: String,
 ) -> Result<WorkspaceFileEntry, String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
     let sanitized_parent = sanitize_workspace_path(&parent_path)?;
     let sanitized_name = sanitize_directory_name(&name)?;
     let relative_path = if sanitized_parent.is_empty() {
@@ -14976,7 +15351,7 @@ pub async fn create_workspace_directory(
     };
     let full_path = format!("{}/{}", WORKSPACE_ROOT, relative_path);
 
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", &full_path])?;
+    docker_exec_output(&["exec", container, "mkdir", "-p", "--", &full_path])?;
 
     Ok(WorkspaceFileEntry {
         name: sanitized_name,
@@ -14988,35 +15363,101 @@ pub async fn create_workspace_directory(
 }
 
 #[tauri::command]
+pub async fn create_workspace_file(
+    parent_path: String,
+    name: String,
+    content: Option<String>,
+) -> Result<WorkspaceFileEntry, String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
+    let sanitized_parent = sanitize_workspace_path(&parent_path)?;
+    let sanitized_name = sanitize_file_name(&name)?;
+    let relative_path = if sanitized_parent.is_empty() {
+        sanitized_name.clone()
+    } else {
+        format!("{}/{}", sanitized_parent, sanitized_name)
+    };
+    let full_path = format!("{}/{}", WORKSPACE_ROOT, relative_path);
+    let parent_dir = if sanitized_parent.is_empty() {
+        WORKSPACE_ROOT.to_string()
+    } else {
+        format!("{}/{}", WORKSPACE_ROOT, sanitized_parent)
+    };
+
+    if docker_exec_output(&["exec", container, "test", "-e", &full_path]).is_ok() {
+        return Err("A file or folder with that name already exists.".to_string());
+    }
+
+    docker_exec_output(&["exec", container, "mkdir", "-p", "--", &parent_dir])?;
+
+    let bytes = content.unwrap_or_default().into_bytes();
+    let size_bytes = bytes.len() as u64;
+    let container_name = container.to_string();
+    let full_path_for_write = full_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        stream_reader_to_container_file(
+            &container_name,
+            &full_path_for_write,
+            std::io::Cursor::new(bytes),
+            "Failed to create file".to_string(),
+            "Failed to write file data".to_string(),
+            "Failed to finalize file creation".to_string(),
+            "Failed to create file in container".to_string(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Failed to run file creation task: {}", e))??;
+
+    Ok(WorkspaceFileEntry {
+        name: sanitized_name,
+        path: relative_path,
+        is_directory: false,
+        size: size_bytes,
+        modified_at: 0,
+    })
+}
+
+#[tauri::command]
 pub async fn read_workspace_file(path: String) -> Result<String, String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
     let sanitized = sanitize_workspace_path(&path)?;
     if sanitized.is_empty() {
         return Err("Invalid path".to_string());
     }
     let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
-    read_container_file(&full_path).ok_or_else(|| "File not found or unreadable".to_string())
+    let resolved_path =
+        resolve_workspace_regular_file_path(container, &full_path, "File not found or unreadable")?;
+    read_container_file_from(container, &resolved_path)
+        .ok_or_else(|| "File not found or unreadable".to_string())
 }
 
 #[tauri::command]
 pub async fn read_workspace_file_base64(path: String) -> Result<String, String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
     let sanitized = sanitize_workspace_path(&path)?;
     if sanitized.is_empty() {
         return Err("Invalid path".to_string());
     }
     let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
-    let raw = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "base64", "--", &full_path])
+    let resolved_path =
+        resolve_workspace_regular_file_path(container, &full_path, "File not found or unreadable")?;
+    let raw = docker_exec_output(&["exec", container, "base64", "--", &resolved_path])
         .map_err(|_| "File not found or unreadable".to_string())?;
     Ok(raw.chars().filter(|c| *c != '\n' && *c != '\r').collect())
 }
 
 #[tauri::command]
 pub async fn delete_workspace_file(path: String) -> Result<(), String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
     let sanitized = sanitize_workspace_path(&path)?;
     if sanitized.is_empty() {
         return Err("Cannot delete workspace root".to_string());
     }
     let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-rf", "--", &full_path])?;
+    docker_exec_output(&["exec", container, "rm", "-rf", "--", &full_path])?;
     Ok(())
 }
 
@@ -15026,6 +15467,8 @@ pub async fn upload_workspace_file(
     base64: String,
     dest_path: String,
 ) -> Result<(), String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
     let sanitized_name = sanitize_filename(&file_name);
     let sanitized_dest = sanitize_workspace_path(&dest_path)?;
     let dir = if sanitized_dest.is_empty() {
@@ -15035,27 +15478,224 @@ pub async fn upload_workspace_file(
     };
     let full_path = format!("{}/{}", dir, sanitized_name);
 
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", &dir])?;
+    docker_exec_output(&["exec", container, "mkdir", "-p", "--", &dir])?;
     let decoded = decode_base64_payload(&base64)?;
 
-    let mut child = docker_command()
-        .args(["exec", "-i", OPENCLAW_CONTAINER, "tee", "--", &full_path])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to upload file: {}", e))?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        stdin
-            .write_all(&decoded)
-            .map_err(|e| format!("Failed to write file data: {}", e))?;
+    let container_name = container.to_string();
+    let full_path_for_upload = full_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        stream_reader_to_container_file(
+            &container_name,
+            &full_path_for_upload,
+            std::io::Cursor::new(decoded),
+            "Failed to upload file".to_string(),
+            "Failed to write file data".to_string(),
+            "Failed to finalize upload".to_string(),
+            "Failed to upload file to container".to_string(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Failed to run workspace upload task: {}", e))??;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn upload_host_dropped_files(
+    paths: Vec<String>,
+    dest_path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<WorkspaceFileEntry>, String> {
+    if paths.is_empty() {
+        return Err("No dropped files were provided.".to_string());
     }
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to finalize upload: {}", e))?;
-    if !status.success() {
-        return Err("Failed to upload file to container".to_string());
+
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
+    let sanitized_dest = sanitize_workspace_path(&dest_path)?;
+    let dir = if sanitized_dest.is_empty() {
+        WORKSPACE_ROOT.to_string()
+    } else {
+        format!("{}/{}", WORKSPACE_ROOT, sanitized_dest)
+    };
+
+    docker_exec_output(&["exec", container, "mkdir", "-p", "--", &dir])?;
+
+    let mut imported = Vec::new();
+    for raw_path in paths {
+        let trimmed = raw_path.trim();
+        if trimmed.is_empty()
+            || trimmed.contains('\0')
+            || trimmed.contains('\n')
+            || trimmed.contains('\r')
+        {
+            continue;
+        }
+
+        let canonical = fs::canonicalize(trimmed)
+            .map_err(|_| format!("Dropped file is no longer available: {}", trimmed))?;
+        let canonical_key = canonical.to_string_lossy().to_string();
+        let mut authorized_record: Option<RecentHostDropRecord> = None;
+        for attempt in 0..6 {
+            let maybe_allowed = {
+                let mut recent = state
+                    .recent_host_drop_paths
+                    .lock()
+                    .map_err(|_| "Failed to access dropped file permissions.".to_string())?;
+                prune_recent_host_drop_paths(&mut recent);
+                recent.remove(&canonical_key)
+            };
+            if let Some(allowed) = maybe_allowed {
+                authorized_record = Some(allowed);
+                break;
+            }
+            if attempt < 5 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+        let Some(allowed) = authorized_record else {
+            return Err(
+                "Dropped file is no longer authorized. Drag it into Entropic again.".to_string(),
+            );
+        };
+        if allowed.path != canonical {
+            return Err("Dropped file authorization mismatch.".to_string());
+        }
+
+        let source_name = canonical
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| "Dropped file name is invalid".to_string())?;
+        let source = open_host_drop_source_file(&canonical)?;
+        let metadata = source
+            .metadata()
+            .map_err(|e| format!("Failed to inspect dropped file {}: {}", source_name, e))?;
+        if !metadata.is_file() {
+            continue;
+        }
+        if metadata.len() > HOST_DROP_FILE_MAX_BYTES {
+            return Err(format!(
+                "{} is too large to import (limit: {} MB).",
+                source_name,
+                HOST_DROP_FILE_MAX_BYTES / (1024 * 1024)
+            ));
+        }
+        let sanitized_name = sanitize_filename(source_name);
+        let stem = Path::new(&sanitized_name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("file");
+        let extension = Path::new(&sanitized_name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty());
+
+        let mut chosen_name = sanitized_name.clone();
+        let mut full_path = format!("{}/{}", dir, chosen_name);
+        if container_path_exists_for(container, &full_path) {
+            let mut attempt = 1_u32;
+            loop {
+                let suffix = format!("{}_{}", unique_id(), attempt);
+                chosen_name = match extension {
+                    Some(ext) => format!("{}_{}.{}", stem, suffix, ext),
+                    None => format!("{}_{}", stem, suffix),
+                };
+                full_path = format!("{}/{}", dir, chosen_name);
+                if !container_path_exists_for(container, &full_path) {
+                    break;
+                }
+                attempt = attempt.saturating_add(1);
+                if attempt > 32 {
+                    return Err(format!(
+                        "Failed to prepare a safe destination for {}.",
+                        source_name
+                    ));
+                }
+            }
+        }
+
+        let container_name = container.to_string();
+        let full_path_for_import = full_path.clone();
+        let source_name_for_import = source_name.to_string();
+        tauri::async_runtime::spawn_blocking(move || {
+            stream_reader_to_container_file(
+                &container_name,
+                &full_path_for_import,
+                source,
+                format!("Failed to import dropped file {}", source_name_for_import),
+                format!("Failed to stream dropped file {}", source_name_for_import),
+                format!(
+                    "Failed to finalize dropped file import {}",
+                    source_name_for_import
+                ),
+                format!("Failed to import dropped file {}.", source_name_for_import),
+            )
+        })
+        .await
+        .map_err(|e| format!("Failed to run dropped file import task: {}", e))??;
+
+        let relative_path = if sanitized_dest.is_empty() {
+            chosen_name.clone()
+        } else {
+            format!("{}/{}", sanitized_dest, chosen_name)
+        };
+        imported.push(WorkspaceFileEntry {
+            name: chosen_name,
+            path: relative_path,
+            is_directory: false,
+            size: metadata.len(),
+            modified_at: 0,
+        });
     }
+
+    if imported.is_empty() {
+        return Err("Only files can be dropped here right now.".to_string());
+    }
+
+    Ok(imported)
+}
+
+#[tauri::command]
+pub async fn export_workspace_file(
+    app: AppHandle,
+    path: String,
+    suggested_name: Option<String>,
+) -> Result<(), String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
+    let sanitized = sanitize_workspace_path(&path)?;
+    if sanitized.is_empty() {
+        return Err("Invalid path".to_string());
+    }
+    let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
+    let export_name = suggested_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| sanitized.rsplit('/').next().unwrap_or("export"));
+    let Some(output_path) = choose_workspace_export_path(&app, export_name)? else {
+        return Ok(());
+    };
+    let resolved_path = resolve_workspace_regular_file_path(
+        container,
+        &full_path,
+        "Only files can be exported from the workspace.",
+    )?;
+
+    let raw = docker_exec_output(&["exec", container, "base64", "--", &resolved_path])
+        .map_err(|e| format!("Failed to read workspace file for export: {}", e))?;
+    let payload: String = raw.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+    let bytes = STANDARD
+        .decode(payload)
+        .map_err(|e| format!("Failed to decode workspace export payload: {}", e))?;
+
+    fs::write(&output_path, bytes).map_err(|e| {
+        format!(
+            "Failed to export workspace file to {}: {}",
+            output_path.display(),
+            e
+        )
+    })?;
     Ok(())
 }
 

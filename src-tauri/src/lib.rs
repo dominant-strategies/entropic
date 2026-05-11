@@ -9,7 +9,7 @@ use std::io::Write;
 use std::panic::{self, PanicHookInfo};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{DragDropEvent, Emitter, Manager, RunEvent, WindowEvent};
 
 const STARTUP_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -243,10 +243,13 @@ pub fn run() {
             commands::approve_gateway_device_pairing,
             commands::list_workspace_files,
             commands::create_workspace_directory,
+            commands::create_workspace_file,
             commands::read_workspace_file,
             commands::read_workspace_file_base64,
             commands::delete_workspace_file,
             commands::upload_workspace_file,
+            commands::upload_host_dropped_files,
+            commands::export_workspace_file,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|error| {
@@ -256,6 +259,18 @@ pub fn run() {
             process::exit(1);
         })
         .run(|app_handle, event| match event {
+            RunEvent::WindowEvent {
+                event: WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }),
+                ..
+            } => {
+                commands::remember_recent_host_drop_paths(app_handle, &paths);
+            }
+            RunEvent::WebviewEvent {
+                event: tauri::WebviewEvent::DragDrop(DragDropEvent::Drop { paths, .. }),
+                ..
+            } => {
+                commands::remember_recent_host_drop_paths(app_handle, &paths);
+            }
             RunEvent::WindowEvent {
                 label,
                 event: WindowEvent::CloseRequested { api, .. },

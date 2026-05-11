@@ -119,6 +119,15 @@ function clampRuntimeDiskGb(value?: number | null) {
   return Math.min(500, Math.max(20, value ?? 20));
 }
 
+type SettingsSection =
+  | "profile"
+  | "appearance"
+  | "intelligence"
+  | "system"
+  | "keys"
+  | "diagnostics"
+  | "data";
+
 function SettingsGroup({ title, children }: { title?: string, children: React.ReactNode }) {
   return (
     <div className="mb-8">
@@ -127,7 +136,7 @@ function SettingsGroup({ title, children }: { title?: string, children: React.Re
           {title}
         </h3>
       )}
-      <div className="bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl overflow-hidden shadow-sm divide-y divide-[var(--border-subtle)]">
+      <div className="settings-group-card bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl overflow-hidden shadow-sm divide-y divide-[var(--border-subtle)]">
         {children}
       </div>
     </div>
@@ -148,19 +157,25 @@ function SettingsRow({
   onClick?: () => void
 }) {
   return (
-    <div className={clsx("p-4 flex items-center justify-between gap-4 transition-colors", onClick && "cursor-pointer hover:bg-[var(--system-gray-6)]")} onClick={onClick}>
-      <div className="flex items-center gap-3 overflow-hidden">
+    <div
+      className={clsx(
+        "settings-row px-4 py-3 flex flex-col items-stretch gap-2 transition-colors",
+        onClick && "cursor-pointer hover:bg-[var(--system-gray-6)]",
+      )}
+      onClick={onClick}
+    >
+      <div className="flex items-center gap-3 flex-shrink-0">
         {Icon && (
           <div className="w-7 h-7 rounded-md bg-[var(--system-blue)]/10 text-[var(--system-blue)] flex items-center justify-center flex-shrink-0">
             <Icon className="w-4 h-4" />
           </div>
         )}
-        <div className="min-w-0">
-          <div className="text-[14px] font-medium text-[var(--text-primary)]">{label}</div>
-          {description && <div className="text-[12px] text-[var(--text-secondary)] truncate">{description}</div>}
+        <div>
+          <div className="text-[13px] font-medium text-[var(--text-primary)] whitespace-nowrap">{label}</div>
+          {description && <div className="text-[11px] text-[var(--text-secondary)]">{description}</div>}
         </div>
       </div>
-      <div className="flex-shrink-0 flex items-center gap-2">
+      <div className="settings-row-right flex min-w-0 items-center gap-2">
         {children}
       </div>
     </div>
@@ -206,6 +221,34 @@ function scheduleDeferredSettingsWork(work: () => void, delayMs = 0) {
     }
   };
 }
+
+const SETTINGS_SIDEBAR_CATEGORIES: Array<{
+  label: string;
+  items: Array<{ id: SettingsSection; label: string; icon: any }>;
+}> = [
+  {
+    label: "Profile",
+    items: [
+      { id: "profile", label: "Profile", icon: User },
+      { id: "appearance", label: "Appearance", icon: Palette },
+    ],
+  },
+  {
+    label: "AI",
+    items: [
+      { id: "intelligence", label: "Intelligence", icon: Sparkles },
+      { id: "keys", label: "Keys", icon: Key },
+    ],
+  },
+  {
+    label: "System",
+    items: [
+      { id: "system", label: "Gateway & Runtime", icon: Shield },
+      { id: "diagnostics", label: "Diagnostics", icon: ScrollText },
+      { id: "data", label: "Data Management", icon: Trash2 },
+    ],
+  },
+];
 
 export function Settings({
   gatewayRunning,
@@ -767,12 +810,18 @@ export function Settings({
   const [isEditingPersonality, setIsEditingPersonality] = useState(false);
   const [logsExpanded, setLogsExpanded] = useState(false);
   const [gatewayDiagnosticsExpanded, setGatewayDiagnosticsExpanded] = useState(false);
+  const [activeSection, setActiveSection] = useState<SettingsSection>("profile");
+  const contentRef = useRef<HTMLDivElement>(null);
   const [gatewayDiagLogs, setGatewayDiagLogs] = useState<DiagnosticLogEntry[]>([]);
   const [diagTypeFilters, setDiagTypeFilters] = useState<Record<DiagnosticLogType, boolean>>({
     info: true,
     warn: true,
     error: true,
   });
+
+  useEffect(() => {
+    contentRef.current?.scrollTo({ top: 0 });
+  }, [activeSection]);
 
   useEffect(() => {
     const refreshDiagnostics = () => setGatewayDiagLogs(readDiagnosticLogs());
@@ -1038,10 +1087,40 @@ export function Settings({
   }
 
   return (
-    <div className="max-w-3xl mx-auto py-8 px-4">
-      <div className="mb-8 px-1">
-        <h1 className="text-2xl font-bold">Settings</h1>
-      </div>
+    <>
+      <div className="flex h-full">
+        <nav className="w-[220px] flex-shrink-0 bg-[var(--bg-card)] border-r border-[var(--border-subtle)] overflow-y-auto py-6 px-3">
+          <h1 className="text-lg font-bold text-[var(--text-primary)] px-3 mb-5">Settings</h1>
+          {SETTINGS_SIDEBAR_CATEGORIES.map((category) => (
+            <div key={category.label} className="mb-4">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] px-3 mb-1">
+                {category.label}
+              </div>
+              {category.items.map((item) => {
+                const Icon = item.icon;
+                const isActive = activeSection === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => setActiveSection(item.id)}
+                    className={clsx(
+                      "w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-[13px] font-medium transition-colors mb-0.5",
+                      isActive
+                        ? "bg-[var(--border-subtle)] text-[var(--text-primary)]"
+                        : "text-[var(--text-secondary)] hover:bg-[var(--border-subtle)]/50 hover:text-[var(--text-primary)]"
+                    )}
+                  >
+                    <Icon className={clsx("w-4 h-4 flex-shrink-0", isActive && "text-[var(--system-blue)]")} />
+                    <span className="truncate">{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </nav>
+
+        <div ref={contentRef} className="flex-1 overflow-y-auto">
+          <div className="max-w-3xl py-8 px-8">
 
       {gatewayConfigInvalid && (
         <div className="mb-6 rounded-xl border border-amber-500/20 bg-amber-500/10 p-4">
@@ -1081,6 +1160,7 @@ export function Settings({
         </div>
       )}
 
+      {activeSection === "profile" && (
       <SettingsGroup title="Profile">
         <div className="p-4 flex items-start gap-6">
           <div className="relative group cursor-pointer flex-shrink-0">
@@ -1213,7 +1293,9 @@ export function Settings({
           </div>
         )}
       </SettingsGroup>
+      )}
 
+      {activeSection === "appearance" && (
       <SettingsGroup title="Appearance">
         <SettingsRow
           label="Theme"
@@ -1268,32 +1350,30 @@ export function Settings({
           </div>
         </SettingsRow>
       </SettingsGroup>
+      )}
 
+      {activeSection === "intelligence" && (
       <div className="relative">
         <SettingsGroup title="Intelligence">
           <SettingsRow label="Primary Model" icon={Cpu}>
-            <div className="w-80">
+            <div className="settings-row-dropdown">
               <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
             </div>
           </SettingsRow>
           {!useLocalKeys && (
             <>
               <SettingsRow label="Coding Model" icon={Cpu}>
-                <div className="w-80">
+                <div className="settings-row-dropdown">
                   <ModelSelector selectedModel={codeModel} onModelChange={onCodeModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
                 </div>
               </SettingsRow>
               <SettingsRow label="Vision Model" icon={Image}>
-                <div className="w-80">
+                <div className="settings-row-dropdown">
                   <ModelSelector selectedModel={imageModel} onModelChange={onImageModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
                 </div>
               </SettingsRow>
-              <SettingsRow
-                label="Image Generation Model"
-                icon={Sparkles}
-                description="Used for Image mode in Chat and generated images."
-              >
-                <div className="w-80">
+              <SettingsRow label="Image Generation Model" icon={Sparkles}>
+                <div className="settings-row-dropdown">
                   <ModelSelector
                     selectedModel={imageGenerationModel}
                     onModelChange={onImageGenerationModelChange}
@@ -1305,12 +1385,8 @@ export function Settings({
           )}
           {useLocalKeys && !authMetaLoading && localImageGenerationProviders.length > 0 && (
             <>
-              <SettingsRow
-                label="Image Generation Model"
-                icon={Sparkles}
-                description="Used for Image mode in Chat and generated images."
-              >
-                <div className="w-80">
+              <SettingsRow label="Image Generation Model" icon={Sparkles}>
+                <div className="settings-row-dropdown">
                   <ModelSelector
                     selectedModel={imageGenerationModel}
                     onModelChange={onImageGenerationModelChange}
@@ -1333,7 +1409,9 @@ export function Settings({
           )}
         </SettingsGroup>
       </div>
+      )}
 
+      {activeSection === "system" && (
       <SettingsGroup title="System">
         <SettingsRow label="Gateway Status" icon={Shield} description={gatewayRunning ? "Running on localhost:19789" : "Secure sandbox stopped"}>
           <button
@@ -1451,7 +1529,9 @@ export function Settings({
           <div className="px-4 pb-4 pt-2 text-xs text-green-500">{gatewayConfigNotice}</div>
         )}
       </SettingsGroup>
+      )}
 
+      {activeSection === "keys" && (
       <SettingsGroup title="Keys">
         <SettingsRow
           label="Use Local Keys"
@@ -1774,7 +1854,9 @@ export function Settings({
           </>
         )}
       </SettingsGroup>
+      )}
 
+      {activeSection === "diagnostics" && (
       <SettingsGroup title="Diagnostics">
         {updaterEnabled && (
           <div className="p-4 space-y-3">
@@ -1958,7 +2040,10 @@ export function Settings({
           )}
         </div>
       </SettingsGroup>
+      )}
 
+      {activeSection === "data" && (
+      <>
       <SettingsGroup title="Data Management">
         <div className="p-4 space-y-4">
           <div className="flex items-start gap-3">
@@ -2254,6 +2339,8 @@ export function Settings({
             : ""}
         </div>
       </div>
+      </>
+      )}
 
       {/* Wallpaper Picker Modal */}
       {wallpaperPickerOpen && (
@@ -2325,7 +2412,10 @@ export function Settings({
         </div>
       )}
 
-    </div>
+          </div>
+        </div>
+      </div>
+    </>
   );
 }
 

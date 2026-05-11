@@ -31,6 +31,7 @@ type Props = {
   isScanning: boolean;
   error: string | null;
   onClose: () => void;
+  onRetry?: () => void;
   onConfirm?: () => void;
   confirmLabel?: string;
   confirmAnywayLabel?: string;
@@ -46,7 +47,7 @@ const SEVERITY_COLORS: Record<string, string> = {
 
 export function ScanResultModal({
   isOpen, targetName, targetType = "plugin", scanResult, isScanning, error,
-  onClose, onConfirm, confirmLabel = "Enable Plugin", confirmAnywayLabel = "Enable Anyway",
+  onClose, onRetry, onConfirm, confirmLabel = "Enable Plugin", confirmAnywayLabel = "Enable Anyway",
 }: Props) {
   const [expandedFindings, setExpandedFindings] = useState<Set<number>>(new Set());
   const [scanElapsedSeconds, setScanElapsedSeconds] = useState(0);
@@ -99,6 +100,43 @@ export function ScanResultModal({
     [targetType]
   );
   const scanProgress = Math.min(100, Math.max(8, Math.round((scanElapsedSeconds / 18) * 100)));
+  const normalizedError = (error || "").trim();
+  const errorLower = normalizedError.toLowerCase();
+  const errorState = (() => {
+    if (!normalizedError) {
+      return null;
+    }
+    if (
+      errorLower.includes("scanner unavailable") ||
+      errorLower.includes("failed to check scanner")
+    ) {
+      return {
+        title: "Scanner unavailable",
+        tone: "amber",
+        body: "The security scanner is not running right now, so we couldn't verify this item yet.",
+        hint: "Try again in a few seconds after the scanner runtime comes up.",
+      };
+    }
+    if (
+      errorLower.includes("scanner may not be ready") ||
+      errorLower.includes("connection refused") ||
+      errorLower.includes("connection closed") ||
+      errorLower.includes("scan request failed after retries")
+    ) {
+      return {
+        title: "Scanner is still starting",
+        tone: "amber",
+        body: "The scanner looks like it was warming up when this check ran.",
+        hint: "Retrying usually works once the scanner container is fully ready.",
+      };
+    }
+    return {
+      title: "Security scan failed",
+      tone: "red",
+      body: "We couldn't complete the scan because the scanner backend returned an unexpected error.",
+      hint: normalizedError,
+    };
+  })();
 
   if (!isOpen) return null;
 
@@ -193,9 +231,48 @@ export function ScanResultModal({
 
         {/* Error state */}
         {error && !isScanning && (
-          <div className="py-8 text-center">
-            <p className="text-red-500 mb-4">{error}</p>
-            <button onClick={onClose} className="btn btn-secondary">Close</button>
+          <div className="py-4">
+            <div
+              className={clsx(
+                "rounded-xl border px-4 py-4",
+                errorState?.tone === "amber"
+                  ? "border-amber-500/20 bg-amber-500/10"
+                  : "border-red-500/20 bg-red-500/10",
+              )}
+            >
+              <div className="flex items-start gap-3">
+                <AlertTriangle
+                  className={clsx(
+                    "mt-0.5 h-5 w-5 shrink-0",
+                    errorState?.tone === "amber" ? "text-amber-500" : "text-red-500",
+                  )}
+                />
+                <div className="min-w-0">
+                  <p
+                    className={clsx(
+                      "text-sm font-semibold",
+                      errorState?.tone === "amber" ? "text-amber-500" : "text-red-500",
+                    )}
+                  >
+                    {errorState?.title || "Security scan failed"}
+                  </p>
+                  <p className="mt-1 text-sm text-[var(--text-primary)]">
+                    {errorState?.body || normalizedError}
+                  </p>
+                  {errorState?.hint ? (
+                    <p className="mt-2 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words">
+                      {errorState.hint}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 flex gap-3 justify-end">
+              {onRetry ? (
+                <button onClick={onRetry} className="btn btn-primary">Retry Scan</button>
+              ) : null}
+              <button onClick={onClose} className="btn btn-secondary">Close</button>
+            </div>
           </div>
         )}
 
@@ -227,7 +304,7 @@ export function ScanResultModal({
                 </p>
                 {!scanResult.scanner_available && (
                   <p className="text-xs text-[var(--text-tertiary)] mt-1">
-                    Security scan was skipped. Start the scanner image/container and retry.
+                    Security scan was skipped because the scanner runtime was unavailable.
                   </p>
                 )}
               </div>
@@ -279,6 +356,9 @@ export function ScanResultModal({
             <div className="flex gap-3 justify-end">
               {!scanPassed && (
                 <button onClick={onClose} className="btn btn-secondary">Cancel</button>
+              )}
+              {onRetry && !scanResult.scanner_available && (
+                <button onClick={onRetry} className="btn btn-secondary">Retry Scan</button>
               )}
               {onConfirm && (scanResult.is_safe || !scanResult.scanner_available) && (
                 <button onClick={onConfirm} className="btn btn-primary">{confirmLabel}</button>

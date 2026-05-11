@@ -326,6 +326,11 @@ PLUGIN_ENTRIES="\"entropic-integrations\": { \"enabled\": true }"
 ALSO_ALLOW="\"entropic-integrations\""
 PLUGIN_LOAD_PATHS=""
 
+if [ "${ENTROPIC_BROWSER_TOOL_ENABLED:-1}" != "0" ] && { [ -d "/app/extensions/browser" ] || is_bundled_plugin "browser" || [ -d "${ENTROPIC_SKILLS_PATH}/browser" ] || [ -d "${ENTROPIC_SKILLS_PATH}/browser/current" ] || [ -d "/data/entropic-skills/browser" ]; }; then
+    PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"browser\": { \"enabled\": true }"
+    ALSO_ALLOW="\"browser\", ${ALSO_ALLOW}"
+fi
+
 if [ -d "/app/extensions/lossless-claw" ]; then
     PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"lossless-claw\": { \"enabled\": true }"
 fi
