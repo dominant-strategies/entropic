@@ -77,6 +77,27 @@ import {
   syncEmbeddedPreviewWebview,
 } from "../lib/nativePreview";
 import { hostedFeaturesEnabled } from "../lib/buildProfile";
+import { createOnlyOfficeSession } from "../lib/office";
+import {
+  DEFAULT_WINDOW_Z,
+  clampWindowFrame,
+  startDesktopWindowDrag,
+  startDesktopWindowResize,
+  useWindowZStack,
+  windowRectsIntersect,
+  type WindowDragState,
+  type WindowKey,
+  type WindowPoint,
+  type WindowRect,
+  type WindowResizeDirection,
+  type WindowResizeState,
+  type WindowSize,
+} from "../desktop/windowManager";
+import {
+  DESKTOP_ACTION_EVENT,
+  dispatchDesktopAction,
+  type DesktopAction,
+} from "../desktop/actions";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -147,6 +168,22 @@ type EmbeddedPreviewState = {
   title: string | null;
 };
 
+type OfficeAppKind = "sheets" | "docs" | "slides";
+
+type OfficeAppSession = {
+  path: string;
+  name: string;
+  url: string;
+  appKind: OfficeAppKind;
+  launchToken: string;
+};
+
+type OfficeRecentEntry = {
+  path: string;
+  name: string;
+  openedAt: number;
+};
+
 type BrowserTabState = {
   id: string;
   title: string | null;
@@ -187,27 +224,13 @@ type DesktopTerminalEventPayload = {
   exit_code: number | null;
 };
 
-const DEFAULT_WINDOW_Z: Record<string, number> = {
-  finder: 60,
-  chat: 61,
-  browser: 62,
-  terminal: 63,
-  plugins: 64,
-  skills: 65,
-  channels: 66,
-  tasks: 67,
-  jobs: 68,
-  logs: 69,
-  billing: 70,
-  settings: 71,
-  preview: 80,
-};
-
 const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md"]);
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
 const HTML_EXTS = new Set(["html", "htm"]);
+const ONLYOFFICE_BROWSER_EXTS = new Set(["docx", "xlsx", "pptx"]);
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
+const DESKTOP_HANDOFF_EVENT = "entropic-desktop-handoff";
 const DESKTOP_SESSION_STORAGE_KEY = "entropic.desktop.session.v1";
 const DEFAULT_DESKTOP_CHAT_TITLE = "New chat";
 const DESKTOP_WORKSPACE_PATH = "Desktop";
@@ -254,8 +277,6 @@ type PreviewState =
   | { kind: "image"; name: string; path: string; dataUrl: string }
   | { kind: "binary"; name: string; path: string; size: number };
 
-type WindowResizeDirection = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
-type WindowResizeState = { sx: number; sy: number; ox: number; oy: number; ow: number; oh: number };
 type ChatWorkspaceReference = {
   key: string;
   path: string;
@@ -269,9 +290,6 @@ type DesktopHandoff = {
   action: "open" | "preview" | "browser";
   looksLikeFile?: boolean;
 };
-type WindowPoint = { x: number; y: number };
-type WindowSize = { w: number; h: number };
-type WindowRect = { x: number; y: number; w: number; h: number };
 type DesktopDropTarget = string | null;
 type NativeDragDropPayload = {
   paths?: string[] | null;
@@ -286,6 +304,9 @@ type DesktopSessionState = {
   chatNavCollapsed: boolean;
   browserOpen: boolean;
   terminalOpen: boolean;
+  sheetsOpen: boolean;
+  docsOpen: boolean;
+  slidesOpen: boolean;
   pluginsOpen: boolean;
   skillsOpen: boolean;
   channelsOpen: boolean;
@@ -302,6 +323,12 @@ type DesktopSessionState = {
   browserSize: WindowSize;
   terminalPos: WindowPoint;
   terminalSize: WindowSize;
+  sheetsPos: WindowPoint;
+  sheetsSize: WindowSize;
+  docsPos: WindowPoint;
+  docsSize: WindowSize;
+  slidesPos: WindowPoint;
+  slidesSize: WindowSize;
   pluginsPos: WindowPoint;
   skillsPos: WindowPoint;
   skillsSize: WindowSize;
@@ -327,6 +354,9 @@ type DesktopSessionState = {
   terminalSessionId: string | null;
   terminalInput: string;
   desktopIcons: Record<string, DesktopIcon>;
+  sheetsRecent: OfficeRecentEntry[];
+  docsRecent: OfficeRecentEntry[];
+  slidesRecent: OfficeRecentEntry[];
 };
 
 type DesktopWarmCache = {
@@ -481,29 +511,6 @@ function sortDesktopChatSessions(list: SharedChatSession[]): SharedChatSession[]
   });
 }
 
-function clampWindowFrame(
-  bounds: { width: number; height: number },
-  position: WindowPoint,
-  size: WindowSize,
-  minSize: WindowSize,
-): { position: WindowPoint; size: WindowSize } {
-  const maxWidth = Math.max(minSize.w, Math.floor(bounds.width - 12));
-  const maxHeight = Math.max(minSize.h, Math.floor(bounds.height - 12));
-  const nextSize = {
-    w: Math.min(Math.max(size.w, minSize.w), maxWidth),
-    h: Math.min(Math.max(size.h, minSize.h), maxHeight),
-  };
-  const maxX = Math.max(0, Math.floor(bounds.width - nextSize.w));
-  const maxY = Math.max(0, Math.floor(bounds.height - nextSize.h));
-  return {
-    position: {
-      x: Math.min(Math.max(0, position.x), maxX),
-      y: Math.min(Math.max(0, position.y), maxY),
-    },
-    size: nextSize,
-  };
-}
-
 function workspaceEntriesEqual(a: WorkspaceFileEntry[], b: WorkspaceFileEntry[]): boolean {
   if (a === b) return true;
   if (a.length !== b.length) return false;
@@ -550,6 +557,21 @@ function asDesktopIcons(value: unknown): Record<string, DesktopIcon> | null {
     next[key] = { id: key, x: point.x, y: point.y };
   }
   return Object.keys(next).length > 0 ? next : null;
+}
+
+function asOfficeRecentEntries(value: unknown): OfficeRecentEntry[] | null {
+  if (!Array.isArray(value)) return null;
+  const entries = value
+    .map((raw): OfficeRecentEntry | null => {
+      if (!isRecord(raw)) return null;
+      const path = typeof raw.path === "string" ? raw.path : "";
+      const name = typeof raw.name === "string" ? raw.name : workspacePathName(path);
+      const openedAt = Number(raw.openedAt);
+      if (!path || !Number.isFinite(openedAt)) return null;
+      return { path, name, openedAt };
+    })
+    .filter((entry): entry is OfficeRecentEntry => entry !== null);
+  return entries.length > 0 ? entries : [];
 }
 
 function nativeDragDropClientPoint(payload: NativeDragDropPayload | null | undefined): WindowPoint | null {
@@ -845,6 +867,45 @@ function workspaceBrowserUrl(path: string): string {
     : `${CONTAINER_LOCAL_BROWSER_BASE}/__workspace__/`;
 }
 
+function workspaceFileCanOpenInBrowser(path: string): boolean {
+  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
+  return HTML_EXTS.has(ext);
+}
+
+function workspaceFileUsesOnlyOffice(path: string): boolean {
+  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
+  return ONLYOFFICE_BROWSER_EXTS.has(ext);
+}
+
+function officeAppKindForPath(path: string): OfficeAppKind | null {
+  const ext = workspacePathName(path).split(".").pop()?.toLowerCase() || "";
+  if (ext === "xlsx") return "sheets";
+  if (ext === "docx") return "docs";
+  if (ext === "pptx") return "slides";
+  return null;
+}
+
+function officeAppLabel(kind: OfficeAppKind): string {
+  switch (kind) {
+    case "sheets":
+      return "Sheets";
+    case "docs":
+      return "Docs";
+    case "slides":
+      return "Slides";
+  }
+}
+
+function pushOfficeRecentEntry(
+  current: OfficeRecentEntry[],
+  nextEntry: OfficeRecentEntry,
+): OfficeRecentEntry[] {
+  return [
+    nextEntry,
+    ...current.filter((entry) => entry.path !== nextEntry.path),
+  ].slice(0, 8);
+}
+
 function trimChatWorkspaceToken(raw: string): string {
   return raw
     .replace(/^[("'`\[]+/, "")
@@ -873,15 +934,6 @@ function workspacePathParent(path: string): string {
   const parts = path.split("/").filter(Boolean);
   parts.pop();
   return parts.join("/");
-}
-
-function windowRectsIntersect(a: WindowRect, b: WindowRect): boolean {
-  return (
-    a.x < b.x + b.w &&
-    a.x + a.w > b.x &&
-    a.y < b.y + b.h &&
-    a.y + a.h > b.y
-  );
 }
 
 function extractChatWorkspaceReferences(content: string): ChatWorkspaceReference[] {
@@ -1119,6 +1171,82 @@ function DockIconButton({
   );
 }
 
+function OfficeHomePanel({
+  kind,
+  recent,
+  onOpenRecent,
+  onOpenChat,
+}: {
+  kind: OfficeAppKind;
+  recent: OfficeRecentEntry[];
+  onOpenRecent: (path: string) => void;
+  onOpenChat: () => void;
+}) {
+  const title = officeAppLabel(kind);
+  const subtitle =
+    kind === "sheets"
+      ? "Create spreadsheets with chat or reopen recent work."
+      : kind === "docs"
+        ? "Create documents with chat or reopen recent work."
+        : "Create presentations with chat or reopen recent work.";
+
+  return (
+    <div className="h-full overflow-auto bg-[linear-gradient(180deg,#f8fafc_0%,#eef5ff_100%)] px-8 py-8">
+      <div className="mx-auto flex h-full max-w-3xl flex-col">
+        <div className="mb-8">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+            {title}
+          </div>
+          <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-900">{title}</h2>
+          <p className="mt-2 max-w-xl text-sm text-slate-600">{subtitle}</p>
+        </div>
+
+        {recent.length > 0 ? (
+          <div className="rounded-[24px] border border-slate-200 bg-white/85 p-4 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur">
+            <div className="mb-3 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
+              Recent
+            </div>
+            <div className="space-y-2">
+              {recent.map((entry) => (
+                <button
+                  key={entry.path}
+                  type="button"
+                  onClick={() => onOpenRecent(entry.path)}
+                  className="flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-slate-300 hover:bg-slate-50"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-slate-900">{entry.name}</div>
+                    <div className="truncate text-xs text-slate-500">{entry.path}</div>
+                  </div>
+                  <div className="ml-4 shrink-0 text-[11px] text-slate-400">
+                    {formatDate(Math.floor(entry.openedAt / 1000))}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-1 items-center justify-center">
+            <div className="max-w-md rounded-[28px] border border-slate-200 bg-white/92 px-8 py-9 text-center shadow-[0_24px_80px_rgba(15,23,42,0.1)] backdrop-blur">
+              <div className="text-lg font-semibold text-slate-900">No recent {title.toLowerCase()} yet</div>
+              <p className="mt-2 text-sm text-slate-600">
+                Open chat and ask Entropic to create one for you, then it will appear here.
+              </p>
+              <button
+                type="button"
+                onClick={onOpenChat}
+                className="mt-5 inline-flex h-11 items-center justify-center rounded-2xl bg-slate-900 px-5 text-sm font-semibold text-white transition hover:bg-slate-800"
+              >
+                Create With Chat
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ═════════════════════════════════════════════════════════════════════
 export function Files({
   gatewayRunning,
@@ -1156,6 +1284,9 @@ export function Files({
   const [chatOpen, setChatOpen] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [sheetsOpen, setSheetsOpen] = useState(false);
+  const [docsOpen, setDocsOpen] = useState(false);
+  const [slidesOpen, setSlidesOpen] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [channelsOpen, setChannelsOpen] = useState(false);
@@ -1168,24 +1299,36 @@ export function Files({
   // Finder drag
   const [finderPos, setFinderPos] = useState({ x: 30, y: 20 });
   const [finderSize, setFinderSize] = useState({ w: 680, h: 460 });
-  const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const dragRef = useRef<WindowDragState | null>(null);
 
   // Chat window drag
   const [chatPos, setChatPos] = useState({ x: 120, y: 40 });
   const [chatSize, setChatSize] = useState({ w: 860, h: 560 });
   const [chatNavCollapsed, setChatNavCollapsed] = useState(false);
   const chatMinSize = chatNavCollapsed ? CHAT_WINDOW_MIN_SIZE_COLLAPSED : CHAT_WINDOW_MIN_SIZE_EXPANDED;
-  const chatDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const chatDragRef = useRef<WindowDragState | null>(null);
   const chatResizeRef = useRef<WindowResizeState | null>(null);
   const [desktopBounds, setDesktopBounds] = useState({ width: 0, height: 0 });
   const [browserPos, setBrowserPos] = useState({ x: 108, y: 40 });
   const [browserSize, setBrowserSize] = useState({ w: 1180, h: 760 });
-  const browserDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const browserDragRef = useRef<WindowDragState | null>(null);
   const browserResizeRef = useRef<WindowResizeState | null>(null);
   const [terminalPos, setTerminalPos] = useState({ x: 156, y: 70 });
   const [terminalSize, setTerminalSize] = useState({ w: 920, h: 560 });
-  const terminalDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const terminalDragRef = useRef<WindowDragState | null>(null);
   const terminalResizeRef = useRef<WindowResizeState | null>(null);
+  const [sheetsPos, setSheetsPos] = useState({ x: 156, y: 58 });
+  const [sheetsSize, setSheetsSize] = useState({ w: 1100, h: 720 });
+  const sheetsDragRef = useRef<WindowDragState | null>(null);
+  const sheetsResizeRef = useRef<WindowResizeState | null>(null);
+  const [docsPos, setDocsPos] = useState({ x: 186, y: 78 });
+  const [docsSize, setDocsSize] = useState({ w: 1040, h: 700 });
+  const docsDragRef = useRef<WindowDragState | null>(null);
+  const docsResizeRef = useRef<WindowResizeState | null>(null);
+  const [slidesPos, setSlidesPos] = useState({ x: 216, y: 98 });
+  const [slidesSize, setSlidesSize] = useState({ w: 1120, h: 720 });
+  const slidesDragRef = useRef<WindowDragState | null>(null);
+  const slidesResizeRef = useRef<WindowResizeState | null>(null);
 
   // Plugin windows drag
   const [pluginsPos, setPluginsPos] = useState({ x: 180, y: 80 });
@@ -1204,17 +1347,16 @@ export function Files({
   const [logsSize] = useState({ w: 560, h: 420 });
   const [billingSize] = useState({ w: 520, h: 520 });
   const [settingsSize] = useState({ w: 740, h: 560 });
-  const pluginsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const skillsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const pluginsDragRef = useRef<WindowDragState | null>(null);
+  const skillsDragRef = useRef<WindowDragState | null>(null);
   const skillsResizeRef = useRef<WindowResizeState | null>(null);
-  const channelsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const tasksDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const jobsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const logsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const billingDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const settingsDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
-  const zCounter = useRef(Math.max(...Object.values(DEFAULT_WINDOW_Z)));
-  const [windowZ, setWindowZ] = useState<Record<string, number>>(DEFAULT_WINDOW_Z);
+  const channelsDragRef = useRef<WindowDragState | null>(null);
+  const tasksDragRef = useRef<WindowDragState | null>(null);
+  const jobsDragRef = useRef<WindowDragState | null>(null);
+  const logsDragRef = useRef<WindowDragState | null>(null);
+  const billingDragRef = useRef<WindowDragState | null>(null);
+  const settingsDragRef = useRef<WindowDragState | null>(null);
+  const { windowZ, setWindowZ, zCounter, focusWindow } = useWindowZStack();
 
   // File browser
   const [entries, setEntries] = useState<WorkspaceFileEntry[]>([]);
@@ -1228,6 +1370,12 @@ export function Files({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [sheetsSession, setSheetsSession] = useState<OfficeAppSession | null>(null);
+  const [docsSession, setDocsSession] = useState<OfficeAppSession | null>(null);
+  const [slidesSession, setSlidesSession] = useState<OfficeAppSession | null>(null);
+  const [sheetsRecent, setSheetsRecent] = useState<OfficeRecentEntry[]>([]);
+  const [docsRecent, setDocsRecent] = useState<OfficeRecentEntry[]>([]);
+  const [slidesRecent, setSlidesRecent] = useState<OfficeRecentEntry[]>([]);
   const [uploading, setUploading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [selected, setSelected] = useState<string | null>(null);
@@ -1250,6 +1398,7 @@ export function Files({
   const filesLoadingSeqRef = useRef(0);
   const desktopEntriesFetchSeqRef = useRef(0);
   const desktopImagePreviewSeqRef = useRef(0);
+  const desktopActionHandlerRef = useRef<((action: DesktopAction) => Promise<void>) | null>(null);
   const desktopLoadedAtRef = useRef(initialDesktopWarmCache.lastLoadedAt);
 
   // Chat
@@ -1324,6 +1473,9 @@ export function Files({
       if (typeof saved.chatNavCollapsed === "boolean") setChatNavCollapsed(saved.chatNavCollapsed);
       const savedBrowserOpen = saved.browserOpen === true;
       if (typeof saved.terminalOpen === "boolean") setTerminalOpen(saved.terminalOpen);
+      if (typeof saved.sheetsOpen === "boolean") setSheetsOpen(saved.sheetsOpen);
+      if (typeof saved.docsOpen === "boolean") setDocsOpen(saved.docsOpen);
+      if (typeof saved.slidesOpen === "boolean") setSlidesOpen(saved.slidesOpen);
       if (typeof saved.pluginsOpen === "boolean") setPluginsOpen(saved.pluginsOpen);
       if (typeof saved.skillsOpen === "boolean") setSkillsOpen(saved.skillsOpen);
       if (typeof saved.channelsOpen === "boolean") setChannelsOpen(saved.channelsOpen);
@@ -1351,6 +1503,18 @@ export function Files({
       if (nextTerminalPos) setTerminalPos(nextTerminalPos);
       const nextTerminalSize = asWindowSize(saved.terminalSize);
       if (nextTerminalSize) setTerminalSize(nextTerminalSize);
+      const nextSheetsPos = asWindowPoint(saved.sheetsPos);
+      if (nextSheetsPos) setSheetsPos(nextSheetsPos);
+      const nextSheetsSize = asWindowSize(saved.sheetsSize);
+      if (nextSheetsSize) setSheetsSize(nextSheetsSize);
+      const nextDocsPos = asWindowPoint(saved.docsPos);
+      if (nextDocsPos) setDocsPos(nextDocsPos);
+      const nextDocsSize = asWindowSize(saved.docsSize);
+      if (nextDocsSize) setDocsSize(nextDocsSize);
+      const nextSlidesPos = asWindowPoint(saved.slidesPos);
+      if (nextSlidesPos) setSlidesPos(nextSlidesPos);
+      const nextSlidesSize = asWindowSize(saved.slidesSize);
+      if (nextSlidesSize) setSlidesSize(nextSlidesSize);
       const nextPluginsPos = asWindowPoint(saved.pluginsPos);
       if (nextPluginsPos) setPluginsPos(nextPluginsPos);
       const nextSkillsPos = asWindowPoint(saved.skillsPos);
@@ -1496,6 +1660,12 @@ export function Files({
       }
       const nextDesktopIcons = asDesktopIcons(saved.desktopIcons);
       if (nextDesktopIcons) setDesktopIcons(nextDesktopIcons);
+      const nextSheetsRecent = asOfficeRecentEntries(saved.sheetsRecent);
+      if (nextSheetsRecent) setSheetsRecent(nextSheetsRecent);
+      const nextDocsRecent = asOfficeRecentEntries(saved.docsRecent);
+      if (nextDocsRecent) setDocsRecent(nextDocsRecent);
+      const nextSlidesRecent = asOfficeRecentEntries(saved.slidesRecent);
+      if (nextSlidesRecent) setSlidesRecent(nextSlidesRecent);
     } catch {
       // Ignore invalid persisted desktop state.
     } finally {
@@ -1645,6 +1815,9 @@ export function Files({
     clampResizableWindow(chatPos, chatSize, chatMinSize, setChatPos, setChatSize);
     clampResizableWindow(browserPos, browserSize, { w: 640, h: 420 }, setBrowserPos, setBrowserSize);
     clampResizableWindow(terminalPos, terminalSize, { w: 680, h: 360 }, setTerminalPos, setTerminalSize);
+    clampResizableWindow(sheetsPos, sheetsSize, { w: 720, h: 480 }, setSheetsPos, setSheetsSize);
+    clampResizableWindow(docsPos, docsSize, { w: 720, h: 480 }, setDocsPos, setDocsSize);
+    clampResizableWindow(slidesPos, slidesSize, { w: 720, h: 480 }, setSlidesPos, setSlidesSize);
     clampFixedWindow(pluginsPos, pluginsSize, setPluginsPos);
     clampResizableWindow(skillsPos, skillsSize, { w: 420, h: 360 }, setSkillsPos, setSkillsSize);
     clampFixedWindow(channelsPos, channelsSize, setChannelsPos);
@@ -1664,6 +1837,12 @@ export function Files({
     browserSize,
     terminalPos,
     terminalSize,
+    sheetsPos,
+    sheetsSize,
+    docsPos,
+    docsSize,
+    slidesPos,
+    slidesSize,
     pluginsPos,
     skillsPos,
     channelsPos,
@@ -1709,6 +1888,9 @@ export function Files({
       chatNavCollapsed,
       browserOpen,
       terminalOpen,
+      sheetsOpen,
+      docsOpen,
+      slidesOpen,
       pluginsOpen,
       skillsOpen,
       channelsOpen,
@@ -1725,6 +1907,12 @@ export function Files({
       browserSize,
       terminalPos,
       terminalSize,
+      sheetsPos,
+      sheetsSize,
+      docsPos,
+      docsSize,
+      slidesPos,
+      slidesSize,
       pluginsPos,
       skillsPos,
       skillsSize,
@@ -1750,6 +1938,9 @@ export function Files({
       terminalSessionId,
       terminalInput,
       desktopIcons,
+      sheetsRecent,
+      docsRecent,
+      slidesRecent,
     };
     desktopSessionSnapshotRef.current = snapshot;
     const timeoutId = window.setTimeout(() => {
@@ -1767,6 +1958,9 @@ export function Files({
     chatNavCollapsed,
     browserOpen,
     terminalOpen,
+    sheetsOpen,
+    docsOpen,
+    slidesOpen,
     pluginsOpen,
     skillsOpen,
     channelsOpen,
@@ -1783,6 +1977,12 @@ export function Files({
     browserSize,
     terminalPos,
     terminalSize,
+    sheetsPos,
+    sheetsSize,
+    docsPos,
+    docsSize,
+    slidesPos,
+    slidesSize,
     pluginsPos,
     skillsPos,
     skillsSize,
@@ -1806,6 +2006,9 @@ export function Files({
     terminalSessionId,
     terminalInput,
     desktopIcons,
+    sheetsRecent,
+    docsRecent,
+    slidesRecent,
   ]);
 
   useEffect(() => {
@@ -1845,43 +2048,23 @@ export function Files({
 
   // ── Finder drag ─────────────────────────────────────────────────────
 
-  function focusWindow(id: string) {
-    setWindowZ((prev) => {
-      const nextZ = zCounter.current + 1;
-      zCounter.current = nextZ;
-      return { ...prev, [id]: nextZ };
-    });
-  }
-
   function startWindowDrag(
     e: ReactMouseEvent<HTMLElement>,
-    ref: React.MutableRefObject<{ sx: number; sy: number; ox: number; oy: number } | null>,
-    pos: { x: number; y: number },
-    size: { w: number; h: number },
-    setPos: (next: { x: number; y: number }) => void,
+    ref: React.MutableRefObject<WindowDragState | null>,
+    pos: WindowPoint,
+    size: WindowSize,
+    setPos: (next: WindowPoint) => void,
     id: string
   ) {
-    if ((e.target as HTMLElement).closest("button")) return;
-    e.preventDefault();
-    focusWindow(id);
-    ref.current = { sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y };
-    function onMove(ev: globalThis.MouseEvent) {
-      if (!ref.current) return;
-      const bounds = containerRef.current?.getBoundingClientRect();
-      const maxX = bounds ? Math.max(0, Math.floor(bounds.width - size.w)) : Number.POSITIVE_INFINITY;
-      const maxY = bounds ? Math.max(0, Math.floor(bounds.height - size.h)) : Number.POSITIVE_INFINITY;
-      setPos({
-        x: Math.min(Math.max(0, ref.current.ox + ev.clientX - ref.current.sx), maxX),
-        y: Math.min(Math.max(0, ref.current.oy + ev.clientY - ref.current.sy), maxY),
-      });
-    }
-    function onUp() {
-      ref.current = null;
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    startDesktopWindowDrag(
+      e,
+      ref,
+      pos,
+      size,
+      setPos,
+      () => containerRef.current?.getBoundingClientRect(),
+      () => focusWindow(id),
+    );
   }
 
   function handleFinderDragStart(e: ReactMouseEvent<HTMLElement>) {
@@ -1896,63 +2079,25 @@ export function Files({
     e: ReactMouseEvent<HTMLElement>,
     direction: WindowResizeDirection,
     ref: React.MutableRefObject<WindowResizeState | null>,
-    pos: { x: number; y: number },
-    size: { w: number; h: number },
-    setPos: (next: { x: number; y: number }) => void,
-    setSize: (next: { w: number; h: number }) => void,
+    pos: WindowPoint,
+    size: WindowSize,
+    setPos: (next: WindowPoint) => void,
+    setSize: (next: WindowSize) => void,
     id: string,
-    minSize: { w: number; h: number },
+    minSize: WindowSize,
   ) {
-    e.preventDefault();
-    e.stopPropagation();
-    focusWindow(id);
-    ref.current = { sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y, ow: size.w, oh: size.h };
-    function onMove(ev: globalThis.MouseEvent) {
-      if (!ref.current) return;
-      const deltaX = ev.clientX - ref.current.sx;
-      const deltaY = ev.clientY - ref.current.sy;
-      const bounds = containerRef.current?.getBoundingClientRect();
-      const maxRight = bounds ? Math.floor(bounds.width - 12) : Number.POSITIVE_INFINITY;
-      const maxBottom = bounds ? Math.floor(bounds.height - 12) : Number.POSITIVE_INFINITY;
-      const originalLeft = ref.current.ox;
-      const originalTop = ref.current.oy;
-      const originalRight = ref.current.ox + ref.current.ow;
-      const originalBottom = ref.current.oy + ref.current.oh;
-
-      let nextLeft = originalLeft;
-      let nextTop = originalTop;
-      let nextRight = originalRight;
-      let nextBottom = originalBottom;
-
-      if (direction.includes("w")) {
-        nextLeft = Math.max(0, Math.min(originalLeft + deltaX, originalRight - minSize.w));
-      }
-      if (direction.includes("e")) {
-        nextRight = Math.max(
-          originalLeft + minSize.w,
-          Math.min(originalRight + deltaX, maxRight),
-        );
-      }
-      if (direction.includes("n")) {
-        nextTop = Math.max(0, Math.min(originalTop + deltaY, originalBottom - minSize.h));
-      }
-      if (direction.includes("s")) {
-        nextBottom = Math.max(
-          originalTop + minSize.h,
-          Math.min(originalBottom + deltaY, maxBottom),
-        );
-      }
-
-      setPos({ x: nextLeft, y: nextTop });
-      setSize({ w: nextRight - nextLeft, h: nextBottom - nextTop });
-    }
-    function onUp() {
-      ref.current = null;
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    startDesktopWindowResize(
+      e,
+      direction,
+      ref,
+      pos,
+      size,
+      setPos,
+      setSize,
+      minSize,
+      () => containerRef.current?.getBoundingClientRect(),
+      () => focusWindow(id),
+    );
   }
 
   function applyTerminalSnapshot(snapshot: DesktopTerminalSnapshot) {
@@ -3244,25 +3389,100 @@ export function Files({
   function goBack() { if (historyIndex > 0) { setHistoryIndex(historyIndex - 1); setCurrentPath(history[historyIndex - 1]); setSelected(null); } }
   function goForward() { if (historyIndex < history.length - 1) { setHistoryIndex(historyIndex + 1); setCurrentPath(history[historyIndex + 1]); setSelected(null); } }
 
+  function openOfficeWindow(kind: OfficeAppKind) {
+    switch (kind) {
+      case "sheets":
+        setSheetsOpen(true);
+        focusWindow("sheets");
+        return;
+      case "docs":
+        setDocsOpen(true);
+        focusWindow("docs");
+        return;
+      case "slides":
+        setSlidesOpen(true);
+        focusWindow("slides");
+        return;
+    }
+  }
+
+  function recordOfficeRecent(kind: OfficeAppKind, entry: WorkspaceFileEntry) {
+    const nextRecent = {
+      path: entry.path,
+      name: entry.name,
+      openedAt: Date.now(),
+    };
+    switch (kind) {
+      case "sheets":
+        setSheetsRecent((current) => pushOfficeRecentEntry(current, nextRecent));
+        return;
+      case "docs":
+        setDocsRecent((current) => pushOfficeRecentEntry(current, nextRecent));
+        return;
+      case "slides":
+        setSlidesRecent((current) => pushOfficeRecentEntry(current, nextRecent));
+        return;
+    }
+  }
+
+  function openOfficeAppHomeInChat() {
+    createNewChatSession();
+  }
+
+  function openRecentOfficePath(path: string) {
+    void runDesktopAction({ type: "open_workspace_file", path });
+  }
+
+  async function openWorkspaceFileInOfficeApp(entry: WorkspaceFileEntry) {
+    const officeKind = officeAppKindForPath(entry.path);
+    if (!officeKind) return false;
+    try {
+      setError(null);
+      const session = await createOnlyOfficeSession(entry.path);
+      const nextSession: OfficeAppSession = {
+        path: entry.path,
+        name: session.fileName || entry.name,
+        url: session.url,
+        appKind: officeKind,
+        launchToken: `${Date.now()}`,
+      };
+      switch (officeKind) {
+        case "sheets":
+          setSheetsSession(nextSession);
+          recordOfficeRecent("sheets", entry);
+          openOfficeWindow("sheets");
+          break;
+        case "docs":
+          setDocsSession(nextSession);
+          recordOfficeRecent("docs", entry);
+          openOfficeWindow("docs");
+          break;
+        case "slides":
+          setSlidesSession(nextSession);
+          recordOfficeRecent("slides", entry);
+          openOfficeWindow("slides");
+          break;
+      }
+    } catch (e) {
+      setError(`Failed to start ONLYOFFICE: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return true;
+  }
+
   function handleEntryClick(entry: WorkspaceFileEntry, e: React.MouseEvent) { e.stopPropagation(); setSelected(entry.path); }
   function handleEntryDoubleClick(entry: WorkspaceFileEntry) {
     if (entry.is_directory) {
       navigateTo(entry.path);
       return;
     }
-    const ext = entry.name.split(".").pop()?.toLowerCase() || "";
-    if (HTML_EXTS.has(ext)) {
-      void openWorkspaceFileInBrowser(entry);
-      return;
-    }
-    handleView(entry);
+    void runDesktopAction({ type: "open_workspace_file", path: entry.path });
   }
   function handleDesktopEntryOpen(entry: WorkspaceFileEntry) {
     if (entry.is_directory) {
-      openFolder(entry.path);
+      void runDesktopAction({ type: "open_workspace_folder", path: entry.path });
       return;
     }
-    handleEntryDoubleClick(entry);
+    void runDesktopAction({ type: "open_workspace_file", path: entry.path });
   }
   function handleContextMenuEntry(entry: WorkspaceFileEntry, e: React.MouseEvent) { e.preventDefault(); e.stopPropagation(); setSelected(entry.path); setContextMenu({ x: e.clientX, y: e.clientY, entry }); }
 
@@ -3313,9 +3533,12 @@ export function Files({
 
   async function openWorkspaceFileInBrowser(entry: WorkspaceFileEntry) {
     if (entry.is_directory) return;
-    const ext = entry.name.split(".").pop()?.toLowerCase() || "";
-    if (!HTML_EXTS.has(ext)) return;
-    const targetUrl = workspaceBrowserUrl(entry.path);
+    if (workspaceFileUsesOnlyOffice(entry.path) && await openWorkspaceFileInOfficeApp(entry)) {
+      return;
+    }
+    if (!workspaceFileCanOpenInBrowser(entry.path)) return;
+    let targetUrl: string;
+    targetUrl = workspaceBrowserUrl(entry.path);
     if (!browserOpen) {
       setBrowserOpen(true);
     }
@@ -3423,6 +3646,34 @@ export function Files({
 
   useEffect(() => {
     void applyDesktopHandoff(consumeDesktopHandoff());
+    const handleDesktopHandoff = (event: Event) => {
+      const detail = (event as CustomEvent<DesktopHandoff>).detail;
+      void applyDesktopHandoff(detail ?? consumeDesktopHandoff());
+    };
+    window.addEventListener(DESKTOP_HANDOFF_EVENT, handleDesktopHandoff);
+    return () => {
+      window.removeEventListener(DESKTOP_HANDOFF_EVENT, handleDesktopHandoff);
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<DesktopAction>(DESKTOP_ACTION_EVENT, (event) => {
+      void desktopActionHandlerRef.current?.(event.payload).catch((error) => {
+        setError(error instanceof Error ? error.message : String(error));
+      });
+    }).then((dispose) => {
+      if (disposed) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   function openBrowserWindow(targetUrl = browserCurrentUrl) {
@@ -3441,6 +3692,185 @@ export function Files({
     if (browserSessionId && targetUrl !== browserCurrentUrl) {
       void navigateBrowser(targetUrl);
     }
+  }
+
+  async function openWorkspaceFilePath(path: string) {
+    const entry: WorkspaceFileEntry = {
+      name: workspacePathName(path),
+      path,
+      is_directory: false,
+      size: 0,
+      modified_at: 0,
+    };
+    if (workspaceFileUsesOnlyOffice(path) && await openWorkspaceFileInOfficeApp(entry)) {
+      return;
+    }
+    if (workspaceFileCanOpenInBrowser(path)) {
+      await openWorkspaceFileInBrowser(entry);
+      return;
+    }
+    await handleView(entry);
+  }
+
+  function focusDesktopWindow(window: WindowKey) {
+    switch (window) {
+      case "finder":
+        if (!finderOpen) {
+          setFinderOpen(true);
+          void fetchFiles(currentPath || "");
+        }
+        focusWindow("finder");
+        return;
+      case "chat":
+        if (!chatOpen) setChatOpen(true);
+        focusWindow("chat");
+        return;
+      case "browser":
+        if (!browserOpen) setBrowserOpen(true);
+        focusWindow("browser");
+        return;
+      case "terminal":
+        if (!terminalOpen) setTerminalOpen(true);
+        focusWindow("terminal");
+        return;
+      case "plugins":
+      case "integrations":
+        if (!pluginsOpen) setPluginsOpen(true);
+        focusWindow("plugins");
+        return;
+      case "skills":
+        if (!skillsOpen) setSkillsOpen(true);
+        focusWindow("skills");
+        return;
+      case "channels":
+        if (!channelsOpen) setChannelsOpen(true);
+        focusWindow("channels");
+        return;
+      case "tasks":
+        if (!tasksOpen) setTasksOpen(true);
+        focusWindow("tasks");
+        return;
+      case "jobs":
+        if (!jobsOpen) setJobsOpen(true);
+        focusWindow("jobs");
+        return;
+      case "logs":
+        if (!logsOpen) setLogsOpen(true);
+        focusWindow("logs");
+        return;
+      case "billing":
+        if (billingEnabled && !billingOpen) setBillingOpen(true);
+        if (billingEnabled) focusWindow("billing");
+        return;
+      case "settings":
+        if (!settingsOpen) setSettingsOpen(true);
+        focusWindow("settings");
+        return;
+      case "preview":
+        if (preview) focusWindow("preview");
+        return;
+      case "sheets":
+        if (!sheetsOpen) setSheetsOpen(true);
+        focusWindow("sheets");
+        return;
+      case "docs":
+        if (!docsOpen) setDocsOpen(true);
+        focusWindow("docs");
+        return;
+      case "slides":
+        if (!slidesOpen) setSlidesOpen(true);
+        focusWindow("slides");
+        return;
+      case "voiceOverlay":
+        focusWindow("voiceOverlay");
+        return;
+    }
+  }
+
+  async function closeDesktopWindow(window: WindowKey) {
+    switch (window) {
+      case "finder":
+        setFinderOpen(false);
+        return;
+      case "chat":
+        setChatOpen(false);
+        return;
+      case "browser":
+        await closeBrowserWindow();
+        return;
+      case "terminal":
+        await closeTerminalWindow();
+        return;
+      case "plugins":
+      case "integrations":
+        setPluginsOpen(false);
+        return;
+      case "skills":
+        setSkillsOpen(false);
+        return;
+      case "channels":
+        setChannelsOpen(false);
+        return;
+      case "tasks":
+        setTasksOpen(false);
+        return;
+      case "jobs":
+        setJobsOpen(false);
+        return;
+      case "logs":
+        setLogsOpen(false);
+        return;
+      case "billing":
+        setBillingOpen(false);
+        return;
+      case "settings":
+        setSettingsOpen(false);
+        return;
+      case "preview":
+        setPreview(null);
+        return;
+      case "sheets":
+        setSheetsOpen(false);
+        setSheetsSession(null);
+        return;
+      case "docs":
+        setDocsOpen(false);
+        setDocsSession(null);
+        return;
+      case "slides":
+        setSlidesOpen(false);
+        setSlidesSession(null);
+        return;
+      case "voiceOverlay":
+        return;
+    }
+  }
+
+  function startDesktopChatTask(prompt: string, sessionId?: string) {
+    setChatRequestedSession(sessionId || "__new__");
+    setChatRequestedAction(null);
+    setChatOpen(true);
+    focusWindow("chat");
+  }
+
+  async function runDesktopAction(action: DesktopAction) {
+    await dispatchDesktopAction(
+      action,
+      {
+        openWorkspaceFile: openWorkspaceFilePath,
+        openWorkspaceFolder: openFolder,
+        openBrowserUrl: openBrowserUrlInDesktop,
+        focusWindow: focusDesktopWindow,
+        closeWindow: closeDesktopWindow,
+        newChatTask: startDesktopChatTask,
+      },
+      { isTrustedLocalPreviewUrl },
+    );
+  }
+  desktopActionHandlerRef.current = runDesktopAction;
+
+  function requestDesktopWindowFocus(window: WindowKey) {
+    void runDesktopAction({ type: "focus_window", window });
   }
 
   async function copyDesktopPath(path: string) {
@@ -3799,6 +4229,15 @@ export function Files({
     if (terminalOpen) {
       frames.push({ z: windowZ.terminal ?? DEFAULT_WINDOW_Z.terminal, rect: { x: terminalPos.x, y: terminalPos.y, w: terminalSize.w, h: terminalSize.h } });
     }
+    if (sheetsOpen) {
+      frames.push({ z: windowZ.sheets ?? DEFAULT_WINDOW_Z.sheets, rect: { x: sheetsPos.x, y: sheetsPos.y, w: sheetsSize.w, h: sheetsSize.h } });
+    }
+    if (docsOpen) {
+      frames.push({ z: windowZ.docs ?? DEFAULT_WINDOW_Z.docs, rect: { x: docsPos.x, y: docsPos.y, w: docsSize.w, h: docsSize.h } });
+    }
+    if (slidesOpen) {
+      frames.push({ z: windowZ.slides ?? DEFAULT_WINDOW_Z.slides, rect: { x: slidesPos.x, y: slidesPos.y, w: slidesSize.w, h: slidesSize.h } });
+    }
     if (pluginsOpen) {
       frames.push({ z: windowZ.plugins ?? DEFAULT_WINDOW_Z.plugins, rect: { x: pluginsPos.x, y: pluginsPos.y, w: pluginsSize.w, h: pluginsSize.h } });
     }
@@ -3847,6 +4286,21 @@ export function Files({
     terminalPos.y,
     terminalSize.w,
     terminalSize.h,
+    sheetsOpen,
+    sheetsPos.x,
+    sheetsPos.y,
+    sheetsSize.w,
+    sheetsSize.h,
+    docsOpen,
+    docsPos.x,
+    docsPos.y,
+    docsSize.w,
+    docsSize.h,
+    slidesOpen,
+    slidesPos.x,
+    slidesPos.y,
+    slidesSize.w,
+    slidesSize.h,
     pluginsOpen,
     pluginsPos.x,
     pluginsPos.y,
@@ -3894,6 +4348,9 @@ export function Files({
     windowZ.finder,
     windowZ.chat,
     windowZ.terminal,
+    windowZ.sheets,
+    windowZ.docs,
+    windowZ.slides,
     windowZ.plugins,
     windowZ.skills,
     windowZ.channels,
@@ -4375,7 +4832,7 @@ export function Files({
               {contextMenu.entry.is_directory && (
                 <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleCreateFolder(contextMenu.entry!.path); setContextMenu(null); }}><Plus className="w-3.5 h-3.5" style={{ color: "#888" }} />New Folder Here</button>
               )}
-              {!contextMenu.entry.is_directory && HTML_EXTS.has(contextMenu.entry.name.split(".").pop()?.toLowerCase() || "") && (
+              {!contextMenu.entry.is_directory && workspaceFileCanOpenInBrowser(contextMenu.entry.path) && (
                 <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { void openWorkspaceFileInBrowser(contextMenu.entry!); setContextMenu(null); }}><Globe className="w-3.5 h-3.5" style={{ color: "#888" }} />Open in Browser</button>
               )}
               {!contextMenu.entry.is_directory && <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/10 text-left text-white/80" onClick={() => { handleView(contextMenu.entry!); setContextMenu(null); }}><Eye className="w-3.5 h-3.5" style={{ color: "#888" }} />Quick Look</button>}
@@ -5163,6 +5620,150 @@ export function Files({
             </AppWindow>
           )}
 
+          {sheetsOpen && (
+            <AppWindow
+              title="Sheets"
+              icon={LayoutGrid}
+              position={sheetsPos}
+              size={sheetsSize}
+              zIndex={windowZ.sheets ?? DEFAULT_WINDOW_Z.sheets}
+              glass={false}
+              onClose={() => { setSheetsOpen(false); setSheetsSession(null); }}
+              onFocus={() => focusWindow("sheets")}
+              onDragStart={(e) =>
+                startWindowDrag(e, sheetsDragRef, sheetsPos, sheetsSize, setSheetsPos, "sheets")
+              }
+              onResizeStart={(direction, e) =>
+                startWindowResize(
+                  e,
+                  direction,
+                  sheetsResizeRef,
+                  sheetsPos,
+                  sheetsSize,
+                  setSheetsPos,
+                  setSheetsSize,
+                  "sheets",
+                  { w: 720, h: 480 },
+                )
+              }
+            >
+              <div className="h-full bg-white">
+                {sheetsSession ? (
+                  <iframe
+                    key={`${sheetsSession.path}:${sheetsSession.launchToken}`}
+                    src={sheetsSession.url}
+                    title={sheetsSession.name}
+                    className="block h-full w-full border-0 bg-white"
+                    allow="clipboard-read; clipboard-write; fullscreen"
+                  />
+                ) : (
+                  <OfficeHomePanel
+                    kind="sheets"
+                    recent={sheetsRecent}
+                    onOpenRecent={openRecentOfficePath}
+                    onOpenChat={openOfficeAppHomeInChat}
+                  />
+                )}
+              </div>
+            </AppWindow>
+          )}
+
+          {docsOpen && (
+            <AppWindow
+              title="Docs"
+              icon={FileText}
+              position={docsPos}
+              size={docsSize}
+              zIndex={windowZ.docs ?? DEFAULT_WINDOW_Z.docs}
+              glass={false}
+              onClose={() => { setDocsOpen(false); setDocsSession(null); }}
+              onFocus={() => focusWindow("docs")}
+              onDragStart={(e) =>
+                startWindowDrag(e, docsDragRef, docsPos, docsSize, setDocsPos, "docs")
+              }
+              onResizeStart={(direction, e) =>
+                startWindowResize(
+                  e,
+                  direction,
+                  docsResizeRef,
+                  docsPos,
+                  docsSize,
+                  setDocsPos,
+                  setDocsSize,
+                  "docs",
+                  { w: 720, h: 480 },
+                )
+              }
+            >
+              <div className="h-full bg-white">
+                {docsSession ? (
+                  <iframe
+                    key={`${docsSession.path}:${docsSession.launchToken}`}
+                    src={docsSession.url}
+                    title={docsSession.name}
+                    className="block h-full w-full border-0 bg-white"
+                    allow="clipboard-read; clipboard-write; fullscreen"
+                  />
+                ) : (
+                  <OfficeHomePanel
+                    kind="docs"
+                    recent={docsRecent}
+                    onOpenRecent={openRecentOfficePath}
+                    onOpenChat={openOfficeAppHomeInChat}
+                  />
+                )}
+              </div>
+            </AppWindow>
+          )}
+
+          {slidesOpen && (
+            <AppWindow
+              title="Slides"
+              icon={Image}
+              position={slidesPos}
+              size={slidesSize}
+              zIndex={windowZ.slides ?? DEFAULT_WINDOW_Z.slides}
+              glass={false}
+              onClose={() => { setSlidesOpen(false); setSlidesSession(null); }}
+              onFocus={() => focusWindow("slides")}
+              onDragStart={(e) =>
+                startWindowDrag(e, slidesDragRef, slidesPos, slidesSize, setSlidesPos, "slides")
+              }
+              onResizeStart={(direction, e) =>
+                startWindowResize(
+                  e,
+                  direction,
+                  slidesResizeRef,
+                  slidesPos,
+                  slidesSize,
+                  setSlidesPos,
+                  setSlidesSize,
+                  "slides",
+                  { w: 720, h: 480 },
+                )
+              }
+            >
+              <div className="h-full bg-white">
+                {slidesSession ? (
+                  <iframe
+                    key={`${slidesSession.path}:${slidesSession.launchToken}`}
+                    src={slidesSession.url}
+                    title={slidesSession.name}
+                    className="block h-full w-full border-0 bg-white"
+                    allow="clipboard-read; clipboard-write; fullscreen"
+                  />
+                ) : (
+                  <OfficeHomePanel
+                    kind="slides"
+                    recent={slidesRecent}
+                    onOpenRecent={openRecentOfficePath}
+                    onOpenChat={openOfficeAppHomeInChat}
+                  />
+                )}
+              </div>
+            </AppWindow>
+          )}
+
           {/* ── TERMINAL WINDOW ─────────────────────────────────────── */}
           {terminalOpen && (
             <AppWindow
@@ -5492,13 +6093,7 @@ export function Files({
             <DockIconButton
               label="Finder"
               active={finderOpen}
-              onClick={() => {
-                if (!finderOpen) {
-                  setFinderOpen(true);
-                  fetchFiles(currentPath || "");
-                }
-                focusWindow("finder");
-              }}
+              onClick={() => requestDesktopWindowFocus("finder")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5512,10 +6107,7 @@ export function Files({
             <DockIconButton
               label="Chat"
               active={chatOpen}
-              onClick={() => {
-                if (!chatOpen) setChatOpen(true);
-                focusWindow("chat");
-              }}
+              onClick={() => requestDesktopWindowFocus("chat")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5545,13 +6137,50 @@ export function Files({
               </div>
             </DockIconButton>
 
+            <DockIconButton
+              label="Sheets"
+              active={sheetsOpen}
+              onClick={() => requestDesktopWindowFocus("sheets")}
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #34d399 0%, #059669 100%)", boxShadow: "0 3px 10px rgba(5,150,105,0.38)" }}
+              >
+                <LayoutGrid className="w-6 h-6 text-white" />
+              </div>
+            </DockIconButton>
+
+            <DockIconButton
+              label="Docs"
+              active={docsOpen}
+              onClick={() => requestDesktopWindowFocus("docs")}
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #60a5fa 0%, #2563eb 100%)", boxShadow: "0 3px 10px rgba(37,99,235,0.38)" }}
+              >
+                <FileText className="w-6 h-6 text-white" />
+              </div>
+            </DockIconButton>
+
+            <DockIconButton
+              label="Slides"
+              active={slidesOpen}
+              onClick={() => requestDesktopWindowFocus("slides")}
+            >
+              <div
+                className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
+                style={{ background: "linear-gradient(180deg, #fbbf24 0%, #f97316 100%)", boxShadow: "0 3px 10px rgba(249,115,22,0.34)" }}
+              >
+                <Image className="w-6 h-6 text-white" />
+              </div>
+            </DockIconButton>
+
             {/* Terminal */}
             <DockIconButton
               label="Terminal"
               active={terminalOpen}
-              onClick={() => {
-                openTerminalWindow();
-              }}
+              onClick={() => requestDesktopWindowFocus("terminal")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5565,10 +6194,7 @@ export function Files({
             <DockIconButton
               label="Skills"
               active={skillsOpen}
-              onClick={() => {
-                if (!skillsOpen) setSkillsOpen(true);
-                focusWindow("skills");
-              }}
+              onClick={() => requestDesktopWindowFocus("skills")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5582,10 +6208,7 @@ export function Files({
             <DockIconButton
               label="Messaging"
               active={channelsOpen}
-              onClick={() => {
-                if (!channelsOpen) setChannelsOpen(true);
-                focusWindow("channels");
-              }}
+              onClick={() => requestDesktopWindowFocus("channels")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5599,10 +6222,7 @@ export function Files({
             <DockIconButton
               label="Tasks"
               active={tasksOpen}
-              onClick={() => {
-                if (!tasksOpen) setTasksOpen(true);
-                focusWindow("tasks");
-              }}
+              onClick={() => requestDesktopWindowFocus("tasks")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5616,10 +6236,7 @@ export function Files({
             <DockIconButton
               label="Jobs"
               active={jobsOpen}
-              onClick={() => {
-                if (!jobsOpen) setJobsOpen(true);
-                focusWindow("jobs");
-              }}
+              onClick={() => requestDesktopWindowFocus("jobs")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5633,10 +6250,7 @@ export function Files({
             <DockIconButton
               label="Logs"
               active={logsOpen}
-              onClick={() => {
-                if (!logsOpen) setLogsOpen(true);
-                focusWindow("logs");
-              }}
+              onClick={() => requestDesktopWindowFocus("logs")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5651,10 +6265,7 @@ export function Files({
               <DockIconButton
                 label="Billing"
                 active={billingOpen}
-                onClick={() => {
-                  if (!billingOpen) setBillingOpen(true);
-                  focusWindow("billing");
-                }}
+                onClick={() => requestDesktopWindowFocus("billing")}
               >
                 <div
                   className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
@@ -5669,10 +6280,7 @@ export function Files({
             <DockIconButton
               label="Settings"
               active={settingsOpen}
-              onClick={() => {
-                if (!settingsOpen) setSettingsOpen(true);
-                focusWindow("settings");
-              }}
+              onClick={() => requestDesktopWindowFocus("settings")}
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"
