@@ -28,10 +28,14 @@ import {
 } from "../lib/integrations";
 import { getGatewayStatusCached } from "../lib/gateway-status";
 import {
+  LOCAL_AUDIO_UNDERSTANDING_MODEL_IDS,
   LOCAL_IMAGE_GENERATION_MODEL_IDS,
   LOCAL_MODEL_IDS,
+  LOCAL_TEXT_TO_SPEECH_MODEL_IDS,
+  PROXY_AUDIO_UNDERSTANDING_MODEL_IDS,
   PROXY_IMAGE_GENERATION_MODEL_IDS,
   PROXY_MODEL_IDS,
+  PROXY_TEXT_TO_SPEECH_MODEL_IDS,
 } from "../components/ModelSelector";
 import { hideEmbeddedPreviewWebview } from "../lib/nativePreview";
 import {
@@ -330,12 +334,16 @@ function SettingsLoadingShell({
   selectedModel,
   codeModel,
   imageGenerationModel,
+  textToSpeechModel,
+  audioUnderstandingModel,
 }: {
   gatewayRunning: boolean;
   useLocalKeys: boolean;
   selectedModel: string;
   codeModel: string;
   imageGenerationModel: string;
+  textToSpeechModel: string;
+  audioUnderstandingModel: string;
 }) {
   return (
     <div className="h-full overflow-auto px-6 py-6">
@@ -371,6 +379,8 @@ function SettingsLoadingShell({
           <SettingsShellRow label="Primary Model" value={selectedModel} icon={Cpu} />
           <SettingsShellRow label="Coding Model" value={codeModel} icon={Cpu} />
           <SettingsShellRow label="Image Generation Model" value={imageGenerationModel} icon={Image} />
+          <SettingsShellRow label="Text to Speech Model" value={textToSpeechModel} icon={Image} />
+          <SettingsShellRow label="Audio Understanding Model" value={audioUnderstandingModel} icon={Image} />
         </SettingsShellGroup>
 
         <SettingsShellGroup title="System">
@@ -418,6 +428,10 @@ const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_PROXY_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
 const DEFAULT_LOCAL_OPENAI_IMAGE_GENERATION_MODEL = "openai/gpt-image-1";
 const DEFAULT_LOCAL_GOOGLE_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
+const DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL = "google/gemini-3-flash-preview";
+const DEFAULT_LOCAL_AUDIO_UNDERSTANDING_MODEL = "google/gemini-3-flash-preview";
+const DEFAULT_PROXY_TEXT_TO_SPEECH_MODEL = "openai/gpt-4o-audio-preview";
+const DEFAULT_LOCAL_TEXT_TO_SPEECH_MODEL = "openai/gpt-4o-mini-tts";
 const GATEWAY_FAILURE_THRESHOLD = 3;
 const FEEDBACK_FORM_URL = entropicSitePath("/feedback");
 
@@ -552,6 +566,59 @@ function remapImageGenerationModelForMode(
   return DEFAULT_PROXY_IMAGE_GENERATION_MODEL;
 }
 
+function remapAudioUnderstandingModelForMode(model: string, useLocalKeys: boolean): string {
+  if (useLocalKeys) {
+    if (LOCAL_AUDIO_UNDERSTANDING_MODEL_IDS.has(model)) {
+      return model;
+    }
+    const base = stripModelParams(model);
+    if (LOCAL_AUDIO_UNDERSTANDING_MODEL_IDS.has(base)) {
+      return base;
+    }
+    if (base.startsWith("openai/")) {
+      return "openai/gpt-4o-transcribe";
+    }
+    if (base.startsWith("google/")) {
+      return DEFAULT_LOCAL_AUDIO_UNDERSTANDING_MODEL;
+    }
+    return DEFAULT_LOCAL_AUDIO_UNDERSTANDING_MODEL;
+  }
+
+  if (PROXY_AUDIO_UNDERSTANDING_MODEL_IDS.has(model)) {
+    return model;
+  }
+  const base = stripModelParams(model);
+  if (PROXY_AUDIO_UNDERSTANDING_MODEL_IDS.has(base)) {
+    return base;
+  }
+  if (base.startsWith("openai/")) {
+    return "openai/gpt-4o-transcribe";
+  }
+  return DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL;
+}
+
+function remapTextToSpeechModelForMode(model: string, useLocalKeys: boolean): string {
+  if (useLocalKeys) {
+    if (LOCAL_TEXT_TO_SPEECH_MODEL_IDS.has(model)) {
+      return model;
+    }
+    const base = stripModelParams(model);
+    if (LOCAL_TEXT_TO_SPEECH_MODEL_IDS.has(base)) {
+      return base;
+    }
+    return DEFAULT_LOCAL_TEXT_TO_SPEECH_MODEL;
+  }
+
+  if (PROXY_TEXT_TO_SPEECH_MODEL_IDS.has(model)) {
+    return model;
+  }
+  const base = stripModelParams(model);
+  if (PROXY_TEXT_TO_SPEECH_MODEL_IDS.has(base)) {
+    return base;
+  }
+  return DEFAULT_PROXY_TEXT_TO_SPEECH_MODEL;
+}
+
 function buildProxyUnavailableStartupError() {
   return {
     message: hostedFeaturesEnabled
@@ -590,6 +657,14 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     defaultUseLocalKeys
       ? defaultLocalImageGenerationModel(DEFAULT_LOCAL_MODEL)
       : DEFAULT_PROXY_IMAGE_GENERATION_MODEL,
+  );
+  const [textToSpeechModel, setTextToSpeechModel] = useState(
+    defaultUseLocalKeys ? DEFAULT_LOCAL_TEXT_TO_SPEECH_MODEL : DEFAULT_PROXY_TEXT_TO_SPEECH_MODEL,
+  );
+  const [audioUnderstandingModel, setAudioUnderstandingModel] = useState(
+    defaultUseLocalKeys
+      ? DEFAULT_LOCAL_AUDIO_UNDERSTANDING_MODEL
+      : DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL,
   );
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [currentChatSession, setCurrentChatSession] = useState<string | null>(null);
@@ -779,6 +854,14 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           isLocal,
           nextSelectedModel,
         );
+        const nextTextToSpeechModel = remapTextToSpeechModelForMode(
+          bootstrap.settings.textToSpeechModel || "",
+          isLocal,
+        );
+        const nextAudioUnderstandingModel = remapAudioUnderstandingModelForMode(
+          bootstrap.settings.audioUnderstandingModel || "",
+          isLocal,
+        );
 
         selectedModelRef.current = nextSelectedModel;
         imageModelRef.current = nextImageModel;
@@ -788,6 +871,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         setCodeModel(nextCodeModel);
         setImageModel(nextImageModel);
         setImageGenerationModel(nextImageGenerationModel);
+        setTextToSpeechModel(nextTextToSpeechModel);
+        setAudioUnderstandingModel(nextAudioUnderstandingModel);
         dispatchBootstrap({ type: "bootstrap_loaded", payload: bootstrap });
 
         const normalizedPatch: Partial<DesktopSettingsSnapshot> = {};
@@ -799,6 +884,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         }
         if (bootstrap.settings.imageGenerationModel !== nextImageGenerationModel) {
           normalizedPatch.imageGenerationModel = nextImageGenerationModel;
+        }
+        if (bootstrap.settings.textToSpeechModel !== nextTextToSpeechModel) {
+          normalizedPatch.textToSpeechModel = nextTextToSpeechModel;
+        }
+        if (bootstrap.settings.audioUnderstandingModel !== nextAudioUnderstandingModel) {
+          normalizedPatch.audioUnderstandingModel = nextAudioUnderstandingModel;
         }
         if (Object.keys(normalizedPatch).length > 0) {
           await updateDesktopSettings(normalizedPatch);
@@ -2144,11 +2235,22 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       value,
       newModel,
     );
+    const newTextToSpeechModel = remapTextToSpeechModelForMode(textToSpeechModel, value);
+    const newAudioUnderstandingModel = remapAudioUnderstandingModelForMode(
+      audioUnderstandingModel,
+      value,
+    );
     if (newModel !== selectedModel) {
       setSelectedModel(newModel);
     }
     if (newImageGenerationModel !== imageGenerationModel) {
       setImageGenerationModel(newImageGenerationModel);
+    }
+    if (newTextToSpeechModel !== textToSpeechModel) {
+      setTextToSpeechModel(newTextToSpeechModel);
+    }
+    if (newAudioUnderstandingModel !== audioUnderstandingModel) {
+      setAudioUnderstandingModel(newAudioUnderstandingModel);
     }
 
     try {
@@ -2156,6 +2258,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         useLocalKeys: value,
         selectedModel: newModel,
         imageGenerationModel: newImageGenerationModel,
+        textToSpeechModel: newTextToSpeechModel,
+        audioUnderstandingModel: newAudioUnderstandingModel,
       });
     } catch (error) {
       console.error("[Entropic] Failed to save useLocalKeys:", error);
@@ -2188,6 +2292,24 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       await updateDesktopSettings({ imageGenerationModel: value });
     } catch (error) {
       console.error("[Entropic] Failed to save imageGenerationModel:", error);
+    }
+  }
+
+  async function handleTextToSpeechModelChange(value: string) {
+    setTextToSpeechModel(value);
+    try {
+      await updateDesktopSettings({ textToSpeechModel: value });
+    } catch (error) {
+      console.error("[Entropic] Failed to save textToSpeechModel:", error);
+    }
+  }
+
+  async function handleAudioUnderstandingModelChange(value: string) {
+    setAudioUnderstandingModel(value);
+    try {
+      await updateDesktopSettings({ audioUnderstandingModel: value });
+    } catch (error) {
+      console.error("[Entropic] Failed to save audioUnderstandingModel:", error);
     }
   }
 
@@ -2267,6 +2389,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         onModelChange={handleModelChange}
         imageModel={imageModel}
         imageGenerationModel={imageGenerationModel}
+        textToSpeechModel={textToSpeechModel}
+        audioUnderstandingModel={audioUnderstandingModel}
         integrationsSyncing={integrationsSyncing}
         integrationsMissing={integrationsMissing}
         onNavigate={setCurrentPage}
@@ -2304,6 +2428,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             selectedModel={selectedModel}
             codeModel={codeModel}
             imageGenerationModel={imageGenerationModel}
+            textToSpeechModel={textToSpeechModel}
+            audioUnderstandingModel={audioUnderstandingModel}
           />
         }
       >
@@ -2319,8 +2445,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           codeModel={codeModel}
           imageModel={imageModel}
           imageGenerationModel={imageGenerationModel}
+          textToSpeechModel={textToSpeechModel}
+          audioUnderstandingModel={audioUnderstandingModel}
           onCodeModelChange={handleCodeModelChange}
           onImageGenerationModelChange={handleImageGenerationModelChange}
+          onTextToSpeechModelChange={handleTextToSpeechModelChange}
+          onAudioUnderstandingModelChange={handleAudioUnderstandingModelChange}
           onImageModelChange={handleImageModelChange}
         />
       </Suspense>
@@ -2370,8 +2500,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             codeModel={codeModel}
             imageModel={imageModel}
             imageGenerationModel={imageGenerationModel}
+            textToSpeechModel={textToSpeechModel}
+            audioUnderstandingModel={audioUnderstandingModel}
             onCodeModelChange={handleCodeModelChange}
             onImageGenerationModelChange={handleImageGenerationModelChange}
+            onTextToSpeechModelChange={handleTextToSpeechModelChange}
+            onAudioUnderstandingModelChange={handleAudioUnderstandingModelChange}
             onImageModelChange={handleImageModelChange}
           />
         );

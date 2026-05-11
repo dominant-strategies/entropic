@@ -21,6 +21,9 @@ import {
   Bot,
   Puzzle,
   User,
+  FileText,
+  Music2,
+  Volume2,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
@@ -124,6 +127,10 @@ import {
   isChannelOriginGatewayMessage,
   normalizeGatewayMessage,
 } from "../lib/chatMessageUtils";
+import { VoiceControlButton } from "../desktop/voice/VoiceControlButton";
+import { useAudioRecorder, type RecordedAudioAttachment } from "../desktop/voice/useAudioRecorder";
+import { useAudioTranscription } from "../desktop/voice/useAudioTranscription";
+import { useTextToSpeech } from "../desktop/voice/useTextToSpeech";
 
 type GatewayMutationResult = {
   plan: "noop" | "config_reload" | "container_restart" | "container_recreate";
@@ -133,7 +140,8 @@ export type { ChatSession };
 export type ChatSessionActionRequest =
   | { id: string; type: "delete"; key: string }
   | { id: string; type: "pin"; key: string; pinned: boolean }
-  | { id: string; type: "rename"; key: string; label: string };
+  | { id: string; type: "rename"; key: string; label: string }
+  | { id: string; type: "compose"; key?: string; prompt: string };
 type Provider = { id: string; name: string; icon: string; placeholder: string; keyUrl: string };
 type PendingAttachment = {
   id: string;
@@ -658,8 +666,8 @@ const TERMS_URL = entropicSitePath("/terms");
 const PRIVACY_URL = entropicSitePath("/privacy");
 const HISTORY_LIMIT = 500;
 const ACTIVE_RUN_IDLE_TIMEOUT_MS = 120_000;
-const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 4;
-const MAX_IMAGE_ATTACHMENT_BYTES = 5_000_000;
+const MAX_ATTACHMENTS_PER_MESSAGE = 4;
+const MAX_ATTACHMENT_BYTES = 5_000_000;
 const GENERATED_IMAGES_DEST_PATH = "generated-images";
 
 const QUICK_ACTION_ICONS: Record<ChatQuickActionIcon, typeof Mail> = {
@@ -1047,6 +1055,8 @@ export function Chat({
   onModelChange: _onModelChange,
   imageModel: _imageModel,
   imageGenerationModel,
+  textToSpeechModel,
+  audioUnderstandingModel,
   integrationsSyncing,
   integrationsMissing,
   onNavigate,
@@ -1068,6 +1078,8 @@ export function Chat({
   onModelChange?: (model: string) => void;
   imageModel: string;
   imageGenerationModel: string;
+  textToSpeechModel: string;
+  audioUnderstandingModel: string;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
   onNavigate?: (page: Page) => void;
@@ -1203,6 +1215,37 @@ export function Chat({
   const activeTerminalState = currentSession
     ? terminalStateBySession[currentSession] || { cwd: TERMINAL_DEFAULT_CWD }
     : { cwd: TERMINAL_DEFAULT_CWD };
+  function handleRecordedAudio(attachment: RecordedAudioAttachment) {
+    setPendingAttachments((prev) => {
+      if (prev.length >= MAX_ATTACHMENTS_PER_MESSAGE) {
+        setError(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`);
+        URL.revokeObjectURL(attachment.previewUrl);
+        return prev;
+      }
+      return [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          fileName: attachment.fileName,
+          mimeType: attachment.mimeType,
+          content: attachment.content,
+          previewUrl: attachment.previewUrl,
+        },
+      ];
+    });
+  }
+
+  const audioRecorder = useAudioRecorder({
+    maxBytes: MAX_ATTACHMENT_BYTES,
+    onRecorded: handleRecordedAudio,
+    onError: setError,
+  });
+  const { isTranscribing, transcribeAudio } = useAudioTranscription(audioUnderstandingModel);
+  const { isGeneratingAudio, generateSpeech } = useTextToSpeech(textToSpeechModel);
+  const pendingAudioAttachments = pendingAttachments.filter((attachment) =>
+    attachment.mimeType.startsWith("audio/"),
+  );
+  const hasPendingAudioAttachments = pendingAudioAttachments.length > 0;
   const integrationSetup = currentSession ? integrationSetupBySession[currentSession] || null : null;
   const quickSuggestion = currentSession ? quickSuggestionBySession[currentSession] || null : null;
   const builderChecklist = currentSession ? builderChecklistBySession[currentSession] || null : null;
@@ -1362,33 +1405,79 @@ export function Chat({
     });
   }
 
-  async function addImageAttachments(filesInput: FileList | File[] | null | undefined) {
+  function revokeAttachmentPreviewUrl(attachment: Pick<PendingAttachment, "previewUrl">) {
+    if (attachment.previewUrl?.startsWith("blob:")) {
+      URL.revokeObjectURL(attachment.previewUrl);
+    }
+  }
+
+  function attachmentKindLabel(mimeType: string): string {
+    const normalized = mimeType.trim().toLowerCase();
+    if (normalized.startsWith("image/")) return "image";
+    if (normalized.startsWith("audio/")) return "audio";
+    if (normalized.startsWith("text/")) return "text";
+    if (normalized === "application/pdf") return "pdf";
+    return "file";
+  }
+
+  function renderPendingAttachmentPreview(attachment: PendingAttachment) {
+    if (attachment.mimeType.startsWith("image/") && attachment.previewUrl) {
+      return (
+        <img
+          src={attachment.previewUrl}
+          alt={attachment.fileName}
+          className="w-8 h-8 rounded object-cover"
+        />
+      );
+    }
+    if (attachment.mimeType.startsWith("audio/")) {
+      return (
+        <div className="flex h-8 w-8 items-center justify-center rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)]">
+          <Music2 className="h-4 w-4" />
+        </div>
+      );
+    }
+    return (
+      <div className="flex h-8 w-8 items-center justify-center rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)]">
+        <FileText className="h-4 w-4" />
+      </div>
+    );
+  }
+
+  async function addAttachments(filesInput: FileList | File[] | null | undefined) {
     const files = filesInput ? Array.from(filesInput) : [];
     if (files.length === 0) return;
 
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-    if (imageFiles.length === 0) {
-      setError("Only image attachments are supported right now.");
+    const allowedFiles =
+      activeComposerMode === "image"
+        ? files.filter((file) => file.type.startsWith("image/"))
+        : files;
+    if (allowedFiles.length === 0) {
+      setError(
+        activeComposerMode === "image"
+          ? "Only image attachments are supported in Image mode."
+          : "No supported attachments were selected.",
+      );
       return;
     }
 
-    const remainingSlots = Math.max(0, MAX_IMAGE_ATTACHMENTS_PER_MESSAGE - pendingAttachments.length);
+    const remainingSlots = Math.max(0, MAX_ATTACHMENTS_PER_MESSAGE - pendingAttachments.length);
     if (remainingSlots <= 0) {
-      setError(`You can attach up to ${MAX_IMAGE_ATTACHMENTS_PER_MESSAGE} images per message.`);
+      setError(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`);
       return;
     }
 
-    const selectedFiles = imageFiles.slice(0, remainingSlots);
-    if (imageFiles.length > remainingSlots) {
-      setError(`You can attach up to ${MAX_IMAGE_ATTACHMENTS_PER_MESSAGE} images per message.`);
+    const selectedFiles = allowedFiles.slice(0, remainingSlots);
+    if (allowedFiles.length > remainingSlots) {
+      setError(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`);
     } else {
       setError(null);
     }
 
     const nextAttachments: PendingAttachment[] = [];
     for (const file of selectedFiles) {
-      if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
-        setError(`${file.name} is too large. Max size is 5 MB per image.`);
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setError(`${file.name} is too large. Max size is 5 MB per file.`);
         continue;
       }
       try {
@@ -1400,18 +1489,20 @@ export function Chat({
         nextAttachments.push({
           id: crypto.randomUUID(),
           fileName: file.name,
-          mimeType: file.type || "image/png",
+          mimeType: file.type || "application/octet-stream",
           content: base64,
           previewUrl: dataUrl,
         });
-        const key = normalizeAttachmentFileName(file.name);
-        if (key) {
-          avatarUploadDataUrlByFileNameRef.current.set(key, dataUrl);
-          if (avatarUploadDataUrlByFileNameRef.current.size > 128) {
-            const firstKey = avatarUploadDataUrlByFileNameRef.current.keys().next().value as
-              | string
-              | undefined;
-            if (firstKey) avatarUploadDataUrlByFileNameRef.current.delete(firstKey);
+        if (file.type.startsWith("image/")) {
+          const key = normalizeAttachmentFileName(file.name);
+          if (key) {
+            avatarUploadDataUrlByFileNameRef.current.set(key, dataUrl);
+            if (avatarUploadDataUrlByFileNameRef.current.size > 128) {
+              const firstKey = avatarUploadDataUrlByFileNameRef.current.keys().next().value as
+                | string
+                | undefined;
+              if (firstKey) avatarUploadDataUrlByFileNameRef.current.delete(firstKey);
+            }
           }
         }
       } catch (err) {
@@ -1425,7 +1516,85 @@ export function Chat({
   }
 
   function removePendingAttachment(attachmentId: string) {
-    setPendingAttachments((prev) => prev.filter((attachment) => attachment.id !== attachmentId));
+    setPendingAttachments((prev) => {
+      const next: PendingAttachment[] = [];
+      for (const attachment of prev) {
+        if (attachment.id === attachmentId) {
+          revokeAttachmentPreviewUrl(attachment);
+        } else {
+          next.push(attachment);
+        }
+      }
+      return next;
+    });
+  }
+
+  function clearPendingAttachments() {
+    setPendingAttachments((prev) => {
+      for (const attachment of prev) {
+        revokeAttachmentPreviewUrl(attachment);
+      }
+      return [];
+    });
+  }
+
+  function insertTextIntoChatDraft(text: string) {
+    const sessionKey = currentSession || ensureComposerSession();
+    if (!sessionKey) return;
+    setComposerModeForSession(sessionKey, "chat");
+    setDraftsBySession((prev) => {
+      const existing = (prev[sessionKey] || "").trim();
+      const nextValue = existing ? `${existing}\n\n${text}` : text;
+      if (prev[sessionKey] === nextValue) return prev;
+      return { ...prev, [sessionKey]: nextValue };
+    });
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.style.height = "auto";
+      const lineHeight = parseInt(getComputedStyle(textarea).lineHeight) || 20;
+      const maxHeight = lineHeight * 5;
+      textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+    });
+  }
+
+  async function transcribePendingAudio() {
+    try {
+      setThinkingStatus("Transcribing audio");
+      setError(null);
+      const transcript = await transcribeAudio(pendingAudioAttachments);
+      insertTextIntoChatDraft(transcript);
+    } catch (error) {
+      setError(formatUnknownUiError(error, "Failed to transcribe audio."));
+    } finally {
+      setThinkingStatus(null);
+    }
+  }
+
+  async function generateAudioFromDraft() {
+    try {
+      const sessionKey = currentSession || ensureComposerSession();
+      if (!sessionKey) return;
+      setThinkingStatus("Generating audio");
+      setError(null);
+      const result = await generateSpeech(activeDraft);
+      appendLocalMessage(
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: result.text || "Generated audio from your text.",
+          sentAt: Date.now(),
+          attachments: result.audio,
+        },
+        sessionKey,
+      );
+    } catch (error) {
+      setError(formatUnknownUiError(error, "Failed to generate audio."));
+    } finally {
+      setThinkingStatus(null);
+    }
   }
 
   async function handleQuickAddCredits() {
@@ -3424,6 +3593,27 @@ export function Chat({
   }
 
   async function applySessionAction(action: ChatSessionActionRequest) {
+    if (action.type === "compose") {
+      let targetKey = action.key || currentSessionRef.current;
+      if (!targetKey) {
+        createNewSession({ force: true });
+        targetKey = currentSessionRef.current;
+      } else if (targetKey !== currentSessionRef.current) {
+        await selectSession(targetKey);
+      }
+      if (!targetKey) return;
+      setComposerModeForSession(targetKey, "chat");
+      setDraftsBySession((prev) => {
+        const existing = (prev[targetKey] || "").trim();
+        const nextValue = existing ? `${existing}\n\n${action.prompt}` : action.prompt;
+        if (prev[targetKey] === nextValue) return prev;
+        return { ...prev, [targetKey]: nextValue };
+      });
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+      });
+      return;
+    }
     if (!action?.key) return;
     if (action.type === "pin") {
       setSessions((prev) =>
@@ -3918,10 +4108,11 @@ export function Chat({
       content: attachment.content,
     }));
     const hasAttachments = attachmentsPayload.length > 0;
+    const attachmentNames = pendingAttachments.map((attachment) => attachment.fileName || "file");
     const attachmentLine =
       pendingAttachments.length === 1
-        ? `[Attached image: ${pendingAttachments[0]?.fileName || "image"}]`
-        : `[Attached ${pendingAttachments.length} images]`;
+        ? `[Attached ${attachmentKindLabel(pendingAttachments[0]?.mimeType || "")}: ${pendingAttachments[0]?.fileName || "file"}]`
+        : `[Attached ${pendingAttachments.length} files]`;
     const userVisibleContent = hasAttachments
       ? userMessageContent
         ? `${userMessageContent}\n\n${attachmentLine}`
@@ -3929,13 +4120,13 @@ export function Chat({
       : userMessageContent;
     let outboundMessageContent = hasAttachments
       ? userMessageContent
-        ? `${userMessageContent}\n\nAttached image context: ${pendingAttachments.map((attachment) => attachment.fileName || "image").join(", ")}`
-        : `Attached image context: ${pendingAttachments.map((attachment) => attachment.fileName || "image").join(", ")}`
+        ? `${userMessageContent}\n\nAttached file context: ${attachmentNames.join(", ")}`
+        : `Attached file context: ${attachmentNames.join(", ")}`
       : messageContent;
     const runCommand = parseRunSlashCommand(messageContent);
     if (runCommand !== null) {
       if (hasAttachments) {
-        const message = "Image attachments are not supported with `/run`.";
+        const message = "Attachments are not supported with `/run`.";
         setError(message);
         appendAssistantNotice(message, sendSession);
         return;
@@ -4046,6 +4237,15 @@ export function Chat({
         appendAssistantNotice(message, sendSession);
         return;
       }
+      const nonImageAttachment = pendingAttachments.find(
+        (attachment) => !attachment.mimeType.startsWith("image/"),
+      );
+      if (nonImageAttachment) {
+        const message = "Image mode only supports image attachments. Remove other files first.";
+        setError(message);
+        appendAssistantNotice(message, sendSession);
+        return;
+      }
 
       const userMessage: Message = {
         id: crypto.randomUUID(),
@@ -4104,7 +4304,7 @@ export function Chat({
         setError(message);
         appendAssistantNotice(`I couldn't generate that image: ${message}`, sendSession);
       } finally {
-        setPendingAttachments([]);
+        clearPendingAttachments();
         setIsLoading(false);
         setThinkingStatus(null);
       }
@@ -4183,7 +4383,7 @@ export function Chat({
     if (taskBoardIntent && sendSession) {
       const handled = await handleTaskBoardChatIntent(taskBoardIntent, sendSession);
       if (handled) {
-        setPendingAttachments([]);
+        clearPendingAttachments();
         return;
       }
     }
@@ -4318,7 +4518,7 @@ export function Chat({
       nextAttemptAt: Date.now(),
     };
     upsertOutboxEntry(pendingSend);
-    setPendingAttachments([]);
+    clearPendingAttachments();
 
     if (!liveClient || !liveClient.isConnected()) {
       if (!connectInFlightRef.current) {
@@ -5184,17 +5384,30 @@ export function Chat({
           const actionKey = imageAttachmentActionKey(message.id, index);
           const savedPath = savedWorkspaceImagePaths[actionKey];
           const saveUnsupportedReason = getGeneratedImageWorkspaceSaveUnsupportedReason(attachment);
-          const canSaveToWorkspace = !saveUnsupportedReason;
+          const isImage = attachment.mimeType.startsWith("image/");
+          const isAudio = attachment.mimeType.startsWith("audio/");
+          const canSaveToWorkspace = isImage && !saveUnsupportedReason;
           return (
             <div
               key={actionKey}
               className="overflow-hidden rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)]"
             >
-              <img
-                src={attachment.previewUrl}
-                alt={attachment.fileName}
-                className="block h-auto max-h-[360px] w-full object-contain"
-              />
+              {isImage ? (
+                <img
+                  src={attachment.previewUrl}
+                  alt={attachment.fileName}
+                  className="block h-auto max-h-[360px] w-full object-contain"
+                />
+              ) : isAudio ? (
+                <div className="px-3 pt-3">
+                  <audio src={attachment.previewUrl} controls className="w-full" />
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 px-3 pt-3 text-sm text-[var(--text-secondary)]">
+                  <FileText className="h-4 w-4" />
+                  <span>{attachmentKindLabel(attachment.mimeType)}</span>
+                </div>
+              )}
               <div className="flex items-center justify-between gap-3 px-3 py-2 text-xs text-[var(--text-secondary)]">
                 <span className="min-w-0 truncate">{attachment.fileName}</span>
                 {message.role === "assistant" && attachment.mimeType.startsWith("image/") ? (
@@ -5907,7 +6120,7 @@ export function Chat({
         if (activeComposerMode === "shell") return;
         event.preventDefault();
         setDragActive(false);
-        void addImageAttachments(event.dataTransfer?.files);
+        void addAttachments(event.dataTransfer?.files);
       }}
     >
 
@@ -5991,18 +6204,15 @@ export function Chat({
                   key={attachment.id}
                   className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] px-2 py-1.5"
                 >
-                  {attachment.previewUrl ? (
-                    <img
-                      src={attachment.previewUrl}
-                      alt={attachment.fileName}
-                      className="w-8 h-8 rounded object-cover"
-                    />
-                  ) : (
-                    <div className="w-8 h-8 rounded bg-[var(--border-subtle)]" />
-                  )}
-                  <span className="text-xs text-[var(--text-secondary)] max-w-[180px] truncate">
-                    {attachment.fileName}
-                  </span>
+                  {renderPendingAttachmentPreview(attachment)}
+                  <div className="min-w-0">
+                    <div className="max-w-[180px] truncate text-xs text-[var(--text-secondary)]">
+                      {attachment.fileName}
+                    </div>
+                    <div className="text-[10px] uppercase tracking-wide text-[var(--text-tertiary)]">
+                      {attachmentKindLabel(attachment.mimeType)}
+                    </div>
+                  </div>
                   <button
                     onClick={() => removePendingAttachment(attachment.id)}
                     className="p-0.5 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
@@ -6017,11 +6227,11 @@ export function Chat({
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
+            accept={activeComposerMode === "image" ? "image/*" : "image/*,audio/*,text/*,.txt,.md,.markdown,.csv,.json,.log"}
             multiple
             className="hidden"
             onChange={(event) => {
-              void addImageAttachments(event.target.files);
+              void addAttachments(event.target.files);
               event.currentTarget.value = "";
             }}
           />
@@ -6084,16 +6294,37 @@ export function Chat({
                   </span>
                 </div>
               </div>
+            ) : activeComposerMode === "chat" && hasPendingAudioAttachments ? (
+              <div className="flex items-center gap-1 text-[11px] text-[var(--text-tertiary)]">
+                <button
+                  type="button"
+                  onClick={() => void transcribePendingAudio()}
+                  disabled={isLoading || isTranscribing}
+                  className="inline-flex items-center gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-2 py-1 text-[11px] font-medium text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isTranscribing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Music2 className="h-3 w-3" />}
+                  <span>Transcribe audio</span>
+                </button>
+              </div>
             ) : null}
           </div>
           <div className="flex items-end gap-2">
+            {activeComposerMode === "chat" ? (
+              <VoiceControlButton
+                isRecording={audioRecorder.isRecording}
+                isSupported={audioRecorder.isSupported}
+                disabled={isLoading || isTranscribing || isGeneratingAudio}
+                onStart={() => void audioRecorder.startRecording()}
+                onStop={audioRecorder.stopRecording}
+              />
+            ) : null}
             {activeComposerMode !== "shell" ? (
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isLoading}
                 className="btn-secondary !p-2.5"
-                title={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
-                aria-label={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
+                title={activeComposerMode === "image" ? "Attach reference image" : "Attach file"}
+                aria-label={activeComposerMode === "image" ? "Attach reference image" : "Attach file"}
               >
                 <Paperclip className="w-4 h-4" />
               </button>
@@ -6143,9 +6374,25 @@ export function Chat({
               className="form-input flex-1 resize-none leading-tight"
               style={{ overflow: 'hidden' }}
             />
+            {activeComposerMode === "chat" ? (
+              <button
+                type="button"
+                onClick={() => void generateAudioFromDraft()}
+                disabled={!activeDraft.trim() || isLoading || isGeneratingAudio || isTranscribing}
+                className="btn-secondary !p-2.5"
+                title="Generate speech from draft"
+                aria-label="Generate speech from draft"
+              >
+                {isGeneratingAudio ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Volume2 className="w-4 h-4" />
+                )}
+              </button>
+            ) : null}
             <button
               onClick={() => handleSend()}
-              disabled={(!activeDraft.trim() && pendingAttachments.length === 0) || isLoading}
+              disabled={(!activeDraft.trim() && pendingAttachments.length === 0) || isLoading || isTranscribing || isGeneratingAudio}
               className="btn-primary !p-2.5 !bg-[var(--purple-accent)] hover:!bg-[var(--purple-accent-hover)] !text-white"
             >
               <Send className="w-5 h-5" />

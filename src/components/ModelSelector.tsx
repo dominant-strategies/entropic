@@ -119,6 +119,54 @@ export const LOCAL_IMAGE_GENERATION_MODELS: Model[] = [
   },
 ];
 
+export const PROXY_AUDIO_UNDERSTANDING_MODELS: Model[] = [
+  {
+    id: "google/gemini-3-flash-preview",
+    name: "Gemini 3 Flash Audio",
+    provider: "Google",
+    tier: "recommended",
+  },
+  {
+    id: "openai/gpt-4o-transcribe",
+    name: "GPT-4o Transcribe",
+    provider: "OpenAI",
+    tier: "premium",
+  },
+];
+
+export const PROXY_TEXT_TO_SPEECH_MODELS: Model[] = [
+  {
+    id: "openai/gpt-4o-audio-preview",
+    name: "GPT-4o Audio Preview",
+    provider: "OpenAI",
+    tier: "premium",
+  },
+];
+
+export const LOCAL_AUDIO_UNDERSTANDING_MODELS: Model[] = [
+  {
+    id: "google/gemini-3-flash-preview",
+    name: "Gemini 3 Flash Audio",
+    provider: "Google",
+    tier: "recommended",
+  },
+  {
+    id: "openai/gpt-4o-transcribe",
+    name: "GPT-4o Transcribe",
+    provider: "OpenAI",
+    tier: "premium",
+  },
+];
+
+export const LOCAL_TEXT_TO_SPEECH_MODELS: Model[] = [
+  {
+    id: "openai/gpt-4o-mini-tts",
+    name: "GPT-4o Mini TTS",
+    provider: "OpenAI",
+    tier: "premium",
+  },
+];
+
 // Exported ID sets for mode-mismatch detection in Dashboard
 export const PROXY_MODEL_IDS = new Set(PROXY_MODELS.map(m => m.id));
 export const LOCAL_MODEL_IDS = new Set(LOCAL_MODELS.map(m => m.id));
@@ -127,6 +175,18 @@ export const PROXY_IMAGE_GENERATION_MODEL_IDS = new Set(
 );
 export const LOCAL_IMAGE_GENERATION_MODEL_IDS = new Set(
   LOCAL_IMAGE_GENERATION_MODELS.map((m) => m.id),
+);
+export const PROXY_AUDIO_UNDERSTANDING_MODEL_IDS = new Set(
+  PROXY_AUDIO_UNDERSTANDING_MODELS.map((m) => m.id),
+);
+export const LOCAL_AUDIO_UNDERSTANDING_MODEL_IDS = new Set(
+  LOCAL_AUDIO_UNDERSTANDING_MODELS.map((m) => m.id),
+);
+export const PROXY_TEXT_TO_SPEECH_MODEL_IDS = new Set(
+  PROXY_TEXT_TO_SPEECH_MODELS.map((m) => m.id),
+);
+export const LOCAL_TEXT_TO_SPEECH_MODEL_IDS = new Set(
+  LOCAL_TEXT_TO_SPEECH_MODELS.map((m) => m.id),
 );
 
 // Map provider display names to auth provider IDs

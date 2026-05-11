@@ -197,6 +197,8 @@ pub fn run() {
             commands::heal_gateway_config,
             commands::get_gateway_config_health,
             commands::upload_attachment,
+            commands::transcribe_chat_audio,
+            commands::generate_chat_audio,
             commands::save_attachment,
             commands::delete_attachment,
             commands::get_plugin_store,

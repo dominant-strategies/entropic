@@ -98,6 +98,7 @@ import {
   dispatchDesktopAction,
   type DesktopAction,
 } from "../desktop/actions";
+import { VoiceProvider } from "../desktop/voice/VoiceProvider";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -123,8 +124,12 @@ type Props = {
   codeModel: string;
   imageModel: string;
   imageGenerationModel: string;
+  textToSpeechModel: string;
+  audioUnderstandingModel: string;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
+  onTextToSpeechModelChange: (model: string) => void;
+  onAudioUnderstandingModelChange: (model: string) => void;
   onImageModelChange: (model: string) => void;
 };
 type ViewMode = "grid" | "list";
@@ -1264,8 +1269,12 @@ export function Files({
   codeModel,
   imageModel,
   imageGenerationModel,
+  textToSpeechModel,
+  audioUnderstandingModel,
   onCodeModelChange,
   onImageGenerationModelChange,
+  onTextToSpeechModelChange,
+  onAudioUnderstandingModelChange,
   onImageModelChange,
 }: Props) {
   const initialDesktopWarmCache = useMemo(() => readDesktopWarmCache(), []);
@@ -3847,10 +3856,15 @@ export function Files({
   }
 
   function startDesktopChatTask(prompt: string, sessionId?: string) {
-    setChatRequestedSession(sessionId || "__new__");
-    setChatRequestedAction(null);
     setChatOpen(true);
     focusWindow("chat");
+    setChatRequestedSession(sessionId || null);
+    setChatRequestedAction({
+      id: `compose-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      type: "compose",
+      key: sessionId,
+      prompt,
+    });
   }
 
   async function runDesktopAction(action: DesktopAction) {
@@ -5299,6 +5313,8 @@ export function Files({
                       onModelChange={onModelChange}
                       imageModel={imageModel}
                       imageGenerationModel={imageGenerationModel}
+                      textToSpeechModel={textToSpeechModel}
+                      audioUnderstandingModel={audioUnderstandingModel}
                       integrationsSyncing={integrationsSyncing}
                       integrationsMissing={integrationsMissing}
                       onNavigate={handleDesktopChatNavigate}
@@ -6069,13 +6085,22 @@ export function Files({
                   codeModel={codeModel}
                   imageModel={imageModel}
                   imageGenerationModel={imageGenerationModel}
+                  textToSpeechModel={textToSpeechModel}
+                  audioUnderstandingModel={audioUnderstandingModel}
                   onCodeModelChange={onCodeModelChange}
                   onImageGenerationModelChange={onImageGenerationModelChange}
+                  onTextToSpeechModelChange={onTextToSpeechModelChange}
+                  onAudioUnderstandingModelChange={onAudioUnderstandingModelChange}
                   onImageModelChange={onImageModelChange}
                 />
               </Suspense>
             </AppWindow>
           )}
+
+          <VoiceProvider
+            audioUnderstandingModel={audioUnderstandingModel}
+            dispatchAction={runDesktopAction}
+          />
 
           {/* ── FLOATING DOCK ─────────────────────────────────────────── */}
           <div

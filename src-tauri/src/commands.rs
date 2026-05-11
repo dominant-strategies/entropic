@@ -144,6 +144,33 @@ pub struct ChatImageGenerationResult {
     pub images: Vec<ChatGeneratedImage>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatGeneratedAudio {
+    pub file_name: String,
+    pub mime_type: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatAudioGenerationResult {
+    pub text: String,
+    pub audio: Vec<ChatGeneratedAudio>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatAudioTranscriptionAttachment {
+    #[serde(alias = "fileName")]
+    pub file_name: String,
+    #[serde(alias = "mimeType")]
+    pub mime_type: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatAudioTranscriptionResult {
+    pub text: String,
+}
+
 struct DesktopTerminalSession {
     container_name: String,
     workspace_path: String,
@@ -477,17 +504,25 @@ fn extract_openrouter_generated_images(message: &serde_json::Value) -> Vec<ChatG
         .collect()
 }
 
-fn split_image_generation_model(model: &str) -> Result<(&str, &str), String> {
+fn split_provider_model<'a>(model: &'a str, label: &str) -> Result<(&'a str, &'a str), String> {
     let trimmed = model.trim();
     let Some((provider, raw_model)) = trimmed.split_once('/') else {
-        return Err("Image generation model is not configured.".to_string());
+        return Err(format!("{} is not configured.", label));
     };
     let provider = provider.trim();
     let raw_model = raw_model.trim();
     if provider.is_empty() || raw_model.is_empty() {
-        return Err("Image generation model is not configured.".to_string());
+        return Err(format!("{} is not configured.", label));
     }
     Ok((provider, raw_model))
+}
+
+fn split_image_generation_model(model: &str) -> Result<(&str, &str), String> {
+    split_provider_model(model, "Image generation model")
+}
+
+fn split_audio_understanding_model(model: &str) -> Result<(&str, &str), String> {
+    split_provider_model(model, "Audio understanding model")
 }
 
 fn has_configured_provider_key(api_keys: &HashMap<String, String>, provider: &str) -> bool {
@@ -719,22 +754,43 @@ fn local_image_generation_provider_name(provider: &str) -> &str {
     }
 }
 
-fn read_local_image_generation_api_key(state: &AppState, provider: &str) -> Result<String, String> {
+fn read_local_provider_api_key(
+    state: &AppState,
+    provider: &str,
+    capability_label: &str,
+) -> Result<String, String> {
     let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
     let Some(api_key) = keys.get(provider) else {
         return Err(format!(
-            "No {} API key is configured. Add one in Settings to use local image generation.",
-            local_image_generation_provider_name(provider)
+            "No {} API key is configured. Add one in Settings to use local {}.",
+            local_image_generation_provider_name(provider),
+            capability_label,
         ));
     };
     let trimmed = api_key.trim();
     if trimmed.is_empty() {
         return Err(format!(
-            "No {} API key is configured. Add one in Settings to use local image generation.",
-            local_image_generation_provider_name(provider)
+            "No {} API key is configured. Add one in Settings to use local {}.",
+            local_image_generation_provider_name(provider),
+            capability_label,
         ));
     }
     Ok(trimmed.to_string())
+}
+
+fn read_local_image_generation_api_key(state: &AppState, provider: &str) -> Result<String, String> {
+    read_local_provider_api_key(state, provider, "image generation")
+}
+
+fn read_local_audio_understanding_api_key(
+    state: &AppState,
+    provider: &str,
+) -> Result<String, String> {
+    read_local_provider_api_key(state, provider, "audio understanding")
+}
+
+fn read_local_text_to_speech_api_key(state: &AppState, provider: &str) -> Result<String, String> {
+    read_local_provider_api_key(state, provider, "text to speech")
 }
 
 fn extract_json_error_message(value: &serde_json::Value) -> Option<String> {
@@ -1127,6 +1183,780 @@ async fn generate_google_chat_image(
         return Err("The selected model did not return an image.".to_string());
     }
     Ok(result)
+}
+
+const DEFAULT_TTS_VOICE: &str = "alloy";
+const DEFAULT_TTS_FORMAT: &str = "mp3";
+const STREAMING_PROXY_TTS_FORMAT: &str = "pcm16";
+const PCM16_SAMPLE_RATE_HZ: u32 = 24_000;
+const PCM16_CHANNELS: u16 = 1;
+const PCM16_BITS_PER_SAMPLE: u16 = 16;
+
+fn extract_generated_audio_data(payload: &serde_json::Value) -> Option<String> {
+    if let Some(data) = payload
+        .get("audio")
+        .and_then(|audio| audio.get("data"))
+        .and_then(|value| value.as_str())
+    {
+        let trimmed = data.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(data) = payload
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("audio"))
+        .and_then(|audio| audio.get("data"))
+        .and_then(|value| value.as_str())
+    {
+        let trimmed = data.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
+}
+
+fn extract_generated_audio_transcript(payload: &serde_json::Value) -> Option<String> {
+    if let Some(transcript) = payload
+        .get("audio")
+        .and_then(|audio| audio.get("transcript"))
+        .and_then(|value| value.as_str())
+    {
+        let trimmed = transcript.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(transcript) = payload
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("audio"))
+        .and_then(|audio| audio.get("transcript"))
+        .and_then(|value| value.as_str())
+    {
+        let trimmed = transcript.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
+}
+
+fn extract_generated_text_content(payload: &serde_json::Value) -> Option<String> {
+    if let Some(text) = payload
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(|value| value.as_str())
+    {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(parts) = payload
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(|value| value.as_array())
+    {
+        let chunks: Vec<String> = parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        if !chunks.is_empty() {
+            return Some(chunks.join("\n\n"));
+        }
+    }
+
+    None
+}
+
+fn append_streamed_audio_fields(
+    payload: &serde_json::Value,
+    audio_chunks: &mut String,
+    transcript_chunks: &mut String,
+    text_chunks: &mut String,
+) {
+    if let Some(data) = payload
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("delta"))
+        .and_then(|delta| delta.get("audio"))
+        .and_then(|audio| audio.get("data"))
+        .and_then(|value| value.as_str())
+    {
+        audio_chunks.push_str(data.trim());
+    }
+
+    if let Some(transcript) = payload
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("delta"))
+        .and_then(|delta| delta.get("audio"))
+        .and_then(|audio| audio.get("transcript"))
+        .and_then(|value| value.as_str())
+    {
+        transcript_chunks.push_str(transcript);
+    }
+
+    if let Some(audio_delta) = payload
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("delta"))
+        .and_then(|delta| delta.get("audio_data"))
+        .and_then(|value| value.as_str())
+    {
+        audio_chunks.push_str(audio_delta.trim());
+    }
+
+    if let Some(transcript_delta) = payload
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("delta"))
+        .and_then(|delta| delta.get("audio_transcript"))
+        .and_then(|value| value.as_str())
+    {
+        transcript_chunks.push_str(transcript_delta);
+    }
+
+    if let Some(text_delta) = payload
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("delta"))
+        .and_then(|delta| delta.get("content"))
+        .and_then(|value| value.as_str())
+    {
+        text_chunks.push_str(text_delta);
+    }
+
+    if let Some(parts) = payload
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("delta"))
+        .and_then(|delta| delta.get("content"))
+        .and_then(|value| value.as_array())
+    {
+        for part in parts {
+            if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
+                text_chunks.push_str(text);
+            }
+        }
+    }
+
+    if let Some(data) = extract_generated_audio_data(payload) {
+        audio_chunks.push_str(data.trim());
+    }
+
+    if let Some(transcript) = extract_generated_audio_transcript(payload) {
+        transcript_chunks.push_str(&transcript);
+    }
+
+    if let Some(text) = extract_generated_text_content(payload) {
+        text_chunks.push_str(&text);
+    }
+}
+
+fn process_sse_event_data(
+    event_data: &str,
+    audio_chunks: &mut String,
+    transcript_chunks: &mut String,
+    text_chunks: &mut String,
+) -> Result<(), String> {
+    let trimmed = event_data.trim();
+    if trimmed.is_empty() || trimmed == "[DONE]" {
+        return Ok(());
+    }
+
+    let payload = serde_json::from_str::<serde_json::Value>(trimmed)
+        .map_err(|e| format!("Invalid streamed audio generation response: {}", e))?;
+    append_streamed_audio_fields(&payload, audio_chunks, transcript_chunks, text_chunks);
+    Ok(())
+}
+
+fn format_audio_generation_http_error(status: reqwest::StatusCode, body: String) -> String {
+    let detail = extract_image_generation_error_detail(&body);
+    let suffix = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", detail)
+    };
+    format!("Audio generation failed ({}{})", status, suffix)
+}
+
+fn pcm16_base64_to_wav_data_url(raw_base64: &str) -> Result<String, String> {
+    let pcm_bytes = STANDARD
+        .decode(raw_base64.trim())
+        .map_err(|e| format!("Invalid streamed PCM audio payload: {}", e))?;
+    let data_len = pcm_bytes.len() as u32;
+    let block_align = PCM16_CHANNELS * (PCM16_BITS_PER_SAMPLE / 8);
+    let byte_rate = PCM16_SAMPLE_RATE_HZ * u32::from(block_align);
+
+    let mut wav = Vec::with_capacity(44 + pcm_bytes.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&PCM16_CHANNELS.to_le_bytes());
+    wav.extend_from_slice(&PCM16_SAMPLE_RATE_HZ.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&PCM16_BITS_PER_SAMPLE.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(&pcm_bytes);
+
+    Ok(format!("data:audio/wav;base64,{}", STANDARD.encode(wav)))
+}
+
+async fn generate_openai_chat_audio(
+    client: &reqwest::Client,
+    api_key: &str,
+    raw_model: &str,
+    text: &str,
+) -> Result<ChatAudioGenerationResult, String> {
+    let response = client
+        .post("https://api.openai.com/v1/audio/speech")
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({
+            "model": raw_model,
+            "voice": DEFAULT_TTS_VOICE,
+            "response_format": DEFAULT_TTS_FORMAT,
+            "input": text,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Audio generation request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(format_audio_generation_http_error(status, body));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read generated audio response: {}", e))?;
+    let encoded = STANDARD.encode(bytes);
+    Ok(ChatAudioGenerationResult {
+        text: "Generated audio from your text.".to_string(),
+        audio: vec![ChatGeneratedAudio {
+            file_name: "generated-speech.mp3".to_string(),
+            mime_type: "audio/mpeg".to_string(),
+            url: format!("data:audio/mpeg;base64,{}", encoded),
+        }],
+    })
+}
+
+async fn generate_proxy_chat_audio(
+    client: &reqwest::Client,
+    model: &str,
+    text: &str,
+) -> Result<ChatAudioGenerationResult, String> {
+    let gateway_token = read_container_env("OPENROUTER_API_KEY").ok_or_else(|| {
+        "Proxy auth is unavailable. Restart the sandbox and try again.".to_string()
+    })?;
+    let proxy_base = read_container_env("ENTROPIC_PROXY_BASE_URL").ok_or_else(|| {
+        "Proxy base URL is unavailable. Restart the sandbox and try again.".to_string()
+    })?;
+    let host_proxy_base = resolve_host_proxy_base(&proxy_base)?;
+    let endpoint = format!("{}/chat/completions", host_proxy_base.trim_end_matches('/'));
+
+    let response = client
+        .post(&endpoint)
+        .bearer_auth(&gateway_token)
+        .json(&serde_json::json!({
+            "model": model.trim(),
+            "modalities": ["text", "audio"],
+            "audio": {
+                "voice": DEFAULT_TTS_VOICE,
+                "format": STREAMING_PROXY_TTS_FORMAT,
+            },
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a text-to-speech engine. Convert the user's text into spoken audio verbatim. Do not add or remove words."
+                },
+                {
+                    "role": "user",
+                    "content": text,
+                }
+            ],
+            "stream": true
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Audio generation request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(format_audio_generation_http_error(status, body));
+    }
+
+    let mut response = response;
+    let mut pending = String::new();
+    let mut audio_chunks = String::new();
+    let mut transcript_chunks = String::new();
+    let mut text_chunks = String::new();
+
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("Failed to read streamed audio response: {}", e))?
+    {
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(idx) = pending.find("\n\n") {
+            let raw_event = pending[..idx].to_string();
+            pending.drain(..idx + 2);
+
+            let mut data_lines = Vec::new();
+            for line in raw_event.lines() {
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("data:") {
+                    data_lines.push(rest.trim_start());
+                }
+            }
+            if data_lines.is_empty() {
+                continue;
+            }
+            process_sse_event_data(
+                &data_lines.join("\n"),
+                &mut audio_chunks,
+                &mut transcript_chunks,
+                &mut text_chunks,
+            )?;
+        }
+    }
+
+    if !pending.trim().is_empty() {
+        let mut data_lines = Vec::new();
+        for line in pending.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("data:") {
+                data_lines.push(rest.trim_start());
+            }
+        }
+        if !data_lines.is_empty() {
+            process_sse_event_data(
+                &data_lines.join("\n"),
+                &mut audio_chunks,
+                &mut transcript_chunks,
+                &mut text_chunks,
+            )?;
+        }
+    }
+
+    if audio_chunks.trim().is_empty() {
+        let text_fallback = text_chunks.trim();
+        if !text_fallback.is_empty() {
+            let snippet = text_fallback.chars().take(220).collect::<String>();
+            eprintln!(
+                "[Entropic] Proxy TTS returned text-only output instead of audio (model={}): {}",
+                model.trim(),
+                snippet
+            );
+            return Err(format!(
+                "The proxy model returned text instead of audio. Snippet: {}",
+                snippet
+            ));
+        }
+        eprintln!(
+            "[Entropic] Proxy TTS returned no audio chunks and no text fallback (model={})",
+            model.trim()
+        );
+        return Err("The selected proxy model did not return audio.".to_string());
+    }
+    let transcript = if transcript_chunks.trim().is_empty() {
+        "Generated audio from your text.".to_string()
+    } else {
+        transcript_chunks.trim().to_string()
+    };
+
+    let wav_data_url = pcm16_base64_to_wav_data_url(&audio_chunks)?;
+
+    Ok(ChatAudioGenerationResult {
+        text: transcript,
+        audio: vec![ChatGeneratedAudio {
+            file_name: "generated-speech.wav".to_string(),
+            mime_type: "audio/wav".to_string(),
+            url: wav_data_url,
+        }],
+    })
+}
+
+fn audio_file_extension_from_name_or_mime(file_name: &str, mime_type: &str) -> &'static str {
+    let lowered_name = file_name.trim().to_lowercase();
+    if lowered_name.ends_with(".wav") {
+        return "wav";
+    }
+    if lowered_name.ends_with(".mp3") {
+        return "mp3";
+    }
+    if lowered_name.ends_with(".m4a") {
+        return "m4a";
+    }
+    if lowered_name.ends_with(".mpeg") {
+        return "mpeg";
+    }
+    if lowered_name.ends_with(".mpga") {
+        return "mpga";
+    }
+    if lowered_name.ends_with(".webm") {
+        return "webm";
+    }
+    if lowered_name.ends_with(".ogg") {
+        return "ogg";
+    }
+
+    match mime_type.trim().to_lowercase().as_str() {
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/mp4" | "audio/m4a" => "m4a",
+        "audio/webm" => "webm",
+        "audio/ogg" | "application/ogg" => "ogg",
+        _ => "webm",
+    }
+}
+
+fn extract_audio_transcription_text(payload: &serde_json::Value) -> Option<String> {
+    if let Some(text) = payload.get("text").and_then(|value| value.as_str()) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(candidates) = payload.get("candidates").and_then(|value| value.as_array()) {
+        let mut chunks = Vec::new();
+        for candidate in candidates {
+            let Some(parts) = candidate
+                .get("content")
+                .and_then(|content| content.get("parts"))
+                .and_then(|parts| parts.as_array())
+            else {
+                continue;
+            };
+
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        chunks.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+
+        if !chunks.is_empty() {
+            return Some(chunks.join("\n\n"));
+        }
+    }
+
+    if let Some(choices) = payload.get("choices").and_then(|value| value.as_array()) {
+        for choice in choices {
+            let Some(message) = choice.get("message") else {
+                continue;
+            };
+
+            if let Some(text) = message.get("content").and_then(|value| value.as_str()) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+
+            if let Some(parts) = message.get("content").and_then(|value| value.as_array()) {
+                let mut chunks = Vec::new();
+                for part in parts {
+                    if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            chunks.push(trimmed.to_string());
+                        }
+                    }
+                }
+                if !chunks.is_empty() {
+                    return Some(chunks.join("\n\n"));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn format_audio_transcription_http_error(status: reqwest::StatusCode, body: String) -> String {
+    let detail = extract_image_generation_error_detail(&body);
+    let suffix = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", detail)
+    };
+    format!("Audio transcription failed ({}{})", status, suffix)
+}
+
+async fn transcribe_openai_audio(
+    client: &reqwest::Client,
+    endpoint: &str,
+    bearer_token: &str,
+    raw_model: &str,
+    attachment: &ChatAudioTranscriptionAttachment,
+) -> Result<String, String> {
+    let file_name = if attachment.file_name.trim().is_empty() {
+        format!(
+            "audio.{}",
+            audio_file_extension_from_name_or_mime(&attachment.file_name, &attachment.mime_type)
+        )
+    } else {
+        attachment.file_name.trim().to_string()
+    };
+    let mime_type = if attachment.mime_type.trim().is_empty() {
+        "audio/webm"
+    } else {
+        attachment.mime_type.trim()
+    };
+    let bytes = STANDARD
+        .decode(attachment.content.trim())
+        .map_err(|e| format!("Invalid audio attachment '{}': {}", file_name, e))?;
+    let file_part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(file_name)
+        .mime_str(mime_type)
+        .map_err(|e| format!("Invalid attachment MIME type '{}': {}", mime_type, e))?;
+    let form = reqwest::multipart::Form::new()
+        .text("model", raw_model.to_string())
+        .text("response_format", "json".to_string())
+        .part("file", file_part);
+
+    let response = client
+        .post(endpoint)
+        .bearer_auth(bearer_token)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Audio transcription request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(format_audio_transcription_http_error(status, body));
+    }
+
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Invalid audio transcription response: {}", e))?;
+    extract_audio_transcription_text(&payload)
+        .ok_or_else(|| "The selected model did not return a transcript.".to_string())
+}
+
+async fn transcribe_google_audio(
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key_header_name: &str,
+    api_key: &str,
+    attachment: &ChatAudioTranscriptionAttachment,
+) -> Result<String, String> {
+    let mime_type = if attachment.mime_type.trim().is_empty() {
+        "audio/webm"
+    } else {
+        attachment.mime_type.trim()
+    };
+    let payload = serde_json::json!({
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": "Transcribe this audio verbatim. Preserve speaker turns when possible, and mark unclear portions as [unclear]."
+                    },
+                    {
+                        "inlineData": {
+                            "mimeType": mime_type,
+                            "data": attachment.content.trim(),
+                        }
+                    }
+                ]
+            }
+        ]
+    });
+
+    let response = client
+        .post(endpoint)
+        .header(api_key_header_name, api_key)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Audio transcription request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(format_audio_transcription_http_error(status, body));
+    }
+
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Invalid audio transcription response: {}", e))?;
+    extract_audio_transcription_text(&payload)
+        .ok_or_else(|| "The selected model did not return a transcript.".to_string())
+}
+
+async fn transcribe_proxy_chat_audio(
+    client: &reqwest::Client,
+    model: &str,
+    attachments: &[ChatAudioTranscriptionAttachment],
+) -> Result<ChatAudioTranscriptionResult, String> {
+    let gateway_token = read_container_env("OPENROUTER_API_KEY").ok_or_else(|| {
+        "Proxy auth is unavailable. Restart the sandbox and try again.".to_string()
+    })?;
+    let proxy_base = read_container_env("ENTROPIC_PROXY_BASE_URL").ok_or_else(|| {
+        "Proxy base URL is unavailable. Restart the sandbox and try again.".to_string()
+    })?;
+    let host_proxy_base = resolve_host_proxy_base(&proxy_base)?;
+    let endpoint = format!("{}/chat/completions", host_proxy_base.trim_end_matches('/'));
+    let normalized_model = model.trim();
+    if normalized_model.is_empty() {
+        return Err("Audio understanding model is not configured.".to_string());
+    }
+
+    let mut transcripts = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let format =
+            audio_file_extension_from_name_or_mime(&attachment.file_name, &attachment.mime_type);
+        let payload = serde_json::json!({
+            "model": normalized_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Transcribe this audio verbatim. Preserve speaker turns when possible, and mark unclear portions as [unclear].",
+                        },
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": attachment.content.trim(),
+                                "format": format,
+                            }
+                        }
+                    ]
+                }
+            ],
+            "stream": false
+        });
+
+        let response = client
+            .post(&endpoint)
+            .bearer_auth(&gateway_token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("Audio transcription request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_else(|_| String::new());
+            return Err(format_audio_transcription_http_error(status, body));
+        }
+
+        let payload = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| format!("Invalid audio transcription response: {}", e))?;
+        let message = payload
+            .get("choices")
+            .and_then(|choices| choices.as_array())
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let transcript = extract_openrouter_message_text(&message);
+        if transcript.trim().is_empty() {
+            return Err("The selected proxy audio model did not return a transcript.".to_string());
+        }
+        transcripts.push(format!("{}:\n{}", attachment.file_name.trim(), transcript));
+    }
+
+    Ok(ChatAudioTranscriptionResult {
+        text: transcripts.join("\n\n"),
+    })
+}
+
+async fn transcribe_local_chat_audio(
+    state: &AppState,
+    client: &reqwest::Client,
+    model: &str,
+    attachments: &[ChatAudioTranscriptionAttachment],
+) -> Result<ChatAudioTranscriptionResult, String> {
+    let (provider, raw_model) = split_audio_understanding_model(model)?;
+
+    let mut transcripts = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let transcript = match provider {
+            "openai" => {
+                let api_key = read_local_audio_understanding_api_key(state, "openai")?;
+                transcribe_openai_audio(
+                    client,
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    &api_key,
+                    raw_model,
+                    attachment,
+                )
+                .await?
+            }
+            "google" => {
+                let api_key = read_local_audio_understanding_api_key(state, "google")?;
+                let endpoint = format!(
+                    "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                    raw_model
+                );
+                transcribe_google_audio(client, &endpoint, "x-goog-api-key", &api_key, attachment)
+                    .await?
+            }
+            _ => {
+                return Err(format!(
+                    "Local audio transcription is not supported for {}. Choose an OpenAI or Google audio model in Settings.",
+                    provider
+                ))
+            }
+        };
+        transcripts.push(format!("{}:\n{}", attachment.file_name.trim(), transcript));
+    }
+
+    Ok(ChatAudioTranscriptionResult {
+        text: transcripts.join("\n\n"),
+    })
 }
 
 fn client_log_path() -> PathBuf {
@@ -17919,6 +18749,75 @@ pub async fn generate_chat_image(
             provider
         )),
     }
+}
+
+#[tauri::command]
+pub async fn generate_chat_audio(
+    state: State<'_, AppState>,
+    model: String,
+    text: String,
+) -> Result<ChatAudioGenerationResult, String> {
+    let _container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
+
+    let model = model.trim().to_string();
+    if model.is_empty() {
+        return Err("Text to speech model is not configured.".to_string());
+    }
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("Enter text first.".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("Failed to create audio generation client: {}", e))?;
+
+    if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
+        return generate_proxy_chat_audio(&client, &model, &text).await;
+    }
+
+    let (provider, raw_model) = split_provider_model(&model, "Text to speech model")?;
+    match provider {
+        "openai" => {
+            let api_key = read_local_text_to_speech_api_key(&state, "openai")?;
+            generate_openai_chat_audio(&client, &api_key, raw_model, &text).await
+        }
+        _ => Err(format!(
+            "Local text to speech is not supported for {}. Choose an OpenAI TTS model in Settings.",
+            provider
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn transcribe_chat_audio(
+    state: State<'_, AppState>,
+    model: String,
+    attachments: Vec<ChatAudioTranscriptionAttachment>,
+) -> Result<ChatAudioTranscriptionResult, String> {
+    let _container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
+
+    let model = model.trim().to_string();
+    if model.is_empty() {
+        return Err("Audio understanding model is not configured.".to_string());
+    }
+    if attachments.is_empty() {
+        return Err("Attach audio first.".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("Failed to create audio transcription client: {}", e))?;
+
+    if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
+        return transcribe_proxy_chat_audio(&client, &model, &attachments).await;
+    }
+
+    transcribe_local_chat_audio(&state, &client, &model, &attachments).await
 }
 
 #[tauri::command]
