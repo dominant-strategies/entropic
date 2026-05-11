@@ -579,6 +579,39 @@ function extractVoicePromptDisplayContent(raw: string): string | null {
   return spoken || null;
 }
 
+function extractInternalRoutingDisplayContent(raw: string): string | null {
+  const text = raw.trim();
+  if (!text) return null;
+  const isKnownRoutingPrompt =
+    /^\s*Use the local Entropic workspace Office workflow for this request\./i.test(text) ||
+    /^\s*Use the connected X integration for this request\./i.test(text) ||
+    /^\s*Use the connected Gmail integration for this request\./i.test(text);
+  if (!isKnownRoutingPrompt) {
+    return null;
+  }
+
+  const marker = "Original user request:";
+  const index = text.lastIndexOf(marker);
+  if (index < 0) {
+    return null;
+  }
+  const original = text.slice(index + marker.length).trim();
+  return original || null;
+}
+
+function normalizeUserDisplayText(raw: string): string {
+  let text = raw.trim();
+  for (let i = 0; i < 4; i += 1) {
+    const original = extractInternalRoutingDisplayContent(text);
+    if (!original || original === text) {
+      break;
+    }
+    text = original.trim();
+  }
+
+  return extractVoicePromptDisplayContent(text) ?? text;
+}
+
 export function toTimestampMs(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value) && value > 0) {
     return value < 1_000_000_000_000 ? Math.round(value * 1000) : Math.round(value);
@@ -622,9 +655,8 @@ export function normalizeUserContent(content: string, fallbackTimestamp?: number
     };
   }
   const parsedPrefix = parseUtcBracketTimestamp(withoutMeta);
-  const voicePromptDisplayContent = extractVoicePromptDisplayContent(parsedPrefix.text);
   return {
-    content: voicePromptDisplayContent ?? parsedPrefix.text.trim(),
+    content: normalizeUserDisplayText(parsedPrefix.text),
     sentAt: fallbackTimestamp ?? parsedPrefix.sentAt ?? null,
   };
 }

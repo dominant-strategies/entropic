@@ -37,7 +37,6 @@ import {
   type GatewayMessage,
 } from "../lib/gateway";
 import {
-  getProfileInitials,
   isRenderableAvatarDataUrl,
   loadOnboardingData,
   loadProfile,
@@ -49,6 +48,7 @@ import {
 import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
 import { TelegramSetupModal } from "../components/TelegramSetupModal";
 import { MarkdownContent } from "../components/MarkdownContent";
+import { AgentAvatar } from "../components/AgentAvatar";
 import { useAuth } from "../contexts/AuthContext";
 import {
   syncAllIntegrationsToGateway,
@@ -396,24 +396,6 @@ function extractWorkspaceChatReferences(content: string): WorkspaceChatReference
 // OAuth icons imported from shared component
 import { GoogleIcon, DiscordIcon } from "../components/OAuthIcons";
 
-// ── Default avatar colors ──────────────────────────────────────
-const AVATAR_COLORS = [
-  "#8b5cf6", "#6366f1", "#3b82f6", "#06b6d4", "#14b8a6",
-  "#10b981", "#f59e0b", "#f97316", "#ef4444", "#ec4899",
-];
-
-function getAvatarColor(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = name.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
-}
-
-function getInitials(name: string): string {
-  return getProfileInitials(name, 2);
-}
-
 function GoogleCalendarLogo({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
@@ -479,6 +461,124 @@ type PersistedChatData = {
   currentSession: string | null;
   outbox: PersistedPendingSend[];
 };
+
+type ChatToolActivityStatus = "running" | "complete" | "error";
+
+type ChatToolActivity = {
+  id: string;
+  name: string;
+  label: string;
+  status: ChatToolActivityStatus;
+  detail?: string;
+  seq: number;
+  ts: number;
+};
+
+const SETTINGS_PROFILE_REQUEST_EVENT = "entropic-settings-open-profile";
+const SETTINGS_PROFILE_REQUEST_KEY = "entropic.settings.requestedSection";
+
+const THINKING_WORDS = [
+  "Thinking",
+  "Reasoning",
+  "Synthesizing",
+  "Mapping",
+  "Parsing",
+  "Weighing",
+  "Composing",
+  "Drafting",
+  "Inspecting",
+  "Solving",
+  "Planning",
+  "Tracing",
+  "Checking",
+  "Refining",
+  "Structuring",
+  "Connecting",
+  "Searching",
+  "Reading",
+  "Calculating",
+  "Evaluating",
+  "Designing",
+  "Building",
+  "Testing",
+  "Verifying",
+  "Aligning",
+  "Debugging",
+  "Organizing",
+  "Clarifying",
+  "Comparing",
+  "Integrating",
+  "Sequencing",
+  "Modeling",
+  "Projecting",
+  "Exploring",
+  "Distilling",
+  "Interpreting",
+  "Reframing",
+  "Balancing",
+  "Prioritizing",
+  "Simulating",
+  "Navigating",
+  "Scanning",
+  "Reviewing",
+  "Assembling",
+  "Optimizing",
+  "Polishing",
+  "Resolving",
+  "Translating",
+  "Summarizing",
+  "Generating",
+  "Coordinating",
+  "Validating",
+  "Triaging",
+  "Investigating",
+  "Unpacking",
+  "Filtering",
+  "Ranking",
+  "Selecting",
+  "Expanding",
+  "Condensing",
+  "Calibrating",
+  "Inferring",
+  "Contextualizing",
+  "Grounding",
+  "Focusing",
+  "Sharpening",
+  "Iterating",
+  "Routing",
+  "Synchronizing",
+  "Preparing",
+  "Forming",
+  "Linking",
+  "Measuring",
+  "Rendering",
+  "Updating",
+  "Adapting",
+  "Tuning",
+  "Compressing",
+  "Indexing",
+  "Sampling",
+  "Estimating",
+  "Scheduling",
+  "Threading",
+  "Merging",
+  "Sorting",
+  "Staging",
+  "Cataloging",
+  "Fetching",
+  "Querying",
+  "Crosschecking",
+  "Harmonizing",
+  "Orchestrating",
+  "Reconciling",
+  "Segmenting",
+  "Annotating",
+  "Comprehending",
+  "Forecasting",
+  "Curating",
+  "Evolving",
+  "Finalizing",
+] as const;
 
 function normalizeSessionsList(list: ChatSession[]): ChatSession[] {
   const byKey = new Map<string, ChatSession>();
@@ -590,6 +690,69 @@ function normalizePersistedPendingSend(raw: unknown): PersistedPendingSend | nul
     createdAt,
     attemptCount,
     nextAttemptAt,
+  };
+}
+
+function compactToolText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+  return text.length > 120 ? `${text.slice(0, 117).trimEnd()}...` : text;
+}
+
+function humanizeToolName(name: string): string {
+  const cleaned = name.trim().replace(/^functions\./, "");
+  if (!cleaned) return "Tool";
+  return cleaned
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function toolStatusFromAgentData(data: Record<string, unknown>): ChatToolActivityStatus {
+  const raw = String(data.status ?? data.state ?? data.phase ?? "").toLowerCase();
+  if (raw.includes("error") || raw.includes("fail")) return "error";
+  if (raw.includes("end") || raw.includes("done") || raw.includes("complete") || raw.includes("success")) {
+    return "complete";
+  }
+  return "running";
+}
+
+function toolDetailFromAgentData(data: Record<string, unknown>): string | undefined {
+  return (
+    compactToolText(data.title) ??
+    compactToolText(data.message) ??
+    compactToolText(data.query) ??
+    compactToolText(data.path) ??
+    compactToolText(data.url) ??
+    compactToolText(data.command) ??
+    compactToolText(data.error)
+  );
+}
+
+function toolActivityFromAgentEvent(event: AgentEvent): ChatToolActivity | null {
+  if (event.stream !== "tool") return null;
+  const data = event.data || {};
+  const rawName =
+    compactToolText(data.name) ??
+    compactToolText(data.tool) ??
+    compactToolText(data.toolName) ??
+    compactToolText(data.call) ??
+    "tool";
+  const id =
+    compactToolText(data.id) ??
+    compactToolText(data.callId) ??
+    compactToolText(data.toolCallId) ??
+    rawName;
+  return {
+    id,
+    name: rawName,
+    label: humanizeToolName(rawName),
+    status: toolStatusFromAgentData(data),
+    detail: toolDetailFromAgentData(data),
+    seq: event.seq,
+    ts: event.ts || Date.now(),
   };
 }
 
@@ -1251,6 +1414,10 @@ export function Chat({
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [savingWorkspaceImageKeys, setSavingWorkspaceImageKeys] = useState<Record<string, boolean>>({});
   const [savedWorkspaceImagePaths, setSavedWorkspaceImagePaths] = useState<Record<string, string>>({});
+  const [toolActivityByRunId, setToolActivityByRunId] = useState<Record<string, ChatToolActivity[]>>({});
+  const [activeToolRunId, setActiveToolRunId] = useState<string | null>(null);
+  const [loadingWordIndex, setLoadingWordIndex] = useState(0);
+  const [loadingWordChanging, setLoadingWordChanging] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [onboardingData, setOnboardingData] = useState<OnboardingData | null>(null);
   const [agentProfile, setAgentProfile] = useState<AgentProfile | null>(null);
@@ -1326,6 +1493,7 @@ export function Chat({
   const avatarUploadDataUrlByFileNameRef = useRef<Map<string, string>>(new Map());
   const wasVisibleRef = useRef(isVisible !== false);
   const outboxReplayInFlightRef = useRef(false);
+  const streamedAssistantRunIdsRef = useRef<Set<string>>(new Set());
   const outboxDispatchInFlightRef = useRef<Set<string>>(new Set());
   const outboxWakeTimerRef = useRef<number | null>(null);
   const connectingScreenTimerRef = useRef<number | null>(null);
@@ -2973,6 +3141,7 @@ export function Chat({
   function clearActiveRunTracking() {
     activeRunIdRef.current = null;
     activeRunSessionRef.current = null;
+    setActiveToolRunId(null);
     if (activeRunTimeoutRef.current) {
       window.clearTimeout(activeRunTimeoutRef.current);
       activeRunTimeoutRef.current = null;
@@ -3028,6 +3197,9 @@ export function Chat({
     clearActiveRunTracking();
     activeRunIdRef.current = runId;
     activeRunSessionRef.current = sessionKey;
+    setActiveToolRunId(runId);
+    streamedAssistantRunIdsRef.current.delete(runId);
+    setToolActivityByRunId((prev) => ({ ...prev, [runId]: [] }));
     runSessionKeyRef.current[runId] = sessionKey;
     lastEventByRunIdRef.current[runId] = Date.now();
     refreshActiveRunTimeout(runId);
@@ -3069,6 +3241,32 @@ export function Chat({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: isLoading ? "auto" : "smooth" });
   }, [messages, isLoading, integrationSetup, quickSuggestion]);
+
+  useEffect(() => {
+    if (!isLoading) {
+      setLoadingWordIndex(0);
+      setLoadingWordChanging(false);
+      return;
+    }
+    let settleTimer: number | null = null;
+    const intervalId = window.setInterval(() => {
+      setLoadingWordChanging(true);
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+      settleTimer = window.setTimeout(() => {
+        setLoadingWordIndex((current) => (current + 1) % THINKING_WORDS.length);
+        setLoadingWordChanging(false);
+        settleTimer = null;
+      }, 180);
+    }, 3_000);
+    return () => {
+      window.clearInterval(intervalId);
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+    };
+  }, [isLoading]);
 
   useEffect(() => {
     currentSessionRef.current = currentSession;
@@ -3603,7 +3801,7 @@ export function Chat({
     if (stream === "assistant") return "Thinking";
     if (stream === "lifecycle") {
       const phase = typeof data.phase === "string" ? data.phase : null;
-      if (phase === "start") return "Starting";
+      if (phase === "start") return "Preparing response";
       if (phase === "end" || phase === "error") return null;
     }
     return null;
@@ -3613,6 +3811,34 @@ export function Chat({
     if (!event?.runId || event.runId !== activeRunIdRef.current) return;
     lastEventByRunIdRef.current[event.runId] = Date.now();
     refreshActiveRunTimeout(event.runId);
+    const toolActivity = toolActivityFromAgentEvent(event);
+    if (toolActivity) {
+      setToolActivityByRunId((prev) => {
+        const existing = prev[event.runId] ?? [];
+        const existingIdx = existing.findIndex((item) => item.id === toolActivity.id);
+        const next =
+          existingIdx >= 0
+            ? existing.map((item, idx) =>
+                idx === existingIdx
+                  ? {
+                      ...item,
+                      ...toolActivity,
+                      status:
+                        item.status === "complete" && toolActivity.status === "running"
+                          ? item.status
+                          : toolActivity.status,
+                    }
+                  : item,
+              )
+            : [...existing, toolActivity];
+        return {
+          ...prev,
+          [event.runId]: next
+            .sort((a, b) => a.seq - b.seq)
+            .slice(-8),
+        };
+      });
+    }
     const status = describeAgentActivity(event);
     if (status) {
       setThinkingStatus(status);
@@ -3857,6 +4083,9 @@ export function Chat({
       );
       if (text || hasRenderableAssistantPayload) {
         setThinkingStatus(null);
+        if (eventRunId) {
+          streamedAssistantRunIdsRef.current.add(eventRunId);
+        }
         if (isProxyAuthFailure(text)) {
           triggerProxyAuthRecovery("chat message");
         }
@@ -4691,7 +4920,7 @@ export function Chat({
     runTimingsRef.current[runId] = { startedAt: sendStart, ackAt: Date.now() };
     addDiag(`timing send_ack runId=${runId} t=${runTimingsRef.current[runId].ackAt! - sendStart}ms`);
     addDiag(`send ok runId=${runId}`);
-    setThinkingStatus("Starting");
+    setThinkingStatus("Preparing response");
     if (routingEnabled && chosenModel && fastModel && reasoningModel && chosenModel !== fastModel) {
       runRevertModelRef.current[runId] = fastModel;
     }
@@ -6092,6 +6321,56 @@ export function Chat({
     );
   }
 
+  function renderToolActivityList(activities: ChatToolActivity[]) {
+    if (activities.length === 0) return null;
+    return (
+      <div className="space-y-1.5">
+        {activities.map((activity) => {
+          const statusClass =
+            activity.status === "error"
+              ? "border-red-500/20 bg-red-500/10 text-red-400"
+              : activity.status === "complete"
+                ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
+                : "border-[var(--border-subtle)] bg-[var(--bg-tertiary)]/60 text-[var(--text-secondary)]";
+          const icon =
+            activity.status === "error" ? (
+              <X className="h-3.5 w-3.5" />
+            ) : activity.status === "complete" ? (
+              <Check className="h-3.5 w-3.5" />
+            ) : (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            );
+          return (
+            <div
+              key={activity.id}
+              className={clsx(
+                "flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs",
+                statusClass,
+              )}
+            >
+              <span className="shrink-0">{icon}</span>
+              <span className="min-w-0 truncate font-medium text-[var(--text-primary)]">
+                {activity.label}
+              </span>
+              <span className="shrink-0 text-[10px] uppercase tracking-[0.18em] opacity-70">
+                {activity.status === "complete"
+                  ? "done"
+                  : activity.status === "error"
+                    ? "error"
+                    : "running"}
+              </span>
+              {activity.detail ? (
+                <span className="min-w-0 truncate text-[var(--text-tertiary)]">
+                  {activity.detail}
+                </span>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
   function renderMessageAttachments(message: Message) {
     const attachments = (message.attachments || []).filter((attachment) => attachment.previewUrl);
     if (attachments.length === 0) {
@@ -6184,23 +6463,44 @@ export function Chat({
         addDiag(`timing tool_payload runId=${message.id} t=${timings.toolSeenAt - timings.startedAt}ms`);
       }
     }
-    if (!payload.events.length && !payload.errors.length) {
-      return (
-        <div className="min-w-0 max-w-full">
-          {renderMessageAttachments(message)}
-          <MarkdownContent
-            content={payload.cleanText}
-            onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
-          />
-        </div>
-      );
-    }
+    const liveActivities = message.id ? toolActivityByRunId[message.id] ?? [] : [];
+    const payloadActivities: ChatToolActivity[] = [
+      ...payload.errors.map((error, idx) => ({
+        id: `payload-error-${idx}-${error.tool || "tool"}`,
+        name: error.tool || "tool",
+        label: humanizeToolName(error.tool || "Tool"),
+        status: "error" as const,
+        detail: compactToolText(error.error) ?? compactToolText(error.status),
+        seq: 10_000 + idx,
+        ts: Date.now(),
+      })),
+      ...(payload.hadToolPayload && liveActivities.length === 0 && payload.events.length === 0 && payload.errors.length === 0
+        ? [{
+            id: "payload-tool-output",
+            name: message.toolName || "tool",
+            label: humanizeToolName(message.toolName || "Tool"),
+            status: "complete" as const,
+            detail: "Tool output used",
+            seq: 10_500,
+            ts: Date.now(),
+          }]
+        : []),
+      ...(payload.events.length > 0
+        ? [{
+            id: "payload-calendar-events",
+            name: "calendar",
+            label: "Calendar",
+            status: "complete" as const,
+            detail: `${payload.events.length} event${payload.events.length === 1 ? "" : "s"} returned`,
+            seq: 11_000,
+            ts: Date.now(),
+          }]
+        : []),
+    ];
+    const activities = [...liveActivities, ...payloadActivities];
     return (
-      <div className="min-w-0 max-w-full space-y-2">
-        <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)]">
-          <span>{message.kind === "toolResult" ? "Tool Result" : "Assistant"}</span>
-          {message.toolName ? <span className="text-[var(--text-quaternary)]">{message.toolName}</span> : null}
-        </div>
+      <div className="min-w-0 max-w-full space-y-3">
+        {renderToolActivityList(activities)}
         {payload.cleanText ? (
           <div>
             {renderMessageAttachments(message)}
@@ -6212,7 +6512,7 @@ export function Chat({
         ) : null}
         {!payload.cleanText ? renderMessageAttachments(message) : null}
         {payload.events.length > 0 && (
-          <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-3 shadow-sm">
+          <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--bg-tertiary)]/50 p-3">
             <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)] mb-2">
               <Calendar className="w-3.5 h-3.5" />
               Calendar
@@ -6715,6 +7015,24 @@ export function Chat({
     return payload.cleanText.trim() || message.content.trim();
   }
 
+  const chatAgentName = sanitizeProfileName(agentProfile?.name || onboardingData?.agentName || "Entropic");
+  const chatAgentAvatarUrl = isRenderableAvatarDataUrl(agentProfile?.avatarDataUrl)
+    ? agentProfile?.avatarDataUrl.trim()
+    : undefined;
+
+  const openAgentProfileSettings = useCallback(() => {
+    try {
+      window.localStorage.setItem(SETTINGS_PROFILE_REQUEST_KEY, "profile");
+    } catch {
+      // Best-effort hint for Settings if it mounts after navigation.
+    }
+    onNavigate?.("settings");
+    window.dispatchEvent(new Event(SETTINGS_PROFILE_REQUEST_EVENT));
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new Event(SETTINGS_PROFILE_REQUEST_EVENT));
+    });
+  }, [onNavigate]);
+
   // Memoize the message list so typing in the composer doesn't re-render
   // every message (and re-parse markdown) on each keystroke.
   // These hooks must be before early returns to satisfy Rules of Hooks.
@@ -6729,30 +7047,74 @@ export function Chat({
     if (msg.role === "user" && !bodyContent) {
       return null;
     }
-    return (
-      <div key={msg.id} className={clsx("flex min-w-0", msg.role === "user" ? "justify-end" : "justify-start")}>
-        <div className={clsx("min-w-0 max-w-[85%]")}>
-          <div className={clsx("px-3.5 py-2 rounded-2xl",
-            msg.role === "user"
-              ? "bg-[var(--chat-user-bg)] text-[var(--chat-user-text)]"
-              : "bg-[var(--chat-assistant-bg)] text-[var(--chat-assistant-text)] border border-[var(--chat-assistant-border)]")}>
-            {msg.role === "assistant" ? (
-              renderAssistantContent(msg)
-            ) : (
-              <div>
-                {renderMessageAttachments(msg)}
-                <p className="whitespace-pre-wrap break-words">{bodyContent}</p>
+    if (msg.role === "assistant") {
+      return (
+        <div key={msg.id} className="group flex w-full min-w-0 justify-start py-2">
+          <div className="flex w-full min-w-0 items-start gap-3.5">
+            <button
+              type="button"
+              onClick={openAgentProfileSettings}
+              className="mt-0.5 shrink-0 self-start rounded-full transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/30"
+              aria-label={`Edit ${chatAgentName} profile`}
+              title={`Edit ${chatAgentName} profile`}
+            >
+              <AgentAvatar
+                name={chatAgentName}
+                avatarUrl={chatAgentAvatarUrl}
+                className="h-11 w-11 border border-[var(--border-subtle)] transition hover:border-[var(--border-primary)]"
+              />
+            </button>
+            <div className="min-w-0 flex-1 pb-3">
+              <div className="mb-2 flex min-w-0 items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
+                <button
+                  type="button"
+                  onClick={openAgentProfileSettings}
+                  className="min-w-0 truncate rounded-sm font-normal text-[var(--text-secondary)] transition hover:text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/20"
+                  title={`Edit ${chatAgentName} profile`}
+                >
+                  {chatAgentName}
+                </button>
               </div>
-            )}
+              <div className="min-w-0 text-[var(--chat-assistant-text)]">
+                {renderAssistantContent(msg)}
+              </div>
+              {messageTime || canCopy ? (
+                <div className="mt-1.5 flex items-center gap-2 px-1 text-[11px] text-[var(--text-tertiary)]">
+                  {messageTime ? <span>{messageTime}</span> : null}
+                  {canCopy ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void copyMessageText(msg.id, copyText);
+                      }}
+                      className="inline-flex h-5 w-5 items-center justify-center text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+                      aria-label={copyLabel}
+                      title={copyLabel}
+                    >
+                      {copyIcon}
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div key={msg.id} className="flex min-w-0 justify-end">
+        <div className="min-w-0 max-w-[85%]">
+          <div className="rounded-2xl bg-[var(--chat-user-bg)] px-3.5 py-2 text-[var(--chat-user-text)]">
+            <div>
+              {renderMessageAttachments(msg)}
+              <p className="whitespace-pre-wrap break-words">{bodyContent}</p>
+            </div>
           </div>
           {messageTime ? (
             <div
-              className={clsx(
-                "mt-0.5 flex items-center gap-2 px-1 text-[11px] text-[var(--text-tertiary)]",
-                msg.role === "user" ? "text-right" : "text-left"
-              )}
+              className="mt-0.5 flex items-center gap-2 px-1 text-right text-[11px] text-[var(--text-tertiary)]"
             >
-              <span className={msg.role === "user" ? "ml-auto" : ""}>{messageTime}</span>
+              <span className="ml-auto">{messageTime}</span>
               {canCopy ? (
                 <button
                   type="button"
@@ -6771,18 +7133,53 @@ export function Chat({
         </div>
       </div>
     );
-  }), [messages, copiedMessageId]);
+  }), [chatAgentAvatarUrl, chatAgentName, copiedMessageId, messages, openAgentProfileSettings, toolActivityByRunId]);
 
-  const loadingIndicator = useMemo(() => isLoading ? (
-    <div className="flex justify-start">
-      <div className="px-3.5 py-2 rounded-2xl bg-[var(--chat-assistant-bg)] border border-[var(--chat-assistant-border)] flex items-center gap-2">
-        <Loader2 className="w-4 h-4 animate-spin text-[var(--purple-accent)]" />
-        <span className="text-sm text-[var(--text-secondary)] animate-pulse">
-          {thinkingStatus || "Thinking"}
-        </span>
+  const loadingIndicator = useMemo(() => {
+    if (!isLoading) return null;
+    if (activeToolRunId && streamedAssistantRunIdsRef.current.has(activeToolRunId)) {
+      return null;
+    }
+    const loadingWord = THINKING_WORDS[loadingWordIndex % THINKING_WORDS.length] ?? "Thinking";
+    return (
+      <div className="flex w-full min-w-0 justify-start py-2">
+        <div className="flex w-full min-w-0 items-start gap-3.5">
+          <button
+            type="button"
+            onClick={openAgentProfileSettings}
+            className="mt-0.5 shrink-0 self-start rounded-full transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/30"
+            aria-label={`Edit ${chatAgentName} profile`}
+            title={`Edit ${chatAgentName} profile`}
+          >
+            <AgentAvatar
+              name={chatAgentName}
+              avatarUrl={chatAgentAvatarUrl}
+              className="h-11 w-11 border border-[var(--border-subtle)] transition hover:border-[var(--border-primary)]"
+            />
+          </button>
+          <div className="min-w-0 flex-1 pb-3">
+            <div className="mb-2 flex min-w-0 items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
+              <button
+                type="button"
+                onClick={openAgentProfileSettings}
+                className="min-w-0 truncate rounded-sm font-normal text-[var(--text-secondary)] transition hover:text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/20"
+                title={`Edit ${chatAgentName} profile`}
+              >
+                {chatAgentName}
+              </button>
+            </div>
+            <span
+              key={loadingWord}
+              className="entropic-thinking-shimmer inline-block text-sm font-normal"
+              data-changing={loadingWordChanging ? "true" : "false"}
+            >
+              {loadingWord}
+            </span>
+          </div>
+        </div>
       </div>
-    </div>
-  ) : null, [isLoading, thinkingStatus]);
+    );
+  }, [activeToolRunId, chatAgentAvatarUrl, chatAgentName, isLoading, loadingWordChanging, loadingWordIndex, messages, openAgentProfileSettings]);
 
   const activeDraft = currentSession
     ? activeComposerMode === "shell"
@@ -6834,10 +7231,6 @@ export function Chat({
     error && isBillingIssueMessage(error) && !isAuthenticated && isAuthConfigured
   );
 
-  const chatAgentName = sanitizeProfileName(agentProfile?.name || onboardingData?.agentName || "Entropic");
-  const chatAgentAvatarUrl = isRenderableAvatarDataUrl(agentProfile?.avatarDataUrl)
-    ? agentProfile?.avatarDataUrl.trim()
-    : undefined;
   const hasInlineAssistantCard = Boolean(builderChecklist || integrationSetup || quickSuggestion);
 
   // Main Chat UI

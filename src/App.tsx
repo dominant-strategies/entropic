@@ -18,6 +18,7 @@ import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { getLocalCreditBalance } from "./lib/localCredits";
 import { updaterEnabled } from "./lib/buildProfile";
 import { checkForAppUpdates } from "./lib/updater";
+import { DEFAULT_AGENT_NAME, DEFAULT_SOUL } from "./lib/agentDefaults";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -40,13 +41,6 @@ function isTauriRuntime(): boolean {
 }
 
 type AppState = "loading" | "signin" | "onboarding" | "docker-install" | "setup" | "ready";
-
-const DEFAULT_AGENT_NAME = "Joulie";
-const DEFAULT_SOUL = `# About Joulie
-
-You are Joulie, a helpful AI assistant for coding, research, and execution tasks.
-Be concise, practical, and action-oriented.
-`;
 
 function AppContent() {
   const { isLoading: authLoading, isAuthenticated, isAuthConfigured } = useAuth();

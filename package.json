@@ -70,6 +70,8 @@
     "build:cross-platform": "./scripts/build-cross-platform.sh"
   },
   "dependencies": {
+    "@fontsource/geist-mono": "^5.2.7",
+    "@fontsource/geist-sans": "^5.2.5",
     "@supabase/supabase-js": "^2.47.10",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-deep-link": "^2.0.0",

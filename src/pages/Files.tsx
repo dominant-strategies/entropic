@@ -1064,9 +1064,11 @@ export function Files({
       if (typeof saved.chatNavCollapsed === "boolean") setChatNavCollapsed(saved.chatNavCollapsed);
       const savedBrowserOpen = saved.browserOpen === true;
       if (typeof saved.terminalOpen === "boolean") setTerminalOpen(saved.terminalOpen);
-      if (typeof saved.sheetsOpen === "boolean") setSheetsOpen(saved.sheetsOpen);
-      if (typeof saved.docsOpen === "boolean") setDocsOpen(saved.docsOpen);
-      if (typeof saved.slidesOpen === "boolean") setSlidesOpen(saved.slidesOpen);
+      // Office document sessions are intentionally not persisted. Restoring only
+      // the open booleans reopens an empty app shell on Desktop startup.
+      setSheetsOpen(false);
+      setDocsOpen(false);
+      setSlidesOpen(false);
       if (typeof saved.pluginsOpen === "boolean") setPluginsOpen(saved.pluginsOpen);
       if (typeof saved.skillsOpen === "boolean") setSkillsOpen(saved.skillsOpen);
       if (typeof saved.channelsOpen === "boolean") setChannelsOpen(saved.channelsOpen);
@@ -1486,9 +1488,10 @@ export function Files({
       chatNavCollapsed,
       browserOpen,
       terminalOpen,
-      sheetsOpen,
-      docsOpen,
-      slidesOpen,
+      // Persist Office geometry/recents, but not transient document windows.
+      sheetsOpen: false,
+      docsOpen: false,
+      slidesOpen: false,
       pluginsOpen,
       skillsOpen,
       channelsOpen,
@@ -4132,6 +4135,7 @@ export function Files({
     if (!current) return key;
     return getWindowZ(windowZ, key) > getWindowZ(windowZ, current) ? key : current;
   }, null);
+  const isDesktopWindowActive = (key: WindowKey) => focusedVoiceWindow === key;
   const activeOffice = [
     { appKind: "sheets" as const, open: sheetsOpen, session: sheetsSession },
     { appKind: "docs" as const, open: docsOpen, session: docsSession },
@@ -4369,6 +4373,7 @@ export function Files({
               position={chatPos}
               size={chatSize}
               zIndex={getWindowZ(windowZ, "chat")}
+              active={isDesktopWindowActive("chat")}
               navCollapsed={chatNavCollapsed}
               sessions={chatSessions}
               currentSession={chatCurrentSession}
@@ -4611,6 +4616,16 @@ export function Files({
 
           <DesktopUtilityWindows
             windowZ={windowZ}
+            active={{
+              plugins: isDesktopWindowActive("plugins"),
+              skills: isDesktopWindowActive("skills"),
+              channels: isDesktopWindowActive("channels"),
+              tasks: isDesktopWindowActive("tasks"),
+              jobs: isDesktopWindowActive("jobs"),
+              logs: isDesktopWindowActive("logs"),
+              billing: isDesktopWindowActive("billing"),
+              settings: isDesktopWindowActive("settings"),
+            }}
             windows={{
               plugins: { open: pluginsOpen, position: pluginsPos, size: pluginsSize },
               skills: { open: skillsOpen, position: skillsPos, size: skillsSize },
