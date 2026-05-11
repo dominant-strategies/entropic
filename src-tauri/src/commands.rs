@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
+use std::net::IpAddr;
 #[cfg(target_os = "macos")]
 use std::os::raw::c_uchar;
 #[cfg(unix)]
@@ -37,7 +38,7 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
 
@@ -62,8 +63,13 @@ const BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS: &str = "0";
 const BROWSER_SERVICE_PATH: &str = "/app/browser-service/server.mjs";
 const BROWSER_SERVICE_LOG_PATH: &str = "/data/browser/browser-service.log";
 const BROWSER_CONTROL_TOKEN_PATH: &str = "/data/browser/control-token";
+const DESKTOP_ACTION_BRIDGE_DIR: &str = "/data/browser/desktop-actions";
+const DESKTOP_ACTION_BRIDGE_MAX_BATCH: usize = 20;
+const DESKTOP_ACTION_BRIDGE_MAX_BYTES: usize = 8192;
+const DESKTOP_ACTION_BRIDGE_POLL_MS: u64 = 900;
 const EMBEDDED_PREVIEW_WEBVIEW_LABEL: &str = "desktop-browser-preview";
 const EMBEDDED_PREVIEW_STATE_EVENT: &str = "embedded-preview-state";
+const DESKTOP_ACTION_EVENT: &str = "entropic-desktop-action";
 const DESKTOP_TERMINAL_EVENT: &str = "desktop-terminal-output";
 const DESKTOP_TERMINAL_BUFFER_MAX_BYTES: usize = 200_000;
 const HOST_DROP_PATH_TTL_MS: u64 = 60_000;
@@ -73,18 +79,18 @@ const ENTROPIC_NATIVE_API_ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1"];
 const ENTROPIC_NATIVE_API_ALLOWED_DOMAINS: &[&str] = &["entropic.qu.ai"];
 const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const CLIENT_LOG_READ_MAX_BYTES: usize = 512 * 1024;
-const DEFAULT_PROXY_GATEWAY_MODEL: &str = "openai/gpt-5.4";
-const DEFAULT_PROXY_ANTHROPIC_GATEWAY_MODEL: &str = "anthropic/claude-opus-4-6";
-const DEFAULT_PROXY_GOOGLE_GATEWAY_MODEL: &str = "google/gemini-3.1-pro-preview";
-const DEFAULT_PROXY_OPENROUTER_GATEWAY_MODEL: &str = "openrouter/free";
+const DEFAULT_PROXY_GATEWAY_MODEL: &str = "venice/kimi-k2-6";
 const DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL: &str = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL: &str = "openai-codex/gpt-5.3-codex";
 const DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL: &str = "google/gemini-2.5-pro";
+const DEFAULT_LOCAL_OPENROUTER_GATEWAY_MODEL: &str = "openrouter/free";
+const OPENROUTER_API_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 static BROWSER_SERVICE_TOKEN_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static EMBEDDED_PREVIEW_STATE_CACHE: OnceLock<Mutex<Option<EmbeddedPreviewStatePayload>>> =
     OnceLock::new();
 static DESKTOP_TERMINAL_MANAGER: OnceLock<DesktopTerminalManager> = OnceLock::new();
+static DESKTOP_ACTION_BRIDGE_STARTED: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -141,6 +147,33 @@ pub struct ChatGeneratedImage {
 pub struct ChatImageGenerationResult {
     pub text: String,
     pub images: Vec<ChatGeneratedImage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatGeneratedAudio {
+    pub file_name: String,
+    pub mime_type: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatAudioGenerationResult {
+    pub text: String,
+    pub audio: Vec<ChatGeneratedAudio>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatAudioTranscriptionAttachment {
+    #[serde(alias = "fileName")]
+    pub file_name: String,
+    #[serde(alias = "mimeType")]
+    pub mime_type: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatAudioTranscriptionResult {
+    pub text: String,
 }
 
 struct DesktopTerminalSession {
@@ -476,17 +509,25 @@ fn extract_openrouter_generated_images(message: &serde_json::Value) -> Vec<ChatG
         .collect()
 }
 
-fn split_image_generation_model(model: &str) -> Result<(&str, &str), String> {
+fn split_provider_model<'a>(model: &'a str, label: &str) -> Result<(&'a str, &'a str), String> {
     let trimmed = model.trim();
     let Some((provider, raw_model)) = trimmed.split_once('/') else {
-        return Err("Image generation model is not configured.".to_string());
+        return Err(format!("{} is not configured.", label));
     };
     let provider = provider.trim();
     let raw_model = raw_model.trim();
     if provider.is_empty() || raw_model.is_empty() {
-        return Err("Image generation model is not configured.".to_string());
+        return Err(format!("{} is not configured.", label));
     }
     Ok((provider, raw_model))
+}
+
+fn split_image_generation_model(model: &str) -> Result<(&str, &str), String> {
+    split_provider_model(model, "Image generation model")
+}
+
+fn split_audio_understanding_model(model: &str) -> Result<(&str, &str), String> {
+    split_provider_model(model, "Audio understanding model")
 }
 
 fn has_configured_provider_key(api_keys: &HashMap<String, String>, provider: &str) -> bool {
@@ -522,21 +563,41 @@ fn remove_bundled_plugin_load_paths(cfg: &mut serde_json::Value, plugin_id: &str
     }
 }
 
+fn split_model_runtime_suffix(model: &str) -> (&str, Option<&str>) {
+    let trimmed = model.trim();
+    if let Some((base, suffix)) = trimmed.rsplit_once(':') {
+        let suffix = suffix.trim();
+        if suffix == "thinking" || suffix.starts_with("reasoning=") {
+            return (base.trim(), Some(suffix));
+        }
+    }
+    (trimmed, None)
+}
+
+fn model_base_ref(model: &str) -> &str {
+    split_model_runtime_suffix(model).0
+}
+
 fn normalize_proxy_gateway_model(model: &str) -> String {
     let trimmed = model.trim();
     if trimmed.is_empty() {
         return DEFAULT_PROXY_GATEWAY_MODEL.to_string();
     }
 
-    let base_model = trimmed.split(':').next().unwrap_or(trimmed).trim();
+    let base_model = model_base_ref(trimmed);
     match base_model {
         "openrouter/free"
         | "anthropic/claude-opus-4-6"
         | "anthropic/claude-opus-4.5"
+        | "anthropic/claude-opus-4.7"
+        | "moonshotai/kimi-k2.6"
+        | "openai/gpt-5.5"
         | "openai/gpt-5.4"
         | "openai/gpt-5.3-codex"
         | "openai/gpt-5.2"
         | "openai/gpt-5.2-codex"
+        | "tencent/hy3-preview:free"
+        | "deepseek/deepseek-v3.2"
         | "google/gemini-3.1-pro-preview"
         | "google/gemini-3.1-flash-image-preview"
         | "google/gemini-3-pro-image-preview" => base_model.to_string(),
@@ -551,17 +612,8 @@ fn normalize_proxy_gateway_model(model: &str) -> String {
                 }
             }
 
-            if base_model.starts_with("anthropic/") {
-                return DEFAULT_PROXY_ANTHROPIC_GATEWAY_MODEL.to_string();
-            }
-            if base_model.starts_with("google/") {
-                return DEFAULT_PROXY_GOOGLE_GATEWAY_MODEL.to_string();
-            }
-            if base_model.starts_with("openrouter/") {
-                return DEFAULT_PROXY_OPENROUTER_GATEWAY_MODEL.to_string();
-            }
-            if base_model.starts_with("openai/") || base_model.starts_with("openai-codex/") {
-                return DEFAULT_PROXY_GATEWAY_MODEL.to_string();
+            if base_model.contains('/') {
+                return base_model.to_string();
             }
 
             DEFAULT_PROXY_GATEWAY_MODEL.to_string()
@@ -571,7 +623,7 @@ fn normalize_proxy_gateway_model(model: &str) -> String {
 
 fn proxy_auth_profile_providers_for_model(model: &str) -> Vec<&'static str> {
     let trimmed = model.trim();
-    let base_model = trimmed.split(':').next().unwrap_or(trimmed).trim();
+    let base_model = model_base_ref(trimmed);
     let Some((provider, _raw_model)) = base_model.split_once('/') else {
         return Vec::new();
     };
@@ -596,11 +648,30 @@ fn normalize_proxy_runtime_model_ref(model: &str) -> String {
     format!("openrouter/{}", trimmed)
 }
 
+fn openrouter_provider_model_id(model: &str) -> String {
+    let base = model_base_ref(model);
+    let stripped = base.trim_start_matches("openrouter/");
+    if stripped == "free" || stripped == "auto" {
+        base.to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
+fn venice_provider_model_id(model: &str) -> String {
+    let base = model_base_ref(model);
+    base.strip_prefix("openrouter/venice/")
+        .or_else(|| base.strip_prefix("venice/"))
+        .unwrap_or(base)
+        .to_string()
+}
+
 fn local_gateway_model_key_provider(provider: &str) -> Option<&'static str> {
     match provider {
         "anthropic" => Some("anthropic"),
         "openai" | "openai-codex" => Some("openai"),
         "google" => Some("google"),
+        "openrouter" => Some("openrouter"),
         _ => None,
     }
 }
@@ -610,6 +681,7 @@ fn default_local_gateway_model_for_provider(provider: &str) -> &'static str {
         "anthropic" => DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL,
         "openai" | "openai-codex" => DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL,
         "google" => DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL,
+        "openrouter" => DEFAULT_LOCAL_OPENROUTER_GATEWAY_MODEL,
         _ => DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL,
     }
 }
@@ -624,7 +696,7 @@ fn choose_local_gateway_provider(
         }
     }
 
-    for provider in ["anthropic", "openai", "google"] {
+    for provider in ["anthropic", "openai", "google", "openrouter"] {
         if has_configured_provider_key(api_keys, provider) {
             return provider;
         }
@@ -647,34 +719,26 @@ fn normalize_local_gateway_model(
             let raw_model = raw_model.trim();
             if !provider.is_empty() && !raw_model.is_empty() {
                 match provider {
-                    "anthropic" | "google" => {
+                    "anthropic" | "google" | "openrouter" => {
                         if let Some(key_provider) = local_gateway_model_key_provider(provider) {
                             if has_configured_provider_key(api_keys, key_provider) {
                                 return requested_model.to_string();
                             }
                         }
                     }
-                    "openai-codex" => {
-                        if has_configured_provider_key(api_keys, "openai") {
-                            return requested_model.to_string();
-                        }
+                    "openai-codex" if has_configured_provider_key(api_keys, "openai") => {
+                        return requested_model.to_string();
                     }
-                    "openai" => {
-                        if has_configured_provider_key(api_keys, "openai") {
-                            let base_model =
-                                requested_model.split(':').next().unwrap_or(requested_model);
-                            let mapped = match base_model {
-                                "openai/gpt-5.3-codex" => {
-                                    "openai-codex/gpt-5.3-codex:reasoning=medium"
-                                }
-                                "openai/gpt-5.2" => "openai-codex/gpt-5.2:reasoning=medium",
-                                "openai/gpt-5.2-codex" => {
-                                    "openai-codex/gpt-5.2-codex:reasoning=medium"
-                                }
-                                _ => DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL,
-                            };
-                            return mapped.to_string();
-                        }
+                    "openai" if has_configured_provider_key(api_keys, "openai") => {
+                        let base_model = model_base_ref(requested_model);
+                        let mapped = match base_model {
+                            "openai/gpt-5.5" => "openai-codex/gpt-5.5:reasoning=medium",
+                            "openai/gpt-5.3-codex" => "openai-codex/gpt-5.3-codex:reasoning=medium",
+                            "openai/gpt-5.2" => "openai-codex/gpt-5.2:reasoning=medium",
+                            "openai/gpt-5.2-codex" => "openai-codex/gpt-5.2-codex:reasoning=medium",
+                            _ => DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL,
+                        };
+                        return mapped.to_string();
                     }
                     _ => {}
                 }
@@ -695,22 +759,43 @@ fn local_image_generation_provider_name(provider: &str) -> &str {
     }
 }
 
-fn read_local_image_generation_api_key(state: &AppState, provider: &str) -> Result<String, String> {
+fn read_local_provider_api_key(
+    state: &AppState,
+    provider: &str,
+    capability_label: &str,
+) -> Result<String, String> {
     let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
     let Some(api_key) = keys.get(provider) else {
         return Err(format!(
-            "No {} API key is configured. Add one in Settings to use local image generation.",
-            local_image_generation_provider_name(provider)
+            "No {} API key is configured. Add one in Settings to use local {}.",
+            local_image_generation_provider_name(provider),
+            capability_label,
         ));
     };
     let trimmed = api_key.trim();
     if trimmed.is_empty() {
         return Err(format!(
-            "No {} API key is configured. Add one in Settings to use local image generation.",
-            local_image_generation_provider_name(provider)
+            "No {} API key is configured. Add one in Settings to use local {}.",
+            local_image_generation_provider_name(provider),
+            capability_label,
         ));
     }
     Ok(trimmed.to_string())
+}
+
+fn read_local_image_generation_api_key(state: &AppState, provider: &str) -> Result<String, String> {
+    read_local_provider_api_key(state, provider, "image generation")
+}
+
+fn read_local_audio_understanding_api_key(
+    state: &AppState,
+    provider: &str,
+) -> Result<String, String> {
+    read_local_provider_api_key(state, provider, "audio understanding")
+}
+
+fn read_local_text_to_speech_api_key(state: &AppState, provider: &str) -> Result<String, String> {
+    read_local_provider_api_key(state, provider, "text to speech")
 }
 
 fn extract_json_error_message(value: &serde_json::Value) -> Option<String> {
@@ -1105,6 +1190,658 @@ async fn generate_google_chat_image(
     Ok(result)
 }
 
+const DEFAULT_TTS_VOICE: &str = "alloy";
+const DEFAULT_TTS_FORMAT: &str = "mp3";
+const MANAGED_PROXY_TTS_MODEL: &str = "venice/tts-kokoro";
+const MANAGED_PROXY_TTS_VOICE: &str = "af_alloy";
+const MANAGED_PROXY_TTS_RESPONSE_FORMAT: &str = "wav";
+
+fn normalize_tts_speed(speed: Option<f64>) -> Option<f64> {
+    let speed = speed?;
+    if !speed.is_finite() {
+        return None;
+    }
+    Some(speed.clamp(0.5, 2.0))
+}
+
+fn format_audio_generation_http_error(status: reqwest::StatusCode, body: String) -> String {
+    let detail = extract_image_generation_error_detail(&body);
+    let suffix = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", detail)
+    };
+    format!("Audio generation failed ({}{})", status, suffix)
+}
+
+fn audio_mime_type_for_tts_format(format: &str) -> &'static str {
+    match format.trim().to_ascii_lowercase().as_str() {
+        "aac" => "audio/aac",
+        "flac" => "audio/flac",
+        "opus" => "audio/ogg; codecs=opus",
+        "pcm" => "audio/pcm",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        _ => "audio/mpeg",
+    }
+}
+
+fn audio_file_extension_for_tts_format(format: &str) -> &'static str {
+    match format.trim().to_ascii_lowercase().as_str() {
+        "aac" => "aac",
+        "flac" => "flac",
+        "opus" => "opus",
+        "pcm" => "pcm",
+        "wav" => "wav",
+        "mp3" => "mp3",
+        _ => "mp3",
+    }
+}
+
+async fn generate_openai_chat_audio(
+    client: &reqwest::Client,
+    api_key: &str,
+    raw_model: &str,
+    text: &str,
+    voice_id: Option<&str>,
+    speed: Option<f64>,
+) -> Result<ChatAudioGenerationResult, String> {
+    let voice = voice_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_TTS_VOICE);
+    let mut payload = serde_json::json!({
+        "model": raw_model,
+        "voice": voice,
+        "response_format": DEFAULT_TTS_FORMAT,
+        "input": text,
+    });
+    if let Some(speed) = normalize_tts_speed(speed) {
+        payload["speed"] = serde_json::json!(speed);
+    }
+    let response = client
+        .post("https://api.openai.com/v1/audio/speech")
+        .bearer_auth(api_key)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Audio generation request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(format_audio_generation_http_error(status, body));
+    }
+
+    let mime_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| audio_mime_type_for_tts_format(DEFAULT_TTS_FORMAT))
+        .to_string();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read generated audio response: {}", e))?;
+    let encoded = STANDARD.encode(bytes);
+    Ok(ChatAudioGenerationResult {
+        text: "Generated audio from your text.".to_string(),
+        audio: vec![ChatGeneratedAudio {
+            file_name: format!(
+                "generated-speech.{}",
+                audio_file_extension_for_tts_format(DEFAULT_TTS_FORMAT)
+            ),
+            mime_type: mime_type.clone(),
+            url: format!("data:{};base64,{}", mime_type, encoded),
+        }],
+    })
+}
+
+async fn generate_proxy_chat_audio(
+    client: &reqwest::Client,
+    model: &str,
+    text: &str,
+    voice_id: Option<&str>,
+    speed: Option<f64>,
+) -> Result<ChatAudioGenerationResult, String> {
+    let gateway_token = read_container_env("OPENROUTER_API_KEY").ok_or_else(|| {
+        "Proxy auth is unavailable. Restart the sandbox and try again.".to_string()
+    })?;
+    let proxy_base = read_container_env("ENTROPIC_PROXY_BASE_URL").ok_or_else(|| {
+        "Proxy base URL is unavailable. Restart the sandbox and try again.".to_string()
+    })?;
+    let host_proxy_base = resolve_host_proxy_base(&proxy_base)?;
+    let endpoint = format!("{}/audio/speech", host_proxy_base.trim_end_matches('/'));
+    let requested_model = model.trim();
+    let speech_model = if requested_model.eq_ignore_ascii_case("openai/gpt-4o-audio-preview") {
+        MANAGED_PROXY_TTS_MODEL
+    } else {
+        requested_model
+    };
+
+    let voice = voice_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(MANAGED_PROXY_TTS_VOICE);
+    let mut payload = serde_json::json!({
+        "model": speech_model,
+        "voice": voice,
+        "response_format": MANAGED_PROXY_TTS_RESPONSE_FORMAT,
+        "input": text,
+    });
+    if let Some(speed) = normalize_tts_speed(speed) {
+        payload["speed"] = serde_json::json!(speed);
+    }
+
+    let response = client
+        .post(&endpoint)
+        .bearer_auth(&gateway_token)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Audio generation request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(format_audio_generation_http_error(status, body));
+    }
+
+    let mime_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| audio_mime_type_for_tts_format(MANAGED_PROXY_TTS_RESPONSE_FORMAT))
+        .to_string();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read generated audio response: {}", e))?;
+    if bytes.is_empty() {
+        return Err("The selected proxy model returned empty audio.".to_string());
+    }
+    let encoded = STANDARD.encode(bytes);
+
+    Ok(ChatAudioGenerationResult {
+        text: "Generated audio from your text.".to_string(),
+        audio: vec![ChatGeneratedAudio {
+            file_name: format!(
+                "generated-speech.{}",
+                audio_file_extension_for_tts_format(MANAGED_PROXY_TTS_RESPONSE_FORMAT)
+            ),
+            mime_type: mime_type.clone(),
+            url: format!("data:{};base64,{}", mime_type, encoded),
+        }],
+    })
+}
+
+fn audio_file_extension_from_name_or_mime(file_name: &str, mime_type: &str) -> &'static str {
+    let lowered_name = file_name.trim().to_lowercase();
+    if lowered_name.ends_with(".wav") {
+        return "wav";
+    }
+    if lowered_name.ends_with(".mp3") {
+        return "mp3";
+    }
+    if lowered_name.ends_with(".m4a") {
+        return "m4a";
+    }
+    if lowered_name.ends_with(".mpeg") {
+        return "mpeg";
+    }
+    if lowered_name.ends_with(".mpga") {
+        return "mpga";
+    }
+    if lowered_name.ends_with(".webm") {
+        return "webm";
+    }
+    if lowered_name.ends_with(".ogg") {
+        return "ogg";
+    }
+
+    match mime_type.trim().to_lowercase().as_str() {
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/mp4" | "audio/m4a" => "m4a",
+        "audio/webm" => "webm",
+        "audio/ogg" | "application/ogg" => "ogg",
+        _ => "webm",
+    }
+}
+
+fn extract_audio_transcription_text(payload: &serde_json::Value) -> Option<String> {
+    if let Some(text) = payload.get("text").and_then(|value| value.as_str()) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(candidates) = payload.get("candidates").and_then(|value| value.as_array()) {
+        let mut chunks = Vec::new();
+        for candidate in candidates {
+            let Some(parts) = candidate
+                .get("content")
+                .and_then(|content| content.get("parts"))
+                .and_then(|parts| parts.as_array())
+            else {
+                continue;
+            };
+
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        chunks.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+
+        if !chunks.is_empty() {
+            return Some(chunks.join("\n\n"));
+        }
+    }
+
+    if let Some(choices) = payload.get("choices").and_then(|value| value.as_array()) {
+        for choice in choices {
+            let Some(message) = choice.get("message") else {
+                continue;
+            };
+
+            if let Some(text) = message.get("content").and_then(|value| value.as_str()) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+
+            if let Some(parts) = message.get("content").and_then(|value| value.as_array()) {
+                let mut chunks = Vec::new();
+                for part in parts {
+                    if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            chunks.push(trimmed.to_string());
+                        }
+                    }
+                }
+                if !chunks.is_empty() {
+                    return Some(chunks.join("\n\n"));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn format_audio_transcription_http_error(status: reqwest::StatusCode, body: String) -> String {
+    let detail = extract_image_generation_error_detail(&body);
+    let suffix = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", detail)
+    };
+    format!("Audio transcription failed ({}{})", status, suffix)
+}
+
+const CHAT_AUDIO_TRANSCRIPTION_PROMPT: &str = "Transcribe the audio verbatim. For short microphone commands, assume there is one user speaking and return only what that user said. Do not invent additional speakers, replies, or conversation turns. Do not add speaker labels unless the audio clearly contains multiple real speakers. If a word is unclear, write [unclear].";
+
+fn format_chat_audio_transcription_segment(
+    attachment: &ChatAudioTranscriptionAttachment,
+    transcript: &str,
+    include_filename: bool,
+) -> String {
+    let transcript = transcript.trim();
+    if !include_filename {
+        return transcript.to_string();
+    }
+
+    let file_name = attachment.file_name.trim();
+    if file_name.is_empty() {
+        transcript.to_string()
+    } else {
+        format!("{}:\n{}", file_name, transcript)
+    }
+}
+
+async fn transcribe_openai_audio(
+    client: &reqwest::Client,
+    endpoint: &str,
+    bearer_token: &str,
+    raw_model: &str,
+    attachment: &ChatAudioTranscriptionAttachment,
+) -> Result<String, String> {
+    let file_name = if attachment.file_name.trim().is_empty() {
+        format!(
+            "audio.{}",
+            audio_file_extension_from_name_or_mime(&attachment.file_name, &attachment.mime_type)
+        )
+    } else {
+        attachment.file_name.trim().to_string()
+    };
+    let mime_type = if attachment.mime_type.trim().is_empty() {
+        "audio/webm"
+    } else {
+        attachment.mime_type.trim()
+    };
+    let bytes = STANDARD
+        .decode(attachment.content.trim())
+        .map_err(|e| format!("Invalid audio attachment '{}': {}", file_name, e))?;
+    let file_part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(file_name)
+        .mime_str(mime_type)
+        .map_err(|e| format!("Invalid attachment MIME type '{}': {}", mime_type, e))?;
+    let form = reqwest::multipart::Form::new()
+        .text("model", raw_model.to_string())
+        .text("response_format", "json".to_string())
+        .text("prompt", CHAT_AUDIO_TRANSCRIPTION_PROMPT.to_string())
+        .part("file", file_part);
+
+    let response = client
+        .post(endpoint)
+        .bearer_auth(bearer_token)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Audio transcription request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(format_audio_transcription_http_error(status, body));
+    }
+
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Invalid audio transcription response: {}", e))?;
+    extract_audio_transcription_text(&payload)
+        .ok_or_else(|| "The selected model did not return a transcript.".to_string())
+}
+
+async fn transcribe_google_audio(
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key_header_name: &str,
+    api_key: &str,
+    attachment: &ChatAudioTranscriptionAttachment,
+) -> Result<String, String> {
+    let mime_type = if attachment.mime_type.trim().is_empty() {
+        "audio/webm"
+    } else {
+        attachment.mime_type.trim()
+    };
+    let payload = serde_json::json!({
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": CHAT_AUDIO_TRANSCRIPTION_PROMPT
+                    },
+                    {
+                        "inlineData": {
+                            "mimeType": mime_type,
+                            "data": attachment.content.trim(),
+                        }
+                    }
+                ]
+            }
+        ]
+    });
+
+    let response = client
+        .post(endpoint)
+        .header(api_key_header_name, api_key)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Audio transcription request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(format_audio_transcription_http_error(status, body));
+    }
+
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Invalid audio transcription response: {}", e))?;
+    extract_audio_transcription_text(&payload)
+        .ok_or_else(|| "The selected model did not return a transcript.".to_string())
+}
+
+async fn transcribe_proxy_venice_audio(
+    client: &reqwest::Client,
+    gateway_token: &str,
+    proxy_base: &str,
+    model: &str,
+    attachments: &[ChatAudioTranscriptionAttachment],
+) -> Result<ChatAudioTranscriptionResult, String> {
+    let host_proxy_base = resolve_host_proxy_base(proxy_base)?;
+    let endpoint = format!(
+        "{}/audio/transcriptions",
+        host_proxy_base.trim_end_matches('/')
+    );
+    let raw_model = venice_provider_model_id(model);
+
+    let mut transcripts = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let file_name = if attachment.file_name.trim().is_empty() {
+            format!(
+                "audio.{}",
+                audio_file_extension_from_name_or_mime(
+                    &attachment.file_name,
+                    &attachment.mime_type
+                )
+            )
+        } else {
+            attachment.file_name.trim().to_string()
+        };
+        let mime_type = if attachment.mime_type.trim().is_empty() {
+            "audio/webm"
+        } else {
+            attachment.mime_type.trim()
+        };
+        let bytes = STANDARD
+            .decode(attachment.content.trim())
+            .map_err(|e| format!("Invalid audio attachment '{}': {}", file_name, e))?;
+        let file_part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(file_name.clone())
+            .mime_str(mime_type)
+            .map_err(|e| format!("Invalid attachment MIME type '{}': {}", mime_type, e))?;
+        let form = reqwest::multipart::Form::new()
+            .text("model", format!("venice/{}", raw_model))
+            .text("response_format", "json".to_string())
+            .text("timestamps", "false".to_string())
+            .part("file", file_part);
+
+        let response = client
+            .post(&endpoint)
+            .bearer_auth(gateway_token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("Audio transcription request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_else(|_| String::new());
+            return Err(format_audio_transcription_http_error(status, body));
+        }
+
+        let payload = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| format!("Invalid audio transcription response: {}", e))?;
+        let transcript = extract_audio_transcription_text(&payload).ok_or_else(|| {
+            "The selected Venice audio model did not return a transcript.".to_string()
+        })?;
+        transcripts.push(format_chat_audio_transcription_segment(
+            attachment,
+            &transcript,
+            attachments.len() > 1,
+        ));
+    }
+
+    Ok(ChatAudioTranscriptionResult {
+        text: transcripts.join("\n\n"),
+    })
+}
+
+async fn transcribe_proxy_chat_audio(
+    client: &reqwest::Client,
+    model: &str,
+    attachments: &[ChatAudioTranscriptionAttachment],
+) -> Result<ChatAudioTranscriptionResult, String> {
+    let gateway_token = read_container_env("OPENROUTER_API_KEY").ok_or_else(|| {
+        "Proxy auth is unavailable. Restart the sandbox and try again.".to_string()
+    })?;
+    let proxy_base = read_container_env("ENTROPIC_PROXY_BASE_URL").ok_or_else(|| {
+        "Proxy base URL is unavailable. Restart the sandbox and try again.".to_string()
+    })?;
+    let host_proxy_base = resolve_host_proxy_base(&proxy_base)?;
+    let endpoint = format!("{}/chat/completions", host_proxy_base.trim_end_matches('/'));
+    let normalized_model = model.trim();
+    if normalized_model.is_empty() {
+        return Err("Audio understanding model is not configured.".to_string());
+    }
+    if model_base_ref(normalized_model).starts_with("venice/") {
+        return transcribe_proxy_venice_audio(
+            client,
+            &gateway_token,
+            &proxy_base,
+            normalized_model,
+            attachments,
+        )
+        .await;
+    }
+
+    let mut transcripts = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let format =
+            audio_file_extension_from_name_or_mime(&attachment.file_name, &attachment.mime_type);
+        let payload = serde_json::json!({
+            "model": normalized_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": CHAT_AUDIO_TRANSCRIPTION_PROMPT,
+                        },
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": attachment.content.trim(),
+                                "format": format,
+                            }
+                        }
+                    ]
+                }
+            ],
+            "stream": false
+        });
+
+        let response = client
+            .post(&endpoint)
+            .bearer_auth(&gateway_token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("Audio transcription request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_else(|_| String::new());
+            return Err(format_audio_transcription_http_error(status, body));
+        }
+
+        let payload = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| format!("Invalid audio transcription response: {}", e))?;
+        let message = payload
+            .get("choices")
+            .and_then(|choices| choices.as_array())
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let transcript = extract_openrouter_message_text(&message);
+        if transcript.trim().is_empty() {
+            return Err("The selected proxy audio model did not return a transcript.".to_string());
+        }
+        transcripts.push(format_chat_audio_transcription_segment(
+            attachment,
+            &transcript,
+            attachments.len() > 1,
+        ));
+    }
+
+    Ok(ChatAudioTranscriptionResult {
+        text: transcripts.join("\n\n"),
+    })
+}
+
+async fn transcribe_local_chat_audio(
+    state: &AppState,
+    client: &reqwest::Client,
+    model: &str,
+    attachments: &[ChatAudioTranscriptionAttachment],
+) -> Result<ChatAudioTranscriptionResult, String> {
+    let (provider, raw_model) = split_audio_understanding_model(model)?;
+
+    let mut transcripts = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let transcript = match provider {
+            "openai" => {
+                let api_key = read_local_audio_understanding_api_key(state, "openai")?;
+                transcribe_openai_audio(
+                    client,
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    &api_key,
+                    raw_model,
+                    attachment,
+                )
+                .await?
+            }
+            "google" => {
+                let api_key = read_local_audio_understanding_api_key(state, "google")?;
+                let endpoint = format!(
+                    "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                    raw_model
+                );
+                transcribe_google_audio(client, &endpoint, "x-goog-api-key", &api_key, attachment)
+                    .await?
+            }
+            _ => {
+                return Err(format!(
+                    "Local audio transcription is not supported for {}. Choose an OpenAI or Google audio model in Settings.",
+                    provider
+                ))
+            }
+        };
+        transcripts.push(format_chat_audio_transcription_segment(
+            attachment,
+            &transcript,
+            attachments.len() > 1,
+        ));
+    }
+
+    Ok(ChatAudioTranscriptionResult {
+        text: transcripts.join("\n\n"),
+    })
+}
+
 fn client_log_path() -> PathBuf {
     dirs::home_dir()
         .map(|home| home.join("entropic-runtime.log"))
@@ -1158,6 +1895,27 @@ fn host_matches_exact_allowlist(host: &str, allowlist: &[&str]) -> bool {
     allowlist
         .iter()
         .any(|allowed| allowed.eq_ignore_ascii_case(host))
+}
+
+fn host_matches_proxy_allowlist(host: &str) -> bool {
+    if host_matches_exact_allowlist(host, ENTROPIC_PROXY_ALLOWED_HOSTS) {
+        return true;
+    }
+
+    if !cfg!(debug_assertions) {
+        return false;
+    }
+
+    std::env::var("ENTROPIC_DEV_ALLOWED_PROXY_HOSTS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .any(|allowed| allowed.eq_ignore_ascii_case(host))
+        })
+        .unwrap_or(false)
 }
 
 fn host_matches_domain_or_subdomain(host: &str, domain: &str) -> bool {
@@ -1486,10 +2244,16 @@ fn resolve_container_proxy_base(proxy_url: &str) -> Result<String, String> {
 
     if trimmed.starts_with('/') {
         let path = trimmed.trim_start_matches('/');
-        let managed_target = std::env::var("VITE_API_PROXY_TARGET")
+        let managed_target = std::env::var("ENTROPIC_RUNTIME_PROXY_TARGET")
             .ok()
             .map(|value| value.trim().trim_end_matches('/').to_string())
             .filter(|value| !value.is_empty())
+            .or_else(|| {
+                std::env::var("VITE_API_PROXY_TARGET")
+                    .ok()
+                    .map(|value| value.trim().trim_end_matches('/').to_string())
+                    .filter(|value| !value.is_empty())
+            })
             .or_else(|| {
                 let profile = std::env::var("ENTROPIC_BUILD_PROFILE").ok()?;
                 if profile.trim().eq_ignore_ascii_case("managed") {
@@ -1529,10 +2293,10 @@ fn resolve_container_proxy_base(proxy_url: &str) -> Result<String, String> {
     let host = url
         .host_str()
         .ok_or_else(|| "Invalid proxy URL: missing host.".to_string())?;
-    if !host_matches_exact_allowlist(host, ENTROPIC_PROXY_ALLOWED_HOSTS) {
+    if !host_matches_proxy_allowlist(host) {
         return Err(format!(
-            "Proxy host '{}' is not allowed. Configure ENTROPIC_PROXY_BASE_URL with an allowed host.",
-            host
+            "Proxy host '{}' is not allowed. Configure VITE_API_PROXY_TARGET with localhost/host.docker.internal or add the exact host to ENTROPIC_DEV_ALLOWED_PROXY_HOSTS for local dev.",
+            host,
         ));
     }
 
@@ -1683,6 +2447,23 @@ fn docker_command() -> Command {
 }
 
 fn tokio_docker_command() -> tokio::process::Command {
+    if windows_use_managed_wsl_docker() {
+        let mut cmd = tokio::process::Command::new("wsl.exe");
+        cmd.args([
+            "--distribution",
+            windows_runtime_distro_name(),
+            "--user",
+            "root",
+            "--exec",
+            "env",
+            "-u",
+            "DOCKER_CONTEXT",
+            "DOCKER_HOST=unix:///var/run/docker.sock",
+            "docker",
+        ]);
+        return cmd;
+    }
+
     let docker = find_docker_binary();
     let mut cmd = tokio::process::Command::new(docker);
     if let Some(host) = get_docker_host() {
@@ -3847,8 +4628,33 @@ pub struct DesktopSettingsSnapshot {
     pub code_model: Option<String>,
     pub image_model: Option<String>,
     pub image_generation_model: Option<String>,
+    pub text_to_speech_model: Option<String>,
+    pub audio_understanding_model: Option<String>,
+    pub voice_shortcut: Option<String>,
+    pub voice_speech_rate: Option<f64>,
+    pub voice_speech_voice: Option<String>,
     pub desktop_wallpaper: Option<String>,
     pub desktop_custom_wallpaper: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnlyOfficeStatus {
+    pub running: bool,
+    pub ready: bool,
+    pub public_url: String,
+    pub image: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnlyOfficeSession {
+    pub path: String,
+    pub url: String,
+    pub file_name: String,
+    pub app_kind: String,
+    pub status: OnlyOfficeStatus,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -4363,6 +5169,13 @@ const SCANNER_CONTAINER: &str = "entropic-skill-scanner";
 const CLAWHUB_NPM_VERSION: &str = "0.9.0";
 const CLAWHUB_JSON5_VERSION: &str = "2.2.3";
 const SCANNER_HOST_PORT: &str = "19791";
+const ONLYOFFICE_CONTAINER: &str = "entropic-onlyoffice";
+const ONLYOFFICE_DEFAULT_IMAGE: &str = "onlyoffice/documentserver:9.3.1";
+const ONLYOFFICE_HOST_PORT: &str = "19794";
+const ONLYOFFICE_HTTP_PORT: &str = "80";
+const ONLYOFFICE_PUBLIC_BASE_URL: &str = "/__onlyoffice_proxy__";
+const ONLYOFFICE_INTERNAL_BASE_URL: &str = "http://entropic-openclaw:19791";
+const ONLYOFFICE_UPSTREAM_BASE_URL: &str = "http://entropic-onlyoffice";
 const ENTROPIC_GATEWAY_SCHEMA_VERSION: &str = "2026-02-13";
 const OPENCLAW_STATE_ROOT: &str = "/home/node/.openclaw";
 const OPENCLAW_PERSISTED_CONFIG_PATH: &str = "/data/openclaw.persisted.json";
@@ -4446,8 +5259,10 @@ fn model_provider_id(model: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let base = trimmed.split(':').next().unwrap_or(trimmed).trim();
-    let base = base.strip_prefix("openrouter/").unwrap_or(base);
+    let base = model_base_ref(trimmed);
+    if base.starts_with("openrouter/") {
+        return Some("openrouter".to_string());
+    }
     let provider = base.split('/').next().unwrap_or("").trim();
     if provider.is_empty() {
         None
@@ -4457,8 +5272,8 @@ fn model_provider_id(model: &str) -> Option<String> {
 }
 
 fn thinking_level_from_model_ref(model: &str) -> String {
-    let trimmed = model.trim();
-    let model_params = trimmed.split(':').nth(1).unwrap_or("").trim();
+    let (_, model_params) = split_model_runtime_suffix(model);
+    let model_params = model_params.unwrap_or("").trim();
     if model_params == "thinking" {
         "high".to_string()
     } else if let Some(level) = model_params.strip_prefix("reasoning=") {
@@ -4470,6 +5285,87 @@ fn thinking_level_from_model_ref(model: &str) -> String {
         }
     } else {
         "off".to_string()
+    }
+}
+
+fn openclaw_agent_model_is_configured(
+    model: &str,
+    proxy_mode: bool,
+    api_keys: &HashMap<String, String>,
+) -> bool {
+    if proxy_mode {
+        let trimmed = model.trim();
+        let base = model_base_ref(trimmed);
+        return base.starts_with("openrouter/");
+    }
+    let Some(provider) = model_provider_id(model) else {
+        return false;
+    };
+    local_gateway_model_key_provider(&provider)
+        .map(|key_provider| has_configured_provider_key(api_keys, key_provider))
+        .unwrap_or(false)
+}
+
+fn sync_openclaw_agent_list_models(
+    cfg: &mut serde_json::Value,
+    primary_model: Option<&str>,
+    image_model: Option<&str>,
+    proxy_mode: bool,
+    api_keys: &HashMap<String, String>,
+) {
+    let Some(primary_model) = primary_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    else {
+        return;
+    };
+    let image_model = image_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or(primary_model);
+
+    let Some(agents) = cfg
+        .pointer_mut("/agents/list")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return;
+    };
+
+    for agent in agents {
+        let Some(agent_obj) = agent.as_object_mut() else {
+            continue;
+        };
+        let agent_id = agent_obj
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let is_default = agent_obj
+            .get("default")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let current_primary = agent_obj
+            .get("model")
+            .and_then(|value| value.get("primary"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+
+        let should_update = proxy_mode
+            || is_default
+            || agent_id == "main"
+            || current_primary.trim().is_empty()
+            || !openclaw_agent_model_is_configured(current_primary, proxy_mode, api_keys);
+        if !should_update {
+            continue;
+        }
+
+        let next_model = if agent_id == "vision" {
+            image_model
+        } else {
+            primary_model
+        };
+        let model_obj = ensure_object_entry(agent_obj, "model");
+        model_obj.insert("primary".to_string(), serde_json::json!(next_model));
+        model_obj.insert("fallbacks".to_string(), serde_json::json!([]));
     }
 }
 
@@ -4518,17 +5414,15 @@ fn desired_gateway_selection(
         active_provider.as_deref(),
         &api_keys,
     );
-    let config_model = normalized_local
-        .split(':')
-        .next()
-        .unwrap_or(normalized_local.as_str())
-        .to_string();
-    let config_image_model = selected_image_model
-        .split(':')
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+    let config_model = model_base_ref(&normalized_local).to_string();
+    let config_image_model = {
+        let base = model_base_ref(selected_image_model.as_str()).trim();
+        if base.is_empty() {
+            None
+        } else {
+            Some(base.to_string())
+        }
+    };
 
     Ok(DesiredGatewaySelection {
         config_model: Some(config_model.clone()),
@@ -4567,8 +5461,12 @@ fn gateway_health_error_suggests_control_ui_auth(error: &str) -> bool {
         || (lowered.contains("origin") && lowered.contains("allow"))
 }
 
+fn docker_exact_name_filter(name: &str) -> String {
+    format!("name=^/{}$", name)
+}
+
 fn named_gateway_container_exists(name: &str, running_only: bool) -> bool {
-    let name_filter = format!("name={}", name);
+    let name_filter = docker_exact_name_filter(name);
     let mut args = vec!["ps"];
     if !running_only {
         args.push("-a");
@@ -4833,7 +5731,8 @@ fn recreate_gateway_container_on_fresh_network(
     );
 
     stop_scanner_sidecar();
-    for name in [SCANNER_CONTAINER, OPENCLAW_CONTAINER] {
+    stop_onlyoffice_sidecar();
+    for name in [SCANNER_CONTAINER, ONLYOFFICE_CONTAINER, OPENCLAW_CONTAINER] {
         remove_container_if_present(name)?;
     }
     disconnect_all_containers_from_network(OPENCLAW_NETWORK)?;
@@ -5501,6 +6400,488 @@ fn stop_scanner_sidecar() {
     let _ = docker_command().args(["stop", SCANNER_CONTAINER]).output();
 }
 
+fn stop_onlyoffice_sidecar() {
+    let _ = docker_command()
+        .args(["stop", ONLYOFFICE_CONTAINER])
+        .output();
+}
+
+fn onlyoffice_image_name() -> String {
+    std::env::var("ENTROPIC_ONLYOFFICE_IMAGE")
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or_else(|| ONLYOFFICE_DEFAULT_IMAGE.to_string())
+}
+
+fn onlyoffice_container_image() -> Option<String> {
+    let output = docker_command()
+        .args([
+            "container",
+            "inspect",
+            ONLYOFFICE_CONTAINER,
+            "--format",
+            "{{.Config.Image}}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let image = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if image.is_empty() {
+        None
+    } else {
+        Some(image)
+    }
+}
+
+fn onlyoffice_jwt_secret_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
+    fs::create_dir_all(&app_dir).map_err(|e| format!("Failed to create app data dir: {}", e))?;
+    Ok(app_dir.join("onlyoffice-jwt-secret.txt"))
+}
+
+fn load_or_create_onlyoffice_jwt_secret(app: &AppHandle) -> Result<String, String> {
+    let path = onlyoffice_jwt_secret_path(app)?;
+    if path.exists() {
+        let existing = fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read ONLYOFFICE JWT secret: {}", e))?;
+        let trimmed = existing.trim().to_string();
+        if !trimmed.is_empty() {
+            return Ok(trimmed);
+        }
+    }
+
+    let mut secret_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut secret_bytes);
+    let secret = URL_SAFE_NO_PAD.encode(secret_bytes);
+    fs::write(&path, format!("{}\n", secret))
+        .map_err(|e| format!("Failed to persist ONLYOFFICE JWT secret: {}", e))?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed to secure ONLYOFFICE JWT secret: {}", e))?;
+    }
+    Ok(secret)
+}
+
+const ONLYOFFICE_OPEN_URL_TOKEN_TTL_SECS: u64 = 15 * 60;
+
+fn onlyoffice_browser_service_local_origin() -> String {
+    format!("http://127.0.0.1:{}", BROWSER_SERVICE_HOST_PORT)
+}
+
+fn docker_network_gateway_ip(network: &str) -> Option<String> {
+    let output = docker_command()
+        .args([
+            "network",
+            "inspect",
+            network,
+            "--format",
+            "{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}}{{end}}{{end}}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .map(|ip| ip.to_string())
+}
+
+fn onlyoffice_docker_host_alias_arg() -> String {
+    if cfg!(target_os = "linux") {
+        if let Some(gateway) = docker_network_gateway_ip(OPENCLAW_NETWORK) {
+            return format!("host.docker.internal:{}", gateway);
+        }
+    }
+    docker_host_alias_arg()
+}
+
+fn onlyoffice_jwt_payload_bytes(payload: &serde_json::Value) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(payload)
+        .map_err(|e| format!("Failed to encode ONLYOFFICE token payload: {}", e))
+}
+
+fn hmac_sha256_bytes(key: &[u8], data: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 64;
+    let mut normalized_key = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let digest = Sha256::digest(key);
+        normalized_key[..digest.len()].copy_from_slice(&digest);
+    } else {
+        normalized_key[..key.len()].copy_from_slice(key);
+    }
+
+    let mut inner_pad = [0x36u8; BLOCK_SIZE];
+    let mut outer_pad = [0x5cu8; BLOCK_SIZE];
+    for index in 0..BLOCK_SIZE {
+        inner_pad[index] ^= normalized_key[index];
+        outer_pad[index] ^= normalized_key[index];
+    }
+
+    let inner_hash = Sha256::new()
+        .chain_update(inner_pad)
+        .chain_update(data)
+        .finalize();
+    let outer_hash = Sha256::new()
+        .chain_update(outer_pad)
+        .chain_update(inner_hash)
+        .finalize();
+    let mut output = [0u8; 32];
+    output.copy_from_slice(&outer_hash);
+    output
+}
+
+fn sign_onlyoffice_jwt(secret: &str, payload: &serde_json::Value) -> Result<String, String> {
+    let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let body = URL_SAFE_NO_PAD.encode(onlyoffice_jwt_payload_bytes(payload)?);
+    let signing_input = format!("{}.{}", header, body);
+    let signature = URL_SAFE_NO_PAD.encode(hmac_sha256_bytes(
+        secret.as_bytes(),
+        signing_input.as_bytes(),
+    ));
+    Ok(format!("{}.{}", signing_input, signature))
+}
+
+fn sign_onlyoffice_path_token(
+    secret: &str,
+    kind: &str,
+    relative_path: &str,
+) -> Result<String, String> {
+    let exp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_add(ONLYOFFICE_OPEN_URL_TOKEN_TTL_SECS);
+    sign_onlyoffice_jwt(
+        secret,
+        &serde_json::json!({
+            "kind": kind,
+            "path": relative_path,
+            "exp": exp,
+        }),
+    )
+}
+
+fn onlyoffice_file_app_kind(relative_path: &str) -> Result<&'static str, String> {
+    let ext = Path::new(relative_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "xlsx" => Ok("sheets"),
+        "docx" => Ok("docs"),
+        "pptx" => Ok("slides"),
+        _ => {
+            Err("This office file type is not supported by ONLYOFFICE in Entropic yet.".to_string())
+        }
+    }
+}
+
+fn resolve_workspace_file_path_for_office(path: &str) -> Result<(String, String), String> {
+    let sanitized = sanitize_workspace_path(path)?;
+    if sanitized.is_empty() {
+        return Err("Invalid path".to_string());
+    }
+    let full_path = workspace_file(&sanitized);
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "Gateway container is not running.".to_string())?;
+    let script = r#"set -eu
+path=$1
+root=$2
+[ -e "$path" ] || exit 1
+[ ! -L "$path" ] || exit 2
+resolved=$(readlink -f -- "$path") || exit 1
+case "$resolved" in
+  "$root"/*) ;;
+  *) exit 3 ;;
+esac
+[ -f "$resolved" ] || exit 1
+printf '%s' "$resolved"
+"#;
+    let resolved = docker_exec_output(&[
+        "exec",
+        container,
+        "sh",
+        "-lc",
+        script,
+        "sh",
+        &full_path,
+        WORKSPACE_ROOT,
+    ])
+    .map_err(|_| "Workspace office file not found or not readable.".to_string())?;
+    let resolved = resolved.trim().to_string();
+    if resolved.is_empty() {
+        return Err("Workspace office file not found or not readable.".to_string());
+    }
+    Ok((sanitized, resolved))
+}
+
+fn normalize_onlyoffice_spreadsheet_if_needed(relative_path: &str) {
+    let ext = Path::new(relative_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    if ext != "xlsx" {
+        return;
+    }
+
+    let Ok((_, full_path)) = resolve_workspace_file_path_for_office(relative_path) else {
+        return;
+    };
+    let container = running_gateway_container_name().unwrap_or(OPENCLAW_CONTAINER);
+    let output = docker_command()
+        .args([
+            "exec",
+            container,
+            "timeout",
+            "15s",
+            "entropic-office",
+            "api",
+            "normalize-spreadsheet",
+            &full_path,
+        ])
+        .output();
+    match output {
+        Ok(result) if result.status.success() => {}
+        Ok(result) => {
+            let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
+            if !stderr.is_empty() {
+                eprintln!(
+                    "[Entropic] ONLYOFFICE spreadsheet normalization skipped for {}: {}",
+                    relative_path, stderr
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "[Entropic] ONLYOFFICE spreadsheet normalization unavailable for {}: {}",
+                relative_path, error
+            );
+        }
+    }
+}
+
+fn workspace_file_metadata(path: &str) -> Result<(u64, u64), String> {
+    let (_, full_path) = resolve_workspace_file_path_for_office(path)?;
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "Gateway container is not running.".to_string())?;
+    let raw = docker_exec_output(&["exec", container, "stat", "-c", "%s %Y", "--", &full_path])?;
+    let mut parts = raw.split_whitespace();
+    let size = parts
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "Failed to read workspace file size".to_string())?;
+    let modified_at = parts
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "Failed to read workspace file timestamp".to_string())?;
+    Ok((size, modified_at))
+}
+
+fn onlyoffice_internal_services_ready() -> Result<(), String> {
+    let output = docker_command()
+        .args([
+            "exec",
+            ONLYOFFICE_CONTAINER,
+            "curl",
+            "-fsS",
+            "--max-time",
+            "2",
+            "http://127.0.0.1:8000/healthcheck",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to check ONLYOFFICE internal health: {}", e))?;
+    if output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .eq_ignore_ascii_case("true")
+    {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if stderr.is_empty() {
+        "ONLYOFFICE internal docservice is not ready yet".to_string()
+    } else {
+        stderr
+    })
+}
+
+async fn wait_for_onlyoffice_health() -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .map_err(|e| format!("Failed to build ONLYOFFICE health client: {}", e))?;
+    let url = format!(
+        "http://127.0.0.1:{}/web-apps/apps/api/documents/api.js",
+        ONLYOFFICE_HOST_PORT
+    );
+    let mut last_error = "ONLYOFFICE did not report readiness yet".to_string();
+    for _ in 0..90 {
+        match client.get(url.as_str()).send().await {
+            Ok(response) if response.status().is_success() => {
+                match onlyoffice_internal_services_ready() {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        last_error = error;
+                    }
+                }
+            }
+            Ok(response) => {
+                last_error = format!("ONLYOFFICE returned {}", response.status());
+            }
+            Err(error) => {
+                last_error = error.to_string();
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    Err(format!(
+        "Timed out waiting for ONLYOFFICE readiness: {}",
+        last_error
+    ))
+}
+
+fn onlyoffice_status_from_error(error: Option<String>) -> OnlyOfficeStatus {
+    let running = named_gateway_container_exists(ONLYOFFICE_CONTAINER, true);
+    OnlyOfficeStatus {
+        running,
+        ready: running && error.is_none(),
+        public_url: onlyoffice_browser_service_local_origin(),
+        image: onlyoffice_image_name(),
+        error,
+    }
+}
+
+fn ensure_onlyoffice_image() -> Result<(), String> {
+    let image = onlyoffice_image_name();
+    let check = docker_command()
+        .args(["image", "inspect", image.as_str()])
+        .output()
+        .map_err(|e| format!("Failed to check ONLYOFFICE image: {}", e))?;
+    if check.status.success() {
+        return Ok(());
+    }
+
+    let pull = docker_command()
+        .args(["pull", image.as_str()])
+        .output()
+        .map_err(|e| format!("Failed to pull ONLYOFFICE image {}: {}", image, e))?;
+    if pull.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&pull.stderr).trim().to_string();
+    Err(format!(
+        "Failed to pull ONLYOFFICE image {}: {}",
+        image,
+        if stderr.is_empty() {
+            "unknown error".to_string()
+        } else {
+            stderr
+        }
+    ))
+}
+
+async fn start_onlyoffice_sidecar(app: &AppHandle) -> Result<(), String> {
+    let expected_image = onlyoffice_image_name();
+    let check = docker_command()
+        .args(["ps", "-q", "-f", &format!("name={}", ONLYOFFICE_CONTAINER)])
+        .output()
+        .map_err(|e| format!("Failed to check ONLYOFFICE container: {}", e))?;
+    if !check.stdout.is_empty()
+        && onlyoffice_container_image().as_deref() == Some(expected_image.as_str())
+    {
+        wait_for_onlyoffice_health().await?;
+        return Ok(());
+    }
+    if !check.stdout.is_empty() {
+        let _ = docker_command()
+            .args(["rm", "-f", ONLYOFFICE_CONTAINER])
+            .output();
+    }
+
+    let check_all = docker_command()
+        .args(["ps", "-aq", "-f", &format!("name={}", ONLYOFFICE_CONTAINER)])
+        .output()
+        .map_err(|e| format!("Failed to inspect ONLYOFFICE container state: {}", e))?;
+    if !check_all.stdout.is_empty() {
+        if onlyoffice_container_image().as_deref() == Some(expected_image.as_str()) {
+            let start = docker_command()
+                .args(["start", ONLYOFFICE_CONTAINER])
+                .output()
+                .map_err(|e| format!("Failed to start ONLYOFFICE container: {}", e))?;
+            if start.status.success() {
+                wait_for_onlyoffice_health().await?;
+                return Ok(());
+            }
+        }
+        let _ = docker_command()
+            .args(["rm", "-f", ONLYOFFICE_CONTAINER])
+            .output();
+    }
+
+    let _ = docker_command()
+        .args(["network", "create", OPENCLAW_NETWORK])
+        .output();
+    ensure_onlyoffice_image()?;
+    let jwt_secret = load_or_create_onlyoffice_jwt_secret(app)?;
+
+    let docker_args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        ONLYOFFICE_CONTAINER.to_string(),
+        "--restart".to_string(),
+        "no".to_string(),
+        "--network".to_string(),
+        OPENCLAW_NETWORK.to_string(),
+        "--add-host".to_string(),
+        onlyoffice_docker_host_alias_arg(),
+        "--security-opt".to_string(),
+        "no-new-privileges".to_string(),
+        "-e".to_string(),
+        "JWT_ENABLED=true".to_string(),
+        "-e".to_string(),
+        format!("JWT_SECRET={}", jwt_secret),
+        "-p".to_string(),
+        format!(
+            "127.0.0.1:{}:{}",
+            ONLYOFFICE_HOST_PORT, ONLYOFFICE_HTTP_PORT
+        ),
+        expected_image,
+    ];
+
+    let run = docker_command()
+        .args(&docker_args)
+        .output()
+        .map_err(|e| format!("Failed to start ONLYOFFICE container: {}", e))?;
+    if !run.status.success() {
+        let stderr = String::from_utf8_lossy(&run.stderr).trim().to_string();
+        return Err(format!(
+            "Failed to start ONLYOFFICE container: {}",
+            if stderr.is_empty() {
+                "unknown error".to_string()
+            } else {
+                stderr
+            }
+        ));
+    }
+
+    wait_for_onlyoffice_health().await?;
+    Ok(())
+}
+
 /// Preserve Entropic containers on app exit; keep state for faster resume.
 /// Called from the Tauri RunEvent::Exit handler.
 pub fn cleanup_on_exit() {
@@ -5515,7 +6896,11 @@ pub fn cleanup_on_exit() {
             }
         }
     }
-    println!("[Entropic] App exit requested — preserving running Entropic containers.");
+    stop_scanner_sidecar();
+    stop_onlyoffice_sidecar();
+    println!(
+        "[Entropic] App exit requested — preserving gateway container and stopping desktop sidecars."
+    );
 }
 
 fn docker_exec_output(args: &[&str]) -> Result<String, String> {
@@ -6584,8 +7969,10 @@ fn build_container_file_write_script(files: &[ContainerFileWrite<'_>]) -> String
 }
 
 fn run_container_write_script(script: &str, target: &str) -> Result<(), String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "Gateway container is not running.".to_string())?;
     let mut child = docker_command()
-        .args(["exec", "-i", OPENCLAW_CONTAINER, "sh", "-se"])
+        .args(["exec", "-i", container, "sh", "-se"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -7082,6 +8469,28 @@ fn build_tools_markdown(capabilities: &[CapabilityState]) -> String {
             "- A successful `lcm_grep` call with zero matches still proves the plugin is installed and callable.\n",
         );
     }
+    body.push_str("\n## Office Files\n");
+    body.push_str(
+        "- Entropic workspace execution runs inside the OpenClaw gateway container. Use `exec` with the default host or `host=\"gateway\"` and `workdir=\"/data/workspace\"` for local file generation; do not use `host=\"node\"` unless the user explicitly says a node host is paired.\n",
+    );
+    body.push_str(
+        "- Do not use node-only file tools (`file_write`, `file_fetch`, `dir_list`, `dir_fetch`) for Entropic workspace files; those target external paired nodes, not the managed workspace.\n",
+    );
+    body.push_str(
+        "- For `.xlsx`, `.docx`, and `.pptx` workspace files, prefer `entropic-office api inspect-aio /data/workspace/file.xlsx` and `entropic-office api apply-aio /data/workspace/file.xlsx` with JSON on stdin.\n",
+    );
+    body.push_str(
+        "- Use the AIO JSON objects for structured spreadsheet, document, and presentation edits; use legacy helpers only for quick blank/todo/document scaffolds.\n",
+    );
+    body.push_str(
+        "- For spreadsheet requests that mention formulas, write actual Excel formula cells such as `=D2*E2` and `=SUM(H2:H13)`, not precomputed static values.\n",
+    );
+    body.push_str(
+        "- After creating an Office file, include its workspace path such as `/data/workspace/sales-plan.xlsx` or the relative `sales-plan.xlsx`; Entropic renders these as desktop links that open in the Office viewer.\n",
+    );
+    body.push_str(
+        "- To ask the Entropic desktop to open a created file immediately, run `entropic-office desktop open /data/workspace/file.xlsx` in the same successful `exec` command that creates or edits the file. Entropic validates the queued workspace-relative request before opening it; the sandbox bridge only accepts low-risk file/folder/window actions.\n",
+    );
     body
 }
 
@@ -7358,6 +8767,18 @@ fn gateway_post_start_reconcile_reasons(
         let expected_base_url = read_container_env("ENTROPIC_PROXY_BASE_URL");
         if current_base_url != expected_base_url {
             reasons.push("proxy base URL mismatch".to_string());
+        }
+        let current_talk_provider = config_string_at_path(&cfg, "/talk/provider");
+        if current_talk_provider.as_deref() != Some("openai") {
+            reasons.push("talk provider mismatch".to_string());
+        }
+        let current_talk_base_url = config_string_at_path(&cfg, "/talk/providers/openai/baseUrl");
+        if current_talk_base_url != expected_base_url {
+            reasons.push("talk proxy base URL mismatch".to_string());
+        }
+        let current_talk_model = config_string_at_path(&cfg, "/talk/providers/openai/modelId");
+        if current_talk_model.as_deref() != Some(MANAGED_PROXY_TTS_MODEL) {
+            reasons.push("talk model mismatch".to_string());
         }
     }
 
@@ -7658,6 +9079,74 @@ fn remove_openclaw_config_value(cfg: &mut serde_json::Value, path: &[&str]) {
     }
 }
 
+fn apply_managed_proxy_talk_config(
+    cfg: &mut serde_json::Value,
+    proxy_base_url: &str,
+    proxy_gateway_token: &str,
+) {
+    let tts_provider_config = serde_json::json!({
+        "apiKey": proxy_gateway_token,
+        "baseUrl": proxy_base_url,
+        "model": MANAGED_PROXY_TTS_MODEL,
+        "voice": MANAGED_PROXY_TTS_VOICE,
+        "responseFormat": MANAGED_PROXY_TTS_RESPONSE_FORMAT,
+    });
+    let talk_provider_config = serde_json::json!({
+        "apiKey": proxy_gateway_token,
+        "baseUrl": proxy_base_url,
+        "modelId": MANAGED_PROXY_TTS_MODEL,
+        "voiceId": MANAGED_PROXY_TTS_VOICE,
+        "responseFormat": MANAGED_PROXY_TTS_RESPONSE_FORMAT,
+    });
+
+    set_openclaw_config_value(
+        cfg,
+        &["messages", "tts", "auto"],
+        serde_json::json!("always"),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["messages", "tts", "provider"],
+        serde_json::json!("openai"),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["messages", "tts", "providers", "openai"],
+        tts_provider_config,
+    );
+    set_openclaw_config_value(cfg, &["talk", "provider"], serde_json::json!("openai"));
+    set_openclaw_config_value(cfg, &["talk", "providers", "openai"], talk_provider_config);
+    set_openclaw_config_value(cfg, &["talk", "interruptOnSpeech"], serde_json::json!(true));
+    set_openclaw_config_value(cfg, &["talk", "silenceTimeoutMs"], serde_json::json!(900));
+}
+
+fn append_unique_openclaw_config_array_strings(
+    cfg: &mut serde_json::Value,
+    path: &[&str],
+    values: &[&str],
+) {
+    if path.is_empty() {
+        return;
+    }
+
+    let existing = cfg.pointer(&format!("/{}", path.join("/"))).cloned();
+    let mut next = match existing {
+        Some(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .filter_map(|item| item.as_str().map(|value| value.to_string()))
+            .collect::<Vec<String>>(),
+        _ => Vec::new(),
+    };
+
+    for value in values {
+        if !next.iter().any(|item| item == value) {
+            next.push((*value).to_string());
+        }
+    }
+
+    set_openclaw_config_value(cfg, path, serde_json::json!(next));
+}
+
 fn normalize_telegram_allow_from_for_dm_policy(cfg: &mut serde_json::Value, dm_policy: &str) {
     let existing_allow_from: Vec<String> = cfg
         .get("channels")
@@ -7926,13 +9415,9 @@ async fn run_whatsapp_login_script(script: &str) -> Result<serde_json::Value, St
         start.elapsed().as_secs_f64()
     );
     let script = script.to_string();
-    let docker_host = get_docker_host();
     let output = tokio::task::spawn_blocking(move || {
         eprintln!("[WA-DEBUG] [inside spawn_blocking] Running docker exec now...");
-        let mut cmd = Command::new("docker");
-        if let Some(host) = docker_host {
-            cmd.env("DOCKER_HOST", host);
-        }
+        let mut cmd = docker_command();
         let result = cmd
             .args([
                 "exec",
@@ -8278,6 +9763,397 @@ fn sanitize_workspace_path(path: &str) -> Result<String, String> {
     Ok(parts.join("/"))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DesktopActionPayload {
+    OpenWorkspaceFile {
+        path: String,
+    },
+    OpenWorkspaceFolder {
+        path: String,
+    },
+    OpenBrowserUrl {
+        url: String,
+    },
+    FocusWindow {
+        window: String,
+    },
+    CloseWindow {
+        window: String,
+    },
+    NewChatTask {
+        prompt: String,
+        #[serde(rename = "sessionId")]
+        session_id: Option<String>,
+        #[serde(rename = "autoSubmit", default)]
+        auto_submit: bool,
+    },
+}
+
+fn is_desktop_window_key(window: &str) -> bool {
+    matches!(
+        window,
+        "finder"
+            | "chat"
+            | "browser"
+            | "terminal"
+            | "plugins"
+            | "skills"
+            | "channels"
+            | "tasks"
+            | "jobs"
+            | "logs"
+            | "billing"
+            | "settings"
+            | "preview"
+            | "sheets"
+            | "docs"
+            | "slides"
+            | "integrations"
+            | "voiceOverlay"
+    )
+}
+
+fn host_is_private_or_local(host: &str) -> bool {
+    let lower = host.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "localhost" | "127.0.0.1" | "0.0.0.0" | "::1"
+    ) {
+        return true;
+    }
+    let Ok(ip) = lower.parse::<IpAddr>() else {
+        return false;
+    };
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()
+        }
+        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local(),
+    }
+}
+
+fn validate_desktop_action_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Browser URL is empty".to_string());
+    }
+    let parsed = Url::parse(trimmed).map_err(|_| "Browser URL must be absolute".to_string())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("Browser URL must use http or https".to_string());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Browser URL must include a host".to_string())?;
+    if host_is_private_or_local(host) {
+        return Err(
+            "Local browser URLs must be opened through trusted Entropic UI paths".to_string(),
+        );
+    }
+    Ok(parsed.to_string())
+}
+
+fn validate_desktop_action(action: DesktopActionPayload) -> Result<DesktopActionPayload, String> {
+    match action {
+        DesktopActionPayload::OpenWorkspaceFile { path } => {
+            let path = sanitize_workspace_path(&path)?;
+            if path.is_empty() {
+                return Err("Workspace file path is empty".to_string());
+            }
+            Ok(DesktopActionPayload::OpenWorkspaceFile { path })
+        }
+        DesktopActionPayload::OpenWorkspaceFolder { path } => {
+            let path = sanitize_workspace_path(&path)?;
+            Ok(DesktopActionPayload::OpenWorkspaceFolder { path })
+        }
+        DesktopActionPayload::OpenBrowserUrl { url } => {
+            let url = validate_desktop_action_url(&url)?;
+            Ok(DesktopActionPayload::OpenBrowserUrl { url })
+        }
+        DesktopActionPayload::FocusWindow { window } => {
+            if !is_desktop_window_key(&window) {
+                return Err("Unknown desktop window".to_string());
+            }
+            Ok(DesktopActionPayload::FocusWindow { window })
+        }
+        DesktopActionPayload::CloseWindow { window } => {
+            if !is_desktop_window_key(&window) {
+                return Err("Unknown desktop window".to_string());
+            }
+            Ok(DesktopActionPayload::CloseWindow { window })
+        }
+        DesktopActionPayload::NewChatTask {
+            prompt,
+            session_id,
+            auto_submit,
+        } => {
+            let prompt = prompt.trim().to_string();
+            if prompt.is_empty() {
+                return Err("Chat task prompt is empty".to_string());
+            }
+            Ok(DesktopActionPayload::NewChatTask {
+                prompt,
+                session_id,
+                auto_submit,
+            })
+        }
+    }
+}
+
+fn validate_desktop_bridge_action(
+    action: DesktopActionPayload,
+) -> Result<DesktopActionPayload, String> {
+    let validated = validate_desktop_action(action)?;
+    match validated {
+        DesktopActionPayload::OpenWorkspaceFile { .. }
+        | DesktopActionPayload::OpenWorkspaceFolder { .. }
+        | DesktopActionPayload::FocusWindow { .. }
+        | DesktopActionPayload::CloseWindow { .. } => Ok(validated),
+        DesktopActionPayload::OpenBrowserUrl { .. } => {
+            Err("Bridge browser opens are not supported".to_string())
+        }
+        DesktopActionPayload::NewChatTask { .. } => {
+            Err("Bridge chat task submission is not supported".to_string())
+        }
+    }
+}
+
+fn read_desktop_action_bridge_batch() -> Result<Vec<DesktopActionPayload>, String> {
+    let Some(container) = running_gateway_container_name() else {
+        return Ok(Vec::new());
+    };
+    let max_files = DESKTOP_ACTION_BRIDGE_MAX_BATCH.to_string();
+    let max_bytes = DESKTOP_ACTION_BRIDGE_MAX_BYTES.to_string();
+    let script = r#"
+set -eu
+dir="$1"
+max_files="$2"
+max_bytes="$3"
+mkdir -p -- "$dir"
+find "$dir" -maxdepth 1 -type f -name '*.json' | sort | head -n "$max_files" | while IFS= read -r file; do
+  [ -f "$file" ] || continue
+  printf '%s\t' "$file"
+  head -c "$max_bytes" -- "$file" | base64 | tr -d '\n'
+  printf '\n'
+  rm -f -- "$file"
+done
+"#;
+    let raw = docker_exec_output(&[
+        "exec",
+        container,
+        "sh",
+        "-lc",
+        script,
+        "sh",
+        DESKTOP_ACTION_BRIDGE_DIR,
+        &max_files,
+        &max_bytes,
+    ])?;
+    let mut actions = Vec::new();
+    for line in raw.lines() {
+        let Some((file, encoded)) = line.split_once('\t') else {
+            continue;
+        };
+        let Ok(decoded) = STANDARD.decode(encoded.trim()) else {
+            let _ = append_client_log_line(&format!(
+                "desktop action bridge: ignoring unreadable request {}",
+                file
+            ));
+            continue;
+        };
+        let Ok(action) = serde_json::from_slice::<DesktopActionPayload>(&decoded) else {
+            let _ = append_client_log_line(&format!(
+                "desktop action bridge: ignoring invalid request {}",
+                file
+            ));
+            continue;
+        };
+        match validate_desktop_bridge_action(action) {
+            Ok(validated) => actions.push(validated),
+            Err(err) => {
+                let _ = append_client_log_line(&format!(
+                    "desktop action bridge: rejected request {}: {}",
+                    file, err
+                ));
+            }
+        }
+    }
+    Ok(actions)
+}
+
+async fn poll_desktop_action_bridge_once(app: AppHandle) -> Result<(), String> {
+    let actions = tauri::async_runtime::spawn_blocking(read_desktop_action_bridge_batch)
+        .await
+        .map_err(|e| format!("Failed to poll desktop action bridge: {}", e))??;
+    for action in actions {
+        app.emit(DESKTOP_ACTION_EVENT, action)
+            .map_err(|e| format!("Failed to emit desktop action: {}", e))?;
+    }
+    Ok(())
+}
+
+pub fn start_desktop_action_bridge(app: &AppHandle) {
+    if DESKTOP_ACTION_BRIDGE_STARTED.set(()).is_err() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if let Err(err) = poll_desktop_action_bridge_once(app.clone()).await {
+                let _ =
+                    append_client_log_line(&format!("desktop action bridge poll failed: {}", err));
+            }
+            sleep(Duration::from_millis(DESKTOP_ACTION_BRIDGE_POLL_MS)).await;
+        }
+    });
+}
+
+#[cfg(test)]
+mod desktop_action_tests {
+    use super::*;
+
+    #[test]
+    fn docker_name_filter_matches_exact_container_name_only() {
+        assert_eq!(
+            docker_exact_name_filter(OPENCLAW_CONTAINER),
+            "name=^/entropic-openclaw$"
+        );
+        assert!(!docker_exact_name_filter(OPENCLAW_CONTAINER).contains("entropic-openclaw-harness"));
+    }
+
+    #[test]
+    fn validates_workspace_file_paths() {
+        let action = DesktopActionPayload::OpenWorkspaceFile {
+            path: " docs/report.md ".to_string(),
+        };
+        match validate_desktop_action(action).expect("valid workspace path") {
+            DesktopActionPayload::OpenWorkspaceFile { path } => {
+                assert_eq!(path, "docs/report.md");
+            }
+            other => panic!("unexpected action: {:?}", other),
+        }
+
+        assert!(
+            validate_desktop_action(DesktopActionPayload::OpenWorkspaceFile {
+                path: "/etc/passwd".to_string(),
+            })
+            .is_err()
+        );
+        assert!(
+            validate_desktop_action(DesktopActionPayload::OpenWorkspaceFile {
+                path: "../escape.txt".to_string(),
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_untrusted_browser_urls() {
+        assert!(
+            validate_desktop_action(DesktopActionPayload::OpenBrowserUrl {
+                url: "https://example.com/path".to_string(),
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_desktop_action(DesktopActionPayload::OpenBrowserUrl {
+                url: "file:///tmp/secret".to_string(),
+            })
+            .is_err()
+        );
+        assert!(
+            validate_desktop_action(DesktopActionPayload::OpenBrowserUrl {
+                url: "http://127.0.0.1:19791".to_string(),
+            })
+            .is_err()
+        );
+        assert!(
+            validate_desktop_action(DesktopActionPayload::OpenBrowserUrl {
+                url: "http://192.168.1.10".to_string(),
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validates_known_windows_and_chat_tasks() {
+        assert!(validate_desktop_action(DesktopActionPayload::FocusWindow {
+            window: "sheets".to_string(),
+        })
+        .is_ok());
+        assert!(validate_desktop_action(DesktopActionPayload::FocusWindow {
+            window: "root".to_string(),
+        })
+        .is_err());
+
+        match validate_desktop_action(DesktopActionPayload::NewChatTask {
+            prompt: "  summarize this  ".to_string(),
+            session_id: Some("abc".to_string()),
+            auto_submit: true,
+        })
+        .expect("valid chat task")
+        {
+            DesktopActionPayload::NewChatTask {
+                prompt,
+                session_id,
+                auto_submit,
+            } => {
+                assert_eq!(prompt, "summarize this");
+                assert_eq!(session_id.as_deref(), Some("abc"));
+                assert!(auto_submit);
+            }
+            other => panic!("unexpected action: {:?}", other),
+        }
+
+        assert!(validate_desktop_action(DesktopActionPayload::NewChatTask {
+            prompt: "   ".to_string(),
+            session_id: None,
+            auto_submit: false,
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn bridge_only_accepts_low_risk_actions() {
+        assert!(
+            validate_desktop_bridge_action(DesktopActionPayload::OpenWorkspaceFile {
+                path: "report.docx".to_string(),
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_desktop_bridge_action(DesktopActionPayload::FocusWindow {
+                window: "docs".to_string(),
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_desktop_bridge_action(DesktopActionPayload::OpenBrowserUrl {
+                url: "https://example.com".to_string(),
+            })
+            .is_err()
+        );
+        assert!(
+            validate_desktop_bridge_action(DesktopActionPayload::NewChatTask {
+                prompt: "summarize this".to_string(),
+                session_id: None,
+                auto_submit: true,
+            })
+            .is_err()
+        );
+    }
+}
+
+#[tauri::command]
+pub async fn request_desktop_action(
+    app: AppHandle,
+    action: DesktopActionPayload,
+) -> Result<(), String> {
+    let validated = validate_desktop_action(action)?;
+    app.emit(DESKTOP_ACTION_EVENT, validated)
+        .map_err(|e| format!("Failed to emit desktop action: {}", e))
+}
+
 fn validate_host_output_path(raw: &str) -> Result<PathBuf, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -8584,6 +10460,19 @@ fn build_oauth_auth_profiles(stored: &StoredAuth) -> serde_json::Value {
         }
     }
 
+    if let Some(openrouter_key) = stored.keys.get("openrouter").map(|key| key.trim()) {
+        if !openrouter_key.is_empty() {
+            profiles.insert(
+                "openrouter:default".to_string(),
+                serde_json::json!({
+                    "type": "api_key",
+                    "provider": "openrouter",
+                    "key": openrouter_key
+                }),
+            );
+        }
+    }
+
     serde_json::json!({
         "version": 1,
         "profiles": serde_json::Value::Object(profiles)
@@ -8694,6 +10583,16 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
         .collect();
     let proxy_mode = read_container_env("ENTROPIC_PROXY_MODE").is_some();
     let base_url = read_container_env("ENTROPIC_PROXY_BASE_URL");
+    let proxy_gateway_token = if proxy_mode {
+        read_container_env("OPENROUTER_API_KEY")
+    } else {
+        None
+    };
+    let proxy_gateway_token_hash = proxy_gateway_token.as_deref().map(|token| {
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        format!("{:x}", hasher.finalize())
+    });
     let model = desired_selection.config_model.clone();
     let alias_model = desired_selection.alias_model.clone();
     let image_model = desired_selection.config_image_model.clone();
@@ -8702,10 +10601,8 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
     let browser_enabled = capability_enabled(&settings.capabilities, "browser", true);
     let web_base_url = read_container_env("ENTROPIC_WEB_BASE_URL");
     let container_id = container_instance_id();
-    let openai_key_for_lancedb = {
-        let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
-        keys.get("openai").cloned()
-    };
+    let api_keys_snapshot = state.api_keys.lock().map_err(|e| e.to_string())?.clone();
+    let openai_key_for_lancedb = api_keys_snapshot.get("openai").cloned();
 
     let mut hb_body = String::from("# HEARTBEAT.md\n\n");
     if settings.heartbeat_tasks.is_empty() {
@@ -8758,6 +10655,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
         "container_id": container_id,
         "proxy_mode": proxy_mode,
         "base_url": &base_url,
+        "proxy_gateway_token_hash": &proxy_gateway_token_hash,
         "model": &model,
         "image_model": &image_model,
         "web_base_url": &web_base_url,
@@ -8842,29 +10740,22 @@ Use it for durable decisions, preferences, and facts that should persist across 
             serde_json::json!({ "primary": image_model }),
         );
     }
+    sync_openclaw_agent_list_models(
+        &mut cfg,
+        model.as_deref(),
+        image_model.as_deref(),
+        proxy_mode,
+        &api_keys_snapshot,
+    );
     if proxy_mode {
         if let Some(base_url) = &base_url {
             let model_id = model
                 .as_ref()
-                .map(|m| {
-                    let stripped = m.trim_start_matches("openrouter/").to_string();
-                    if stripped == "free" || stripped == "auto" {
-                        m.to_string()
-                    } else {
-                        stripped
-                    }
-                })
+                .map(|m| openrouter_provider_model_id(m))
                 .unwrap_or_default();
             let image_model_id = image_model
                 .as_ref()
-                .map(|m| {
-                    let stripped = m.trim_start_matches("openrouter/").to_string();
-                    if stripped == "free" || stripped == "auto" {
-                        m.to_string()
-                    } else {
-                        stripped
-                    }
-                })
+                .map(|m| openrouter_provider_model_id(m))
                 .unwrap_or_default();
             let mut models = Vec::new();
 
@@ -8899,58 +10790,68 @@ Use it for durable decisions, preferences, and facts that should persist across 
                     "models": models
                 }),
             );
-            let web_search_base_url = if let Some(web_base_url) = &web_base_url {
-                resolve_container_openai_base(web_base_url)
-            } else {
-                base_url.clone()
-            };
-            if web_search_enabled {
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &["tools", "web", "search", "enabled"],
-                    serde_json::json!(true),
-                );
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &["tools", "web", "search", "provider"],
-                    serde_json::json!("perplexity"),
-                );
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &["plugins", "entries", "perplexity", "enabled"],
-                    serde_json::json!(true),
-                );
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &[
-                        "plugins",
-                        "entries",
-                        "perplexity",
-                        "config",
-                        "webSearch",
-                        "baseUrl",
-                    ],
-                    serde_json::json!(web_search_base_url),
-                );
-                remove_openclaw_config_value(&mut cfg, &["tools", "web", "search", "perplexity"]);
-                remove_openclaw_config_value(
-                    &mut cfg,
-                    &["plugins", "entries", "duckduckgo", "config", "webSearch"],
-                );
-            } else {
-                remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
-                remove_openclaw_config_value(&mut cfg, &["tools", "web", "search", "perplexity"]);
-                remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "perplexity"]);
-                remove_openclaw_config_value(
-                    &mut cfg,
-                    &["plugins", "entries", "duckduckgo", "config", "webSearch"],
-                );
-            }
+            // The managed runtime does not currently bundle a Perplexity web-search plugin,
+            // and newer OpenClaw rejects the legacy tools.web.search.perplexity key.
+            remove_openclaw_config_value(&mut cfg, &["tools", "web", "search"]);
+            remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "perplexity"]);
+            remove_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "entries", "duckduckgo", "config", "webSearch"],
+            );
         }
     } else {
-        // Non-proxy mode: remove openrouter config to avoid validation errors
-        // (an empty models.providers.openrouter object causes "baseUrl required" validation failure)
-        remove_openclaw_config_value(&mut cfg, &["models", "providers", "openrouter"]);
+        let local_openrouter_model_id = model
+            .as_deref()
+            .map(model_base_ref)
+            .filter(|m| m.starts_with("openrouter/"))
+            .map(openrouter_provider_model_id);
+        let local_openrouter_image_model_id = image_model
+            .as_deref()
+            .map(model_base_ref)
+            .filter(|m| m.starts_with("openrouter/"))
+            .map(openrouter_provider_model_id);
+        if has_configured_provider_key(&api_keys_snapshot, "openrouter")
+            && (local_openrouter_model_id.is_some() || local_openrouter_image_model_id.is_some())
+        {
+            let mut models = Vec::new();
+            if let Some(model_id) = &local_openrouter_model_id {
+                models.push(serde_json::json!({
+                    "id": model_id,
+                    "name": model_id,
+                    "input": ["text", "image"],
+                    "reasoning": false,
+                    "contextWindow": 200000,
+                    "maxTokens": 8192,
+                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+                }));
+            }
+            if let Some(image_model_id) = &local_openrouter_image_model_id {
+                if local_openrouter_model_id.as_ref() != Some(image_model_id) {
+                    models.push(serde_json::json!({
+                        "id": image_model_id,
+                        "name": image_model_id,
+                        "input": ["text", "image"],
+                        "reasoning": false,
+                        "contextWindow": 200000,
+                        "maxTokens": 8192,
+                        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+                    }));
+                }
+            }
+            set_openclaw_config_value(
+                &mut cfg,
+                &["models", "providers", "openrouter"],
+                serde_json::json!({
+                    "baseUrl": OPENROUTER_API_BASE_URL,
+                    "api": "openai-completions",
+                    "models": models
+                }),
+            );
+        } else {
+            // Non-proxy mode: remove stale OpenRouter config unless the user explicitly
+            // selected an OpenRouter-backed local-key model and provided an OpenRouter key.
+            remove_openclaw_config_value(&mut cfg, &["models", "providers", "openrouter"]);
+        }
         if web_search_enabled {
             set_openclaw_config_value(
                 &mut cfg,
@@ -8976,6 +10877,13 @@ Use it for durable decisions, preferences, and facts that should persist across 
                 &mut cfg,
                 &["plugins", "entries", "duckduckgo", "config", "webSearch"],
             );
+        }
+    }
+    if proxy_mode {
+        if let (Some(base_url), Some(proxy_gateway_token)) =
+            (base_url.as_deref(), proxy_gateway_token.as_deref())
+        {
+            apply_managed_proxy_talk_config(&mut cfg, base_url, proxy_gateway_token);
         }
     }
     let memory_enabled = settings.memory_enabled;
@@ -9052,12 +10960,13 @@ Use it for durable decisions, preferences, and facts that should persist across 
     }
 
     // Ensure optional plugin tools are allowed without restricting core tools.
-    const ENTROPIC_INTEGRATION_TOOLS: [&str; 5] = [
+    const ENTROPIC_INTEGRATION_TOOLS: [&str; 6] = [
         "calendar_list",
         "calendar_create",
         "gmail_search",
         "gmail_get",
         "gmail_send",
+        "gmail_draft",
     ];
     const ENTROPIC_X_TOOLS: [&str; 4] = ["x_search", "x_profile", "x_thread", "x_user_tweets"];
     const ENTROPIC_CORE_TOOLS: [&str; 1] = ["image"];
@@ -9100,6 +11009,10 @@ Use it for durable decisions, preferences, and facts that should persist across 
     }
 
     let resolve_managed_plugin_path = |plugin_id: &str| -> Option<String> {
+        let bundled_path = format!("/app/extensions/{}", plugin_id);
+        if container_path_exists(&bundled_path) {
+            return Some(bundled_path);
+        }
         if let Some(skills_root) = read_container_env("ENTROPIC_SKILLS_PATH") {
             let base = format!("{}/{}", skills_root.trim_end_matches('/'), plugin_id);
             let current = format!("{}/current", base);
@@ -9816,6 +11729,7 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
     let paths: &[&[&str]] = &[
         &["agents", "defaults"],
         &["tools", "fs"],
+        &["tools", "exec"],
         &["gateway", "controlUi"],
         &["gateway", "reload"],
         &["plugins", "slots"],
@@ -9841,6 +11755,24 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         cfg,
         &["tools", "fs", "workspaceOnly"],
         serde_json::json!(true),
+    );
+    // Entropic runs OpenClaw inside its managed gateway container. Do not route
+    // generic exec to a desktop/node host unless a separate node is explicitly configured.
+    set_openclaw_config_value(
+        cfg,
+        &["tools", "exec", "host"],
+        serde_json::json!("gateway"),
+    );
+    append_unique_openclaw_config_array_strings(
+        cfg,
+        &["tools", "deny"],
+        &["file_write", "file_fetch", "dir_list", "dir_fetch"],
+    );
+    append_unique_openclaw_config_array_strings(cfg, &["plugins", "deny"], &["file-transfer"]);
+    set_openclaw_config_value(
+        cfg,
+        &["plugins", "entries", "file-transfer", "enabled"],
+        serde_json::json!(false),
     );
 
     // Docker bridge requests can present a non-loopback source IP.
@@ -9962,6 +11894,7 @@ fn redact_env_value(env: &str) -> String {
         "GEMINI_API_KEY=",
         "OPENROUTER_API_KEY=",
         "ENTROPIC_PROXY_BASE_URL=",
+        "ENTROPIC_ONLYOFFICE_JWT_SECRET=",
     ];
     for prefix in SECRET_ENV_PREFIXES {
         if env.starts_with(prefix) {
@@ -11283,7 +13216,7 @@ pub async fn set_active_provider(
 pub async fn get_auth_state(state: State<'_, AppState>) -> Result<AuthState, String> {
     let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
     let active = state.active_provider.lock().map_err(|e| e.to_string())?;
-    let providers = ["anthropic", "openai", "google"]
+    let providers = ["anthropic", "openai", "google", "openrouter"]
         .into_iter()
         .map(|id| {
             let last4 = keys.get(id).and_then(|k| {
@@ -11388,10 +13321,11 @@ async fn start_gateway_inner(
 
     let has_any_local_api_key = has_configured_provider_key(&api_keys, "anthropic")
         || has_configured_provider_key(&api_keys, "openai")
-        || has_configured_provider_key(&api_keys, "google");
+        || has_configured_provider_key(&api_keys, "google")
+        || has_configured_provider_key(&api_keys, "openrouter");
     if !has_any_local_api_key {
         return Err(
-            "No local API key configured. Add an Anthropic/OpenAI/Google key in Settings, or sign in and disable 'Use Local Keys'."
+            "No local API key configured. Add an Anthropic/OpenAI/Google/OpenRouter key in Settings, or sign in and disable 'Use Local Keys'."
                 .to_string(),
         );
     }
@@ -11414,17 +13348,22 @@ async fn start_gateway_inner(
 
     // Parse model string: "provider/model-id:param" -> base model + optional params
     // Supported suffixes: ":thinking" (Anthropic), ":reasoning=level" (OpenAI)
-    let (base_model, model_params) = if let Some(colon_pos) = model_full.find(':') {
-        (&model_full[..colon_pos], Some(&model_full[colon_pos + 1..]))
-    } else {
-        (model_full.as_str(), None)
-    };
+    let (base_model, model_params) = split_model_runtime_suffix(&model_full);
 
     // Derive thinking / reasoning env vars from suffix
     let thinking_enabled = model_params == Some("thinking");
     let reasoning_effort = model_params
         .and_then(|p| p.strip_prefix("reasoning="))
         .unwrap_or("");
+    let onlyoffice_jwt_secret = load_or_create_onlyoffice_jwt_secret(app)?;
+    let onlyoffice_user_name = {
+        let trimmed = settings.identity_name.trim().replace(['\n', '\r'], " ");
+        if trimmed.is_empty() {
+            "Entropic".to_string()
+        } else {
+            trimmed
+        }
+    };
 
     cleanup_legacy_gateway_artifacts();
 
@@ -11439,6 +13378,14 @@ async fn start_gateway_inner(
             read_container_env("ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX");
         let current_browser_allow_insecure_secure_contexts =
             read_container_env("ENTROPIC_BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS");
+        let current_onlyoffice_public_base = read_container_env("ENTROPIC_ONLYOFFICE_PUBLIC_BASE");
+        let current_onlyoffice_internal_base =
+            read_container_env("ENTROPIC_ONLYOFFICE_INTERNAL_BASE");
+        let current_onlyoffice_upstream_base =
+            read_container_env("ENTROPIC_ONLYOFFICE_UPSTREAM_BASE");
+        let current_onlyoffice_jwt_secret = read_container_env("ENTROPIC_ONLYOFFICE_JWT_SECRET");
+        let current_onlyoffice_user_name = read_container_env("ENTROPIC_ONLYOFFICE_USER_NAME");
+        let current_openclaw_home = read_container_env("OPENCLAW_HOME");
         let current_container_image_id = container_image_id(OPENCLAW_CONTAINER);
         let latest_runtime_image_id = image_id("openclaw-runtime:latest");
         let current_proxy_mode = read_container_env("ENTROPIC_PROXY_MODE");
@@ -11473,6 +13420,12 @@ async fn start_gateway_inner(
                 == Some(BROWSER_ALLOW_UNSAFE_NO_SANDBOX)
             && current_browser_allow_insecure_secure_contexts.as_deref()
                 == Some(BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS)
+            && current_onlyoffice_public_base.as_deref() == Some(ONLYOFFICE_PUBLIC_BASE_URL)
+            && current_onlyoffice_internal_base.as_deref() == Some(ONLYOFFICE_INTERNAL_BASE_URL)
+            && current_onlyoffice_upstream_base.as_deref() == Some(ONLYOFFICE_UPSTREAM_BASE_URL)
+            && current_onlyoffice_jwt_secret.as_deref() == Some(onlyoffice_jwt_secret.as_str())
+            && current_onlyoffice_user_name.as_deref() == Some(onlyoffice_user_name.as_str())
+            && current_openclaw_home.as_deref() == Some("/home/node")
             && image_matches_latest
         {
             apply_agent_settings(app, state)?;
@@ -11545,6 +13498,7 @@ async fn start_gateway_inner(
         ("ENTROPIC_WORKSPACE_PATH", WORKSPACE_ROOT),
         ("ENTROPIC_SKILLS_PATH", SKILLS_ROOT),
         ("ENTROPIC_SKILL_MANIFESTS_PATH", SKILL_MANIFESTS_ROOT),
+        ("OPENCLAW_HOME", "/home/node"),
         ("HOME", "/data"),
         ("TMPDIR", "/data/tmp"),
         ("XDG_CONFIG_HOME", "/data/.config"),
@@ -11566,6 +13520,26 @@ async fn start_gateway_inner(
         ("ENTROPIC_BROWSER_PROFILE", "/data/browser/profile"),
         ("ENTROPIC_BROWSER_TOOL_ENABLED", browser_tool_enabled_env),
         ("ENTROPIC_TOOLS_PATH", "/data/tools"),
+        (
+            "ENTROPIC_ONLYOFFICE_PUBLIC_BASE",
+            ONLYOFFICE_PUBLIC_BASE_URL,
+        ),
+        (
+            "ENTROPIC_ONLYOFFICE_INTERNAL_BASE",
+            ONLYOFFICE_INTERNAL_BASE_URL,
+        ),
+        (
+            "ENTROPIC_ONLYOFFICE_UPSTREAM_BASE",
+            ONLYOFFICE_UPSTREAM_BASE_URL,
+        ),
+        (
+            "ENTROPIC_ONLYOFFICE_JWT_SECRET",
+            onlyoffice_jwt_secret.as_str(),
+        ),
+        (
+            "ENTROPIC_ONLYOFFICE_USER_NAME",
+            onlyoffice_user_name.as_str(),
+        ),
     ];
 
     // Anthropic: use ANTHROPIC_OAUTH_TOKEN for OAuth tokens (sk-ant-oat01-...), ANTHROPIC_API_KEY for regular keys
@@ -11587,6 +13561,9 @@ async fn start_gateway_inner(
     }
     if let Some(key) = api_keys.get("google") {
         env_entries.push(("GEMINI_API_KEY", key.as_str()));
+    }
+    if let Some(key) = api_keys.get("openrouter") {
+        env_entries.push(("OPENROUTER_API_KEY", key.as_str()));
     }
     let mut web_base_url = None;
     if let Ok(base) = std::env::var("ENTROPIC_WEB_BASE_URL") {
@@ -11727,8 +13704,13 @@ pub async fn start_gateway(
 #[tauri::command]
 pub async fn stop_gateway() -> Result<(), String> {
     stop_scanner_sidecar();
+    stop_onlyoffice_sidecar();
 
-    for name in [OPENCLAW_CONTAINER, LEGACY_OPENCLAW_CONTAINER] {
+    for name in [
+        ONLYOFFICE_CONTAINER,
+        OPENCLAW_CONTAINER,
+        LEGACY_OPENCLAW_CONTAINER,
+    ] {
         let stop = docker_command()
             .args(["stop", name])
             .output()
@@ -11822,6 +13804,15 @@ async fn start_gateway_with_proxy_inner(
     let settings = load_agent_settings(app);
     let browser_tool_enabled = capability_enabled(&settings.capabilities, "browser", true);
     let browser_tool_enabled_env = if browser_tool_enabled { "1" } else { "0" };
+    let onlyoffice_jwt_secret = load_or_create_onlyoffice_jwt_secret(app)?;
+    let onlyoffice_user_name = {
+        let trimmed = settings.identity_name.trim().replace(['\n', '\r'], " ");
+        if trimmed.is_empty() {
+            "Entropic".to_string()
+        } else {
+            trimmed
+        }
+    };
     let build_proxy_docker_args = || -> Result<(Vec<String>, GatewayEnvFile), String> {
         let mut env_entries: Vec<(&str, &str)> = vec![
             ("OPENCLAW_GATEWAY_TOKEN", local_gateway_token.as_str()),
@@ -11838,6 +13829,7 @@ async fn start_gateway_with_proxy_inner(
             ("ENTROPIC_WORKSPACE_PATH", WORKSPACE_ROOT),
             ("ENTROPIC_SKILLS_PATH", SKILLS_ROOT),
             ("ENTROPIC_SKILL_MANIFESTS_PATH", SKILL_MANIFESTS_ROOT),
+            ("OPENCLAW_HOME", "/home/node"),
             ("HOME", "/data"),
             ("TMPDIR", "/data/tmp"),
             ("XDG_CONFIG_HOME", "/data/.config"),
@@ -11859,6 +13851,26 @@ async fn start_gateway_with_proxy_inner(
             ("ENTROPIC_BROWSER_PROFILE", "/data/browser/profile"),
             ("ENTROPIC_BROWSER_TOOL_ENABLED", browser_tool_enabled_env),
             ("ENTROPIC_TOOLS_PATH", "/data/tools"),
+            (
+                "ENTROPIC_ONLYOFFICE_PUBLIC_BASE",
+                ONLYOFFICE_PUBLIC_BASE_URL,
+            ),
+            (
+                "ENTROPIC_ONLYOFFICE_INTERNAL_BASE",
+                ONLYOFFICE_INTERNAL_BASE_URL,
+            ),
+            (
+                "ENTROPIC_ONLYOFFICE_UPSTREAM_BASE",
+                ONLYOFFICE_UPSTREAM_BASE_URL,
+            ),
+            (
+                "ENTROPIC_ONLYOFFICE_JWT_SECRET",
+                onlyoffice_jwt_secret.as_str(),
+            ),
+            (
+                "ENTROPIC_ONLYOFFICE_USER_NAME",
+                onlyoffice_user_name.as_str(),
+            ),
         ];
         if let Some(image_model) = runtime_image_model_ref.as_deref() {
             env_entries.push(("OPENCLAW_IMAGE_MODEL", image_model));
@@ -11945,6 +13957,14 @@ async fn start_gateway_with_proxy_inner(
             read_container_env("ENTROPIC_BROWSER_ALLOW_UNSAFE_NO_SANDBOX");
         let current_browser_allow_insecure_secure_contexts =
             read_container_env("ENTROPIC_BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS");
+        let current_onlyoffice_public_base = read_container_env("ENTROPIC_ONLYOFFICE_PUBLIC_BASE");
+        let current_onlyoffice_internal_base =
+            read_container_env("ENTROPIC_ONLYOFFICE_INTERNAL_BASE");
+        let current_onlyoffice_upstream_base =
+            read_container_env("ENTROPIC_ONLYOFFICE_UPSTREAM_BASE");
+        let current_onlyoffice_jwt_secret = read_container_env("ENTROPIC_ONLYOFFICE_JWT_SECRET");
+        let current_onlyoffice_user_name = read_container_env("ENTROPIC_ONLYOFFICE_USER_NAME");
+        let current_openclaw_home = read_container_env("OPENCLAW_HOME");
         let current_container_image_id = container_image_id(OPENCLAW_CONTAINER);
         let latest_runtime_image_id = image_id("openclaw-runtime:latest");
         let expected_image = runtime_image_model_ref.clone().unwrap_or_default();
@@ -11980,6 +14000,12 @@ async fn start_gateway_with_proxy_inner(
                 == Some(BROWSER_ALLOW_UNSAFE_NO_SANDBOX)
             && current_browser_allow_insecure_secure_contexts.as_deref()
                 == Some(BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS)
+            && current_onlyoffice_public_base.as_deref() == Some(ONLYOFFICE_PUBLIC_BASE_URL)
+            && current_onlyoffice_internal_base.as_deref() == Some(ONLYOFFICE_INTERNAL_BASE_URL)
+            && current_onlyoffice_upstream_base.as_deref() == Some(ONLYOFFICE_UPSTREAM_BASE_URL)
+            && current_onlyoffice_jwt_secret.as_deref() == Some(onlyoffice_jwt_secret.as_str())
+            && current_onlyoffice_user_name.as_deref() == Some(onlyoffice_user_name.as_str())
+            && current_openclaw_home.as_deref() == Some("/home/node")
         {
             println!("[Entropic] Proxy container already running with matching config. Reusing.");
             let reuse_prepare_started = Instant::now();
@@ -12164,12 +14190,10 @@ pub async fn start_gateway_with_proxy(
 /// Only works for same-provider changes (API keys stay the same).
 #[tauri::command]
 pub fn update_gateway_model(model: String) -> Result<(), String> {
-    let base_model = model.split(':').next().unwrap_or(&model);
-    let thinking_enabled = model.contains(":thinking");
-    let reasoning_effort = model
-        .split(':')
-        .find_map(|s| s.strip_prefix("reasoning="))
-        .unwrap_or("");
+    let (base_model, model_params) = split_model_runtime_suffix(&model);
+    let model_params = model_params.unwrap_or("");
+    let thinking_enabled = model_params == "thinking";
+    let reasoning_effort = model_params.strip_prefix("reasoning=").unwrap_or("");
 
     let thinking_level = if thinking_enabled {
         "high"
@@ -12189,7 +14213,14 @@ pub fn update_gateway_model(model: String) -> Result<(), String> {
     set_openclaw_config_value(
         &mut cfg,
         &["agents", "defaults", "model", "primary"],
-        serde_json::json!(config_model),
+        serde_json::json!(config_model.clone()),
+    );
+    sync_openclaw_agent_list_models(
+        &mut cfg,
+        Some(config_model.as_str()),
+        None,
+        read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1"),
+        &HashMap::new(),
     );
 
     if thinking_level != "off" {
@@ -14082,7 +16113,7 @@ pub async fn get_skill_store() -> Result<Vec<SkillInfo>, String> {
         });
     }
 
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|a| a.name.to_lowercase());
     Ok(out)
 }
 
@@ -15734,6 +17765,74 @@ pub async fn export_workspace_file(
 }
 
 #[tauri::command]
+pub async fn get_onlyoffice_status() -> Result<OnlyOfficeStatus, String> {
+    if !named_gateway_container_exists(ONLYOFFICE_CONTAINER, true) {
+        return Ok(onlyoffice_status_from_error(None));
+    }
+    match wait_for_onlyoffice_health().await {
+        Ok(()) => Ok(onlyoffice_status_from_error(None)),
+        Err(error) => Ok(onlyoffice_status_from_error(Some(error))),
+    }
+}
+
+#[tauri::command]
+pub async fn ensure_onlyoffice_ready(app: AppHandle) -> Result<OnlyOfficeStatus, String> {
+    start_onlyoffice_sidecar(&app).await?;
+    Ok(onlyoffice_status_from_error(None))
+}
+
+#[tauri::command]
+pub async fn create_onlyoffice_session(
+    app: AppHandle,
+    path: String,
+) -> Result<OnlyOfficeSession, String> {
+    let relative_path = sanitize_workspace_path(&path)?;
+    if relative_path.is_empty() {
+        return Err("A workspace office file path is required.".to_string());
+    }
+    let app_kind = onlyoffice_file_app_kind(&relative_path)?.to_string();
+    normalize_onlyoffice_spreadsheet_if_needed(&relative_path);
+    workspace_file_metadata(&relative_path)?;
+    let status = ensure_onlyoffice_ready(app.clone()).await?;
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "Gateway container is not running.".to_string())?;
+    wait_for_browser_service(container)?;
+    let secret = load_or_create_onlyoffice_jwt_secret(&app)?;
+    let container_secret =
+        read_container_env("ENTROPIC_ONLYOFFICE_JWT_SECRET").ok_or_else(|| {
+            "Gateway container is missing ONLYOFFICE session configuration.".to_string()
+        })?;
+    if container_secret.trim() != secret.trim() {
+        return Err(
+            "Gateway ONLYOFFICE session configuration is stale. Restart the sandbox and try again."
+                .to_string(),
+        );
+    }
+    let open_token = sign_onlyoffice_path_token(&secret, "open", &relative_path)?;
+    let encoded_path =
+        url::form_urlencoded::byte_serialize(relative_path.as_bytes()).collect::<String>();
+    let encoded_token =
+        url::form_urlencoded::byte_serialize(open_token.as_bytes()).collect::<String>();
+    let file_name = Path::new(&relative_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("office-file")
+        .to_string();
+    Ok(OnlyOfficeSession {
+        path: relative_path,
+        url: format!(
+            "{}/__onlyoffice__/open?path={}&token={}",
+            onlyoffice_browser_service_local_origin(),
+            encoded_path,
+            encoded_token
+        ),
+        file_name,
+        app_kind,
+        status,
+    })
+}
+
+#[tauri::command]
 pub async fn browser_session_create(
     url: Option<String>,
     viewport_width: Option<u32>,
@@ -16134,6 +18233,85 @@ pub async fn generate_chat_image(
             provider
         )),
     }
+}
+
+#[tauri::command]
+pub async fn generate_chat_audio(
+    state: State<'_, AppState>,
+    model: String,
+    text: String,
+    voice_id: Option<String>,
+    speed: Option<f64>,
+) -> Result<ChatAudioGenerationResult, String> {
+    let _container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
+
+    let model = model.trim().to_string();
+    if model.is_empty() {
+        return Err("Text to speech model is not configured.".to_string());
+    }
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("Enter text first.".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("Failed to create audio generation client: {}", e))?;
+
+    if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
+        return generate_proxy_chat_audio(&client, &model, &text, voice_id.as_deref(), speed).await;
+    }
+
+    let (provider, raw_model) = split_provider_model(&model, "Text to speech model")?;
+    match provider {
+        "openai" => {
+            let api_key = read_local_text_to_speech_api_key(&state, "openai")?;
+            generate_openai_chat_audio(
+                &client,
+                &api_key,
+                raw_model,
+                &text,
+                voice_id.as_deref(),
+                speed,
+            )
+            .await
+        }
+        _ => Err(format!(
+            "Local text to speech is not supported for {}. Choose an OpenAI TTS model in Settings.",
+            provider
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn transcribe_chat_audio(
+    state: State<'_, AppState>,
+    model: String,
+    attachments: Vec<ChatAudioTranscriptionAttachment>,
+) -> Result<ChatAudioTranscriptionResult, String> {
+    let _container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
+
+    let model = model.trim().to_string();
+    if model.is_empty() {
+        return Err("Audio understanding model is not configured.".to_string());
+    }
+    if attachments.is_empty() {
+        return Err("Attach audio first.".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("Failed to create audio transcription client: {}", e))?;
+
+    if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
+        return transcribe_proxy_chat_audio(&client, &model, &attachments).await;
+    }
+
+    transcribe_local_chat_audio(&state, &client, &model, &attachments).await
 }
 
 #[tauri::command]

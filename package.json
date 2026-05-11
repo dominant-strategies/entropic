@@ -1,6 +1,6 @@
 {
   "name": "entropic",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "OpenClaw Desktop - AI assistant with secure sandboxing",
   "license": "MIT",
   "type": "module",
@@ -8,6 +8,12 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
+    "test:desktop-actions": "node scripts/test-desktop-actions.mjs",
+    "test:chat-office-routing": "node scripts/test-chat-office-routing.mjs",
+    "test:voice-actions": "node scripts/test-voice-actions.mjs",
+    "test:voice-manual-log": "node scripts/verify-voice-manual-log.mjs",
+    "test:voice-manual-log-fixtures": "node scripts/test-voice-manual-log.mjs",
+    "test:platform-audio-static": "node scripts/verify-platform-audio-static.mjs",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml --no-default-features",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -64,6 +70,8 @@
     "build:cross-platform": "./scripts/build-cross-platform.sh"
   },
   "dependencies": {
+    "@fontsource/geist-mono": "^5.2.7",
+    "@fontsource/geist-sans": "^5.2.5",
     "@supabase/supabase-js": "^2.47.10",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-deep-link": "^2.0.0",

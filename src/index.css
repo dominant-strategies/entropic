@@ -3,6 +3,9 @@
 @tailwind utilities;
 
 :root {
+  --font-sans: "Geist Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "Geist Mono", "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+
   /* Apple System Colors */
   --system-blue: #007AFF;
   --system-gray-1: #8E8E93;
@@ -13,9 +16,13 @@
   --system-gray-6: #F2F2F7;
 
   /* Accent */
-  --purple-accent: #8B5CF6;
-  --purple-accent-hover: #7C3AED;
-  --purple-accent-subtle: rgba(139, 92, 246, 0.12);
+  --entropic-logo-purple: #6B2FA0;
+  --entropic-logo-purple-hover: #5B248B;
+  --entropic-logo-purple-subtle: rgba(107, 47, 160, 0.14);
+  --purple-accent: var(--entropic-logo-purple);
+  --purple-accent-hover: var(--entropic-logo-purple-hover);
+  --purple-accent-subtle: var(--entropic-logo-purple-subtle);
+  --chat-link-accent: #7C39B6;
 
   /* Backgrounds — warm tint instead of pure gray */
   --bg-app: #F4F2EF;
@@ -31,7 +38,7 @@
   --text-secondary: #5C5C5C;
   --text-tertiary: #8A8A8A;
   --text-quaternary: #AEAEB2;
-  --text-accent: #7C3AED;
+  --text-accent: var(--entropic-logo-purple);
 
   /* Borders & Shadows */
   --border-subtle: rgba(0, 0, 0, 0.06);
@@ -48,7 +55,7 @@
   --glass-border-subtle: rgba(0, 0, 0, 0.05);
 
   /* Chat-specific */
-  --chat-user-bg: var(--text-accent);
+  --chat-user-bg: var(--entropic-logo-purple);
   --chat-user-text: #FFFFFF;
   --chat-assistant-bg: var(--bg-card);
   --chat-assistant-text: var(--text-primary);
@@ -56,7 +63,7 @@
 
   /* Composer */
   --composer-bg: var(--bg-card);
-  --composer-border: var(--border-default);
+  --composer-border: rgba(91, 36, 139, 0.26);
 
   /* Status */
   --status-success: #22C55E;
@@ -65,7 +72,7 @@
   --status-info: var(--system-blue);
 
   /* Typography */
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.4;
   font-weight: 400;
@@ -79,49 +86,53 @@
 @media (prefers-color-scheme: dark) {
   :root:not(.light) {
     --system-gray-1: #8E8E93;
-    --system-gray-2: #636366;
-    --system-gray-3: #48484A;
-    --system-gray-4: #3A3A3C;
-    --system-gray-5: #2C2C2E;
-    --system-gray-6: #1C1C1E;
+    --system-gray-2: #5A5A5F;
+    --system-gray-3: #343438;
+    --system-gray-4: #242428;
+    --system-gray-5: #17171A;
+    --system-gray-6: #101012;
 
-    --purple-accent: #A78BFA;
-    --purple-accent-hover: #8B5CF6;
-    --purple-accent-subtle: rgba(167, 139, 250, 0.15);
+    --entropic-logo-purple: #6B2FA0;
+    --entropic-logo-purple-hover: #5B248B;
+    --entropic-logo-purple-subtle: rgba(107, 47, 160, 0.24);
+    --purple-accent: var(--entropic-logo-purple);
+    --purple-accent-hover: var(--entropic-logo-purple-hover);
+    --purple-accent-subtle: var(--entropic-logo-purple-subtle);
+    --chat-link-accent: #A15CE0;
 
-    --bg-app: #131313;
-    --bg-primary: #131313;
-    --bg-secondary: #191919;
-    --bg-tertiary: #262626;
-    --bg-sidebar: #131313;
-    --bg-muted: #1A1A1A;
-    --bg-card: #1E1E1E;
+    --bg-app: #030304;
+    --bg-primary: #030304;
+    --bg-secondary: #070708;
+    --bg-tertiary: #101012;
+    --bg-sidebar: #030304;
+    --bg-muted: #0B0B0D;
+    --bg-card: #0A0A0C;
 
     --text-primary: #F0F0F0;
     --text-secondary: #A0A0A0;
     --text-tertiary: #6B6B6B;
     --text-quaternary: #4A4A4A;
-    --text-accent: #A78BFA;
+    --text-accent: var(--entropic-logo-purple);
 
-    --border-subtle: rgba(255, 255, 255, 0.08);
-    --border-default: rgba(255, 255, 255, 0.12);
-    --border-primary: rgba(255, 255, 255, 0.16);
-    --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
-    --shadow-floating: 0 8px 30px rgba(0, 0, 0, 0.4);
+    --border-subtle: rgba(255, 255, 255, 0.07);
+    --border-default: rgba(255, 255, 255, 0.11);
+    --border-primary: rgba(255, 255, 255, 0.15);
+    --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.55), 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-floating: 0 18px 50px rgba(0, 0, 0, 0.72);
 
-    --glass-bg: rgba(30, 30, 30, 0.80);
-    --glass-bg-hover: rgba(40, 40, 40, 0.90);
-    --glass-border: rgba(255, 255, 255, 0.08);
+    --glass-bg: rgba(10, 10, 12, 0.82);
+    --glass-bg-hover: rgba(16, 16, 18, 0.92);
+    --glass-border: rgba(255, 255, 255, 0.07);
     --glass-border-subtle: rgba(255, 255, 255, 0.05);
 
-    --chat-user-bg: var(--purple-accent-hover);
+    --chat-user-bg: var(--entropic-logo-purple);
     --chat-user-text: #FFFFFF;
-    --chat-assistant-bg: #262626;
+    --chat-assistant-bg: #101012;
     --chat-assistant-text: #F0F0F0;
     --chat-assistant-border: rgba(255, 255, 255, 0.08);
 
-    --composer-bg: #1E1E1E;
-    --composer-border: rgba(255, 255, 255, 0.10);
+    --composer-bg: #0A0A0C;
+    --composer-border: rgba(91, 36, 139, 0.42);
 
     color-scheme: dark;
   }
@@ -130,49 +141,53 @@
 /* Manual dark class override (for settings toggle) */
 :root.dark {
   --system-gray-1: #8E8E93;
-  --system-gray-2: #636366;
-  --system-gray-3: #48484A;
-  --system-gray-4: #3A3A3C;
-  --system-gray-5: #2C2C2E;
-  --system-gray-6: #1C1C1E;
+  --system-gray-2: #5A5A5F;
+  --system-gray-3: #343438;
+  --system-gray-4: #242428;
+  --system-gray-5: #17171A;
+  --system-gray-6: #101012;
 
-  --purple-accent: #A78BFA;
-  --purple-accent-hover: #8B5CF6;
-  --purple-accent-subtle: rgba(167, 139, 250, 0.10);
+  --entropic-logo-purple: #6B2FA0;
+  --entropic-logo-purple-hover: #5B248B;
+  --entropic-logo-purple-subtle: rgba(107, 47, 160, 0.24);
+  --purple-accent: var(--entropic-logo-purple);
+  --purple-accent-hover: var(--entropic-logo-purple-hover);
+  --purple-accent-subtle: var(--entropic-logo-purple-subtle);
+  --chat-link-accent: #A15CE0;
 
-  --bg-app: #131313;
-  --bg-primary: #131313;
-  --bg-secondary: #191919;
-  --bg-tertiary: #262626;
-  --bg-sidebar: #131313;
-  --bg-muted: #1A1A1A;
-  --bg-card: #1E1E1E;
+  --bg-app: #030304;
+  --bg-primary: #030304;
+  --bg-secondary: #070708;
+  --bg-tertiary: #101012;
+  --bg-sidebar: #030304;
+  --bg-muted: #0B0B0D;
+  --bg-card: #0A0A0C;
 
   --text-primary: #F0F0F0;
   --text-secondary: #A0A0A0;
   --text-tertiary: #6B6B6B;
   --text-quaternary: #4A4A4A;
-  --text-accent: #A78BFA;
+  --text-accent: var(--entropic-logo-purple);
 
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --border-default: rgba(255, 255, 255, 0.12);
-  --border-primary: rgba(255, 255, 255, 0.16);
-  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
-  --shadow-floating: 0 8px 30px rgba(0, 0, 0, 0.4);
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-default: rgba(255, 255, 255, 0.11);
+  --border-primary: rgba(255, 255, 255, 0.15);
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.55), 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-floating: 0 18px 50px rgba(0, 0, 0, 0.72);
 
-  --glass-bg: rgba(30, 30, 30, 0.80);
-  --glass-bg-hover: rgba(40, 40, 40, 0.90);
-  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-bg: rgba(10, 10, 12, 0.82);
+  --glass-bg-hover: rgba(16, 16, 18, 0.92);
+  --glass-border: rgba(255, 255, 255, 0.07);
   --glass-border-subtle: rgba(255, 255, 255, 0.05);
 
-  --chat-user-bg: var(--purple-accent-hover);
+  --chat-user-bg: var(--entropic-logo-purple);
   --chat-user-text: #FFFFFF;
-  --chat-assistant-bg: #262626;
+  --chat-assistant-bg: #101012;
   --chat-assistant-text: #F0F0F0;
   --chat-assistant-border: rgba(255, 255, 255, 0.08);
 
-  --composer-bg: #1E1E1E;
-  --composer-border: rgba(255, 255, 255, 0.10);
+  --composer-bg: #0A0A0C;
+  --composer-border: rgba(91, 36, 139, 0.42);
 
   color-scheme: dark;
 }
@@ -189,11 +204,46 @@ body.platform-macos {
 }
 
 body {
+  font-family: var(--font-sans);
   background-color: var(--bg-app);
   min-height: 100vh;
   min-height: 100dvh;
   border-radius: var(--window-radius);
   overflow: hidden;
+}
+
+@keyframes entropic-text-shimmer {
+  0% {
+    background-position: 180% 50%;
+  }
+  100% {
+    background-position: -180% 50%;
+  }
+}
+
+.entropic-thinking-shimmer {
+  display: inline-block;
+  color: transparent;
+  background:
+    linear-gradient(
+      90deg,
+      var(--text-tertiary) 0%,
+      var(--text-secondary) 34%,
+      var(--text-primary) 50%,
+      var(--text-secondary) 66%,
+      var(--text-tertiary) 100%
+    );
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: entropic-text-shimmer 1.35s ease-in-out infinite;
+  transition: opacity 180ms ease, transform 180ms ease, filter 180ms ease;
+}
+
+.entropic-thinking-shimmer[data-changing="true"] {
+  opacity: 0.45;
+  transform: translateY(2px);
+  filter: blur(0.2px);
 }
 
 #root {
@@ -223,6 +273,17 @@ body {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-primary);
+}
+
+.desktop-app-window[data-window-active="false"],
+.desktop-app-window[data-window-active="false"] * {
+  scrollbar-width: none;
+}
+
+.desktop-app-window[data-window-active="false"]::-webkit-scrollbar,
+.desktop-app-window[data-window-active="false"] *::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 @layer components {
@@ -265,7 +326,7 @@ body {
     @apply w-full px-3 py-2 rounded-lg border-transparent text-[var(--text-primary)];
     background-color: var(--bg-tertiary);
     font-size: 13px;
-    transition: background-color 0.15s, box-shadow 0.15s;
+    transition: background-color 0.15s, border-color 0.15s, box-shadow 0.15s;
   }
   .form-input:focus {
     @apply outline-none;

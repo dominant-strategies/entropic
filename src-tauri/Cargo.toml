@@ -1,6 +1,6 @@
 [package]
 name = "entropic"
-version = "0.1.14"
+version = "0.1.15"
 description = "OpenClaw Desktop - AI assistant with secure sandboxing"
 authors = ["OpenClaw Team"]
 license = "MIT"
@@ -44,6 +44,9 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.25"
 objc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0.2", features = ["v2_40"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

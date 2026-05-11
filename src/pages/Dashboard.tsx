@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
 import { Cpu, Image, Loader2, Shield, User } from "lucide-react";
 import { Layout, Page } from "../components/Layout";
@@ -28,10 +29,14 @@ import {
 } from "../lib/integrations";
 import { getGatewayStatusCached } from "../lib/gateway-status";
 import {
+  LOCAL_AUDIO_UNDERSTANDING_MODEL_IDS,
   LOCAL_IMAGE_GENERATION_MODEL_IDS,
   LOCAL_MODEL_IDS,
+  LOCAL_TEXT_TO_SPEECH_MODEL_IDS,
+  PROXY_AUDIO_UNDERSTANDING_MODEL_IDS,
   PROXY_IMAGE_GENERATION_MODEL_IDS,
   PROXY_MODEL_IDS,
+  PROXY_TEXT_TO_SPEECH_MODEL_IDS,
 } from "../components/ModelSelector";
 import { hideEmbeddedPreviewWebview } from "../lib/nativePreview";
 import {
@@ -45,6 +50,15 @@ import {
   updateDesktopSettings,
 } from "../lib/settingsStore";
 import { loadSettingsWarmState } from "../lib/settingsWarmState";
+import { DESKTOP_ACTION_EVENT, type DesktopAction } from "../desktop/actions";
+import { clientLog } from "../lib/clientLog";
+import {
+  DEFAULT_VOICE_SPEECH_RATE,
+  DEFAULT_VOICE_SPEECH_VOICE,
+  normalizeVoiceSpeechRate,
+  normalizeVoiceSpeechVoice,
+  type VoiceSpeechVoice,
+} from "../desktop/voice/voicePreferences";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -82,6 +96,11 @@ type DashboardBootstrapAction =
       gatewayLaunchMode?: GatewayLaunchMode;
       gatewayHealthStatus?: string;
     };
+
+type PendingDesktopAction = {
+  id: string;
+  action: DesktopAction;
+};
 
 let settingsPagePrefetchPromise: Promise<unknown> | null = null;
 
@@ -330,12 +349,16 @@ function SettingsLoadingShell({
   selectedModel,
   codeModel,
   imageGenerationModel,
+  textToSpeechModel,
+  audioUnderstandingModel,
 }: {
   gatewayRunning: boolean;
   useLocalKeys: boolean;
   selectedModel: string;
   codeModel: string;
   imageGenerationModel: string;
+  textToSpeechModel: string;
+  audioUnderstandingModel: string;
 }) {
   return (
     <div className="h-full overflow-auto px-6 py-6">
@@ -371,6 +394,8 @@ function SettingsLoadingShell({
           <SettingsShellRow label="Primary Model" value={selectedModel} icon={Cpu} />
           <SettingsShellRow label="Coding Model" value={codeModel} icon={Cpu} />
           <SettingsShellRow label="Image Generation Model" value={imageGenerationModel} icon={Image} />
+          <SettingsShellRow label="Text to Speech Model" value={textToSpeechModel} icon={Image} />
+          <SettingsShellRow label="Audio Understanding Model" value={audioUnderstandingModel} icon={Image} />
         </SettingsShellGroup>
 
         <SettingsShellGroup title="System">
@@ -411,18 +436,29 @@ type Props = {
 };
 
 // Default models per mode
-const DEFAULT_PROXY_MODEL = "openai/gpt-5.4";
+const DEFAULT_PROXY_MODEL = "venice/kimi-k2-6";
 const DEFAULT_PROXY_ANTHROPIC_MODEL = "anthropic/claude-opus-4-6";
 const DEFAULT_PROXY_GOOGLE_MODEL = "google/gemini-3.1-pro-preview";
 const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_PROXY_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
 const DEFAULT_LOCAL_OPENAI_IMAGE_GENERATION_MODEL = "openai/gpt-image-1";
 const DEFAULT_LOCAL_GOOGLE_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
+const DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL = "venice/nvidia/parakeet-tdt-0.6b-v3";
+const DEFAULT_LOCAL_AUDIO_UNDERSTANDING_MODEL = "google/gemini-3-flash-preview";
+const DEFAULT_PROXY_TEXT_TO_SPEECH_MODEL = "venice/tts-kokoro";
+const DEFAULT_LOCAL_TEXT_TO_SPEECH_MODEL = "openai/gpt-4o-mini-tts";
 const GATEWAY_FAILURE_THRESHOLD = 3;
 const FEEDBACK_FORM_URL = entropicSitePath("/feedback");
 
 function stripModelParams(model: string) {
-  return model.split(":")[0] || model;
+  const trimmed = model.trim();
+  const separatorIndex = trimmed.lastIndexOf(":");
+  if (separatorIndex < 0) return trimmed || model;
+  const suffix = trimmed.slice(separatorIndex + 1);
+  if (suffix === "thinking" || suffix.startsWith("reasoning=")) {
+    return trimmed.slice(0, separatorIndex);
+  }
+  return trimmed || model;
 }
 
 function defaultLocalImageGenerationModel(primaryModel?: string) {
@@ -444,6 +480,10 @@ function remapModelForMode(model: string, useLocalKeys: boolean): string {
     const base = stripModelParams(model);
     if (LOCAL_MODEL_IDS.has(base)) {
       return base;
+    }
+    const openrouterCandidate = `openrouter/${base}`;
+    if (LOCAL_MODEL_IDS.has(openrouterCandidate)) {
+      return openrouterCandidate;
     }
     if (base.startsWith("anthropic/")) {
       return DEFAULT_LOCAL_MODEL;
@@ -480,6 +520,12 @@ function remapModelForMode(model: string, useLocalKeys: boolean): string {
   const base = stripModelParams(model);
   if (PROXY_MODEL_IDS.has(base)) {
     return base;
+  }
+  if (base.startsWith("openrouter/")) {
+    const openrouterModel = base.slice("openrouter/".length);
+    if (PROXY_MODEL_IDS.has(openrouterModel)) {
+      return openrouterModel;
+    }
   }
   if (base.startsWith("openai-codex/")) {
     const openaiModel = base.slice("openai-codex/".length);
@@ -535,6 +581,56 @@ function remapImageGenerationModelForMode(
   return DEFAULT_PROXY_IMAGE_GENERATION_MODEL;
 }
 
+function remapAudioUnderstandingModelForMode(model: string, useLocalKeys: boolean): string {
+  if (useLocalKeys) {
+    if (LOCAL_AUDIO_UNDERSTANDING_MODEL_IDS.has(model)) {
+      return model;
+    }
+    const base = stripModelParams(model);
+    if (LOCAL_AUDIO_UNDERSTANDING_MODEL_IDS.has(base)) {
+      return base;
+    }
+    if (base.startsWith("openai/")) {
+      return "openai/gpt-4o-transcribe";
+    }
+    if (base.startsWith("google/")) {
+      return DEFAULT_LOCAL_AUDIO_UNDERSTANDING_MODEL;
+    }
+    return DEFAULT_LOCAL_AUDIO_UNDERSTANDING_MODEL;
+  }
+
+  if (PROXY_AUDIO_UNDERSTANDING_MODEL_IDS.has(model)) {
+    return model;
+  }
+  const base = stripModelParams(model);
+  if (PROXY_AUDIO_UNDERSTANDING_MODEL_IDS.has(base)) {
+    return base;
+  }
+  return DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL;
+}
+
+function remapTextToSpeechModelForMode(model: string, useLocalKeys: boolean): string {
+  if (useLocalKeys) {
+    if (LOCAL_TEXT_TO_SPEECH_MODEL_IDS.has(model)) {
+      return model;
+    }
+    const base = stripModelParams(model);
+    if (LOCAL_TEXT_TO_SPEECH_MODEL_IDS.has(base)) {
+      return base;
+    }
+    return DEFAULT_LOCAL_TEXT_TO_SPEECH_MODEL;
+  }
+
+  if (PROXY_TEXT_TO_SPEECH_MODEL_IDS.has(model)) {
+    return model;
+  }
+  const base = stripModelParams(model);
+  if (PROXY_TEXT_TO_SPEECH_MODEL_IDS.has(base)) {
+    return base;
+  }
+  return DEFAULT_PROXY_TEXT_TO_SPEECH_MODEL;
+}
+
 function buildProxyUnavailableStartupError() {
   return {
     message: hostedFeaturesEnabled
@@ -574,10 +670,24 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       ? defaultLocalImageGenerationModel(DEFAULT_LOCAL_MODEL)
       : DEFAULT_PROXY_IMAGE_GENERATION_MODEL,
   );
+  const [textToSpeechModel, setTextToSpeechModel] = useState(
+    defaultUseLocalKeys ? DEFAULT_LOCAL_TEXT_TO_SPEECH_MODEL : DEFAULT_PROXY_TEXT_TO_SPEECH_MODEL,
+  );
+  const [audioUnderstandingModel, setAudioUnderstandingModel] = useState(
+    defaultUseLocalKeys
+      ? DEFAULT_LOCAL_AUDIO_UNDERSTANDING_MODEL
+      : DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL,
+  );
+  const [voiceShortcut, setVoiceShortcut] = useState("");
+  const [voiceSpeechRate, setVoiceSpeechRate] = useState(DEFAULT_VOICE_SPEECH_RATE);
+  const [voiceSpeechVoice, setVoiceSpeechVoice] =
+    useState<VoiceSpeechVoice>(DEFAULT_VOICE_SPEECH_VOICE);
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [currentChatSession, setCurrentChatSession] = useState<string | null>(null);
   const [pendingChatSession, setPendingChatSession] = useState<string | null>(null);
   const [pendingChatAction, setPendingChatAction] = useState<ChatSessionActionRequest | null>(null);
+  const [pendingDesktopAction, setPendingDesktopAction] =
+    useState<PendingDesktopAction | null>(null);
   const [localCreditBalanceCents, setLocalCreditBalanceCents] = useState<number | null>(null);
   const gatewayTokenRef = useRef<string | null>(null);
   const selectedModelRef = useRef(selectedModel);
@@ -762,6 +872,21 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           isLocal,
           nextSelectedModel,
         );
+        const nextTextToSpeechModel = remapTextToSpeechModelForMode(
+          bootstrap.settings.textToSpeechModel || "",
+          isLocal,
+        );
+        const nextAudioUnderstandingModel = remapAudioUnderstandingModelForMode(
+          bootstrap.settings.audioUnderstandingModel || "",
+          isLocal,
+        );
+        const nextVoiceShortcut = bootstrap.settings.voiceShortcut || "";
+        const nextVoiceSpeechRate = normalizeVoiceSpeechRate(
+          bootstrap.settings.voiceSpeechRate ?? DEFAULT_VOICE_SPEECH_RATE,
+        );
+        const nextVoiceSpeechVoice = normalizeVoiceSpeechVoice(
+          bootstrap.settings.voiceSpeechVoice ?? DEFAULT_VOICE_SPEECH_VOICE,
+        );
 
         selectedModelRef.current = nextSelectedModel;
         imageModelRef.current = nextImageModel;
@@ -771,6 +896,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         setCodeModel(nextCodeModel);
         setImageModel(nextImageModel);
         setImageGenerationModel(nextImageGenerationModel);
+        setTextToSpeechModel(nextTextToSpeechModel);
+        setAudioUnderstandingModel(nextAudioUnderstandingModel);
+        setVoiceShortcut(nextVoiceShortcut);
+        setVoiceSpeechRate(nextVoiceSpeechRate);
+        setVoiceSpeechVoice(nextVoiceSpeechVoice);
         dispatchBootstrap({ type: "bootstrap_loaded", payload: bootstrap });
 
         const normalizedPatch: Partial<DesktopSettingsSnapshot> = {};
@@ -782,6 +912,21 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         }
         if (bootstrap.settings.imageGenerationModel !== nextImageGenerationModel) {
           normalizedPatch.imageGenerationModel = nextImageGenerationModel;
+        }
+        if (bootstrap.settings.textToSpeechModel !== nextTextToSpeechModel) {
+          normalizedPatch.textToSpeechModel = nextTextToSpeechModel;
+        }
+        if (bootstrap.settings.audioUnderstandingModel !== nextAudioUnderstandingModel) {
+          normalizedPatch.audioUnderstandingModel = nextAudioUnderstandingModel;
+        }
+        if ((bootstrap.settings.voiceShortcut || "") !== nextVoiceShortcut) {
+          normalizedPatch.voiceShortcut = nextVoiceShortcut;
+        }
+        if (bootstrap.settings.voiceSpeechRate !== nextVoiceSpeechRate) {
+          normalizedPatch.voiceSpeechRate = nextVoiceSpeechRate;
+        }
+        if ((bootstrap.settings.voiceSpeechVoice || "") !== nextVoiceSpeechVoice) {
+          normalizedPatch.voiceSpeechVoice = nextVoiceSpeechVoice;
         }
         if (Object.keys(normalizedPatch).length > 0) {
           await updateDesktopSettings(normalizedPatch);
@@ -898,6 +1043,29 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     window.addEventListener("entropic-open-page", handleOpenPage as EventListener);
     return () => {
       window.removeEventListener("entropic-open-page", handleOpenPage as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<DesktopAction>(DESKTOP_ACTION_EVENT, (event) => {
+      clientLog("desktop_action.received", { type: event.payload.type });
+      setPendingDesktopAction({
+        id: crypto.randomUUID(),
+        action: event.payload,
+      });
+      setCurrentPage("files");
+    }).then((dispose) => {
+      if (disposed) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
@@ -2127,11 +2295,22 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       value,
       newModel,
     );
+    const newTextToSpeechModel = remapTextToSpeechModelForMode(textToSpeechModel, value);
+    const newAudioUnderstandingModel = remapAudioUnderstandingModelForMode(
+      audioUnderstandingModel,
+      value,
+    );
     if (newModel !== selectedModel) {
       setSelectedModel(newModel);
     }
     if (newImageGenerationModel !== imageGenerationModel) {
       setImageGenerationModel(newImageGenerationModel);
+    }
+    if (newTextToSpeechModel !== textToSpeechModel) {
+      setTextToSpeechModel(newTextToSpeechModel);
+    }
+    if (newAudioUnderstandingModel !== audioUnderstandingModel) {
+      setAudioUnderstandingModel(newAudioUnderstandingModel);
     }
 
     try {
@@ -2139,6 +2318,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         useLocalKeys: value,
         selectedModel: newModel,
         imageGenerationModel: newImageGenerationModel,
+        textToSpeechModel: newTextToSpeechModel,
+        audioUnderstandingModel: newAudioUnderstandingModel,
       });
     } catch (error) {
       console.error("[Entropic] Failed to save useLocalKeys:", error);
@@ -2171,6 +2352,53 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       await updateDesktopSettings({ imageGenerationModel: value });
     } catch (error) {
       console.error("[Entropic] Failed to save imageGenerationModel:", error);
+    }
+  }
+
+  async function handleTextToSpeechModelChange(value: string) {
+    setTextToSpeechModel(value);
+    try {
+      await updateDesktopSettings({ textToSpeechModel: value });
+    } catch (error) {
+      console.error("[Entropic] Failed to save textToSpeechModel:", error);
+    }
+  }
+
+  async function handleAudioUnderstandingModelChange(value: string) {
+    setAudioUnderstandingModel(value);
+    try {
+      await updateDesktopSettings({ audioUnderstandingModel: value });
+    } catch (error) {
+      console.error("[Entropic] Failed to save audioUnderstandingModel:", error);
+    }
+  }
+
+  async function handleVoiceShortcutChange(value: string) {
+    setVoiceShortcut(value);
+    try {
+      await updateDesktopSettings({ voiceShortcut: value });
+    } catch (error) {
+      console.error("[Entropic] Failed to save voiceShortcut:", error);
+    }
+  }
+
+  async function handleVoiceSpeechRateChange(value: number) {
+    const next = normalizeVoiceSpeechRate(value);
+    setVoiceSpeechRate(next);
+    try {
+      await updateDesktopSettings({ voiceSpeechRate: next });
+    } catch (error) {
+      console.error("[Entropic] Failed to save voiceSpeechRate:", error);
+    }
+  }
+
+  async function handleVoiceSpeechVoiceChange(value: VoiceSpeechVoice) {
+    const next = normalizeVoiceSpeechVoice(value);
+    setVoiceSpeechVoice(next);
+    try {
+      await updateDesktopSettings({ voiceSpeechVoice: next });
+    } catch (error) {
+      console.error("[Entropic] Failed to save voiceSpeechVoice:", error);
     }
   }
 
@@ -2250,6 +2478,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         onModelChange={handleModelChange}
         imageModel={imageModel}
         imageGenerationModel={imageGenerationModel}
+        textToSpeechModel={textToSpeechModel}
+        audioUnderstandingModel={audioUnderstandingModel}
+        voiceSpeechRate={voiceSpeechRate}
+        voiceSpeechVoice={voiceSpeechVoice}
         integrationsSyncing={integrationsSyncing}
         integrationsMissing={integrationsMissing}
         onNavigate={setCurrentPage}
@@ -2287,6 +2519,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             selectedModel={selectedModel}
             codeModel={codeModel}
             imageGenerationModel={imageGenerationModel}
+            textToSpeechModel={textToSpeechModel}
+            audioUnderstandingModel={audioUnderstandingModel}
           />
         }
       >
@@ -2302,8 +2536,18 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           codeModel={codeModel}
           imageModel={imageModel}
           imageGenerationModel={imageGenerationModel}
+          textToSpeechModel={textToSpeechModel}
+          audioUnderstandingModel={audioUnderstandingModel}
+          voiceShortcut={voiceShortcut}
+          voiceSpeechRate={voiceSpeechRate}
+          voiceSpeechVoice={voiceSpeechVoice}
           onCodeModelChange={handleCodeModelChange}
           onImageGenerationModelChange={handleImageGenerationModelChange}
+          onTextToSpeechModelChange={handleTextToSpeechModelChange}
+          onAudioUnderstandingModelChange={handleAudioUnderstandingModelChange}
+          onVoiceShortcutChange={handleVoiceShortcutChange}
+          onVoiceSpeechRateChange={handleVoiceSpeechRateChange}
+          onVoiceSpeechVoiceChange={handleVoiceSpeechVoiceChange}
           onImageModelChange={handleImageModelChange}
         />
       </Suspense>
@@ -2315,9 +2559,19 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       case "chat":
         return null;
       case "store":
+      case "integrations":
+        return (
+          <Store
+            view="integrations"
+            integrationsSyncing={integrationsSyncing}
+            integrationsMissing={integrationsMissing}
+            onNavigate={(page) => setCurrentPage(page)}
+          />
+        );
       case "skills":
         return (
           <Store
+            view="skills"
             integrationsSyncing={integrationsSyncing}
             integrationsMissing={integrationsMissing}
             onNavigate={(page) => setCurrentPage(page)}
@@ -2343,9 +2597,23 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             codeModel={codeModel}
             imageModel={imageModel}
             imageGenerationModel={imageGenerationModel}
+            textToSpeechModel={textToSpeechModel}
+            audioUnderstandingModel={audioUnderstandingModel}
+            voiceShortcut={voiceShortcut}
+            voiceSpeechRate={voiceSpeechRate}
+            voiceSpeechVoice={voiceSpeechVoice}
             onCodeModelChange={handleCodeModelChange}
             onImageGenerationModelChange={handleImageGenerationModelChange}
+            onTextToSpeechModelChange={handleTextToSpeechModelChange}
+            onAudioUnderstandingModelChange={handleAudioUnderstandingModelChange}
+            onVoiceShortcutChange={handleVoiceShortcutChange}
+            onVoiceSpeechRateChange={handleVoiceSpeechRateChange}
+            onVoiceSpeechVoiceChange={handleVoiceSpeechVoiceChange}
             onImageModelChange={handleImageModelChange}
+            pendingDesktopAction={pendingDesktopAction}
+            onDesktopActionHandled={(id) => {
+              setPendingDesktopAction((current) => (current?.id === id ? null : current));
+            }}
           />
         );
       case "tasks":

@@ -192,6 +192,9 @@ function Ensure-Distro([string]$Name) {
     }
 
     $installPath = Get-DistroInstallPath $Name
+    if (Test-Path $installPath) {
+        Remove-Item -Recurse -Force $installPath
+    }
     New-Item -ItemType Directory -Force -Path $installPath | Out-Null
 
     Write-Host "[wsl] Importing runtime distro '$Name'..."
@@ -491,12 +494,21 @@ switch ($cmd) {
     "start" {
         Set-BaseDistroAsDefault
         foreach ($target in $targets) {
+            $importError = $null
             try {
                 Ensure-Distro $target.Name
             } catch {
+                $importError = $_.Exception.Message
                 Write-Warning "Failed to verify or import '$($target.Name)': $($_.Exception.Message). Trying to start the distro directly."
             }
-            Start-Distro $target.Name
+            try {
+                Start-Distro $target.Name
+            } catch {
+                if (-not [string]::IsNullOrWhiteSpace($importError)) {
+                    throw "Failed to start '$($target.Name)' after import failed. Import error: $importError. Start error: $($_.Exception.Message)"
+                }
+                throw
+            }
             if ($target.Mode -eq "dev") {
                 Ensure-DevDockerReady $target.Name
                 Ensure-DevBuildToolchainReady $target.Name

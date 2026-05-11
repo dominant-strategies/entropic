@@ -4,7 +4,9 @@ import http from "node:http";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { createHash, createHmac, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { chromium } from "patchright";
 import { WebSocketServer, WebSocket } from "ws";
 
@@ -50,6 +52,43 @@ const BROWSER_CONTROL_TOKEN_PATH =
 const BROWSER_APP_URL = `data:text/html,${encodeURIComponent(
   "<html><head><title>Entropic Browser</title><style>html,body{margin:0;background:#fff;height:100%;}</style></head><body></body></html>",
 )}`;
+const ONLYOFFICE_HOST_HTML_PATH = fileURLToPath(new URL("./onlyoffice-host.html", import.meta.url));
+const OFFICE_TOOL_PATH = fileURLToPath(new URL("./office_tools.py", import.meta.url));
+const ONLYOFFICE_PUBLIC_BASE = (process.env.ENTROPIC_ONLYOFFICE_PUBLIC_BASE || "/__onlyoffice_proxy__")
+  .trim()
+  .replace(/\/+$/, "");
+const ONLYOFFICE_UPSTREAM_BASE = (process.env.ENTROPIC_ONLYOFFICE_UPSTREAM_BASE || "http://entropic-onlyoffice")
+  .trim()
+  .replace(/\/+$/, "");
+const ONLYOFFICE_INTERNAL_BASE = (process.env.ENTROPIC_ONLYOFFICE_INTERNAL_BASE || "http://entropic-openclaw:19791")
+  .trim()
+  .replace(/\/+$/, "");
+const ONLYOFFICE_JWT_SECRET = (process.env.ENTROPIC_ONLYOFFICE_JWT_SECRET || "").trim();
+const ONLYOFFICE_USER_NAME = (process.env.ENTROPIC_ONLYOFFICE_USER_NAME || "Entropic").trim() || "Entropic";
+const ONLYOFFICE_SUPPORTED_EXTS = new Map([
+  ["docx", { documentType: "word", fileType: "docx" }],
+  ["xlsx", { documentType: "cell", fileType: "xlsx" }],
+  ["pptx", { documentType: "slide", fileType: "pptx" }],
+]);
+const ONLYOFFICE_ALLOWED_CALLBACK_HOSTS = new Set(
+  [ONLYOFFICE_INTERNAL_BASE, ONLYOFFICE_UPSTREAM_BASE, "http://127.0.0.1", "http://localhost"]
+    .map((value) => parseUrlOrNull(value)?.hostname?.toLowerCase())
+    .filter(Boolean),
+);
+const ONLYOFFICE_ROOT_PROXY_PREFIXES = [
+  "/cache/",
+  "/coauthoring/",
+  "/doc/",
+  "/dictionaries/",
+  "/fonts/",
+  "/sdkjs/",
+  "/spellchecker/",
+  "/themes/",
+  "/web-apps/",
+];
+const ONLYOFFICE_VERSIONED_PROXY_RE =
+  /^\/\d+(?:\.\d+){1,3}-[A-Za-z0-9]+\/(?:cache|coauthoring|doc|dictionaries|fonts|sdkjs|spellchecker|themes|web-apps)\//;
+const ONLYOFFICE_URL_TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
 const WORKSPACE_RELOAD_IGNORED_DIRS = new Set([
   ".git",
   ".next",
@@ -62,6 +101,10 @@ const WORKSPACE_RELOAD_IGNORED_DIRS = new Set([
 
 const sessions = new Map();
 const BROWSER_CONTROL_TOKEN = loadBrowserControlToken();
+
+process.on("unhandledRejection", (error) => {
+  console.error("[EntropicBrowserService] unhandled rejection", error);
+});
 
 function loadBrowserControlToken() {
   try {
@@ -123,6 +166,7 @@ function buildLaunchArgs(secureOrigins = [], viewport = DEFAULT_VIEWPORT) {
       `--app=${BROWSER_APP_URL}`,
       "--window-position=0,0",
       `--window-size=${viewport.width},${viewport.height}`,
+      "--disable-gpu",
       "--use-gl=angle",
       "--use-angle=swiftshader",
       "--test-type",
@@ -445,6 +489,157 @@ function proxyLocalAppUpgrade(req, socket, head, targetPort) {
   });
 }
 
+function onlyOfficeUpstreamUrl() {
+  const upstream = parseUrlOrNull(ONLYOFFICE_UPSTREAM_BASE);
+  if (!upstream || upstream.protocol !== "http:") {
+    throw new Error("ONLYOFFICE upstream base is invalid.");
+  }
+  return upstream;
+}
+
+function safeDecodePathname(pathname) {
+  try {
+    return decodeURIComponent(pathname);
+  } catch {
+    return pathname;
+  }
+}
+
+function onlyOfficeProxyPathForRequest(rawPath = "/") {
+  const target = typeof rawPath === "string" && rawPath ? rawPath : "/";
+  const queryIndex = target.indexOf("?");
+  const pathname = queryIndex >= 0 ? target.slice(0, queryIndex) : target;
+  const suffix = queryIndex >= 0 ? target.slice(queryIndex) : "";
+  let nextPath = safeDecodePathname(pathname);
+  if (nextPath === ONLYOFFICE_PUBLIC_BASE || nextPath === `${ONLYOFFICE_PUBLIC_BASE}/`) {
+    return `/${suffix}`;
+  }
+  if (nextPath.startsWith(`${ONLYOFFICE_PUBLIC_BASE}/`)) {
+    nextPath = nextPath.slice(ONLYOFFICE_PUBLIC_BASE.length);
+  }
+  if (!nextPath.startsWith("/")) {
+    nextPath = `/${nextPath}`;
+  }
+  return `${nextPath}${suffix}`;
+}
+
+function proxiedOnlyOfficeHeaders(req, upstream, upstreamPath) {
+  const headers = { ...req.headers };
+  const publicHost = typeof req.headers.host === "string" ? req.headers.host : "";
+  headers.host = publicHost || upstream.host;
+  headers["x-forwarded-host"] = publicHost || upstream.host;
+  headers["x-forwarded-proto"] = "http";
+  headers["x-forwarded-prefix"] = ONLYOFFICE_PUBLIC_BASE;
+  if (typeof headers.origin === "string") {
+    headers.origin = publicHost ? `http://${publicHost}` : upstream.origin;
+  }
+  if (typeof headers.referer === "string") {
+    headers.referer = publicHost
+      ? `http://${publicHost}${ONLYOFFICE_PUBLIC_BASE}${upstreamPath}`
+      : `${upstream.origin}${upstreamPath}`;
+  }
+  return headers;
+}
+
+function isOnlyOfficeProxyPath(pathname) {
+  const decodedPathname = safeDecodePathname(pathname);
+  if (decodedPathname === ONLYOFFICE_PUBLIC_BASE || decodedPathname.startsWith(`${ONLYOFFICE_PUBLIC_BASE}/`)) {
+    return true;
+  }
+  if (ONLYOFFICE_ROOT_PROXY_PREFIXES.some((prefix) => decodedPathname.startsWith(prefix))) {
+    return true;
+  }
+  return ONLYOFFICE_VERSIONED_PROXY_RE.test(decodedPathname);
+}
+
+function rewriteOnlyOfficeLocation(value, upstream) {
+  if (typeof value !== "string" || !value) {
+    return value;
+  }
+  if (value.startsWith("/")) {
+    return `${ONLYOFFICE_PUBLIC_BASE}${value}`;
+  }
+  const parsed = parseUrlOrNull(value);
+  if (!parsed) {
+    return value;
+  }
+  if (parsed.origin !== upstream.origin) {
+    return value;
+  }
+  return `${ONLYOFFICE_PUBLIC_BASE}${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+
+function proxyOnlyOfficeRequest(req, res) {
+  const upstream = onlyOfficeUpstreamUrl();
+  const upstreamBasePath = upstream.pathname === "/" ? "" : upstream.pathname.replace(/\/+$/, "");
+  const upstreamPath = `${upstreamBasePath}${onlyOfficeProxyPathForRequest(req.url || "/")}`;
+  const proxyReq = http.request(
+    {
+      hostname: upstream.hostname,
+      port: upstream.port || 80,
+      method: req.method,
+      path: upstreamPath,
+      headers: proxiedOnlyOfficeHeaders(req, upstream, upstreamPath),
+    },
+    (proxyRes) => {
+      const headers = { ...proxyRes.headers };
+      if (typeof headers.location === "string") {
+        headers.location = rewriteOnlyOfficeLocation(headers.location, upstream);
+      }
+      res.writeHead(proxyRes.statusCode || 502, headers);
+      proxyRes.pipe(res);
+    },
+  );
+
+  proxyReq.on("error", (error) => {
+    if (!res.headersSent) {
+      sendJson(res, 502, {
+        error: `Failed to reach ONLYOFFICE upstream: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
+    res.destroy(error);
+  });
+
+  req.pipe(proxyReq);
+}
+
+function proxyOnlyOfficeUpgrade(req, socket, head) {
+  const upstream = onlyOfficeUpstreamUrl();
+  const upstreamBasePath = upstream.pathname === "/" ? "" : upstream.pathname.replace(/\/+$/, "");
+  const upstreamPath = `${upstreamBasePath}${onlyOfficeProxyPathForRequest(req.url || "/")}`;
+  const targetSocket = net.connect(upstream.port || 80, upstream.hostname);
+
+  targetSocket.on("connect", () => {
+    const headers = proxiedOnlyOfficeHeaders(req, upstream, upstreamPath);
+    const lines = [`GET ${upstreamPath} HTTP/1.1`];
+    for (const [key, value] of Object.entries(headers)) {
+      if (value == null) continue;
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          lines.push(`${key}: ${item}`);
+        }
+        continue;
+      }
+      lines.push(`${key}: ${value}`);
+    }
+    lines.push("", "");
+    targetSocket.write(lines.join("\r\n"));
+    if (head?.length) {
+      targetSocket.write(head);
+    }
+    socket.pipe(targetSocket);
+    targetSocket.pipe(socket);
+  });
+
+  targetSocket.on("error", () => {
+    socket.destroy();
+  });
+  socket.on("error", () => {
+    targetSocket.destroy();
+  });
+}
+
 function decodeUrlPathPart(rawPart) {
   try {
     return decodeURIComponent(rawPart);
@@ -489,6 +684,12 @@ function contentTypeForFile(filePath) {
       return "text/javascript; charset=utf-8";
     case ".json":
       return "application/json; charset=utf-8";
+    case ".docx":
+      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    case ".xlsx":
+      return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    case ".pptx":
+      return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
     case ".svg":
       return "image/svg+xml";
     case ".png":
@@ -522,6 +723,236 @@ function serveWorkspaceAsset(res, urlParts) {
     "Cache-Control": "no-store",
   });
   fs.createReadStream(filePath).pipe(res);
+}
+
+function normalizeWorkspaceEditorRelativePath(rawPath) {
+  const raw = typeof rawPath === "string" ? rawPath.trim() : "";
+  if (!raw) {
+    throw new Error("A workspace file path is required.");
+  }
+  let candidate = raw;
+  if (candidate === WORKSPACE_ROOT) {
+    throw new Error("Open a workspace file, not the workspace root.");
+  }
+  if (candidate.startsWith(`${WORKSPACE_ROOT}/`)) {
+    candidate = candidate.slice(WORKSPACE_ROOT.length + 1);
+  }
+  const normalized = path.posix.normalize(`/${candidate}`).replace(/^\/+/, "");
+  if (!normalized || normalized === "." || normalized === ".." || normalized.startsWith("../")) {
+    throw new Error("Invalid workspace file path.");
+  }
+  return normalized;
+}
+
+function serveOnlyOfficeShell(res) {
+  res.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+  });
+  res.end(fs.readFileSync(ONLYOFFICE_HOST_HTML_PATH, "utf8"));
+}
+
+function runOfficeTool(command, workspacePath, payload = null) {
+  const result = spawnSync("python3", [OFFICE_TOOL_PATH, "api", command, workspacePath], {
+    input: payload === null ? "" : JSON.stringify(payload),
+    encoding: "utf8",
+    maxBuffer: 25 * 1024 * 1024,
+    env: {
+      ...process.env,
+      ENTROPIC_WORKSPACE_PATH: WORKSPACE_ROOT,
+    },
+  });
+  if (result.error) {
+    throw new Error(`Failed to launch office helper: ${result.error.message}`);
+  }
+  const rawOutput = (result.stdout || result.stderr || "").trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(rawOutput || "{}");
+  } catch {
+    throw new Error(rawOutput || "Office helper returned an unreadable response.");
+  }
+  if (!parsed?.ok) {
+    throw new Error(typeof parsed?.error === "string" ? parsed.error : "Office helper failed.");
+  }
+  return parsed.result;
+}
+
+function base64UrlEncode(value) {
+  return Buffer.from(value).toString("base64url");
+}
+
+function signJwt(payload) {
+  if (!ONLYOFFICE_JWT_SECRET) {
+    throw new Error("ONLYOFFICE JWT secret is not configured.");
+  }
+  const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const body = base64UrlEncode(JSON.stringify(payload));
+  const signature = createHmac("sha256", ONLYOFFICE_JWT_SECRET)
+    .update(`${header}.${body}`)
+    .digest("base64url");
+  return `${header}.${body}.${signature}`;
+}
+
+function verifyJwt(token) {
+  if (!ONLYOFFICE_JWT_SECRET) {
+    throw new Error("ONLYOFFICE JWT secret is not configured.");
+  }
+  const [header, body, signature] = String(token || "").split(".");
+  if (!header || !body || !signature) {
+    throw new Error("Invalid ONLYOFFICE token.");
+  }
+  const expected = createHmac("sha256", ONLYOFFICE_JWT_SECRET)
+    .update(`${header}.${body}`)
+    .digest("base64url");
+  if (expected !== signature) {
+    throw new Error("Invalid ONLYOFFICE token signature.");
+  }
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  } catch {
+    throw new Error("Invalid ONLYOFFICE token payload.");
+  }
+  if (typeof payload?.exp === "number" && Date.now() >= payload.exp * 1000) {
+    throw new Error("ONLYOFFICE token expired.");
+  }
+  return payload;
+}
+
+function signOnlyOfficePathToken(kind, relativePath) {
+  return signJwt({
+    kind,
+    path: relativePath,
+    exp: Math.floor((Date.now() + ONLYOFFICE_URL_TOKEN_TTL_MS) / 1000),
+  });
+}
+
+function verifyOnlyOfficePathToken(token, expectedKind, expectedPath) {
+  const payload = verifyJwt(token);
+  if (payload?.kind !== expectedKind || payload?.path !== expectedPath) {
+    throw new Error("ONLYOFFICE token does not match the requested file.");
+  }
+}
+
+function onlyOfficeSpecForPath(relativePath) {
+  const ext = path.posix.extname(relativePath).slice(1).toLowerCase();
+  const spec = ONLYOFFICE_SUPPORTED_EXTS.get(ext);
+  if (!spec) {
+    throw new Error("This office file type is not supported by ONLYOFFICE in Entropic yet.");
+  }
+  return { ext, ...spec };
+}
+
+function normalizeOnlyOfficeDocumentIfNeeded(filePath, spec) {
+  if (spec.fileType !== "xlsx") {
+    return;
+  }
+  runOfficeTool("normalize-spreadsheet", filePath);
+}
+
+function onlyOfficeDocumentKey(relativePath, stats) {
+  return createHash("sha256")
+    .update(`${relativePath}:${stats.size}:${Math.round(stats.mtimeMs)}`)
+    .digest("base64url")
+    .slice(0, 48);
+}
+
+function onlyOfficeConfigPayload(rawPath, openToken) {
+  const relativePath = normalizeWorkspaceEditorRelativePath(rawPath);
+  verifyOnlyOfficePathToken(openToken, "open", relativePath);
+  const filePath = path.posix.join(WORKSPACE_ROOT, relativePath);
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    throw new Error("Workspace file not found.");
+  }
+  const spec = onlyOfficeSpecForPath(relativePath);
+  const stats = fs.statSync(filePath);
+  const key = onlyOfficeDocumentKey(relativePath, stats);
+  const encodedPath = encodeURIComponent(relativePath);
+  const documentUrlToken = signOnlyOfficePathToken("download", relativePath);
+  const callbackUrlToken = signOnlyOfficePathToken("callback", relativePath);
+  const title = path.posix.basename(relativePath);
+  const config = {
+    documentType: spec.documentType,
+    type: "desktop",
+    document: {
+      title,
+      fileType: spec.fileType,
+      key,
+      url: `${ONLYOFFICE_INTERNAL_BASE}/__onlyoffice_api__/file?path=${encodedPath}&token=${encodeURIComponent(documentUrlToken)}`,
+      permissions: {
+        edit: true,
+        download: true,
+        print: true,
+        review: true,
+        comment: true,
+        fillForms: true,
+        copy: true,
+      },
+    },
+    editorConfig: {
+      mode: "edit",
+      lang: "en",
+      callbackUrl: `${ONLYOFFICE_INTERNAL_BASE}/__onlyoffice_api__/callback?path=${encodedPath}&token=${encodeURIComponent(callbackUrlToken)}`,
+      user: {
+        id: "entropic-desktop",
+        name: ONLYOFFICE_USER_NAME,
+      },
+      coEditing: {
+        mode: "fast",
+        change: true,
+      },
+      customization: {
+        autosave: true,
+        forcesave: true,
+        compactHeader: false,
+        compactToolbar: false,
+        toolbarNoTabs: false,
+      },
+    },
+  };
+  return {
+    documentServerUrl: ONLYOFFICE_PUBLIC_BASE,
+    fileKey: key,
+    path: relativePath,
+    updatedAt: Math.round(stats.mtimeMs),
+    config: {
+      ...config,
+      token: signJwt(config),
+    },
+  };
+}
+
+function writeWorkspaceFileAtomically(filePath, data) {
+  const tempPath = path.join(
+    path.dirname(filePath),
+    `.entropic-onlyoffice-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
+  fs.writeFileSync(tempPath, data);
+  fs.renameSync(tempPath, filePath);
+}
+
+async function handleOnlyOfficeCallback(req, res, rawPath, token) {
+  const relativePath = normalizeWorkspaceEditorRelativePath(rawPath);
+  verifyOnlyOfficePathToken(token, "callback", relativePath);
+  const filePath = path.posix.join(WORKSPACE_ROOT, relativePath);
+  const body = await parseBody(req);
+  const status = Number(body?.status || 0);
+
+  if ((status === 2 || status === 6) && typeof body?.url === "string" && body.url.trim()) {
+    const sourceUrl = parseUrlOrNull(body.url.trim());
+    if (!sourceUrl || !ONLYOFFICE_ALLOWED_CALLBACK_HOSTS.has(sourceUrl.hostname.toLowerCase())) {
+      throw new Error("ONLYOFFICE save callback used an unexpected source host.");
+    }
+    const response = await fetch(sourceUrl, { method: "GET" });
+    if (!response.ok) {
+      throw new Error(`ONLYOFFICE save download failed with ${response.status}.`);
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    writeWorkspaceFileAtomically(filePath, bytes);
+  }
+
+  sendJson(res, 200, { error: 0 });
 }
 
 function resolveWorkspaceAssetFromUrl(rawUrl) {
@@ -1425,13 +1856,63 @@ const server = http.createServer(async (req, res) => {
     const parts = url.pathname.split("/").filter(Boolean);
     const proxiedPort = proxyPortFromHostHeader(req.headers.host);
 
+    if (req.method === "GET" && url.pathname === "/health") {
+      sendJson(res, 200, { ok: true, sessions: sessions.size });
+      return;
+    }
+
+    if (req.method === "GET" && parts.length === 2 && parts[0] === "__onlyoffice__" && parts[1] === "open") {
+      serveOnlyOfficeShell(res);
+      return;
+    }
+
+    if (parts.length === 2 && parts[0] === "__onlyoffice_api__") {
+      try {
+        const relativePath = normalizeWorkspaceEditorRelativePath(url.searchParams.get("path") || "");
+        if (req.method === "GET" && parts[1] === "config") {
+          sendJson(res, 200, onlyOfficeConfigPayload(relativePath, url.searchParams.get("token") || ""));
+          return;
+        }
+        if ((req.method === "GET" || req.method === "HEAD") && parts[1] === "file") {
+          verifyOnlyOfficePathToken(url.searchParams.get("token") || "", "download", relativePath);
+          const filePath = path.posix.join(WORKSPACE_ROOT, relativePath);
+          if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+            sendJson(res, 404, { error: "Workspace file not found" });
+            return;
+          }
+          const fileStats = fs.statSync(filePath);
+          res.writeHead(200, {
+            "Content-Type": contentTypeForFile(filePath),
+            "Cache-Control": "no-store",
+            "Content-Length": String(fileStats.size),
+            "Accept-Ranges": "bytes",
+          });
+          if (req.method === "HEAD") {
+            res.end();
+            return;
+          }
+          fs.createReadStream(filePath).pipe(res);
+          return;
+        }
+        if (req.method === "POST" && parts[1] === "callback") {
+          await handleOnlyOfficeCallback(req, res, relativePath, url.searchParams.get("token") || "");
+          return;
+        }
+      } catch (error) {
+        sendJson(res, /token/i.test(error?.message || "") ? 403 : 400, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+    }
+
     if (proxiedPort !== null) {
       proxyLocalAppRequest(req, res, proxiedPort);
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/health") {
-      sendJson(res, 200, { ok: true, sessions: sessions.size });
+    if (isOnlyOfficeProxyPath(url.pathname)) {
+      proxyOnlyOfficeRequest(req, res);
       return;
     }
 
@@ -1573,6 +2054,10 @@ liveWss.on("connection", async (socket, _req, session) => {
 server.on("upgrade", (req, socket, head) => {
   try {
     const url = new URL(req.url || "/", `http://127.0.0.1:${PORT}`);
+    if (isOnlyOfficeProxyPath(url.pathname)) {
+      proxyOnlyOfficeUpgrade(req, socket, head);
+      return;
+    }
     const proxiedPort = proxyPortFromHostHeader(req.headers.host);
     if (proxiedPort !== null) {
       proxyLocalAppUpgrade(req, socket, head, proxiedPort);

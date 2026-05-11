@@ -1795,6 +1795,23 @@ impl Runtime {
         "Entropic could not enable the required Windows features automatically. Enable Windows Subsystem for Linux and Virtual Machine Platform, restart Windows if prompted, then reopen Entropic.".to_string()
     }
 
+    fn windows_wsl_vm_platform_unavailable_message() -> String {
+        "Windows could not create the Entropic WSL2 sandbox VM because a required virtualization feature is unavailable. Enable Windows Subsystem for Linux and Virtual Machine Platform, make sure hardware virtualization is enabled in BIOS/UEFI, run `wsl.exe --update`, restart Windows completely, then reopen Entropic.".to_string()
+    }
+
+    fn windows_wsl_vm_platform_repair_completed_message() -> String {
+        "Entropic attempted to enable the Windows WSL2 virtualization features. Restart Windows completely, then reopen Entropic and retry setup. If this still fails, confirm Task Manager > Performance > CPU shows Virtualization: Enabled.".to_string()
+    }
+
+    fn output_mentions_windows_wsl_vm_platform_unavailable(text: &str) -> bool {
+        let lower = text.to_ascii_lowercase();
+        lower.contains("hcs_e_service_not_available")
+            || lower.contains("registerdistro/createvm")
+            || lower.contains("createvm/hc")
+            || lower.contains("required feature is not installed")
+            || lower.contains("required feautre is not installed")
+    }
+
     fn windows_wsl_available(&self) -> bool {
         for args in [
             &["--version"][..],
@@ -1911,6 +1928,58 @@ impl Runtime {
             "$p = Start-Process -FilePath wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
         )
         .map_err(|e| RuntimeError::CommandFailed(format!("Failed to request elevated WSL install: {}", e)))
+    }
+
+    fn run_elevated_windows_wsl_virtualization_repair(
+        &self,
+    ) -> Result<std::process::Output, RuntimeError> {
+        if std::env::var("ENTROPIC_TEST_WSL_STATE_FILE").is_ok() {
+            return self
+                .run_wsl(&["--install", "--no-distribution"])
+                .map_err(|e| {
+                    RuntimeError::CommandFailed(format!(
+                        "Failed to invoke test WSL repair shim: {}",
+                        e
+                    ))
+                });
+        }
+
+        self.run_windows_powershell(
+            r#"$repair = @'
+$ErrorActionPreference = "Continue"
+$failed = $false
+
+& dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
+if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) { $failed = $true }
+
+& dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) { $failed = $true }
+
+& bcdedit /set hypervisorlaunchtype auto
+if ($LASTEXITCODE -ne 0) { $failed = $true }
+
+try {
+  & wsl.exe --update
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warning "wsl.exe --update exited with $LASTEXITCODE"
+  }
+} catch {
+  Write-Warning "wsl.exe --update failed: $($_.Exception.Message)"
+}
+
+if ($failed) { exit 1 }
+exit 0
+'@
+$encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($repair))
+$p = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$encoded) -Verb RunAs -Wait -PassThru
+exit $p.ExitCode"#,
+        )
+        .map_err(|e| {
+            RuntimeError::CommandFailed(format!(
+                "Failed to request elevated WSL virtualization repair: {}",
+                e
+            ))
+        })
     }
 
     fn ensure_windows_wsl_platform(&self) -> Result<(), RuntimeError> {
@@ -2164,10 +2233,37 @@ impl Runtime {
             })?;
 
         if !import.status.success() {
+            let summary = Self::command_output_summary(&import);
+            if Self::output_mentions_windows_wsl_vm_platform_unavailable(&summary) {
+                debug_log(&format!(
+                    "WSL import failed because VM platform is unavailable; attempting elevated repair: {}",
+                    summary
+                ));
+                return match self.run_elevated_windows_wsl_virtualization_repair() {
+                    Ok(repair) if repair.status.success() => {
+                        Err(RuntimeError::CommandFailed(format!(
+                            "{} Original WSL error: {}",
+                            Self::windows_wsl_vm_platform_repair_completed_message(),
+                            summary
+                        )))
+                    }
+                    Ok(repair) => Err(RuntimeError::CommandFailed(format!(
+                        "{} Automatic repair was attempted but did not complete: {}. Original WSL error: {}",
+                        Self::windows_wsl_vm_platform_unavailable_message(),
+                        Self::command_output_summary(&repair),
+                        summary
+                    ))),
+                    Err(repair_err) => Err(RuntimeError::CommandFailed(format!(
+                        "{} Automatic repair could not be started: {}. Original WSL error: {}",
+                        Self::windows_wsl_vm_platform_unavailable_message(),
+                        repair_err,
+                        summary
+                    ))),
+                };
+            }
             return Err(RuntimeError::CommandFailed(format!(
                 "Failed to import {} distro: {}",
-                distro,
-                Self::command_output_summary(&import)
+                distro, summary
             )));
         }
 
@@ -4016,6 +4112,15 @@ exit 1
         assert!(
             Runtime::output_contains_manual_wsl_install_guidance(sample),
             "expected localized install guidance to be detected"
+        );
+    }
+
+    #[test]
+    fn windows_wsl_vm_platform_unavailable_detection_handles_import_error() {
+        let sample = "The operation could not be started because a required feautre is not installed. Error code: Wsl/Service/RegisterDistro/CreateVm/HC/HCS_E_SERVICE_NOT_AVAILABLE";
+        assert!(
+            Runtime::output_mentions_windows_wsl_vm_platform_unavailable(sample),
+            "expected WSL2 VM platform failure to be detected"
         );
     }
 

@@ -19,7 +19,11 @@ import {
   ChevronDown,
   ChevronUp,
   Bot,
+  Puzzle,
   User,
+  FileText,
+  Music2,
+  Mic,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
@@ -33,7 +37,6 @@ import {
   type GatewayMessage,
 } from "../lib/gateway";
 import {
-  getProfileInitials,
   isRenderableAvatarDataUrl,
   loadOnboardingData,
   loadProfile,
@@ -45,6 +48,7 @@ import {
 import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
 import { TelegramSetupModal } from "../components/TelegramSetupModal";
 import { MarkdownContent } from "../components/MarkdownContent";
+import { AgentAvatar } from "../components/AgentAvatar";
 import { useAuth } from "../contexts/AuthContext";
 import {
   syncAllIntegrationsToGateway,
@@ -63,6 +67,12 @@ import {
   type SuggestionTaskPreset,
 } from "../lib/chatQuickActions";
 import {
+  extractWorkspaceOfficeFileName,
+  formatWorkspaceOfficeRoutingPrompt,
+  shouldRouteWorkspaceOfficeRequest,
+  workspaceOfficeRequestWantsDesktopOpen,
+} from "../lib/chatOfficeRouting";
+import {
   addTaskBoardItem,
   formatTaskBoardOwnerLabel,
   formatTaskBoardStatusLabel,
@@ -70,11 +80,9 @@ import {
   type TaskBoardChatIntent,
 } from "../lib/taskBoard";
 import { resolveGatewayAuth } from "../lib/gateway-auth";
+import { clientLog } from "../lib/clientLog";
 import { appendDiagnosticLog } from "../lib/diagnostics";
 import { entropicSitePath } from "../lib/buildProfile";
-import {
-  workspaceBrowserUrl,
-} from "../lib/nativePreview";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { getLocalCreditBalance } from "../lib/localCredits";
 import { signInWithDiscord, signInWithEmail, signInWithGoogle, signUpWithEmail, createCheckout, getBalance } from "../lib/auth";
@@ -126,6 +134,26 @@ import {
   isChannelOriginGatewayMessage,
   normalizeGatewayMessage,
 } from "../lib/chatMessageUtils";
+import {
+  recordedAudioHasDetectedSpeech,
+  useAudioRecorder,
+  type RecordedAudioAttachment,
+} from "../desktop/voice/useAudioRecorder";
+import {
+  cleanRecordedVoiceTranscript,
+  useAudioTranscription,
+} from "../desktop/voice/useAudioTranscription";
+import { useLiveSpeechRecognition } from "../desktop/voice/useLiveSpeechRecognition";
+import { useStreamingAudioTranscription } from "../desktop/voice/useStreamingAudioTranscription";
+import { useTextToSpeech } from "../desktop/voice/useTextToSpeech";
+import {
+  DEFAULT_VOICE_SPEECH_RATE,
+  DEFAULT_VOICE_SPEECH_VOICE,
+  normalizeVoiceSpeechRate,
+  normalizeVoiceSpeechVoice,
+  voiceIdForSpeechProvider,
+  type VoiceSpeechVoice,
+} from "../desktop/voice/voicePreferences";
 
 type GatewayMutationResult = {
   plan: "noop" | "config_reload" | "container_restart" | "container_recreate";
@@ -135,7 +163,8 @@ export type { ChatSession };
 export type ChatSessionActionRequest =
   | { id: string; type: "delete"; key: string }
   | { id: string; type: "pin"; key: string; pinned: boolean }
-  | { id: string; type: "rename"; key: string; label: string };
+  | { id: string; type: "rename"; key: string; label: string }
+  | { id: string; type: "compose"; key?: string; prompt: string; submit?: boolean; speakResponse?: boolean };
 type Provider = { id: string; name: string; icon: string; placeholder: string; keyUrl: string };
 type PendingAttachment = {
   id: string;
@@ -178,6 +207,7 @@ type ChatImageGenerationResponse = {
 };
 
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
+const DESKTOP_HANDOFF_EVENT = "entropic-desktop-handoff";
 const TERMINAL_DEFAULT_CWD = "/data/workspace";
 const DEFAULT_COMPOSER_MODE: ComposerMode = "chat";
 const CHAT_WORKSPACE_PREFIXES = [
@@ -188,6 +218,100 @@ const CHAT_WORKSPACE_PREFIXES = [
 const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/node\/\.openclaw\/workspace)(?:\/[^\s`"'<>]+)?)/g;
 const FINAL_RESPONSE_RECOVERY_RETRY_MS = 1200;
 const FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS = 2;
+const MAX_VOICE_RESPONSE_SPEECH_CHARS = 1800;
+const VOICE_TTS_MIN_STREAM_CHARS = 18;
+const VOICE_TTS_MAX_STREAM_CHARS = 360;
+
+type VoiceSpeechChunk = {
+  sequence: number;
+  text: string;
+  source: "delta" | "final_event" | "history";
+};
+
+type VoiceSpeechRunState = {
+  lastSourceText: string;
+  pendingText: string;
+  queue: VoiceSpeechChunk[];
+  processing: boolean;
+  final: boolean;
+  started: boolean;
+  notified: boolean;
+  sequence: number;
+  queuedAny: boolean;
+};
+
+function formatAssistantResponseForSpeech(text: string): string {
+  const normalized = text
+    .replace(/```[\s\S]*?```/g, "Code block omitted.")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s{0,3}[-*+]\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length <= MAX_VOICE_RESPONSE_SPEECH_CHARS) {
+    return normalized;
+  }
+  return `${normalized.slice(0, MAX_VOICE_RESPONSE_SPEECH_CHARS).trim()}...`;
+}
+
+function audioDataUrlFromBase64(base64: string, mimeType?: string | null): string {
+  return `data:${mimeType?.trim() || "audio/mpeg"};base64,${base64.trim()}`;
+}
+
+function findVoiceSpeechBoundary(text: string): number {
+  const limit = Math.min(text.length, VOICE_TTS_MAX_STREAM_CHARS);
+  let newlineBoundary = -1;
+  for (let index = 0; index < limit; index += 1) {
+    const char = text[index];
+    const next = text[index + 1] || "";
+    const candidateLength = text.slice(0, index + 1).trim().length;
+    if (char === "\n" && candidateLength >= VOICE_TTS_MIN_STREAM_CHARS) {
+      newlineBoundary = index + 1;
+    }
+    if (
+      (char === "." || char === "!" || char === "?") &&
+      candidateLength >= VOICE_TTS_MIN_STREAM_CHARS &&
+      (!next || /\s/.test(next))
+    ) {
+      return index + 1;
+    }
+  }
+
+  if (newlineBoundary >= 0) return newlineBoundary;
+  if (text.length <= VOICE_TTS_MAX_STREAM_CHARS) return -1;
+
+  const hardLimit = Math.min(text.length, VOICE_TTS_MAX_STREAM_CHARS);
+  for (let index = hardLimit; index >= VOICE_TTS_MIN_STREAM_CHARS; index -= 1) {
+    if (/\s/.test(text[index] || "")) {
+      return index + 1;
+    }
+  }
+  return hardLimit;
+}
+
+function splitVoiceSpeechBuffer(
+  buffer: string,
+  final: boolean,
+): { chunks: string[]; rest: string } {
+  const chunks: string[] = [];
+  let rest = buffer;
+
+  while (rest.trim()) {
+    const boundary = findVoiceSpeechBoundary(rest);
+    if (boundary < 0) break;
+    const chunk = rest.slice(0, boundary).trim();
+    rest = rest.slice(boundary).trimStart();
+    if (chunk) chunks.push(chunk);
+  }
+
+  if (final && rest.trim()) {
+    chunks.push(rest.trim());
+    rest = "";
+  }
+
+  return { chunks, rest };
+}
 
 function trimChatWorkspaceToken(raw: string): string {
   return raw
@@ -272,24 +396,6 @@ function extractWorkspaceChatReferences(content: string): WorkspaceChatReference
 // OAuth icons imported from shared component
 import { GoogleIcon, DiscordIcon } from "../components/OAuthIcons";
 
-// ── Default avatar colors ──────────────────────────────────────
-const AVATAR_COLORS = [
-  "#8b5cf6", "#6366f1", "#3b82f6", "#06b6d4", "#14b8a6",
-  "#10b981", "#f59e0b", "#f97316", "#ef4444", "#ec4899",
-];
-
-function getAvatarColor(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = name.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
-}
-
-function getInitials(name: string): string {
-  return getProfileInitials(name, 2);
-}
-
 function GoogleCalendarLogo({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
@@ -355,6 +461,124 @@ type PersistedChatData = {
   currentSession: string | null;
   outbox: PersistedPendingSend[];
 };
+
+type ChatToolActivityStatus = "running" | "complete" | "error";
+
+type ChatToolActivity = {
+  id: string;
+  name: string;
+  label: string;
+  status: ChatToolActivityStatus;
+  detail?: string;
+  seq: number;
+  ts: number;
+};
+
+const SETTINGS_PROFILE_REQUEST_EVENT = "entropic-settings-open-profile";
+const SETTINGS_PROFILE_REQUEST_KEY = "entropic.settings.requestedSection";
+
+const THINKING_WORDS = [
+  "Thinking",
+  "Reasoning",
+  "Synthesizing",
+  "Mapping",
+  "Parsing",
+  "Weighing",
+  "Composing",
+  "Drafting",
+  "Inspecting",
+  "Solving",
+  "Planning",
+  "Tracing",
+  "Checking",
+  "Refining",
+  "Structuring",
+  "Connecting",
+  "Searching",
+  "Reading",
+  "Calculating",
+  "Evaluating",
+  "Designing",
+  "Building",
+  "Testing",
+  "Verifying",
+  "Aligning",
+  "Debugging",
+  "Organizing",
+  "Clarifying",
+  "Comparing",
+  "Integrating",
+  "Sequencing",
+  "Modeling",
+  "Projecting",
+  "Exploring",
+  "Distilling",
+  "Interpreting",
+  "Reframing",
+  "Balancing",
+  "Prioritizing",
+  "Simulating",
+  "Navigating",
+  "Scanning",
+  "Reviewing",
+  "Assembling",
+  "Optimizing",
+  "Polishing",
+  "Resolving",
+  "Translating",
+  "Summarizing",
+  "Generating",
+  "Coordinating",
+  "Validating",
+  "Triaging",
+  "Investigating",
+  "Unpacking",
+  "Filtering",
+  "Ranking",
+  "Selecting",
+  "Expanding",
+  "Condensing",
+  "Calibrating",
+  "Inferring",
+  "Contextualizing",
+  "Grounding",
+  "Focusing",
+  "Sharpening",
+  "Iterating",
+  "Routing",
+  "Synchronizing",
+  "Preparing",
+  "Forming",
+  "Linking",
+  "Measuring",
+  "Rendering",
+  "Updating",
+  "Adapting",
+  "Tuning",
+  "Compressing",
+  "Indexing",
+  "Sampling",
+  "Estimating",
+  "Scheduling",
+  "Threading",
+  "Merging",
+  "Sorting",
+  "Staging",
+  "Cataloging",
+  "Fetching",
+  "Querying",
+  "Crosschecking",
+  "Harmonizing",
+  "Orchestrating",
+  "Reconciling",
+  "Segmenting",
+  "Annotating",
+  "Comprehending",
+  "Forecasting",
+  "Curating",
+  "Evolving",
+  "Finalizing",
+] as const;
 
 function normalizeSessionsList(list: ChatSession[]): ChatSession[] {
   const byKey = new Map<string, ChatSession>();
@@ -466,6 +690,69 @@ function normalizePersistedPendingSend(raw: unknown): PersistedPendingSend | nul
     createdAt,
     attemptCount,
     nextAttemptAt,
+  };
+}
+
+function compactToolText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+  return text.length > 120 ? `${text.slice(0, 117).trimEnd()}...` : text;
+}
+
+function humanizeToolName(name: string): string {
+  const cleaned = name.trim().replace(/^functions\./, "");
+  if (!cleaned) return "Tool";
+  return cleaned
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function toolStatusFromAgentData(data: Record<string, unknown>): ChatToolActivityStatus {
+  const raw = String(data.status ?? data.state ?? data.phase ?? "").toLowerCase();
+  if (raw.includes("error") || raw.includes("fail")) return "error";
+  if (raw.includes("end") || raw.includes("done") || raw.includes("complete") || raw.includes("success")) {
+    return "complete";
+  }
+  return "running";
+}
+
+function toolDetailFromAgentData(data: Record<string, unknown>): string | undefined {
+  return (
+    compactToolText(data.title) ??
+    compactToolText(data.message) ??
+    compactToolText(data.query) ??
+    compactToolText(data.path) ??
+    compactToolText(data.url) ??
+    compactToolText(data.command) ??
+    compactToolText(data.error)
+  );
+}
+
+function toolActivityFromAgentEvent(event: AgentEvent): ChatToolActivity | null {
+  if (event.stream !== "tool") return null;
+  const data = event.data || {};
+  const rawName =
+    compactToolText(data.name) ??
+    compactToolText(data.tool) ??
+    compactToolText(data.toolName) ??
+    compactToolText(data.call) ??
+    "tool";
+  const id =
+    compactToolText(data.id) ??
+    compactToolText(data.callId) ??
+    compactToolText(data.toolCallId) ??
+    rawName;
+  return {
+    id,
+    name: rawName,
+    label: humanizeToolName(rawName),
+    status: toolStatusFromAgentData(data),
+    detail: toolDetailFromAgentData(data),
+    seq: event.seq,
+    ts: event.ts || Date.now(),
   };
 }
 
@@ -659,8 +946,8 @@ const TERMS_URL = entropicSitePath("/terms");
 const PRIVACY_URL = entropicSitePath("/privacy");
 const HISTORY_LIMIT = 500;
 const ACTIVE_RUN_IDLE_TIMEOUT_MS = 120_000;
-const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 4;
-const MAX_IMAGE_ATTACHMENT_BYTES = 5_000_000;
+const MAX_ATTACHMENTS_PER_MESSAGE = 4;
+const MAX_ATTACHMENT_BYTES = 5_000_000;
 const GENERATED_IMAGES_DEST_PATH = "generated-images";
 
 const QUICK_ACTION_ICONS: Record<ChatQuickActionIcon, typeof Mail> = {
@@ -673,10 +960,10 @@ const QUICK_ACTION_ICONS: Record<ChatQuickActionIcon, typeof Mail> = {
   user: User,
 };
 
-const INTEGRATION_LOGOS: Record<
+const INTEGRATION_LOGOS: Partial<Record<
   IntegrationQuickActionRequirement["provider"],
   ComponentType<{ className?: string }>
-> = {
+>> = {
   google_email: GmailLogo,
   google_calendar: GoogleCalendarLogo,
   x: XLogo,
@@ -1014,6 +1301,26 @@ function parseXSearchIntent(raw: string): XSearchIntent | null {
   return { topic: null };
 }
 
+function parseGmailIntent(raw: string): boolean {
+  const text = raw.trim().toLowerCase();
+  if (!text) return false;
+
+  // Keep explicit Microsoft mail requests on the Outlook path.
+  if (/\b(?:outlook|microsoft\s+mail|office\s*365\s+mail)\b/.test(text)) {
+    return false;
+  }
+
+  const mentionsGmail = /\bgmail\b/.test(text);
+  const mentionsInbox = /\binbox\b/.test(text);
+  const mentionsComposioGmail =
+    /\bcomposio\b/.test(text) && /\b(?:gmail|email|emails|mail|inbox)\b/.test(text);
+  const mentionsGenericMail =
+    /\b(?:email|emails|mail|messages?)\b/.test(text) &&
+    /\b(?:check|search|read|summari[sz]e|triage|send|draft|reply|inbox)\b/.test(text);
+
+  return mentionsGmail || mentionsInbox || mentionsComposioGmail || mentionsGenericMail;
+}
+
 export function Chat({
   isVisible,
   gatewayRunning,
@@ -1028,6 +1335,10 @@ export function Chat({
   onModelChange: _onModelChange,
   imageModel: _imageModel,
   imageGenerationModel,
+  textToSpeechModel,
+  audioUnderstandingModel,
+  voiceSpeechRate = DEFAULT_VOICE_SPEECH_RATE,
+  voiceSpeechVoice = DEFAULT_VOICE_SPEECH_VOICE,
   integrationsSyncing,
   integrationsMissing,
   onNavigate,
@@ -1049,6 +1360,10 @@ export function Chat({
   onModelChange?: (model: string) => void;
   imageModel: string;
   imageGenerationModel: string;
+  textToSpeechModel: string;
+  audioUnderstandingModel: string;
+  voiceSpeechRate?: number;
+  voiceSpeechVoice?: VoiceSpeechVoice;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
   onNavigate?: (page: Page) => void;
@@ -1099,6 +1414,10 @@ export function Chat({
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [savingWorkspaceImageKeys, setSavingWorkspaceImageKeys] = useState<Record<string, boolean>>({});
   const [savedWorkspaceImagePaths, setSavedWorkspaceImagePaths] = useState<Record<string, string>>({});
+  const [toolActivityByRunId, setToolActivityByRunId] = useState<Record<string, ChatToolActivity[]>>({});
+  const [activeToolRunId, setActiveToolRunId] = useState<string | null>(null);
+  const [loadingWordIndex, setLoadingWordIndex] = useState(0);
+  const [loadingWordChanging, setLoadingWordChanging] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [onboardingData, setOnboardingData] = useState<OnboardingData | null>(null);
   const [agentProfile, setAgentProfile] = useState<AgentProfile | null>(null);
@@ -1174,9 +1493,19 @@ export function Chat({
   const avatarUploadDataUrlByFileNameRef = useRef<Map<string, string>>(new Map());
   const wasVisibleRef = useRef(isVisible !== false);
   const outboxReplayInFlightRef = useRef(false);
+  const streamedAssistantRunIdsRef = useRef<Set<string>>(new Set());
   const outboxDispatchInFlightRef = useRef<Set<string>>(new Set());
   const outboxWakeTimerRef = useRef<number | null>(null);
   const connectingScreenTimerRef = useRef<number | null>(null);
+  const voiceSpeakResponseBySendIdRef = useRef<Set<string>>(new Set());
+  const voiceSpeakResponseByRunIdRef = useRef<Set<string>>(new Set());
+  const voiceReplyAudioRef = useRef<HTMLAudioElement | null>(null);
+  const voiceSpeakingRunIdRef = useRef<string | null>(null);
+  const voiceSpeechRunStateByRunIdRef = useRef<Record<string, VoiceSpeechRunState>>({});
+  const liveVoiceDraftBaseRef = useRef<{ sessionKey: string; baseText: string } | null>(null);
+  const sendAfterLiveVoiceStopRef = useRef(false);
+  const workspaceOfficeOpenBySendIdRef = useRef<Record<string, { path: string }>>({});
+  const workspaceOfficeOpenByRunIdRef = useRef<Record<string, { path: string }>>({});
   const [outboxWakeTick, setOutboxWakeTick] = useState(0);
   const activeComposerMode = currentSession
     ? composerModeBySession[currentSession] || DEFAULT_COMPOSER_MODE
@@ -1184,6 +1513,193 @@ export function Chat({
   const activeTerminalState = currentSession
     ? terminalStateBySession[currentSession] || { cwd: TERMINAL_DEFAULT_CWD }
     : { cwd: TERMINAL_DEFAULT_CWD };
+  const normalizedVoiceSpeechRate = normalizeVoiceSpeechRate(voiceSpeechRate);
+  const normalizedVoiceSpeechVoice = normalizeVoiceSpeechVoice(voiceSpeechVoice);
+  const voiceSpeechProviderVoiceId = voiceIdForSpeechProvider(normalizedVoiceSpeechVoice, {
+    useLocalKeys,
+  });
+  const { isTranscribing, transcribeAudio } = useAudioTranscription(audioUnderstandingModel);
+  const { isGeneratingAudio, generateSpeech } = useTextToSpeech(textToSpeechModel, {
+    voiceId: voiceSpeechProviderVoiceId,
+    speed: normalizedVoiceSpeechRate,
+  });
+
+  function resizeChatComposer() {
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.style.height = "auto";
+      const lineHeight = parseInt(getComputedStyle(textarea).lineHeight) || 20;
+      const maxHeight = lineHeight * 5;
+      textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+    });
+  }
+
+  async function startChatVoiceCapture() {
+    const sessionKey = currentSession || ensureComposerSession();
+    if (!sessionKey) return;
+    setComposerModeForSession(sessionKey, "chat");
+    sendAfterLiveVoiceStopRef.current = false;
+    setError(null);
+    if (liveSpeech.isSupported) {
+      liveVoiceDraftBaseRef.current = {
+        sessionKey,
+        baseText: draftsRef.current[sessionKey] || "",
+      };
+      setThinkingStatus("Listening");
+      if (liveSpeech.start({ continuous: true, autoRestart: true })) {
+        resizeChatComposer();
+        return;
+      }
+      liveVoiceDraftBaseRef.current = null;
+      setThinkingStatus(null);
+    }
+    if (streamingSpeech.isSupported) {
+      liveVoiceDraftBaseRef.current = {
+        sessionKey,
+        baseText: draftsRef.current[sessionKey] || "",
+      };
+      setThinkingStatus("Listening");
+      if (await streamingSpeech.start()) {
+        resizeChatComposer();
+        return;
+      }
+      liveVoiceDraftBaseRef.current = null;
+      setThinkingStatus(null);
+    }
+    setError("Live dictation is not available in this WebView.");
+  }
+
+  function handleComposerSend() {
+    if (liveSpeech.isListening) {
+      sendAfterLiveVoiceStopRef.current = true;
+      liveSpeech.stop();
+      return;
+    }
+    if (streamingSpeech.isRecording) {
+      sendAfterLiveVoiceStopRef.current = true;
+      streamingSpeech.stop();
+      return;
+    }
+    void handleSend();
+  }
+
+  function setChatDraftForSession(sessionKey: string, nextValue: string) {
+    setDraftsBySession((prev) => {
+      if (prev[sessionKey] === nextValue) return prev;
+      return { ...prev, [sessionKey]: nextValue };
+    });
+    resizeChatComposer();
+  }
+
+  function updateLiveVoiceDraft(transcript: string) {
+    const normalized = cleanRecordedVoiceTranscript(transcript).trim();
+    const base = liveVoiceDraftBaseRef.current;
+    if (!base) return;
+    const nextValue = normalized
+      ? base.baseText.trim()
+        ? `${base.baseText.trimEnd()}\n\n${normalized}`
+        : normalized
+      : base.baseText;
+    setComposerModeForSession(base.sessionKey, "chat");
+    setChatDraftForSession(base.sessionKey, nextValue);
+  }
+
+  function finishLiveVoiceCapture(text: string) {
+    updateLiveVoiceDraft(text);
+    liveVoiceDraftBaseRef.current = null;
+    setThinkingStatus(null);
+    if (sendAfterLiveVoiceStopRef.current) {
+      sendAfterLiveVoiceStopRef.current = false;
+      window.setTimeout(() => {
+        void handleSend();
+      }, 0);
+    }
+  }
+
+  function handleLiveVoiceError(message: string) {
+    sendAfterLiveVoiceStopRef.current = false;
+    setError(message);
+    setThinkingStatus(null);
+  }
+
+  const liveSpeech = useLiveSpeechRecognition({
+    onPartial: updateLiveVoiceDraft,
+    onFinal: updateLiveVoiceDraft,
+    onEnd: finishLiveVoiceCapture,
+    onError: handleLiveVoiceError,
+  });
+
+  const streamingSpeech = useStreamingAudioTranscription({
+    model: audioUnderstandingModel,
+    maxBytes: MAX_ATTACHMENT_BYTES,
+    onPartial: updateLiveVoiceDraft,
+    onEnd: finishLiveVoiceCapture,
+    onError: handleLiveVoiceError,
+  });
+
+  function attachRecordedAudio(attachment: RecordedAudioAttachment) {
+    setPendingAttachments((prev) => {
+      if (prev.length >= MAX_ATTACHMENTS_PER_MESSAGE) {
+        setError(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`);
+        revokeAttachmentPreviewUrl(attachment);
+        return prev;
+      }
+      return [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          fileName: attachment.fileName,
+          mimeType: attachment.mimeType,
+          content: attachment.content,
+          previewUrl: attachment.previewUrl,
+        },
+      ];
+    });
+  }
+
+  async function handleRecordedAudio(attachment: RecordedAudioAttachment) {
+    try {
+      setThinkingStatus("Transcribing recording");
+      setError(null);
+      if (!recordedAudioHasDetectedSpeech(attachment)) {
+        revokeAttachmentPreviewUrl(attachment);
+        setError("I didn't catch any speech in that recording. Try again.");
+        return;
+      }
+      const transcript = cleanRecordedVoiceTranscript(await transcribeAudio([attachment]));
+      insertTextIntoChatDraft(transcript);
+      revokeAttachmentPreviewUrl(attachment);
+    } catch (error) {
+      attachRecordedAudio(attachment);
+      setError(
+        `${formatUnknownUiError(error, "Failed to transcribe recording.")} The audio was attached so you can retry.`,
+      );
+    } finally {
+      setThinkingStatus(null);
+    }
+  }
+
+  const audioRecorder = useAudioRecorder({
+    maxBytes: MAX_ATTACHMENT_BYTES,
+    onRecorded: handleRecordedAudio,
+    onError: setError,
+    autoStopOnSilence: {
+      levelThreshold: 0.0035,
+      silenceLevelThreshold: 0.0025,
+      peakSilenceRatio: 0.18,
+      noiseFloorMultiplier: 1.35,
+      silenceMs: 750,
+      minRecordingMs: 500,
+      checkIntervalMs: 60,
+    },
+  });
+  const pendingAudioAttachments = pendingAttachments.filter((attachment) =>
+    attachment.mimeType.startsWith("audio/"),
+  );
+  const hasPendingAudioAttachments = pendingAudioAttachments.length > 0;
   const integrationSetup = currentSession ? integrationSetupBySession[currentSession] || null : null;
   const quickSuggestion = currentSession ? quickSuggestionBySession[currentSession] || null : null;
   const builderChecklist = currentSession ? builderChecklistBySession[currentSession] || null : null;
@@ -1343,33 +1859,79 @@ export function Chat({
     });
   }
 
-  async function addImageAttachments(filesInput: FileList | File[] | null | undefined) {
+  function revokeAttachmentPreviewUrl(attachment: Pick<PendingAttachment, "previewUrl">) {
+    if (attachment.previewUrl?.startsWith("blob:")) {
+      URL.revokeObjectURL(attachment.previewUrl);
+    }
+  }
+
+  function attachmentKindLabel(mimeType: string): string {
+    const normalized = mimeType.trim().toLowerCase();
+    if (normalized.startsWith("image/")) return "image";
+    if (normalized.startsWith("audio/")) return "audio";
+    if (normalized.startsWith("text/")) return "text";
+    if (normalized === "application/pdf") return "pdf";
+    return "file";
+  }
+
+  function renderPendingAttachmentPreview(attachment: PendingAttachment) {
+    if (attachment.mimeType.startsWith("image/") && attachment.previewUrl) {
+      return (
+        <img
+          src={attachment.previewUrl}
+          alt={attachment.fileName}
+          className="w-8 h-8 rounded object-cover"
+        />
+      );
+    }
+    if (attachment.mimeType.startsWith("audio/")) {
+      return (
+        <div className="flex h-8 w-8 items-center justify-center rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)]">
+          <Music2 className="h-4 w-4" />
+        </div>
+      );
+    }
+    return (
+      <div className="flex h-8 w-8 items-center justify-center rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)]">
+        <FileText className="h-4 w-4" />
+      </div>
+    );
+  }
+
+  async function addAttachments(filesInput: FileList | File[] | null | undefined) {
     const files = filesInput ? Array.from(filesInput) : [];
     if (files.length === 0) return;
 
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-    if (imageFiles.length === 0) {
-      setError("Only image attachments are supported right now.");
+    const allowedFiles =
+      activeComposerMode === "image"
+        ? files.filter((file) => file.type.startsWith("image/"))
+        : files;
+    if (allowedFiles.length === 0) {
+      setError(
+        activeComposerMode === "image"
+          ? "Only image attachments are supported in Image mode."
+          : "No supported attachments were selected.",
+      );
       return;
     }
 
-    const remainingSlots = Math.max(0, MAX_IMAGE_ATTACHMENTS_PER_MESSAGE - pendingAttachments.length);
+    const remainingSlots = Math.max(0, MAX_ATTACHMENTS_PER_MESSAGE - pendingAttachments.length);
     if (remainingSlots <= 0) {
-      setError(`You can attach up to ${MAX_IMAGE_ATTACHMENTS_PER_MESSAGE} images per message.`);
+      setError(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`);
       return;
     }
 
-    const selectedFiles = imageFiles.slice(0, remainingSlots);
-    if (imageFiles.length > remainingSlots) {
-      setError(`You can attach up to ${MAX_IMAGE_ATTACHMENTS_PER_MESSAGE} images per message.`);
+    const selectedFiles = allowedFiles.slice(0, remainingSlots);
+    if (allowedFiles.length > remainingSlots) {
+      setError(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`);
     } else {
       setError(null);
     }
 
     const nextAttachments: PendingAttachment[] = [];
     for (const file of selectedFiles) {
-      if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
-        setError(`${file.name} is too large. Max size is 5 MB per image.`);
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setError(`${file.name} is too large. Max size is 5 MB per file.`);
         continue;
       }
       try {
@@ -1381,18 +1943,20 @@ export function Chat({
         nextAttachments.push({
           id: crypto.randomUUID(),
           fileName: file.name,
-          mimeType: file.type || "image/png",
+          mimeType: file.type || "application/octet-stream",
           content: base64,
           previewUrl: dataUrl,
         });
-        const key = normalizeAttachmentFileName(file.name);
-        if (key) {
-          avatarUploadDataUrlByFileNameRef.current.set(key, dataUrl);
-          if (avatarUploadDataUrlByFileNameRef.current.size > 128) {
-            const firstKey = avatarUploadDataUrlByFileNameRef.current.keys().next().value as
-              | string
-              | undefined;
-            if (firstKey) avatarUploadDataUrlByFileNameRef.current.delete(firstKey);
+        if (file.type.startsWith("image/")) {
+          const key = normalizeAttachmentFileName(file.name);
+          if (key) {
+            avatarUploadDataUrlByFileNameRef.current.set(key, dataUrl);
+            if (avatarUploadDataUrlByFileNameRef.current.size > 128) {
+              const firstKey = avatarUploadDataUrlByFileNameRef.current.keys().next().value as
+                | string
+                | undefined;
+              if (firstKey) avatarUploadDataUrlByFileNameRef.current.delete(firstKey);
+            }
           }
         }
       } catch (err) {
@@ -1406,7 +1970,400 @@ export function Chat({
   }
 
   function removePendingAttachment(attachmentId: string) {
-    setPendingAttachments((prev) => prev.filter((attachment) => attachment.id !== attachmentId));
+    setPendingAttachments((prev) => {
+      const next: PendingAttachment[] = [];
+      for (const attachment of prev) {
+        if (attachment.id === attachmentId) {
+          revokeAttachmentPreviewUrl(attachment);
+        } else {
+          next.push(attachment);
+        }
+      }
+      return next;
+    });
+  }
+
+  function clearPendingAttachments() {
+    setPendingAttachments((prev) => {
+      for (const attachment of prev) {
+        revokeAttachmentPreviewUrl(attachment);
+      }
+      return [];
+    });
+  }
+
+  function insertTextIntoChatDraft(text: string) {
+    const sessionKey = currentSession || ensureComposerSession();
+    if (!sessionKey) return;
+    setComposerModeForSession(sessionKey, "chat");
+    setDraftsBySession((prev) => {
+      const existing = (prev[sessionKey] || "").trim();
+      const nextValue = existing ? `${existing}\n\n${text}` : text;
+      if (prev[sessionKey] === nextValue) return prev;
+      return { ...prev, [sessionKey]: nextValue };
+    });
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.style.height = "auto";
+      const lineHeight = parseInt(getComputedStyle(textarea).lineHeight) || 20;
+      const maxHeight = lineHeight * 5;
+      textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+    });
+  }
+
+  async function transcribePendingAudio() {
+    try {
+      setThinkingStatus("Transcribing audio");
+      setError(null);
+      const transcript = await transcribeAudio(pendingAudioAttachments);
+      insertTextIntoChatDraft(transcript);
+    } catch (error) {
+      setError(formatUnknownUiError(error, "Failed to transcribe audio."));
+    } finally {
+      setThinkingStatus(null);
+    }
+  }
+
+  function notifyVoiceResponseComplete(runId: string) {
+    window.dispatchEvent(
+      new CustomEvent("entropic-voice-response-complete", {
+        detail: { runId },
+      }),
+    );
+  }
+
+  function notifyVoiceResponseStarted(runId: string) {
+    window.dispatchEvent(
+      new CustomEvent("entropic-voice-response-started", {
+        detail: { runId },
+      }),
+    );
+  }
+
+  function getVoiceSpeechRunState(runId: string): VoiceSpeechRunState {
+    const existing = voiceSpeechRunStateByRunIdRef.current[runId];
+    if (existing) return existing;
+    const next: VoiceSpeechRunState = {
+      lastSourceText: "",
+      pendingText: "",
+      queue: [],
+      processing: false,
+      final: false,
+      started: false,
+      notified: false,
+      sequence: 0,
+      queuedAny: false,
+    };
+    voiceSpeechRunStateByRunIdRef.current[runId] = next;
+    return next;
+  }
+
+  function clearCurrentVoiceReplyAudio() {
+    const audio = voiceReplyAudioRef.current;
+    if (!audio) return;
+    audio.pause();
+    audio.removeAttribute("src");
+    voiceReplyAudioRef.current = null;
+  }
+
+  function completeVoiceSpeechRun(runId: string) {
+    const state = voiceSpeechRunStateByRunIdRef.current[runId];
+    if (state?.notified) return;
+    if (state) state.notified = true;
+    delete voiceSpeechRunStateByRunIdRef.current[runId];
+    voiceSpeakResponseByRunIdRef.current.delete(runId);
+    if (voiceSpeakingRunIdRef.current === runId) {
+      voiceSpeakingRunIdRef.current = null;
+    }
+    setThinkingStatus((current) => (current === "Speaking response" ? null : current));
+    notifyVoiceResponseComplete(runId);
+  }
+
+  async function createVoiceSpeechAudio(
+    runId: string,
+    speechText: string,
+    chunk: VoiceSpeechChunk,
+  ): Promise<HTMLAudioElement | null> {
+    if (!voiceSpeakResponseByRunIdRef.current.has(runId)) return null;
+    voiceSpeakingRunIdRef.current = runId;
+
+    try {
+      const liveClient = clientRef.current;
+      if (!liveClient || !liveClient.isConnected()) {
+        throw new Error("OpenClaw is not connected, so the response could not be read back.");
+      }
+      const result = await liveClient.talkSpeak(speechText, {
+        voiceId: voiceSpeechProviderVoiceId,
+        speed: normalizedVoiceSpeechRate,
+      });
+      if (voiceSpeakingRunIdRef.current !== runId || !voiceSpeakResponseByRunIdRef.current.has(runId)) {
+        return null;
+      }
+      if (!result.audioBase64?.trim()) {
+        throw new Error("OpenClaw talk.speak did not return audio.");
+      }
+
+      clientLog("voice.reply.openclaw_tts", {
+        runId,
+        sequence: chunk.sequence,
+        source: chunk.source,
+        chars: speechText.length,
+        provider: result.provider,
+        outputFormat: result.outputFormat,
+        mimeType: result.mimeType,
+      });
+      return new Audio(audioDataUrlFromBase64(result.audioBase64, result.mimeType));
+    } catch (openClawError) {
+      const openClawMessage = formatUnknownUiError(
+        openClawError,
+        "OpenClaw talk.speak failed.",
+      );
+      addDiag(`voice reply OpenClaw TTS failed runId=${runId} seq=${chunk.sequence}: ${openClawMessage}`);
+      if (voiceSpeakingRunIdRef.current !== runId || !voiceSpeakResponseByRunIdRef.current.has(runId)) {
+        return null;
+      }
+
+      try {
+        const fallback = await generateSpeech(speechText);
+        if (voiceSpeakingRunIdRef.current !== runId || !voiceSpeakResponseByRunIdRef.current.has(runId)) {
+          return null;
+        }
+        const generatedAudio = fallback.audio[0];
+        if (!generatedAudio?.previewUrl) {
+          throw new Error("Managed speech fallback did not return audio.");
+        }
+
+        clientLog("voice.reply.managed_tts_fallback", {
+          runId,
+          sequence: chunk.sequence,
+          source: chunk.source,
+          chars: speechText.length,
+          mimeType: generatedAudio.mimeType,
+        });
+        return new Audio(generatedAudio.previewUrl);
+      } catch (fallbackError) {
+        const fallbackMessage = formatUnknownUiError(
+          fallbackError,
+          "Managed speech fallback failed.",
+        );
+        addDiag(`voice reply fallback failed runId=${runId} seq=${chunk.sequence}: ${fallbackMessage}`);
+        if (voiceSpeakingRunIdRef.current === runId) {
+          voiceSpeakingRunIdRef.current = null;
+        }
+        setError(`${openClawMessage} ${fallbackMessage}`);
+        return null;
+      }
+    }
+  }
+
+  function playVoiceSpeechAudio(runId: string, audio: HTMLAudioElement): Promise<void> {
+    clearCurrentVoiceReplyAudio();
+    voiceReplyAudioRef.current = audio;
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        audio.removeEventListener("ended", handleEnded);
+        audio.removeEventListener("error", handleError);
+        audio.removeEventListener("pause", handlePause);
+        if (voiceReplyAudioRef.current === audio) {
+          voiceReplyAudioRef.current = null;
+        }
+      };
+      const settle = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (voiceSpeakingRunIdRef.current === runId) {
+          voiceSpeakingRunIdRef.current = null;
+        }
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      };
+      const handleEnded = () => settle();
+      const handleError = () => settle(new Error("Voice response audio playback failed."));
+      const handlePause = () => {
+        if (voiceSpeakingRunIdRef.current !== runId) {
+          settle();
+        }
+      };
+
+      audio.addEventListener("ended", handleEnded);
+      audio.addEventListener("error", handleError);
+      audio.addEventListener("pause", handlePause);
+      audio.play().catch((error: unknown) => {
+        settle(error instanceof Error ? error : new Error("Voice response audio playback failed."));
+      });
+    });
+  }
+
+  async function processVoiceSpeechQueue(runId: string) {
+    const state = voiceSpeechRunStateByRunIdRef.current[runId];
+    if (!state || state.processing) return;
+    state.processing = true;
+    if (!state.started) {
+      state.started = true;
+      notifyVoiceResponseStarted(runId);
+    }
+    setThinkingStatus("Speaking response");
+
+    try {
+      while (voiceSpeakResponseByRunIdRef.current.has(runId)) {
+        const chunk = state.queue.shift();
+        if (!chunk) break;
+        const speechText = formatAssistantResponseForSpeech(chunk.text);
+        if (!speechText) continue;
+
+        const audio = await createVoiceSpeechAudio(runId, speechText, chunk);
+        if (!audio || !voiceSpeakResponseByRunIdRef.current.has(runId)) return;
+        await playVoiceSpeechAudio(runId, audio);
+      }
+    } catch (error) {
+      addDiag(`voice reply playback failed runId=${runId}: ${String(error)}`);
+    } finally {
+      const current = voiceSpeechRunStateByRunIdRef.current[runId];
+      if (!current) return;
+      current.processing = false;
+      if (current.queue.length > 0) {
+        void processVoiceSpeechQueue(runId);
+        return;
+      }
+      if (current.final) {
+        completeVoiceSpeechRun(runId);
+        return;
+      }
+      setThinkingStatus((status) => (status === "Speaking response" ? null : status));
+    }
+  }
+
+  function enqueueVoiceAssistantSpeech(
+    runId: string,
+    text: string,
+    options: { final: boolean; source: VoiceSpeechChunk["source"] },
+  ) {
+    if (!runId || !voiceSpeakResponseByRunIdRef.current.has(runId)) return;
+
+    const state = getVoiceSpeechRunState(runId);
+    const sourceText = text.trimEnd();
+    let delta = "";
+    if (!state.lastSourceText) {
+      delta = sourceText;
+    } else if (sourceText.startsWith(state.lastSourceText)) {
+      delta = sourceText.slice(state.lastSourceText.length);
+    } else if (options.final) {
+      delta = state.queuedAny ? "" : sourceText;
+    } else if (sourceText.length > state.lastSourceText.length) {
+      delta = sourceText.slice(state.lastSourceText.length);
+    }
+    state.lastSourceText = sourceText;
+
+    if (delta) {
+      state.pendingText += delta;
+    }
+    if (options.final) {
+      state.final = true;
+    }
+
+    const { chunks, rest } = splitVoiceSpeechBuffer(state.pendingText, options.final);
+    state.pendingText = rest;
+    for (const chunkText of chunks) {
+      state.sequence += 1;
+      state.queuedAny = true;
+      state.queue.push({
+        sequence: state.sequence,
+        text: chunkText,
+        source: options.source,
+      });
+    }
+
+    if (state.queue.length > 0 && !state.processing) {
+      void processVoiceSpeechQueue(runId);
+      return;
+    }
+    if (state.final && !state.processing && state.queue.length === 0) {
+      completeVoiceSpeechRun(runId);
+    }
+  }
+
+  function scheduleSpeakAssistantResponseForRun(
+    runId: string,
+    sessionKey: string | null | undefined,
+    fallbackText: string,
+  ) {
+    if (!runId || !voiceSpeakResponseByRunIdRef.current.has(runId)) return;
+    const existingSpeechState = voiceSpeechRunStateByRunIdRef.current[runId];
+    if (
+      existingSpeechState &&
+      (
+        existingSpeechState.queuedAny ||
+        existingSpeechState.queue.length > 0 ||
+        existingSpeechState.pendingText.trim() ||
+        existingSpeechState.processing
+      )
+    ) {
+      enqueueVoiceAssistantSpeech(runId, "", {
+        final: true,
+        source: "history",
+      });
+      return;
+    }
+
+    let attempts = 0;
+    const maxAttempts = 10;
+    const scheduleAttempt = () => {
+      window.setTimeout(() => {
+        if (!voiceSpeakResponseByRunIdRef.current.has(runId)) return;
+        const currentSpeechState = voiceSpeechRunStateByRunIdRef.current[runId];
+        if (
+          currentSpeechState &&
+          (
+            currentSpeechState.queuedAny ||
+            currentSpeechState.queue.length > 0 ||
+            currentSpeechState.pendingText.trim() ||
+            currentSpeechState.processing
+          )
+        ) {
+          enqueueVoiceAssistantSpeech(runId, "", {
+            final: true,
+            source: "history",
+          });
+          return;
+        }
+        attempts += 1;
+
+        const sessionMessages = sessionKey ? sessionMessagesRef.current[sessionKey] || [] : [];
+        const visibleMessages = messagesRef.current;
+        const visibleAssistantText = [...sessionMessages, ...visibleMessages]
+          .reverse()
+          .find((message) => message.id === runId && message.role === "assistant")
+          ?.content
+          ?.trim();
+        if (!visibleAssistantText && attempts < maxAttempts) {
+          scheduleAttempt();
+          return;
+        }
+
+        const assistantText = visibleAssistantText || fallbackText.trim();
+        if (!assistantText) return;
+        clientLog("voice.reply.speak", {
+          runId,
+          chars: assistantText.length,
+          source: visibleAssistantText ? "chat_state" : "final_event",
+        });
+        enqueueVoiceAssistantSpeech(runId, assistantText, {
+          final: true,
+          source: visibleAssistantText ? "history" : "final_event",
+        });
+      }, 100);
+    };
+
+    scheduleAttempt();
   }
 
   async function handleQuickAddCredits() {
@@ -1981,6 +2938,10 @@ export function Chat({
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   // Keep session messages ref in sync with current messages state
   useEffect(() => {
@@ -2022,6 +2983,9 @@ export function Chat({
       if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current);
       if (streamPersistTimerRef.current) clearTimeout(streamPersistTimerRef.current);
       clearActiveRunTracking();
+      clearCurrentVoiceReplyAudio();
+      voiceSpeakingRunIdRef.current = null;
+      voiceSpeechRunStateByRunIdRef.current = {};
       const sessionsSnap = sessionsRef.current;
       const currentSnap = currentSessionRef.current;
       const messagesSnap = { ...sessionMessagesRef.current };
@@ -2048,6 +3012,28 @@ export function Chat({
         window.clearTimeout(outboxWakeTimerRef.current);
         outboxWakeTimerRef.current = null;
       }
+    };
+  }, []);
+
+  useEffect(() => {
+    function stopVoiceReplyAudio() {
+      const hadSpeechState =
+        voiceReplyAudioRef.current ||
+        voiceSpeakingRunIdRef.current ||
+        Object.keys(voiceSpeechRunStateByRunIdRef.current).length > 0;
+      if (!hadSpeechState) return;
+      voiceSpeakResponseBySendIdRef.current.clear();
+      voiceSpeakResponseByRunIdRef.current.clear();
+      voiceSpeechRunStateByRunIdRef.current = {};
+      voiceSpeakingRunIdRef.current = null;
+      clearCurrentVoiceReplyAudio();
+      setThinkingStatus((current) => (current === "Speaking response" ? null : current));
+      clientLog("voice.reply.stopped_for_capture");
+    }
+
+    window.addEventListener("entropic-voice-capture-started", stopVoiceReplyAudio);
+    return () => {
+      window.removeEventListener("entropic-voice-capture-started", stopVoiceReplyAudio);
     };
   }, []);
 
@@ -2155,6 +3141,7 @@ export function Chat({
   function clearActiveRunTracking() {
     activeRunIdRef.current = null;
     activeRunSessionRef.current = null;
+    setActiveToolRunId(null);
     if (activeRunTimeoutRef.current) {
       window.clearTimeout(activeRunTimeoutRef.current);
       activeRunTimeoutRef.current = null;
@@ -2210,6 +3197,9 @@ export function Chat({
     clearActiveRunTracking();
     activeRunIdRef.current = runId;
     activeRunSessionRef.current = sessionKey;
+    setActiveToolRunId(runId);
+    streamedAssistantRunIdsRef.current.delete(runId);
+    setToolActivityByRunId((prev) => ({ ...prev, [runId]: [] }));
     runSessionKeyRef.current[runId] = sessionKey;
     lastEventByRunIdRef.current[runId] = Date.now();
     refreshActiveRunTimeout(runId);
@@ -2251,6 +3241,32 @@ export function Chat({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: isLoading ? "auto" : "smooth" });
   }, [messages, isLoading, integrationSetup, quickSuggestion]);
+
+  useEffect(() => {
+    if (!isLoading) {
+      setLoadingWordIndex(0);
+      setLoadingWordChanging(false);
+      return;
+    }
+    let settleTimer: number | null = null;
+    const intervalId = window.setInterval(() => {
+      setLoadingWordChanging(true);
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+      settleTimer = window.setTimeout(() => {
+        setLoadingWordIndex((current) => (current + 1) % THINKING_WORDS.length);
+        setLoadingWordChanging(false);
+        settleTimer = null;
+      }, 180);
+    }, 3_000);
+    return () => {
+      window.clearInterval(intervalId);
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+    };
+  }, [isLoading]);
 
   useEffect(() => {
     currentSessionRef.current = currentSession;
@@ -2785,7 +3801,7 @@ export function Chat({
     if (stream === "assistant") return "Thinking";
     if (stream === "lifecycle") {
       const phase = typeof data.phase === "string" ? data.phase : null;
-      if (phase === "start") return "Starting";
+      if (phase === "start") return "Preparing response";
       if (phase === "end" || phase === "error") return null;
     }
     return null;
@@ -2795,6 +3811,34 @@ export function Chat({
     if (!event?.runId || event.runId !== activeRunIdRef.current) return;
     lastEventByRunIdRef.current[event.runId] = Date.now();
     refreshActiveRunTimeout(event.runId);
+    const toolActivity = toolActivityFromAgentEvent(event);
+    if (toolActivity) {
+      setToolActivityByRunId((prev) => {
+        const existing = prev[event.runId] ?? [];
+        const existingIdx = existing.findIndex((item) => item.id === toolActivity.id);
+        const next =
+          existingIdx >= 0
+            ? existing.map((item, idx) =>
+                idx === existingIdx
+                  ? {
+                      ...item,
+                      ...toolActivity,
+                      status:
+                        item.status === "complete" && toolActivity.status === "running"
+                          ? item.status
+                          : toolActivity.status,
+                    }
+                  : item,
+              )
+            : [...existing, toolActivity];
+        return {
+          ...prev,
+          [event.runId]: next
+            .sort((a, b) => a.seq - b.seq)
+            .slice(-8),
+        };
+      });
+    }
     const status = describeAgentActivity(event);
     if (status) {
       setThinkingStatus(status);
@@ -2934,6 +3978,9 @@ export function Chat({
             setError(BILLING_RECOVERY_MESSAGE);
             setShowOutOfCreditsModal(true);
           }
+          if (text.trim()) {
+            scheduleSpeakAssistantResponseForRun(runId, sessionKey, text);
+          }
           addDiag(`recovered final response from history runId=${runId} attempt=${attempt + 1}`);
           return;
         } catch (err) {
@@ -3006,6 +4053,13 @@ export function Chat({
     if (isActiveRunTerminalEvent) {
       setIsLoading(false);
       setThinkingStatus(null);
+      if (
+        eventRunId &&
+        (event.state === "error" || event.state === "aborted") &&
+        voiceSpeakResponseByRunIdRef.current.has(eventRunId)
+      ) {
+        completeVoiceSpeechRun(eventRunId);
+      }
       clearActiveRunTracking();
       // Refresh credit balance after message completion
       window.dispatchEvent(new Event("entropic-local-credits-changed"));
@@ -3029,6 +4083,9 @@ export function Chat({
       );
       if (text || hasRenderableAssistantPayload) {
         setThinkingStatus(null);
+        if (eventRunId) {
+          streamedAssistantRunIdsRef.current.add(eventRunId);
+        }
         if (isProxyAuthFailure(text)) {
           triggerProxyAuthRecovery("chat message");
         }
@@ -3094,6 +4151,12 @@ export function Chat({
             schedulePersist();
           }, 5000);
         }
+        if (eventRunId && text.trim() && normalized?.kind !== "toolResult") {
+          enqueueVoiceAssistantSpeech(eventRunId, text, {
+            final: event.state === "final",
+            source: event.state === "final" ? "final_event" : "delta",
+          });
+        }
       } else if (event.state === "final" && eventRunId && knownSessionKey) {
         addDiag(`final event missing payload runId=${eventRunId}; attempting history recovery`);
         void recoverFinalRunFromHistory(eventRunId, knownSessionKey);
@@ -3109,6 +4172,30 @@ export function Chat({
         if (timings && !timings.finalAt) {
           timings.finalAt = Date.now();
           addDiag(`timing final runId=${eventRunId} t=${timings.finalAt - timings.startedAt}ms`);
+        }
+        if (
+          voiceSpeakResponseByRunIdRef.current.has(eventRunId) &&
+          (normalized?.kind === "toolResult" ||
+            (!text.trim() && Boolean(voiceSpeechRunStateByRunIdRef.current[eventRunId])))
+        ) {
+          enqueueVoiceAssistantSpeech(eventRunId, "", {
+            final: true,
+            source: "final_event",
+          });
+        }
+        const pendingOfficeOpen = workspaceOfficeOpenByRunIdRef.current[eventRunId];
+        if (pendingOfficeOpen) {
+          delete workspaceOfficeOpenByRunIdRef.current[eventRunId];
+          addDiag(`workspace office auto-open path=${pendingOfficeOpen.path}`);
+          clientLog("chat.office.auto_open", {
+            runId: eventRunId,
+            path: pendingOfficeOpen.path,
+          });
+          void handoffWorkspacePathToDesktop({
+            path: pendingOfficeOpen.path,
+            action: "open",
+            looksLikeFile: true,
+          });
         }
         const revertModel = runRevertModelRef.current[eventRunId];
         if (revertModel && currentSessionRef.current && clientRef.current) {
@@ -3405,6 +4492,34 @@ export function Chat({
   }
 
   async function applySessionAction(action: ChatSessionActionRequest) {
+    if (action.type === "compose") {
+      let targetKey = action.key || currentSessionRef.current;
+      if (!targetKey) {
+        createNewSession({ force: true });
+        targetKey = currentSessionRef.current;
+      } else if (targetKey !== currentSessionRef.current) {
+        await selectSession(targetKey);
+      }
+      if (!targetKey) return;
+      setComposerModeForSession(targetKey, "chat");
+      if (action.submit) {
+        void handleSend(action.prompt, {
+          mode: "chat",
+          speakResponse: action.speakResponse === true,
+        });
+      } else {
+        setDraftsBySession((prev) => {
+          const existing = (prev[targetKey] || "").trim();
+          const nextValue = existing ? `${existing}\n\n${action.prompt}` : action.prompt;
+          if (prev[targetKey] === nextValue) return prev;
+          return { ...prev, [targetKey]: nextValue };
+        });
+        requestAnimationFrame(() => {
+          textareaRef.current?.focus();
+        });
+      }
+      return;
+    }
     if (!action?.key) return;
     if (action.type === "pin") {
       setSessions((prev) =>
@@ -3790,12 +4905,22 @@ export function Chat({
       throw new Error("Failed to start response stream");
     }
 
+    const pendingOfficeOpen = workspaceOfficeOpenBySendIdRef.current[entry.id];
+    if (pendingOfficeOpen) {
+      workspaceOfficeOpenByRunIdRef.current[runId] = pendingOfficeOpen;
+      delete workspaceOfficeOpenBySendIdRef.current[entry.id];
+    }
+    if (voiceSpeakResponseBySendIdRef.current.has(entry.id)) {
+      voiceSpeakResponseByRunIdRef.current.add(runId);
+      voiceSpeakResponseBySendIdRef.current.delete(entry.id);
+    }
+
     scheduleActiveRunTimeout(runId, entry.sessionKey);
     removeOutboxEntry(entry.id);
     runTimingsRef.current[runId] = { startedAt: sendStart, ackAt: Date.now() };
     addDiag(`timing send_ack runId=${runId} t=${runTimingsRef.current[runId].ackAt! - sendStart}ms`);
     addDiag(`send ok runId=${runId}`);
-    setThinkingStatus("Starting");
+    setThinkingStatus("Preparing response");
     if (routingEnabled && chosenModel && fastModel && reasoningModel && chosenModel !== fastModel) {
       runRevertModelRef.current[runId] = fastModel;
     }
@@ -3844,6 +4969,7 @@ export function Chat({
         setThinkingStatus("Waiting for reconnect");
       } else {
         removeOutboxEntry(entry.id);
+        voiceSpeakResponseBySendIdRef.current.delete(entry.id);
         setError(errorMessage);
         setIsLoading(false);
         setThinkingStatus(null);
@@ -3855,7 +4981,10 @@ export function Chat({
     }
   }
 
-  async function handleSend(content?: string, options?: { mode?: ComposerMode }) {
+  async function handleSend(
+    content?: string,
+    options?: { mode?: ComposerMode; speakResponse?: boolean },
+  ) {
     let sendSession = currentSessionRef.current;
     if (!sendSession) {
       createNewSession({ force: true });
@@ -3899,10 +5028,11 @@ export function Chat({
       content: attachment.content,
     }));
     const hasAttachments = attachmentsPayload.length > 0;
+    const attachmentNames = pendingAttachments.map((attachment) => attachment.fileName || "file");
     const attachmentLine =
       pendingAttachments.length === 1
-        ? `[Attached image: ${pendingAttachments[0]?.fileName || "image"}]`
-        : `[Attached ${pendingAttachments.length} images]`;
+        ? `[Attached ${attachmentKindLabel(pendingAttachments[0]?.mimeType || "")}: ${pendingAttachments[0]?.fileName || "file"}]`
+        : `[Attached ${pendingAttachments.length} files]`;
     const userVisibleContent = hasAttachments
       ? userMessageContent
         ? `${userMessageContent}\n\n${attachmentLine}`
@@ -3910,13 +5040,13 @@ export function Chat({
       : userMessageContent;
     let outboundMessageContent = hasAttachments
       ? userMessageContent
-        ? `${userMessageContent}\n\nAttached image context: ${pendingAttachments.map((attachment) => attachment.fileName || "image").join(", ")}`
-        : `Attached image context: ${pendingAttachments.map((attachment) => attachment.fileName || "image").join(", ")}`
+        ? `${userMessageContent}\n\nAttached file context: ${attachmentNames.join(", ")}`
+        : `Attached file context: ${attachmentNames.join(", ")}`
       : messageContent;
     const runCommand = parseRunSlashCommand(messageContent);
     if (runCommand !== null) {
       if (hasAttachments) {
-        const message = "Image attachments are not supported with `/run`.";
+        const message = "Attachments are not supported with `/run`.";
         setError(message);
         appendAssistantNotice(message, sendSession);
         return;
@@ -4027,6 +5157,15 @@ export function Chat({
         appendAssistantNotice(message, sendSession);
         return;
       }
+      const nonImageAttachment = pendingAttachments.find(
+        (attachment) => !attachment.mimeType.startsWith("image/"),
+      );
+      if (nonImageAttachment) {
+        const message = "Image mode only supports image attachments. Remove other files first.";
+        setError(message);
+        appendAssistantNotice(message, sendSession);
+        return;
+      }
 
       const userMessage: Message = {
         id: crypto.randomUUID(),
@@ -4085,7 +5224,7 @@ export function Chat({
         setError(message);
         appendAssistantNotice(`I couldn't generate that image: ${message}`, sendSession);
       } finally {
-        setPendingAttachments([]);
+        clearPendingAttachments();
         setIsLoading(false);
         setThinkingStatus(null);
       }
@@ -4164,7 +5303,7 @@ export function Chat({
     if (taskBoardIntent && sendSession) {
       const handled = await handleTaskBoardChatIntent(taskBoardIntent, sendSession);
       if (handled) {
-        setPendingAttachments([]);
+        clearPendingAttachments();
         return;
       }
     }
@@ -4233,6 +5372,75 @@ export function Chat({
       addDiag(`x intent detected; routing via X integration topic=${xIntent.topic ? "yes" : "no"}`);
     }
 
+    const workspaceOfficeIntent =
+      !xIntent &&
+      !hasAttachments &&
+      !messageContent.startsWith(INTERNAL_USER_PROMPT_PREFIX) &&
+      shouldRouteWorkspaceOfficeRequest(messageContent);
+    if (workspaceOfficeIntent) {
+      outboundMessageContent = formatWorkspaceOfficeRoutingPrompt(messageContent);
+      addDiag("workspace office intent detected; routing via local Office workflow");
+    }
+    const workspaceOfficeAutoOpenPath =
+      workspaceOfficeIntent && workspaceOfficeRequestWantsDesktopOpen(messageContent)
+        ? extractWorkspaceOfficeFileName(messageContent)
+        : null;
+
+    const gmailIntent =
+      !xIntent &&
+      !workspaceOfficeIntent &&
+      shouldCheckXIntent &&
+      parseGmailIntent(messageContent);
+    if (gmailIntent && sendSession) {
+      const gmailQuickActionCandidate = getQuickActionById("inbox_cleanup");
+      const gmailQuickAction =
+        gmailQuickActionCandidate && gmailQuickActionCandidate.kind === "agent"
+          ? gmailQuickActionCandidate
+          : null;
+      const requirement = gmailQuickAction?.requirement;
+
+      if (gmailQuickAction && requirement?.kind === "integration") {
+        try {
+          const connectedNow = await isIntegrationReady(requirement.provider);
+          if (!connectedNow) {
+            addDiag("gmail intent detected; Gmail integration not connected");
+            setIntegrationSetupForSession(sendSession, {
+              requirement,
+              pendingAction: gmailQuickAction,
+              status: "idle",
+              error: null,
+            });
+            setQuickSuggestionForSession(sendSession, null);
+            setBuilderChecklistForSession(sendSession, null);
+            appendAssistantNotice(
+              `I can do that with ${integrationRequirementLabel(requirement)}, but it is not connected yet. Complete setup below and I will continue.`,
+              sendSession
+            );
+            return;
+          }
+        } catch {
+          setIntegrationSetupForSession(sendSession, {
+            requirement,
+            pendingAction: gmailQuickAction,
+            status: "idle",
+            error: `Failed to check ${integrationRequirementLabel(requirement)} status.`,
+          });
+          setQuickSuggestionForSession(sendSession, null);
+          setBuilderChecklistForSession(sendSession, null);
+          return;
+        }
+      }
+
+      outboundMessageContent = [
+        "Use the connected Gmail integration for this request.",
+        "Available Gmail tools: `gmail_search` for inbox/search, `gmail_get` for reading a specific message, `gmail_send` for sending, and `gmail_draft` for drafts.",
+        "Do not say Gmail or Composio is unavailable unless a Gmail tool call actually fails.",
+        "For inbox/list/summarize requests, start with `gmail_search` using query `in:inbox` and maxResults 10.",
+        `Original user request: ${messageContent.trim()}`,
+      ].join("\n");
+      addDiag("gmail intent detected; routing via Gmail integration");
+    }
+
     const pendingSend: PersistedPendingSend = {
       id: userMessage.id,
       sessionKey: sendSession,
@@ -4244,8 +5452,20 @@ export function Chat({
       attemptCount: 0,
       nextAttemptAt: Date.now(),
     };
+    if (options?.speakResponse) {
+      voiceSpeakResponseBySendIdRef.current.add(pendingSend.id);
+    }
+    if (workspaceOfficeAutoOpenPath) {
+      workspaceOfficeOpenBySendIdRef.current[pendingSend.id] = {
+        path: workspaceOfficeAutoOpenPath,
+      };
+      clientLog("chat.office.auto_open.pending", {
+        sendId: pendingSend.id,
+        path: workspaceOfficeAutoOpenPath,
+      });
+    }
     upsertOutboxEntry(pendingSend);
-    setPendingAttachments([]);
+    clearPendingAttachments();
 
     if (!liveClient || !liveClient.isConnected()) {
       if (!connectInFlightRef.current) {
@@ -4291,6 +5511,7 @@ export function Chat({
         setThinkingStatus("Waiting for reconnect");
       } else {
         removeOutboxEntry(pendingSend.id);
+        voiceSpeakResponseBySendIdRef.current.delete(pendingSend.id);
         if (!handledProviderOAuth) {
           setError(errorMessage);
         }
@@ -4721,7 +5942,7 @@ export function Chat({
   function renderIntegrationSetupAssistantCard() {
     if (!integrationSetup) return null;
     const setup = integrationSetup;
-    const RequirementLogo = INTEGRATION_LOGOS[setup.requirement.provider];
+    const RequirementLogo = INTEGRATION_LOGOS[setup.requirement.provider] || Puzzle;
 
     return (
       <div className="flex justify-start">
@@ -4910,7 +6131,10 @@ export function Chat({
       onNavigate(quickAction.handoffPage);
       if (quickAction.handoffPage === "channels") {
         appendAssistantNotice("Open Messaging to set up Telegram, then come back here to run it in chat.", sessionKey);
-      } else if (quickAction.handoffPage === "store") {
+      } else if (
+        quickAction.handoffPage === "store" ||
+        quickAction.handoffPage === "integrations"
+      ) {
         appendAssistantNotice("Open Integrations to connect this integration, then return to run it in chat.", sessionKey);
       }
       return;
@@ -5002,17 +6226,22 @@ export function Chat({
     looksLikeFile: boolean;
     url?: string;
   }) {
+    const normalizedPath =
+      typeof link.path === "string" && link.path
+        ? normalizeChatWorkspacePath(link.path) ?? link.path
+        : link.path;
+    const payload: DesktopHandoff = {
+      path: normalizedPath,
+      url: link.url,
+      action: link.action,
+      looksLikeFile: link.looksLikeFile,
+    };
     try {
-      const payload: DesktopHandoff = {
-        path: link.path,
-        url: link.url,
-        action: link.action,
-        looksLikeFile: link.looksLikeFile,
-      };
       window.localStorage.setItem(DESKTOP_HANDOFF_STORAGE_KEY, JSON.stringify(payload));
     } catch {
       // Ignore storage failures and still navigate.
     }
+    window.dispatchEvent(new CustomEvent(DESKTOP_HANDOFF_EVENT, { detail: payload }));
     onNavigate?.("files");
   }
 
@@ -5092,6 +6321,56 @@ export function Chat({
     );
   }
 
+  function renderToolActivityList(activities: ChatToolActivity[]) {
+    if (activities.length === 0) return null;
+    return (
+      <div className="space-y-1.5">
+        {activities.map((activity) => {
+          const statusClass =
+            activity.status === "error"
+              ? "border-red-500/20 bg-red-500/10 text-red-400"
+              : activity.status === "complete"
+                ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
+                : "border-[var(--border-subtle)] bg-[var(--bg-tertiary)]/60 text-[var(--text-secondary)]";
+          const icon =
+            activity.status === "error" ? (
+              <X className="h-3.5 w-3.5" />
+            ) : activity.status === "complete" ? (
+              <Check className="h-3.5 w-3.5" />
+            ) : (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            );
+          return (
+            <div
+              key={activity.id}
+              className={clsx(
+                "flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs",
+                statusClass,
+              )}
+            >
+              <span className="shrink-0">{icon}</span>
+              <span className="min-w-0 truncate font-medium text-[var(--text-primary)]">
+                {activity.label}
+              </span>
+              <span className="shrink-0 text-[10px] uppercase tracking-[0.18em] opacity-70">
+                {activity.status === "complete"
+                  ? "done"
+                  : activity.status === "error"
+                    ? "error"
+                    : "running"}
+              </span>
+              {activity.detail ? (
+                <span className="min-w-0 truncate text-[var(--text-tertiary)]">
+                  {activity.detail}
+                </span>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
   function renderMessageAttachments(message: Message) {
     const attachments = (message.attachments || []).filter((attachment) => attachment.previewUrl);
     if (attachments.length === 0) {
@@ -5103,17 +6382,30 @@ export function Chat({
           const actionKey = imageAttachmentActionKey(message.id, index);
           const savedPath = savedWorkspaceImagePaths[actionKey];
           const saveUnsupportedReason = getGeneratedImageWorkspaceSaveUnsupportedReason(attachment);
-          const canSaveToWorkspace = !saveUnsupportedReason;
+          const isImage = attachment.mimeType.startsWith("image/");
+          const isAudio = attachment.mimeType.startsWith("audio/");
+          const canSaveToWorkspace = isImage && !saveUnsupportedReason;
           return (
             <div
               key={actionKey}
               className="overflow-hidden rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)]"
             >
-              <img
-                src={attachment.previewUrl}
-                alt={attachment.fileName}
-                className="block h-auto max-h-[360px] w-full object-contain"
-              />
+              {isImage ? (
+                <img
+                  src={attachment.previewUrl}
+                  alt={attachment.fileName}
+                  className="block h-auto max-h-[360px] w-full object-contain"
+                />
+              ) : isAudio ? (
+                <div className="px-3 pt-3">
+                  <audio src={attachment.previewUrl} controls className="w-full" />
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 px-3 pt-3 text-sm text-[var(--text-secondary)]">
+                  <FileText className="h-4 w-4" />
+                  <span>{attachmentKindLabel(attachment.mimeType)}</span>
+                </div>
+              )}
               <div className="flex items-center justify-between gap-3 px-3 py-2 text-xs text-[var(--text-secondary)]">
                 <span className="min-w-0 truncate">{attachment.fileName}</span>
                 {message.role === "assistant" && attachment.mimeType.startsWith("image/") ? (
@@ -5171,23 +6463,44 @@ export function Chat({
         addDiag(`timing tool_payload runId=${message.id} t=${timings.toolSeenAt - timings.startedAt}ms`);
       }
     }
-    if (!payload.events.length && !payload.errors.length) {
-      return (
-        <div className="min-w-0 max-w-full">
-          {renderMessageAttachments(message)}
-          <MarkdownContent
-            content={payload.cleanText}
-            onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
-          />
-        </div>
-      );
-    }
+    const liveActivities = message.id ? toolActivityByRunId[message.id] ?? [] : [];
+    const payloadActivities: ChatToolActivity[] = [
+      ...payload.errors.map((error, idx) => ({
+        id: `payload-error-${idx}-${error.tool || "tool"}`,
+        name: error.tool || "tool",
+        label: humanizeToolName(error.tool || "Tool"),
+        status: "error" as const,
+        detail: compactToolText(error.error) ?? compactToolText(error.status),
+        seq: 10_000 + idx,
+        ts: Date.now(),
+      })),
+      ...(payload.hadToolPayload && liveActivities.length === 0 && payload.events.length === 0 && payload.errors.length === 0
+        ? [{
+            id: "payload-tool-output",
+            name: message.toolName || "tool",
+            label: humanizeToolName(message.toolName || "Tool"),
+            status: "complete" as const,
+            detail: "Tool output used",
+            seq: 10_500,
+            ts: Date.now(),
+          }]
+        : []),
+      ...(payload.events.length > 0
+        ? [{
+            id: "payload-calendar-events",
+            name: "calendar",
+            label: "Calendar",
+            status: "complete" as const,
+            detail: `${payload.events.length} event${payload.events.length === 1 ? "" : "s"} returned`,
+            seq: 11_000,
+            ts: Date.now(),
+          }]
+        : []),
+    ];
+    const activities = [...liveActivities, ...payloadActivities];
     return (
-      <div className="min-w-0 max-w-full space-y-2">
-        <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)]">
-          <span>{message.kind === "toolResult" ? "Tool Result" : "Assistant"}</span>
-          {message.toolName ? <span className="text-[var(--text-quaternary)]">{message.toolName}</span> : null}
-        </div>
+      <div className="min-w-0 max-w-full space-y-3">
+        {renderToolActivityList(activities)}
         {payload.cleanText ? (
           <div>
             {renderMessageAttachments(message)}
@@ -5199,7 +6512,7 @@ export function Chat({
         ) : null}
         {!payload.cleanText ? renderMessageAttachments(message) : null}
         {payload.events.length > 0 && (
-          <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-3 shadow-sm">
+          <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--bg-tertiary)]/50 p-3">
             <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)] mb-2">
               <Calendar className="w-3.5 h-3.5" />
               Calendar
@@ -5702,6 +7015,24 @@ export function Chat({
     return payload.cleanText.trim() || message.content.trim();
   }
 
+  const chatAgentName = sanitizeProfileName(agentProfile?.name || onboardingData?.agentName || "Entropic");
+  const chatAgentAvatarUrl = isRenderableAvatarDataUrl(agentProfile?.avatarDataUrl)
+    ? agentProfile?.avatarDataUrl.trim()
+    : undefined;
+
+  const openAgentProfileSettings = useCallback(() => {
+    try {
+      window.localStorage.setItem(SETTINGS_PROFILE_REQUEST_KEY, "profile");
+    } catch {
+      // Best-effort hint for Settings if it mounts after navigation.
+    }
+    onNavigate?.("settings");
+    window.dispatchEvent(new Event(SETTINGS_PROFILE_REQUEST_EVENT));
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new Event(SETTINGS_PROFILE_REQUEST_EVENT));
+    });
+  }, [onNavigate]);
+
   // Memoize the message list so typing in the composer doesn't re-render
   // every message (and re-parse markdown) on each keystroke.
   // These hooks must be before early returns to satisfy Rules of Hooks.
@@ -5716,30 +7047,74 @@ export function Chat({
     if (msg.role === "user" && !bodyContent) {
       return null;
     }
-    return (
-      <div key={msg.id} className={clsx("flex min-w-0", msg.role === "user" ? "justify-end" : "justify-start")}>
-        <div className={clsx("min-w-0 max-w-[85%]")}>
-          <div className={clsx("px-3.5 py-2 rounded-2xl",
-            msg.role === "user"
-              ? "bg-[var(--chat-user-bg)] text-[var(--chat-user-text)]"
-              : "bg-[var(--chat-assistant-bg)] text-[var(--chat-assistant-text)] border border-[var(--chat-assistant-border)]")}>
-            {msg.role === "assistant" ? (
-              renderAssistantContent(msg)
-            ) : (
-              <div>
-                {renderMessageAttachments(msg)}
-                <p className="whitespace-pre-wrap break-words">{bodyContent}</p>
+    if (msg.role === "assistant") {
+      return (
+        <div key={msg.id} className="group flex w-full min-w-0 justify-start py-2">
+          <div className="flex w-full min-w-0 items-start gap-3.5">
+            <button
+              type="button"
+              onClick={openAgentProfileSettings}
+              className="mt-0.5 shrink-0 self-start rounded-full transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/30"
+              aria-label={`Edit ${chatAgentName} profile`}
+              title={`Edit ${chatAgentName} profile`}
+            >
+              <AgentAvatar
+                name={chatAgentName}
+                avatarUrl={chatAgentAvatarUrl}
+                className="h-11 w-11 border border-[var(--border-subtle)] transition hover:border-[var(--border-primary)]"
+              />
+            </button>
+            <div className="min-w-0 flex-1 pb-3">
+              <div className="mb-2 flex min-w-0 items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
+                <button
+                  type="button"
+                  onClick={openAgentProfileSettings}
+                  className="min-w-0 truncate rounded-sm font-normal text-[var(--text-secondary)] transition hover:text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/20"
+                  title={`Edit ${chatAgentName} profile`}
+                >
+                  {chatAgentName}
+                </button>
               </div>
-            )}
+              <div className="min-w-0 text-[var(--chat-assistant-text)]">
+                {renderAssistantContent(msg)}
+              </div>
+              {messageTime || canCopy ? (
+                <div className="mt-1.5 flex items-center gap-2 px-1 text-[11px] text-[var(--text-tertiary)]">
+                  {messageTime ? <span>{messageTime}</span> : null}
+                  {canCopy ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void copyMessageText(msg.id, copyText);
+                      }}
+                      className="inline-flex h-5 w-5 items-center justify-center text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+                      aria-label={copyLabel}
+                      title={copyLabel}
+                    >
+                      {copyIcon}
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div key={msg.id} className="flex min-w-0 justify-end">
+        <div className="min-w-0 max-w-[85%]">
+          <div className="rounded-2xl bg-[var(--chat-user-bg)] px-3.5 py-2 text-[var(--chat-user-text)]">
+            <div>
+              {renderMessageAttachments(msg)}
+              <p className="whitespace-pre-wrap break-words">{bodyContent}</p>
+            </div>
           </div>
           {messageTime ? (
             <div
-              className={clsx(
-                "mt-0.5 flex items-center gap-2 px-1 text-[11px] text-[var(--text-tertiary)]",
-                msg.role === "user" ? "text-right" : "text-left"
-              )}
+              className="mt-0.5 flex items-center gap-2 px-1 text-right text-[11px] text-[var(--text-tertiary)]"
             >
-              <span className={msg.role === "user" ? "ml-auto" : ""}>{messageTime}</span>
+              <span className="ml-auto">{messageTime}</span>
               {canCopy ? (
                 <button
                   type="button"
@@ -5758,18 +7133,53 @@ export function Chat({
         </div>
       </div>
     );
-  }), [messages, copiedMessageId]);
+  }), [chatAgentAvatarUrl, chatAgentName, copiedMessageId, messages, openAgentProfileSettings, toolActivityByRunId]);
 
-  const loadingIndicator = useMemo(() => isLoading ? (
-    <div className="flex justify-start">
-      <div className="px-3.5 py-2 rounded-2xl bg-[var(--chat-assistant-bg)] border border-[var(--chat-assistant-border)] flex items-center gap-2">
-        <Loader2 className="w-4 h-4 animate-spin text-[var(--purple-accent)]" />
-        <span className="text-sm text-[var(--text-secondary)] animate-pulse">
-          {thinkingStatus || "Thinking"}
-        </span>
+  const loadingIndicator = useMemo(() => {
+    if (!isLoading) return null;
+    if (activeToolRunId && streamedAssistantRunIdsRef.current.has(activeToolRunId)) {
+      return null;
+    }
+    const loadingWord = THINKING_WORDS[loadingWordIndex % THINKING_WORDS.length] ?? "Thinking";
+    return (
+      <div className="flex w-full min-w-0 justify-start py-2">
+        <div className="flex w-full min-w-0 items-start gap-3.5">
+          <button
+            type="button"
+            onClick={openAgentProfileSettings}
+            className="mt-0.5 shrink-0 self-start rounded-full transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/30"
+            aria-label={`Edit ${chatAgentName} profile`}
+            title={`Edit ${chatAgentName} profile`}
+          >
+            <AgentAvatar
+              name={chatAgentName}
+              avatarUrl={chatAgentAvatarUrl}
+              className="h-11 w-11 border border-[var(--border-subtle)] transition hover:border-[var(--border-primary)]"
+            />
+          </button>
+          <div className="min-w-0 flex-1 pb-3">
+            <div className="mb-2 flex min-w-0 items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
+              <button
+                type="button"
+                onClick={openAgentProfileSettings}
+                className="min-w-0 truncate rounded-sm font-normal text-[var(--text-secondary)] transition hover:text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/20"
+                title={`Edit ${chatAgentName} profile`}
+              >
+                {chatAgentName}
+              </button>
+            </div>
+            <span
+              key={loadingWord}
+              className="entropic-thinking-shimmer inline-block text-sm font-normal"
+              data-changing={loadingWordChanging ? "true" : "false"}
+            >
+              {loadingWord}
+            </span>
+          </div>
+        </div>
       </div>
-    </div>
-  ) : null, [isLoading, thinkingStatus]);
+    );
+  }, [activeToolRunId, chatAgentAvatarUrl, chatAgentName, isLoading, loadingWordChanging, loadingWordIndex, messages, openAgentProfileSettings]);
 
   const activeDraft = currentSession
     ? activeComposerMode === "shell"
@@ -5778,6 +7188,21 @@ export function Chat({
         ? imageDraftsBySession[currentSession] || ""
         : draftsBySession[currentSession] || ""
     : "";
+  const chatVoiceCaptureActive = liveSpeech.isListening || streamingSpeech.isRecording;
+  const chatHasSendableContent = activeDraft.trim().length > 0 || pendingAttachments.length > 0;
+  const chatComposerControlIsSend = chatVoiceCaptureActive || chatHasSendableContent;
+  const composerSendDisabled =
+    (!activeDraft.trim() &&
+      pendingAttachments.length === 0 &&
+      !liveSpeech.isListening &&
+      !streamingSpeech.isRecording) ||
+    isLoading ||
+    audioRecorder.isRecording ||
+    audioRecorder.isFinalizing ||
+    (streamingSpeech.isProcessing && !streamingSpeech.isRecording) ||
+    isTranscribing ||
+    isGeneratingAudio;
+  const chatMicDisabled = isLoading || isTranscribing || isGeneratingAudio;
 
   useEffect(() => {
     if (!textareaRef.current) return;
@@ -5806,10 +7231,6 @@ export function Chat({
     error && isBillingIssueMessage(error) && !isAuthenticated && isAuthConfigured
   );
 
-  const chatAgentName = sanitizeProfileName(agentProfile?.name || onboardingData?.agentName || "Entropic");
-  const chatAgentAvatarUrl = isRenderableAvatarDataUrl(agentProfile?.avatarDataUrl)
-    ? agentProfile?.avatarDataUrl.trim()
-    : undefined;
   const hasInlineAssistantCard = Boolean(builderChecklist || integrationSetup || quickSuggestion);
 
   // Main Chat UI
@@ -5826,7 +7247,7 @@ export function Chat({
         if (activeComposerMode === "shell") return;
         event.preventDefault();
         setDragActive(false);
-        void addImageAttachments(event.dataTransfer?.files);
+        void addAttachments(event.dataTransfer?.files);
       }}
     >
 
@@ -5910,18 +7331,15 @@ export function Chat({
                   key={attachment.id}
                   className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] px-2 py-1.5"
                 >
-                  {attachment.previewUrl ? (
-                    <img
-                      src={attachment.previewUrl}
-                      alt={attachment.fileName}
-                      className="w-8 h-8 rounded object-cover"
-                    />
-                  ) : (
-                    <div className="w-8 h-8 rounded bg-[var(--border-subtle)]" />
-                  )}
-                  <span className="text-xs text-[var(--text-secondary)] max-w-[180px] truncate">
-                    {attachment.fileName}
-                  </span>
+                  {renderPendingAttachmentPreview(attachment)}
+                  <div className="min-w-0">
+                    <div className="max-w-[180px] truncate text-xs text-[var(--text-secondary)]">
+                      {attachment.fileName}
+                    </div>
+                    <div className="text-[10px] uppercase tracking-wide text-[var(--text-tertiary)]">
+                      {attachmentKindLabel(attachment.mimeType)}
+                    </div>
+                  </div>
                   <button
                     onClick={() => removePendingAttachment(attachment.id)}
                     className="p-0.5 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
@@ -5936,11 +7354,11 @@ export function Chat({
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
+            accept={activeComposerMode === "image" ? "image/*" : "image/*,audio/*,text/*,.txt,.md,.markdown,.csv,.json,.log"}
             multiple
             className="hidden"
             onChange={(event) => {
-              void addImageAttachments(event.target.files);
+              void addAttachments(event.target.files);
               event.currentTarget.value = "";
             }}
           />
@@ -6003,6 +7421,18 @@ export function Chat({
                   </span>
                 </div>
               </div>
+            ) : activeComposerMode === "chat" && hasPendingAudioAttachments ? (
+              <div className="flex items-center gap-1 text-[11px] text-[var(--text-tertiary)]">
+                <button
+                  type="button"
+                  onClick={() => void transcribePendingAudio()}
+                  disabled={isLoading || isTranscribing}
+                  className="inline-flex items-center gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-2 py-1 text-[11px] font-medium text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isTranscribing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Music2 className="h-3 w-3" />}
+                  <span>Transcribe audio</span>
+                </button>
+              </div>
             ) : null}
           </div>
           <div className="flex items-end gap-2">
@@ -6011,8 +7441,8 @@ export function Chat({
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isLoading}
                 className="btn-secondary !p-2.5"
-                title={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
-                aria-label={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
+                title={activeComposerMode === "image" ? "Attach reference image" : "Attach file"}
+                aria-label={activeComposerMode === "image" ? "Attach reference image" : "Attach file"}
               >
                 <Paperclip className="w-4 h-4" />
               </button>
@@ -6050,7 +7480,7 @@ export function Chat({
                 ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
                 ta.style.overflowY = ta.scrollHeight > maxHeight ? 'auto' : 'hidden';
               }}
-              onKeyDown={e => {if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }}}
+              onKeyDown={e => {if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleComposerSend(); }}}
               placeholder={
                 activeComposerMode === "shell"
                   ? "Run a command in the workspace shell"
@@ -6059,16 +7489,66 @@ export function Chat({
                     : "Message your assistant"
               }
               rows={1}
-              className="form-input flex-1 resize-none leading-tight"
+              className="form-input flex-1 resize-none leading-tight !border-[var(--composer-border)] focus:!border-[var(--purple-accent)]"
               style={{ overflow: 'hidden' }}
             />
-            <button
-              onClick={() => handleSend()}
-              disabled={(!activeDraft.trim() && pendingAttachments.length === 0) || isLoading}
-              className="btn-primary !p-2.5 !bg-[var(--purple-accent)] hover:!bg-[var(--purple-accent-hover)] !text-white"
-            >
-              <Send className="w-5 h-5" />
-            </button>
+            {activeComposerMode === "chat" ? (
+              <button
+                type="button"
+                onClick={
+                  chatComposerControlIsSend
+                    ? handleComposerSend
+                    : () => void startChatVoiceCapture()
+                }
+                disabled={
+                  chatComposerControlIsSend
+                    ? composerSendDisabled
+                    : chatMicDisabled || !(liveSpeech.isSupported || streamingSpeech.isSupported)
+                }
+                className={clsx(
+                  "relative inline-flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl border font-medium shadow-sm transition-all duration-200 ease-out active:scale-95 disabled:cursor-not-allowed disabled:opacity-50",
+                  chatComposerControlIsSend
+                    ? "border-[var(--purple-accent-hover)]/70 bg-[var(--purple-accent)] text-white shadow-[0_10px_26px_rgba(91,36,139,0.26)] hover:bg-[var(--purple-accent-hover)] hover:shadow-[0_12px_30px_rgba(91,36,139,0.34)]"
+                    : "border-[var(--border-default)] bg-[var(--bg-card)] text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]",
+                )}
+                title={
+                  chatComposerControlIsSend
+                    ? "Send"
+                    : liveSpeech.isSupported || streamingSpeech.isSupported
+                      ? "Record"
+                      : "Microphone unavailable"
+                }
+                aria-label={chatComposerControlIsSend ? "Send" : "Record"}
+              >
+                <span className="relative h-5 w-5">
+                  <Mic
+                    className={clsx(
+                      "absolute inset-0 m-auto h-[18px] w-[18px] transition-all duration-200 ease-out",
+                      chatComposerControlIsSend
+                        ? "scale-75 rotate-12 opacity-0"
+                        : "scale-100 rotate-0 opacity-100",
+                    )}
+                  />
+                  <Send
+                    className={clsx(
+                      "absolute inset-0 m-auto h-[18px] w-[18px] transition-all duration-200 ease-out",
+                      chatComposerControlIsSend
+                        ? "scale-100 translate-x-0 opacity-100"
+                        : "scale-75 -translate-x-1 opacity-0",
+                    )}
+                  />
+                </span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleComposerSend}
+                disabled={composerSendDisabled}
+                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[var(--purple-accent-hover)]/70 bg-[var(--purple-accent)] text-white shadow-sm transition-all duration-200 ease-out hover:bg-[var(--purple-accent-hover)] active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Send className="h-[18px] w-[18px]" />
+              </button>
+            )}
           </div>
         </div>
         {dragActive && activeComposerMode !== "shell" && (

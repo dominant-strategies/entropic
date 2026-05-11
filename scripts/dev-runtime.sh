@@ -151,7 +151,7 @@ ensure_runtime_tars() {
     image_created="$(run_docker image inspect openclaw-runtime:latest --format '{{.Created}}' 2>/dev/null || true)"
   fi
   if [ -f "$runtime_tar" ]; then
-    tar_mtime="$(stat -f '%m' "$runtime_tar" 2>/dev/null || true)"
+    tar_mtime="$(stat -c '%Y' "$runtime_tar" 2>/dev/null || stat -f '%m' "$runtime_tar" 2>/dev/null || true)"
   fi
 
   if [ ! -f "$runtime_tar" ]; then
