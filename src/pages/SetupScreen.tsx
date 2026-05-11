@@ -37,6 +37,7 @@ type SetupErrorDiagnosis = {
   causes: string[];
   actions: string[];
   technical: string;
+  repairCommand?: string;
 };
 
 const EDUCATIONAL_FACTS = [
@@ -52,6 +53,12 @@ const EDUCATIONAL_FACTS = [
 
 const TERMS_URL = entropicSitePath("/terms");
 const PRIVACY_URL = entropicSitePath("/privacy");
+const WINDOWS_WSL2_REPAIR_COMMAND = [
+  "dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart",
+  "dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart",
+  "bcdedit /set hypervisorlaunchtype auto",
+  "wsl.exe --update",
+].join("\n");
 
 function sanitizeSetupError(rawError: string): string {
   return rawError
@@ -74,6 +81,15 @@ function diagnoseSetupError(rawError: string): SetupErrorDiagnosis {
     lower.includes("error validating sha sum") || lower.includes("error getting qcow image");
   const hasHomeSplit =
     lower.includes("cd: /users/") && lower.includes("no such file or directory");
+  const hasWindowsVmPlatformUnavailable =
+    lower.includes("hcs_e_service_not_available") ||
+    lower.includes("registerdistro/createvm") ||
+    lower.includes("createvm/hc") ||
+    lower.includes("required feature is not installed") ||
+    lower.includes("required feautre is not installed");
+  const hasWindowsVmPlatformRepairAttempted = lower.includes(
+    "attempted to enable the windows wsl2 virtualization features",
+  );
 
   if (hasQcowSha) {
     return {
@@ -127,6 +143,46 @@ function diagnoseSetupError(rawError: string): SetupErrorDiagnosis {
         "After the reboot, run first-time setup again.",
       ],
       technical,
+    };
+  }
+
+  if (hasWindowsVmPlatformRepairAttempted) {
+    return {
+      title: "Restart Windows to Finish WSL2 Repair",
+      summary:
+        "Entropic attempted to enable the Windows virtualization features required for its managed WSL2 sandbox.",
+      causes: [
+        "Windows feature changes usually require a full restart before WSL2 can create VMs",
+        "Hardware virtualization may still be disabled in BIOS/UEFI",
+        "The Windows hypervisor may still be unavailable until restart",
+      ],
+      actions: [
+        "Restart Windows completely, then reopen Entropic and retry setup.",
+        "Confirm Task Manager > Performance > CPU shows Virtualization: Enabled.",
+        "If setup still fails after restart, run the Admin PowerShell repair commands below.",
+      ],
+      technical,
+      repairCommand: WINDOWS_WSL2_REPAIR_COMMAND,
+    };
+  }
+
+  if (hasWindowsVmPlatformUnavailable) {
+    return {
+      title: "Enable Windows Virtualization for WSL2",
+      summary:
+        "Windows could not create Entropic's managed WSL2 sandbox VM because a required virtualization feature is unavailable.",
+      causes: [
+        "Windows Subsystem for Linux or Virtual Machine Platform is not enabled",
+        "Hardware virtualization is disabled in BIOS/UEFI",
+        "The Windows hypervisor is disabled or Windows needs a restart after enabling WSL",
+      ],
+      actions: [
+        "Enable Windows Subsystem for Linux and Virtual Machine Platform in Windows Features.",
+        "Confirm Task Manager > Performance > CPU shows Virtualization: Enabled.",
+        "Run `wsl.exe --update`, restart Windows completely, then reopen Entropic and retry setup.",
+      ],
+      technical,
+      repairCommand: WINDOWS_WSL2_REPAIR_COMMAND,
     };
   }
 
@@ -199,7 +255,8 @@ function detectDarkTheme(): boolean {
 export function SetupScreen({ onComplete, preview }: Props) {
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState<SetupProgress | null>(null);
-  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
+  const [copyStatus, setCopyStatus] =
+    useState<"idle" | "details_copied" | "repair_copied" | "error">("idle");
   const [factIndex, setFactIndex] = useState(0);
   const [tosAccepted, setTosAccepted] = useState(false);
   const [isDarkTheme, setIsDarkTheme] = useState(() => detectDarkTheme());
@@ -509,6 +566,37 @@ export function SetupScreen({ onComplete, preview }: Props) {
                     </div>
                   </div>
 
+                  {diagnosis.repairCommand && (
+                    <div className="mb-4 rounded-xl border border-violet-500/20 bg-violet-500/10 p-4">
+                      <p className="text-sm font-medium text-violet-500 mb-2">
+                        Admin PowerShell repair commands
+                      </p>
+                      <pre className="text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words rounded-lg bg-[var(--bg-card)] border border-[var(--border-subtle)] p-3 max-h-36 overflow-auto">
+                        {diagnosis.repairCommand}
+                      </pre>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(diagnosis.repairCommand || "");
+                            setCopyStatus("repair_copied");
+                          } catch {
+                            setCopyStatus("error");
+                          } finally {
+                            setTimeout(() => setCopyStatus("idle"), 1800);
+                          }
+                        }}
+                        className="mt-3 inline-flex items-center gap-2 px-3 py-2 rounded-lg text-xs border border-violet-500/30 bg-[var(--bg-card)] hover:bg-violet-500/10 text-violet-500"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        {copyStatus === "repair_copied"
+                          ? "Copied"
+                          : copyStatus === "error"
+                            ? "Copy failed"
+                            : "Copy repair commands"}
+                      </button>
+                    </div>
+                  )}
+
                   <div className="text-center mb-4">
                     <p className="text-xs text-[var(--text-secondary)] mb-3">
                       Automatic cleanup resets Entropic&apos;s isolated runtime state. On Windows it removes Entropic&apos;s managed WSL distros and runtime cache; on macOS it resets Entropic&apos;s isolated Colima runtime. It does not touch your normal WSL distros, macOS home files, or Docker Desktop data.
@@ -538,7 +626,7 @@ export function SetupScreen({ onComplete, preview }: Props) {
                       onClick={async () => {
                         try {
                           await navigator.clipboard.writeText(diagnosis.technical);
-                          setCopyStatus("copied");
+                          setCopyStatus("details_copied");
                         } catch {
                           setCopyStatus("error");
                         } finally {
@@ -548,7 +636,7 @@ export function SetupScreen({ onComplete, preview }: Props) {
                       className="mt-3 inline-flex items-center gap-2 px-3 py-2 rounded-lg text-xs border border-[var(--border-primary)] bg-[var(--bg-card)] hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                     >
                       <Copy className="w-3.5 h-3.5" />
-                      {copyStatus === "copied"
+                      {copyStatus === "details_copied"
                         ? "Copied"
                         : copyStatus === "error"
                           ? "Copy failed"

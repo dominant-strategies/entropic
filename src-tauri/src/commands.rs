@@ -36,7 +36,7 @@ use tauri::{
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -79,7 +79,7 @@ const ENTROPIC_NATIVE_API_ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1"];
 const ENTROPIC_NATIVE_API_ALLOWED_DOMAINS: &[&str] = &["entropic.qu.ai"];
 const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const CLIENT_LOG_READ_MAX_BYTES: usize = 512 * 1024;
-const DEFAULT_PROXY_GATEWAY_MODEL: &str = "openai/gpt-5.4";
+const DEFAULT_PROXY_GATEWAY_MODEL: &str = "venice/kimi-k2-6";
 const DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL: &str = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL: &str = "openai-codex/gpt-5.3-codex";
 const DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL: &str = "google/gemini-2.5-pro";
@@ -658,6 +658,14 @@ fn openrouter_provider_model_id(model: &str) -> String {
     }
 }
 
+fn venice_provider_model_id(model: &str) -> String {
+    let base = model_base_ref(model);
+    base.strip_prefix("openrouter/venice/")
+        .or_else(|| base.strip_prefix("venice/"))
+        .unwrap_or(base)
+        .to_string()
+}
+
 fn local_gateway_model_key_provider(provider: &str) -> Option<&'static str> {
     match provider {
         "anthropic" => Some("anthropic"),
@@ -1192,215 +1200,16 @@ async fn generate_google_chat_image(
 
 const DEFAULT_TTS_VOICE: &str = "alloy";
 const DEFAULT_TTS_FORMAT: &str = "mp3";
-const STREAMING_PROXY_TTS_FORMAT: &str = "pcm16";
-const PCM16_SAMPLE_RATE_HZ: u32 = 24_000;
-const PCM16_CHANNELS: u16 = 1;
-const PCM16_BITS_PER_SAMPLE: u16 = 16;
+const MANAGED_PROXY_TTS_MODEL: &str = "venice/tts-kokoro";
+const MANAGED_PROXY_TTS_VOICE: &str = "af_alloy";
+const MANAGED_PROXY_TTS_RESPONSE_FORMAT: &str = "wav";
 
-fn extract_generated_audio_data(payload: &serde_json::Value) -> Option<String> {
-    if let Some(data) = payload
-        .get("audio")
-        .and_then(|audio| audio.get("data"))
-        .and_then(|value| value.as_str())
-    {
-        let trimmed = data.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
+fn normalize_tts_speed(speed: Option<f64>) -> Option<f64> {
+    let speed = speed?;
+    if !speed.is_finite() {
+        return None;
     }
-
-    if let Some(data) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("audio"))
-        .and_then(|audio| audio.get("data"))
-        .and_then(|value| value.as_str())
-    {
-        let trimmed = data.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    None
-}
-
-fn extract_generated_audio_transcript(payload: &serde_json::Value) -> Option<String> {
-    if let Some(transcript) = payload
-        .get("audio")
-        .and_then(|audio| audio.get("transcript"))
-        .and_then(|value| value.as_str())
-    {
-        let trimmed = transcript.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    if let Some(transcript) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("audio"))
-        .and_then(|audio| audio.get("transcript"))
-        .and_then(|value| value.as_str())
-    {
-        let trimmed = transcript.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    None
-}
-
-fn extract_generated_text_content(payload: &serde_json::Value) -> Option<String> {
-    if let Some(text) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(|value| value.as_str())
-    {
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    if let Some(parts) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(|value| value.as_array())
-    {
-        let chunks: Vec<String> = parts
-            .iter()
-            .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
-        if !chunks.is_empty() {
-            return Some(chunks.join("\n\n"));
-        }
-    }
-
-    None
-}
-
-fn append_streamed_audio_fields(
-    payload: &serde_json::Value,
-    audio_chunks: &mut String,
-    transcript_chunks: &mut String,
-    text_chunks: &mut String,
-) {
-    if let Some(data) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("audio"))
-        .and_then(|audio| audio.get("data"))
-        .and_then(|value| value.as_str())
-    {
-        audio_chunks.push_str(data.trim());
-    }
-
-    if let Some(transcript) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("audio"))
-        .and_then(|audio| audio.get("transcript"))
-        .and_then(|value| value.as_str())
-    {
-        transcript_chunks.push_str(transcript);
-    }
-
-    if let Some(audio_delta) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("audio_data"))
-        .and_then(|value| value.as_str())
-    {
-        audio_chunks.push_str(audio_delta.trim());
-    }
-
-    if let Some(transcript_delta) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("audio_transcript"))
-        .and_then(|value| value.as_str())
-    {
-        transcript_chunks.push_str(transcript_delta);
-    }
-
-    if let Some(text_delta) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("content"))
-        .and_then(|value| value.as_str())
-    {
-        text_chunks.push_str(text_delta);
-    }
-
-    if let Some(parts) = payload
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("content"))
-        .and_then(|value| value.as_array())
-    {
-        for part in parts {
-            if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
-                text_chunks.push_str(text);
-            }
-        }
-    }
-
-    if let Some(data) = extract_generated_audio_data(payload) {
-        audio_chunks.push_str(data.trim());
-    }
-
-    if let Some(transcript) = extract_generated_audio_transcript(payload) {
-        transcript_chunks.push_str(&transcript);
-    }
-
-    if let Some(text) = extract_generated_text_content(payload) {
-        text_chunks.push_str(&text);
-    }
-}
-
-fn process_sse_event_data(
-    event_data: &str,
-    audio_chunks: &mut String,
-    transcript_chunks: &mut String,
-    text_chunks: &mut String,
-) -> Result<(), String> {
-    let trimmed = event_data.trim();
-    if trimmed.is_empty() || trimmed == "[DONE]" {
-        return Ok(());
-    }
-
-    let payload = serde_json::from_str::<serde_json::Value>(trimmed)
-        .map_err(|e| format!("Invalid streamed audio generation response: {}", e))?;
-    append_streamed_audio_fields(&payload, audio_chunks, transcript_chunks, text_chunks);
-    Ok(())
+    Some(speed.clamp(0.5, 2.0))
 }
 
 fn format_audio_generation_http_error(status: reqwest::StatusCode, body: String) -> String {
@@ -1413,31 +1222,28 @@ fn format_audio_generation_http_error(status: reqwest::StatusCode, body: String)
     format!("Audio generation failed ({}{})", status, suffix)
 }
 
-fn pcm16_base64_to_wav_data_url(raw_base64: &str) -> Result<String, String> {
-    let pcm_bytes = STANDARD
-        .decode(raw_base64.trim())
-        .map_err(|e| format!("Invalid streamed PCM audio payload: {}", e))?;
-    let data_len = pcm_bytes.len() as u32;
-    let block_align = PCM16_CHANNELS * (PCM16_BITS_PER_SAMPLE / 8);
-    let byte_rate = PCM16_SAMPLE_RATE_HZ * u32::from(block_align);
+fn audio_mime_type_for_tts_format(format: &str) -> &'static str {
+    match format.trim().to_ascii_lowercase().as_str() {
+        "aac" => "audio/aac",
+        "flac" => "audio/flac",
+        "opus" => "audio/ogg; codecs=opus",
+        "pcm" => "audio/pcm",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        _ => "audio/mpeg",
+    }
+}
 
-    let mut wav = Vec::with_capacity(44 + pcm_bytes.len());
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&PCM16_CHANNELS.to_le_bytes());
-    wav.extend_from_slice(&PCM16_SAMPLE_RATE_HZ.to_le_bytes());
-    wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&block_align.to_le_bytes());
-    wav.extend_from_slice(&PCM16_BITS_PER_SAMPLE.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_len.to_le_bytes());
-    wav.extend_from_slice(&pcm_bytes);
-
-    Ok(format!("data:audio/wav;base64,{}", STANDARD.encode(wav)))
+fn audio_file_extension_for_tts_format(format: &str) -> &'static str {
+    match format.trim().to_ascii_lowercase().as_str() {
+        "aac" => "aac",
+        "flac" => "flac",
+        "opus" => "opus",
+        "pcm" => "pcm",
+        "wav" => "wav",
+        "mp3" => "mp3",
+        _ => "mp3",
+    }
 }
 
 async fn generate_openai_chat_audio(
@@ -1445,16 +1251,26 @@ async fn generate_openai_chat_audio(
     api_key: &str,
     raw_model: &str,
     text: &str,
+    voice_id: Option<&str>,
+    speed: Option<f64>,
 ) -> Result<ChatAudioGenerationResult, String> {
+    let voice = voice_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_TTS_VOICE);
+    let mut payload = serde_json::json!({
+        "model": raw_model,
+        "voice": voice,
+        "response_format": DEFAULT_TTS_FORMAT,
+        "input": text,
+    });
+    if let Some(speed) = normalize_tts_speed(speed) {
+        payload["speed"] = serde_json::json!(speed);
+    }
     let response = client
         .post("https://api.openai.com/v1/audio/speech")
         .bearer_auth(api_key)
-        .json(&serde_json::json!({
-            "model": raw_model,
-            "voice": DEFAULT_TTS_VOICE,
-            "response_format": DEFAULT_TTS_FORMAT,
-            "input": text,
-        }))
+        .json(&payload)
         .send()
         .await
         .map_err(|e| format!("Audio generation request failed: {}", e))?;
@@ -1465,6 +1281,14 @@ async fn generate_openai_chat_audio(
         return Err(format_audio_generation_http_error(status, body));
     }
 
+    let mime_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| audio_mime_type_for_tts_format(DEFAULT_TTS_FORMAT))
+        .to_string();
     let bytes = response
         .bytes()
         .await
@@ -1473,9 +1297,12 @@ async fn generate_openai_chat_audio(
     Ok(ChatAudioGenerationResult {
         text: "Generated audio from your text.".to_string(),
         audio: vec![ChatGeneratedAudio {
-            file_name: "generated-speech.mp3".to_string(),
-            mime_type: "audio/mpeg".to_string(),
-            url: format!("data:audio/mpeg;base64,{}", encoded),
+            file_name: format!(
+                "generated-speech.{}",
+                audio_file_extension_for_tts_format(DEFAULT_TTS_FORMAT)
+            ),
+            mime_type: mime_type.clone(),
+            url: format!("data:{};base64,{}", mime_type, encoded),
         }],
     })
 }
@@ -1484,6 +1311,8 @@ async fn generate_proxy_chat_audio(
     client: &reqwest::Client,
     model: &str,
     text: &str,
+    voice_id: Option<&str>,
+    speed: Option<f64>,
 ) -> Result<ChatAudioGenerationResult, String> {
     let gateway_token = read_container_env("OPENROUTER_API_KEY").ok_or_else(|| {
         "Proxy auth is unavailable. Restart the sandbox and try again.".to_string()
@@ -1492,30 +1321,32 @@ async fn generate_proxy_chat_audio(
         "Proxy base URL is unavailable. Restart the sandbox and try again.".to_string()
     })?;
     let host_proxy_base = resolve_host_proxy_base(&proxy_base)?;
-    let endpoint = format!("{}/chat/completions", host_proxy_base.trim_end_matches('/'));
+    let endpoint = format!("{}/audio/speech", host_proxy_base.trim_end_matches('/'));
+    let requested_model = model.trim();
+    let speech_model = if requested_model.eq_ignore_ascii_case("openai/gpt-4o-audio-preview") {
+        MANAGED_PROXY_TTS_MODEL
+    } else {
+        requested_model
+    };
+
+    let voice = voice_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(MANAGED_PROXY_TTS_VOICE);
+    let mut payload = serde_json::json!({
+        "model": speech_model,
+        "voice": voice,
+        "response_format": MANAGED_PROXY_TTS_RESPONSE_FORMAT,
+        "input": text,
+    });
+    if let Some(speed) = normalize_tts_speed(speed) {
+        payload["speed"] = serde_json::json!(speed);
+    }
 
     let response = client
         .post(&endpoint)
         .bearer_auth(&gateway_token)
-        .json(&serde_json::json!({
-            "model": model.trim(),
-            "modalities": ["text", "audio"],
-            "audio": {
-                "voice": DEFAULT_TTS_VOICE,
-                "format": STREAMING_PROXY_TTS_FORMAT,
-            },
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a text-to-speech engine. Convert the user's text into spoken audio verbatim. Do not add or remove words."
-                },
-                {
-                    "role": "user",
-                    "content": text,
-                }
-            ],
-            "stream": true
-        }))
+        .json(&payload)
         .send()
         .await
         .map_err(|e| format!("Audio generation request failed: {}", e))?;
@@ -1526,94 +1357,32 @@ async fn generate_proxy_chat_audio(
         return Err(format_audio_generation_http_error(status, body));
     }
 
-    let mut response = response;
-    let mut pending = String::new();
-    let mut audio_chunks = String::new();
-    let mut transcript_chunks = String::new();
-    let mut text_chunks = String::new();
-
-    while let Some(chunk) = response
-        .chunk()
+    let mime_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| audio_mime_type_for_tts_format(MANAGED_PROXY_TTS_RESPONSE_FORMAT))
+        .to_string();
+    let bytes = response
+        .bytes()
         .await
-        .map_err(|e| format!("Failed to read streamed audio response: {}", e))?
-    {
-        pending.push_str(&String::from_utf8_lossy(&chunk));
-
-        while let Some(idx) = pending.find("\n\n") {
-            let raw_event = pending[..idx].to_string();
-            pending.drain(..idx + 2);
-
-            let mut data_lines = Vec::new();
-            for line in raw_event.lines() {
-                let trimmed = line.trim();
-                if let Some(rest) = trimmed.strip_prefix("data:") {
-                    data_lines.push(rest.trim_start());
-                }
-            }
-            if data_lines.is_empty() {
-                continue;
-            }
-            process_sse_event_data(
-                &data_lines.join("\n"),
-                &mut audio_chunks,
-                &mut transcript_chunks,
-                &mut text_chunks,
-            )?;
-        }
+        .map_err(|e| format!("Failed to read generated audio response: {}", e))?;
+    if bytes.is_empty() {
+        return Err("The selected proxy model returned empty audio.".to_string());
     }
-
-    if !pending.trim().is_empty() {
-        let mut data_lines = Vec::new();
-        for line in pending.lines() {
-            let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("data:") {
-                data_lines.push(rest.trim_start());
-            }
-        }
-        if !data_lines.is_empty() {
-            process_sse_event_data(
-                &data_lines.join("\n"),
-                &mut audio_chunks,
-                &mut transcript_chunks,
-                &mut text_chunks,
-            )?;
-        }
-    }
-
-    if audio_chunks.trim().is_empty() {
-        let text_fallback = text_chunks.trim();
-        if !text_fallback.is_empty() {
-            let snippet = text_fallback.chars().take(220).collect::<String>();
-            eprintln!(
-                "[Entropic] Proxy TTS returned text-only output instead of audio (model={}): {}",
-                model.trim(),
-                snippet
-            );
-            return Err(format!(
-                "The proxy model returned text instead of audio. Snippet: {}",
-                snippet
-            ));
-        }
-        eprintln!(
-            "[Entropic] Proxy TTS returned no audio chunks and no text fallback (model={})",
-            model.trim()
-        );
-        return Err("The selected proxy model did not return audio.".to_string());
-    }
-    let transcript = if transcript_chunks.trim().is_empty() {
-        "Generated audio from your text.".to_string()
-    } else {
-        transcript_chunks.trim().to_string()
-    };
-
-    let wav_data_url = pcm16_base64_to_wav_data_url(&audio_chunks)?;
+    let encoded = STANDARD.encode(bytes);
 
     Ok(ChatAudioGenerationResult {
-        text: transcript,
+        text: "Generated audio from your text.".to_string(),
         audio: vec![ChatGeneratedAudio {
-            file_name: "generated-speech.wav".to_string(),
-            mime_type: "audio/wav".to_string(),
-            url: wav_data_url,
+            file_name: format!(
+                "generated-speech.{}",
+                audio_file_extension_for_tts_format(MANAGED_PROXY_TTS_RESPONSE_FORMAT)
+            ),
+            mime_type: mime_type.clone(),
+            url: format!("data:{};base64,{}", mime_type, encoded),
         }],
     })
 }
@@ -1729,6 +1498,26 @@ fn format_audio_transcription_http_error(status: reqwest::StatusCode, body: Stri
     format!("Audio transcription failed ({}{})", status, suffix)
 }
 
+const CHAT_AUDIO_TRANSCRIPTION_PROMPT: &str = "Transcribe the audio verbatim. For short microphone commands, assume there is one user speaking and return only what that user said. Do not invent additional speakers, replies, or conversation turns. Do not add speaker labels unless the audio clearly contains multiple real speakers. If a word is unclear, write [unclear].";
+
+fn format_chat_audio_transcription_segment(
+    attachment: &ChatAudioTranscriptionAttachment,
+    transcript: &str,
+    include_filename: bool,
+) -> String {
+    let transcript = transcript.trim();
+    if !include_filename {
+        return transcript.to_string();
+    }
+
+    let file_name = attachment.file_name.trim();
+    if file_name.is_empty() {
+        transcript.to_string()
+    } else {
+        format!("{}:\n{}", file_name, transcript)
+    }
+}
+
 async fn transcribe_openai_audio(
     client: &reqwest::Client,
     endpoint: &str,
@@ -1759,6 +1548,7 @@ async fn transcribe_openai_audio(
     let form = reqwest::multipart::Form::new()
         .text("model", raw_model.to_string())
         .text("response_format", "json".to_string())
+        .text("prompt", CHAT_AUDIO_TRANSCRIPTION_PROMPT.to_string())
         .part("file", file_part);
 
     let response = client
@@ -1801,7 +1591,7 @@ async fn transcribe_google_audio(
                 "role": "user",
                 "parts": [
                     {
-                        "text": "Transcribe this audio verbatim. Preserve speaker turns when possible, and mark unclear portions as [unclear]."
+                        "text": CHAT_AUDIO_TRANSCRIPTION_PROMPT
                     },
                     {
                         "inlineData": {
@@ -1836,6 +1626,84 @@ async fn transcribe_google_audio(
         .ok_or_else(|| "The selected model did not return a transcript.".to_string())
 }
 
+async fn transcribe_proxy_venice_audio(
+    client: &reqwest::Client,
+    gateway_token: &str,
+    proxy_base: &str,
+    model: &str,
+    attachments: &[ChatAudioTranscriptionAttachment],
+) -> Result<ChatAudioTranscriptionResult, String> {
+    let host_proxy_base = resolve_host_proxy_base(proxy_base)?;
+    let endpoint = format!(
+        "{}/audio/transcriptions",
+        host_proxy_base.trim_end_matches('/')
+    );
+    let raw_model = venice_provider_model_id(model);
+
+    let mut transcripts = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let file_name = if attachment.file_name.trim().is_empty() {
+            format!(
+                "audio.{}",
+                audio_file_extension_from_name_or_mime(
+                    &attachment.file_name,
+                    &attachment.mime_type
+                )
+            )
+        } else {
+            attachment.file_name.trim().to_string()
+        };
+        let mime_type = if attachment.mime_type.trim().is_empty() {
+            "audio/webm"
+        } else {
+            attachment.mime_type.trim()
+        };
+        let bytes = STANDARD
+            .decode(attachment.content.trim())
+            .map_err(|e| format!("Invalid audio attachment '{}': {}", file_name, e))?;
+        let file_part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(file_name.clone())
+            .mime_str(mime_type)
+            .map_err(|e| format!("Invalid attachment MIME type '{}': {}", mime_type, e))?;
+        let form = reqwest::multipart::Form::new()
+            .text("model", format!("venice/{}", raw_model))
+            .text("response_format", "json".to_string())
+            .text("timestamps", "false".to_string())
+            .part("file", file_part);
+
+        let response = client
+            .post(&endpoint)
+            .bearer_auth(gateway_token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("Audio transcription request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_else(|_| String::new());
+            return Err(format_audio_transcription_http_error(status, body));
+        }
+
+        let payload = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| format!("Invalid audio transcription response: {}", e))?;
+        let transcript = extract_audio_transcription_text(&payload).ok_or_else(|| {
+            "The selected Venice audio model did not return a transcript.".to_string()
+        })?;
+        transcripts.push(format_chat_audio_transcription_segment(
+            attachment,
+            &transcript,
+            attachments.len() > 1,
+        ));
+    }
+
+    Ok(ChatAudioTranscriptionResult {
+        text: transcripts.join("\n\n"),
+    })
+}
+
 async fn transcribe_proxy_chat_audio(
     client: &reqwest::Client,
     model: &str,
@@ -1853,6 +1721,16 @@ async fn transcribe_proxy_chat_audio(
     if normalized_model.is_empty() {
         return Err("Audio understanding model is not configured.".to_string());
     }
+    if model_base_ref(normalized_model).starts_with("venice/") {
+        return transcribe_proxy_venice_audio(
+            client,
+            &gateway_token,
+            &proxy_base,
+            normalized_model,
+            attachments,
+        )
+        .await;
+    }
 
     let mut transcripts = Vec::with_capacity(attachments.len());
     for attachment in attachments {
@@ -1866,7 +1744,7 @@ async fn transcribe_proxy_chat_audio(
                     "content": [
                         {
                             "type": "text",
-                            "text": "Transcribe this audio verbatim. Preserve speaker turns when possible, and mark unclear portions as [unclear].",
+                            "text": CHAT_AUDIO_TRANSCRIPTION_PROMPT,
                         },
                         {
                             "type": "input_audio",
@@ -1910,7 +1788,11 @@ async fn transcribe_proxy_chat_audio(
         if transcript.trim().is_empty() {
             return Err("The selected proxy audio model did not return a transcript.".to_string());
         }
-        transcripts.push(format!("{}:\n{}", attachment.file_name.trim(), transcript));
+        transcripts.push(format_chat_audio_transcription_segment(
+            attachment,
+            &transcript,
+            attachments.len() > 1,
+        ));
     }
 
     Ok(ChatAudioTranscriptionResult {
@@ -1956,7 +1838,11 @@ async fn transcribe_local_chat_audio(
                 ))
             }
         };
-        transcripts.push(format!("{}:\n{}", attachment.file_name.trim(), transcript));
+        transcripts.push(format_chat_audio_transcription_segment(
+            attachment,
+            &transcript,
+            attachments.len() > 1,
+        ));
     }
 
     Ok(ChatAudioTranscriptionResult {
@@ -2569,6 +2455,23 @@ fn docker_command() -> Command {
 }
 
 fn tokio_docker_command() -> tokio::process::Command {
+    if windows_use_managed_wsl_docker() {
+        let mut cmd = tokio::process::Command::new("wsl.exe");
+        cmd.args([
+            "--distribution",
+            windows_runtime_distro_name(),
+            "--user",
+            "root",
+            "--exec",
+            "env",
+            "-u",
+            "DOCKER_CONTEXT",
+            "DOCKER_HOST=unix:///var/run/docker.sock",
+            "docker",
+        ]);
+        return cmd;
+    }
+
     let docker = find_docker_binary();
     let mut cmd = tokio::process::Command::new(docker);
     if let Some(host) = get_docker_host() {
@@ -4733,6 +4636,11 @@ pub struct DesktopSettingsSnapshot {
     pub code_model: Option<String>,
     pub image_model: Option<String>,
     pub image_generation_model: Option<String>,
+    pub text_to_speech_model: Option<String>,
+    pub audio_understanding_model: Option<String>,
+    pub voice_shortcut: Option<String>,
+    pub voice_speech_rate: Option<f64>,
+    pub voice_speech_voice: Option<String>,
     pub desktop_wallpaper: Option<String>,
     pub desktop_custom_wallpaper: Option<String>,
 }
@@ -5271,7 +5179,6 @@ const ONLYOFFICE_CONTAINER: &str = "entropic-onlyoffice";
 const ONLYOFFICE_DEFAULT_IMAGE: &str = "onlyoffice/documentserver:9.3.1";
 const ONLYOFFICE_HOST_PORT: &str = "19794";
 const ONLYOFFICE_HTTP_PORT: &str = "80";
-const ONLYOFFICE_BRIDGE_PORT: &str = "19796";
 const ONLYOFFICE_PUBLIC_BASE_URL: &str = "/__onlyoffice_proxy__";
 const ONLYOFFICE_INTERNAL_BASE_URL: &str = "http://entropic-openclaw:19791";
 const ONLYOFFICE_UPSTREAM_BASE_URL: &str = "http://entropic-onlyoffice";
@@ -5299,7 +5206,6 @@ const MANAGED_PLUGIN_IDS: &[&str] = &[
 ];
 static GATEWAY_START_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 static APPLIED_AGENT_SETTINGS_FINGERPRINT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-static ONLYOFFICE_BRIDGE_START_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 
 fn gateway_start_lock() -> &'static AsyncMutex<()> {
     GATEWAY_START_LOCK.get_or_init(|| AsyncMutex::new(()))
@@ -5307,10 +5213,6 @@ fn gateway_start_lock() -> &'static AsyncMutex<()> {
 
 fn applied_agent_settings_fingerprint() -> &'static Mutex<Option<String>> {
     APPLIED_AGENT_SETTINGS_FINGERPRINT.get_or_init(|| Mutex::new(None))
-}
-
-fn onlyoffice_bridge_start_lock() -> &'static AsyncMutex<()> {
-    ONLYOFFICE_BRIDGE_START_LOCK.get_or_init(|| AsyncMutex::new(()))
 }
 
 fn clear_applied_agent_settings_fingerprint() -> Result<(), String> {
@@ -6559,64 +6461,40 @@ fn load_or_create_onlyoffice_jwt_secret(app: &AppHandle) -> Result<String, Strin
     Ok(secret)
 }
 
-const ONLYOFFICE_HOST_HTML: &str =
-    include_str!("../../openclaw-runtime/browser-service/onlyoffice-host.html");
 const ONLYOFFICE_OPEN_URL_TOKEN_TTL_SECS: u64 = 15 * 60;
-const ONLYOFFICE_ACTIVE_DOCUMENT_TOKEN_TTL_SECS: u64 = 12 * 60 * 60;
 
-#[derive(Debug, Clone, Copy)]
-struct OnlyOfficeFileSpec {
-    document_type: &'static str,
-    file_type: &'static str,
-    content_type: &'static str,
+fn onlyoffice_browser_service_local_origin() -> String {
+    format!("http://127.0.0.1:{}", BROWSER_SERVICE_HOST_PORT)
 }
 
-#[derive(Debug)]
-struct OnlyOfficeBridgeRequest {
-    method: String,
-    target: String,
-    body: Vec<u8>,
+fn docker_network_gateway_ip(network: &str) -> Option<String> {
+    let output = docker_command()
+        .args([
+            "network",
+            "inspect",
+            network,
+            "--format",
+            "{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}}{{end}}{{end}}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .map(|ip| ip.to_string())
 }
 
-fn onlyoffice_bridge_local_origin() -> String {
-    format!("http://127.0.0.1:{}", ONLYOFFICE_BRIDGE_PORT)
-}
-
-fn onlyoffice_bridge_container_origin() -> String {
-    format!("http://host.docker.internal:{}", ONLYOFFICE_BRIDGE_PORT)
-}
-
-fn onlyoffice_document_server_origin() -> String {
-    format!("http://127.0.0.1:{}", ONLYOFFICE_HOST_PORT)
-}
-
-fn onlyoffice_file_spec_for_path(path: &str) -> Result<OnlyOfficeFileSpec, String> {
-    let ext = Path::new(path)
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| value.to_ascii_lowercase())
-        .unwrap_or_default();
-    match ext.as_str() {
-        "docx" => Ok(OnlyOfficeFileSpec {
-            document_type: "word",
-            file_type: "docx",
-            content_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        }),
-        "xlsx" => Ok(OnlyOfficeFileSpec {
-            document_type: "cell",
-            file_type: "xlsx",
-            content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        }),
-        "pptx" => Ok(OnlyOfficeFileSpec {
-            document_type: "slide",
-            file_type: "pptx",
-            content_type:
-                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        }),
-        _ => {
-            Err("This office file type is not supported by ONLYOFFICE in Entropic yet.".to_string())
+fn onlyoffice_docker_host_alias_arg() -> String {
+    if cfg!(target_os = "linux") {
+        if let Some(gateway) = docker_network_gateway_ip(OPENCLAW_NETWORK) {
+            return format!("host.docker.internal:{}", gateway);
         }
     }
+    docker_host_alias_arg()
 }
 
 fn onlyoffice_jwt_payload_bytes(payload: &serde_json::Value) -> Result<Vec<u8>, String> {
@@ -6665,52 +6543,16 @@ fn sign_onlyoffice_jwt(secret: &str, payload: &serde_json::Value) -> Result<Stri
     Ok(format!("{}.{}", signing_input, signature))
 }
 
-fn verify_onlyoffice_jwt(secret: &str, token: &str) -> Result<serde_json::Value, String> {
-    let mut parts = token.split('.');
-    let header = parts.next().unwrap_or_default();
-    let body = parts.next().unwrap_or_default();
-    let signature = parts.next().unwrap_or_default();
-    if header.is_empty() || body.is_empty() || signature.is_empty() || parts.next().is_some() {
-        return Err("Invalid ONLYOFFICE token.".to_string());
-    }
-
-    let signing_input = format!("{}.{}", header, body);
-    let expected = URL_SAFE_NO_PAD.encode(hmac_sha256_bytes(
-        secret.as_bytes(),
-        signing_input.as_bytes(),
-    ));
-    if expected != signature {
-        return Err("Invalid ONLYOFFICE token signature.".to_string());
-    }
-
-    let payload_bytes = URL_SAFE_NO_PAD
-        .decode(body.as_bytes())
-        .map_err(|_| "Invalid ONLYOFFICE token payload.".to_string())?;
-    let payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
-        .map_err(|_| "Invalid ONLYOFFICE token payload.".to_string())?;
-    if let Some(exp) = payload.get("exp").and_then(|value| value.as_u64()) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        if now >= exp {
-            return Err("ONLYOFFICE token expired.".to_string());
-        }
-    }
-    Ok(payload)
-}
-
 fn sign_onlyoffice_path_token(
     secret: &str,
     kind: &str,
     relative_path: &str,
 ) -> Result<String, String> {
-    let ttl_secs = onlyoffice_path_token_ttl_secs(kind);
     let exp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-        .saturating_add(ttl_secs);
+        .saturating_add(ONLYOFFICE_OPEN_URL_TOKEN_TTL_SECS);
     sign_onlyoffice_jwt(
         secret,
         &serde_json::json!({
@@ -6719,59 +6561,6 @@ fn sign_onlyoffice_path_token(
             "exp": exp,
         }),
     )
-}
-
-fn onlyoffice_path_token_ttl_secs(kind: &str) -> u64 {
-    match kind {
-        "download" | "callback" => ONLYOFFICE_ACTIVE_DOCUMENT_TOKEN_TTL_SECS,
-        _ => ONLYOFFICE_OPEN_URL_TOKEN_TTL_SECS,
-    }
-}
-
-fn verify_onlyoffice_path_token(
-    secret: &str,
-    token: &str,
-    expected_kind: &str,
-    expected_path: &str,
-) -> Result<(), String> {
-    let payload = verify_onlyoffice_jwt(secret, token)?;
-    let kind = payload
-        .get("kind")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let path = payload
-        .get("path")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    if kind != expected_kind || path != expected_path {
-        return Err("ONLYOFFICE token does not match the requested file.".to_string());
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod onlyoffice_token_tests {
-    use super::{
-        onlyoffice_path_token_ttl_secs, ONLYOFFICE_ACTIVE_DOCUMENT_TOKEN_TTL_SECS,
-        ONLYOFFICE_OPEN_URL_TOKEN_TTL_SECS,
-    };
-
-    #[test]
-    fn active_document_tokens_outlive_open_tokens() {
-        assert_eq!(
-            onlyoffice_path_token_ttl_secs("open"),
-            ONLYOFFICE_OPEN_URL_TOKEN_TTL_SECS
-        );
-        assert_eq!(
-            onlyoffice_path_token_ttl_secs("download"),
-            ONLYOFFICE_ACTIVE_DOCUMENT_TOKEN_TTL_SECS
-        );
-        assert_eq!(
-            onlyoffice_path_token_ttl_secs("callback"),
-            ONLYOFFICE_ACTIVE_DOCUMENT_TOKEN_TTL_SECS
-        );
-        assert!(ONLYOFFICE_ACTIVE_DOCUMENT_TOKEN_TTL_SECS > ONLYOFFICE_OPEN_URL_TOKEN_TTL_SECS);
-    }
 }
 
 fn onlyoffice_file_app_kind(relative_path: &str) -> Result<&'static str, String> {
@@ -6787,203 +6576,6 @@ fn onlyoffice_file_app_kind(relative_path: &str) -> Result<&'static str, String>
         _ => {
             Err("This office file type is not supported by ONLYOFFICE in Entropic yet.".to_string())
         }
-    }
-}
-
-fn ensure_onlyoffice_local_request(peer_ip: IpAddr, route: &str) -> Result<(), String> {
-    if peer_ip.is_loopback() {
-        return Ok(());
-    }
-    Err(format!(
-        "ONLYOFFICE route {} is only available from the local desktop.",
-        route
-    ))
-}
-
-fn onlyoffice_document_key(relative_path: &str, size: u64, modified_at: u64) -> String {
-    URL_SAFE_NO_PAD
-        .encode(Sha256::digest(
-            format!("{}:{}:{}", relative_path, size, modified_at).as_bytes(),
-        ))
-        .chars()
-        .take(48)
-        .collect()
-}
-
-fn onlyoffice_bridge_reason(status: http::StatusCode) -> &'static str {
-    status.canonical_reason().unwrap_or("OK")
-}
-
-async fn read_http_request(socket: &mut TcpStream) -> Result<OnlyOfficeBridgeRequest, String> {
-    let mut buffer = Vec::with_capacity(8192);
-    let mut temp = [0u8; 4096];
-    let header_end = loop {
-        if buffer.len() > 1024 * 1024 {
-            return Err("Request headers exceeded the maximum size.".to_string());
-        }
-        let size = socket
-            .read(&mut temp)
-            .await
-            .map_err(|e| format!("Failed to read office bridge request: {}", e))?;
-        if size == 0 {
-            return Err("Connection closed before request headers were received.".to_string());
-        }
-        buffer.extend_from_slice(&temp[..size]);
-        if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
-            break position + 4;
-        }
-    };
-
-    let header_text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
-    let mut lines = header_text.lines();
-    let first_line = lines
-        .next()
-        .ok_or_else(|| "Office bridge request line was missing.".to_string())?;
-    let mut request_parts = first_line.split_whitespace();
-    let method = request_parts
-        .next()
-        .ok_or_else(|| "Office bridge request method was missing.".to_string())?
-        .to_string();
-    let target = request_parts
-        .next()
-        .ok_or_else(|| "Office bridge request target was missing.".to_string())?;
-
-    let mut headers = HashMap::new();
-    for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
-        }
-    }
-    let content_length = headers
-        .get("content-length")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let mut body = buffer[header_end..].to_vec();
-    while body.len() < content_length {
-        let size = socket
-            .read(&mut temp)
-            .await
-            .map_err(|e| format!("Failed to read office bridge body: {}", e))?;
-        if size == 0 {
-            break;
-        }
-        body.extend_from_slice(&temp[..size]);
-    }
-    if body.len() > content_length {
-        body.truncate(content_length);
-    }
-
-    Url::parse(&format!("http://127.0.0.1{}", target))
-        .map_err(|e| format!("Invalid office bridge URL: {}", e))?;
-
-    Ok(OnlyOfficeBridgeRequest {
-        method,
-        target: target.to_string(),
-        body,
-    })
-}
-
-async fn write_http_response(
-    socket: &mut TcpStream,
-    status: http::StatusCode,
-    headers: &[(&str, String)],
-    body: &[u8],
-) -> Result<(), String> {
-    let has_content_length = headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("Content-Length"));
-    let mut response = format!(
-        "HTTP/1.1 {} {}\r\nConnection: close\r\n",
-        status.as_u16(),
-        onlyoffice_bridge_reason(status)
-    );
-    if !has_content_length {
-        response.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    for (name, value) in headers {
-        response.push_str(name);
-        response.push_str(": ");
-        response.push_str(value);
-        response.push_str("\r\n");
-    }
-    response.push_str("\r\n");
-    socket
-        .write_all(response.as_bytes())
-        .await
-        .map_err(|e| format!("Failed to write office bridge response headers: {}", e))?;
-    if !body.is_empty() {
-        socket
-            .write_all(body)
-            .await
-            .map_err(|e| format!("Failed to write office bridge response body: {}", e))?;
-    }
-    socket
-        .shutdown()
-        .await
-        .map_err(|e| format!("Failed to close office bridge response: {}", e))
-}
-
-async fn write_json_response(
-    socket: &mut TcpStream,
-    status: http::StatusCode,
-    payload: &serde_json::Value,
-) -> Result<(), String> {
-    let body = serde_json::to_vec(payload)
-        .map_err(|e| format!("Failed to encode office bridge JSON response: {}", e))?;
-    write_http_response(
-        socket,
-        status,
-        &[
-            (
-                "Content-Type",
-                "application/json; charset=utf-8".to_string(),
-            ),
-            ("Cache-Control", "no-store".to_string()),
-        ],
-        &body,
-    )
-    .await
-}
-
-async fn write_text_response(
-    socket: &mut TcpStream,
-    status: http::StatusCode,
-    content_type: &str,
-    body: &[u8],
-) -> Result<(), String> {
-    write_http_response(
-        socket,
-        status,
-        &[
-            ("Content-Type", content_type.to_string()),
-            ("Cache-Control", "no-store".to_string()),
-        ],
-        body,
-    )
-    .await
-}
-
-fn normalize_onlyoffice_callback_source_url(raw_url: &str) -> Result<Url, String> {
-    let mut parsed = Url::parse(raw_url)
-        .map_err(|e| format!("ONLYOFFICE callback returned an invalid source URL: {}", e))?;
-    let host = parsed
-        .host_str()
-        .map(|value| value.to_ascii_lowercase())
-        .ok_or_else(|| "ONLYOFFICE callback URL host is missing.".to_string())?;
-    match host.as_str() {
-        "127.0.0.1" | "localhost" | "host.docker.internal" | "entropic-onlyoffice" => {
-            let _ = parsed.set_scheme("http");
-            parsed
-                .set_host(Some("127.0.0.1"))
-                .map_err(|_| "Failed to normalize ONLYOFFICE callback host.".to_string())?;
-            if parsed.port().is_none() {
-                parsed
-                    .set_port(Some(ONLYOFFICE_HOST_PORT.parse::<u16>().unwrap_or(19794)))
-                    .map_err(|_| "Failed to normalize ONLYOFFICE callback port.".to_string())?;
-            }
-            Ok(parsed)
-        }
-        _ => Err("ONLYOFFICE save callback used an unexpected source host.".to_string()),
     }
 }
 
@@ -7044,6 +6636,8 @@ fn normalize_onlyoffice_spreadsheet_if_needed(relative_path: &str) {
         .args([
             "exec",
             container,
+            "timeout",
+            "15s",
             "entropic-office",
             "api",
             "normalize-spreadsheet",
@@ -7070,25 +6664,6 @@ fn normalize_onlyoffice_spreadsheet_if_needed(relative_path: &str) {
     }
 }
 
-fn read_workspace_file_bytes(path: &str) -> Result<Vec<u8>, String> {
-    let (_, full_path) = resolve_workspace_file_path_for_office(path)?;
-    let container = running_gateway_container_name()
-        .ok_or_else(|| "Gateway container is not running.".to_string())?;
-    let output = docker_command()
-        .args(["exec", container, "cat", "--", &full_path])
-        .output()
-        .map_err(|e| format!("Failed to read workspace file: {}", e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "File not found or unreadable".to_string()
-        } else {
-            stderr
-        });
-    }
-    Ok(output.stdout)
-}
-
 fn workspace_file_metadata(path: &str) -> Result<(u64, u64), String> {
     let (_, full_path) = resolve_workspace_file_path_for_office(path)?;
     let container = running_gateway_container_name()
@@ -7106,531 +6681,32 @@ fn workspace_file_metadata(path: &str) -> Result<(u64, u64), String> {
     Ok((size, modified_at))
 }
 
-fn write_workspace_file_bytes_atomically(path: &str, bytes: &[u8]) -> Result<(), String> {
-    let (_, full_path) = resolve_workspace_file_path_for_office(path)?;
-    let parent = Path::new(&full_path)
-        .parent()
-        .map(|value| value.to_string_lossy().to_string())
-        .unwrap_or_else(|| WORKSPACE_ROOT.to_string());
-    let encoded = STANDARD.encode(bytes);
-    let script = format!(
-        "set -eu\n\
-dir={dir}\n\
-path={path}\n\
-mkdir -p -- \"$dir\"\n\
-tmp=$(mktemp \"$dir/.entropic-onlyoffice.XXXXXX\")\n\
-trap 'rm -f -- \"$tmp\"' EXIT HUP INT TERM\n\
-printf %s {encoded} | base64 -d > \"$tmp\"\n\
-mv -f -- \"$tmp\" \"$path\"\n",
-        dir = sh_single_quote(&parent),
-        path = sh_single_quote(&full_path),
-        encoded = sh_single_quote(&encoded),
-    );
-    run_container_write_script(&script, &full_path)
-}
-
-fn onlyoffice_config_payload(
-    app: &AppHandle,
-    raw_path: &str,
-    open_token: &str,
-) -> Result<serde_json::Value, String> {
-    let relative_path = sanitize_workspace_path(raw_path)?;
-    if relative_path.is_empty() {
-        return Err("A workspace file path is required.".to_string());
-    }
-    let secret = load_or_create_onlyoffice_jwt_secret(app)?;
-    verify_onlyoffice_path_token(&secret, open_token, "open", &relative_path)?;
-    let spec = onlyoffice_file_spec_for_path(&relative_path)?;
-    normalize_onlyoffice_spreadsheet_if_needed(&relative_path);
-    let (size, modified_at) = workspace_file_metadata(&relative_path)?;
-    let key = onlyoffice_document_key(&relative_path, size, modified_at);
-    let encoded_path =
-        url::form_urlencoded::byte_serialize(relative_path.as_bytes()).collect::<String>();
-    let download_token = sign_onlyoffice_path_token(&secret, "download", &relative_path)?;
-    let callback_token = sign_onlyoffice_path_token(&secret, "callback", &relative_path)?;
-    let title = Path::new(&relative_path)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("office-file")
-        .to_string();
-    let user_name = load_agent_settings(app).identity_name;
-    let config = serde_json::json!({
-        "documentType": spec.document_type,
-        "type": "desktop",
-        "document": {
-            "title": title,
-            "fileType": spec.file_type,
-            "key": key,
-            "url": format!(
-                "{}/__onlyoffice_api__/file?path={}&token={}",
-                onlyoffice_bridge_container_origin(),
-                encoded_path,
-                url::form_urlencoded::byte_serialize(download_token.as_bytes()).collect::<String>(),
-            ),
-            "permissions": {
-                "edit": true,
-                "download": true,
-                "print": true,
-                "review": true,
-                "comment": true,
-                "fillForms": true,
-                "copy": true,
-            },
-        },
-        "editorConfig": {
-            "mode": "edit",
-            "lang": "en",
-            "callbackUrl": format!(
-                "{}/__onlyoffice_api__/callback?path={}&token={}",
-                onlyoffice_bridge_container_origin(),
-                encoded_path,
-                url::form_urlencoded::byte_serialize(callback_token.as_bytes()).collect::<String>(),
-            ),
-            "user": {
-                "id": "entropic-desktop",
-                "name": user_name,
-            },
-            "coEditing": {
-                "mode": "fast",
-                "change": true,
-            },
-            "customization": {
-                "autosave": true,
-                "forcesave": true,
-                "compactHeader": false,
-                "compactToolbar": false,
-                "toolbarNoTabs": false,
-            },
-        },
-    });
-    let mut signed_config = config.clone();
-    signed_config
-        .as_object_mut()
-        .ok_or_else(|| "ONLYOFFICE config is not an object".to_string())?
-        .insert(
-            "token".to_string(),
-            serde_json::Value::String(sign_onlyoffice_jwt(&secret, &config)?),
-        );
-    Ok(serde_json::json!({
-        "documentServerUrl": onlyoffice_document_server_origin(),
-        "fileKey": key,
-        "path": relative_path,
-        "updatedAt": modified_at.saturating_mul(1000),
-        "config": signed_config
-    }))
-}
-
-async fn handle_onlyoffice_bridge_connection(
-    mut socket: TcpStream,
-    app: AppHandle,
-    peer_ip: IpAddr,
-) -> Result<(), String> {
-    let request = read_http_request(&mut socket).await?;
-    let parsed = Url::parse(&format!("http://127.0.0.1{}", request.target))
-        .map_err(|e| format!("Invalid office bridge route: {}", e))?;
-    let path = parsed.path();
-
-    if request.method == "GET" && path == "/__onlyoffice__/open" {
-        if let Err(error) = ensure_onlyoffice_local_request(peer_ip, path) {
-            return write_json_response(
-                &mut socket,
-                http::StatusCode::FORBIDDEN,
-                &serde_json::json!({ "error": error }),
-            )
-            .await;
-        }
-        let relative_path = parsed
-            .query_pairs()
-            .find(|(key, _)| key == "path")
-            .map(|(_, value)| value.to_string())
-            .unwrap_or_default();
-        let token = parsed
-            .query_pairs()
-            .find(|(key, _)| key == "token")
-            .map(|(_, value)| value.to_string())
-            .unwrap_or_default();
-        let secret = match load_or_create_onlyoffice_jwt_secret(&app) {
-            Ok(secret) => secret,
-            Err(error) => {
-                return write_json_response(
-                    &mut socket,
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &serde_json::json!({ "error": error }),
-                )
-                .await;
-            }
-        };
-        if let Err(error) = verify_onlyoffice_path_token(&secret, &token, "open", &relative_path) {
-            return write_json_response(
-                &mut socket,
-                http::StatusCode::FORBIDDEN,
-                &serde_json::json!({ "error": error }),
-            )
-            .await;
-        }
-        return write_text_response(
-            &mut socket,
-            http::StatusCode::OK,
-            "text/html; charset=utf-8",
-            ONLYOFFICE_HOST_HTML.as_bytes(),
-        )
-        .await;
-    }
-
-    if path == "/__onlyoffice_api__/health" {
-        if let Err(error) = ensure_onlyoffice_local_request(peer_ip, path) {
-            return write_json_response(
-                &mut socket,
-                http::StatusCode::FORBIDDEN,
-                &serde_json::json!({ "error": error }),
-            )
-            .await;
-        }
-        return write_json_response(
-            &mut socket,
-            http::StatusCode::OK,
-            &serde_json::json!({ "ok": true }),
-        )
-        .await;
-    }
-
-    if request.method == "GET" && path == "/__onlyoffice_api__/config" {
-        if let Err(error) = ensure_onlyoffice_local_request(peer_ip, path) {
-            return write_json_response(
-                &mut socket,
-                http::StatusCode::FORBIDDEN,
-                &serde_json::json!({ "error": error }),
-            )
-            .await;
-        }
-        let relative_path = parsed
-            .query_pairs()
-            .find(|(key, _)| key == "path")
-            .map(|(_, value)| value.to_string())
-            .unwrap_or_default();
-        let token = parsed
-            .query_pairs()
-            .find(|(key, _)| key == "token")
-            .map(|(_, value)| value.to_string())
-            .unwrap_or_default();
-        match onlyoffice_config_payload(&app, &relative_path, &token) {
-            Ok(payload) => {
-                return write_json_response(&mut socket, http::StatusCode::OK, &payload).await;
-            }
-            Err(error) => {
-                return write_json_response(
-                    &mut socket,
-                    http::StatusCode::BAD_REQUEST,
-                    &serde_json::json!({ "error": error }),
-                )
-                .await;
-            }
-        }
-    }
-
-    if (request.method == "GET" || request.method == "HEAD") && path == "/__onlyoffice_api__/file" {
-        let relative_path = parsed
-            .query_pairs()
-            .find(|(key, _)| key == "path")
-            .map(|(_, value)| value.to_string())
-            .unwrap_or_default();
-        let token = parsed
-            .query_pairs()
-            .find(|(key, _)| key == "token")
-            .map(|(_, value)| value.to_string())
-            .unwrap_or_default();
-        let secret = match load_or_create_onlyoffice_jwt_secret(&app) {
-            Ok(secret) => secret,
-            Err(error) => {
-                return write_json_response(
-                    &mut socket,
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &serde_json::json!({ "error": error }),
-                )
-                .await;
-            }
-        };
-        if let Err(error) =
-            verify_onlyoffice_path_token(&secret, &token, "download", &relative_path)
-        {
-            return write_json_response(
-                &mut socket,
-                http::StatusCode::FORBIDDEN,
-                &serde_json::json!({ "error": error }),
-            )
-            .await;
-        }
-        let spec = match onlyoffice_file_spec_for_path(&relative_path) {
-            Ok(spec) => spec,
-            Err(error) => {
-                return write_json_response(
-                    &mut socket,
-                    http::StatusCode::BAD_REQUEST,
-                    &serde_json::json!({ "error": error }),
-                )
-                .await;
-            }
-        };
-        let (size, _) = match workspace_file_metadata(&relative_path) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                return write_json_response(
-                    &mut socket,
-                    http::StatusCode::NOT_FOUND,
-                    &serde_json::json!({ "error": error }),
-                )
-                .await;
-            }
-        };
-        if request.method == "HEAD" {
-            return write_http_response(
-                &mut socket,
-                http::StatusCode::OK,
-                &[
-                    ("Content-Type", spec.content_type.to_string()),
-                    ("Cache-Control", "no-store".to_string()),
-                    ("Content-Length", size.to_string()),
-                    ("Accept-Ranges", "bytes".to_string()),
-                ],
-                &[],
-            )
-            .await;
-        }
-        match read_workspace_file_bytes(&relative_path) {
-            Ok(bytes) => {
-                return write_http_response(
-                    &mut socket,
-                    http::StatusCode::OK,
-                    &[
-                        ("Content-Type", spec.content_type.to_string()),
-                        ("Cache-Control", "no-store".to_string()),
-                        ("Accept-Ranges", "bytes".to_string()),
-                    ],
-                    &bytes,
-                )
-                .await;
-            }
-            Err(error) => {
-                return write_json_response(
-                    &mut socket,
-                    http::StatusCode::NOT_FOUND,
-                    &serde_json::json!({ "error": error }),
-                )
-                .await;
-            }
-        }
-    }
-
-    if request.method == "POST" && path == "/__onlyoffice_api__/callback" {
-        let relative_path = parsed
-            .query_pairs()
-            .find(|(key, _)| key == "path")
-            .map(|(_, value)| value.to_string())
-            .unwrap_or_default();
-        let token = parsed
-            .query_pairs()
-            .find(|(key, _)| key == "token")
-            .map(|(_, value)| value.to_string())
-            .unwrap_or_default();
-        let secret = match load_or_create_onlyoffice_jwt_secret(&app) {
-            Ok(secret) => secret,
-            Err(error) => {
-                return write_json_response(
-                    &mut socket,
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &serde_json::json!({ "error": error }),
-                )
-                .await;
-            }
-        };
-        if let Err(error) =
-            verify_onlyoffice_path_token(&secret, &token, "callback", &relative_path)
-        {
-            return write_json_response(
-                &mut socket,
-                http::StatusCode::FORBIDDEN,
-                &serde_json::json!({ "error": error }),
-            )
-            .await;
-        }
-        let body: serde_json::Value = match serde_json::from_slice(&request.body) {
-            Ok(body) => body,
-            Err(error) => {
-                return write_json_response(
-                    &mut socket,
-                    http::StatusCode::BAD_REQUEST,
-                    &serde_json::json!({ "error": format!("Invalid ONLYOFFICE callback body: {}", error) }),
-                )
-                .await;
-            }
-        };
-        let status = body
-            .get("status")
-            .and_then(|value| value.as_i64())
-            .unwrap_or(0);
-        if (status == 2 || status == 6)
-            && body.get("url").and_then(|value| value.as_str()).is_some()
-        {
-            let source_url = match normalize_onlyoffice_callback_source_url(
-                body.get("url")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default(),
-            ) {
-                Ok(url) => url,
-                Err(error) => {
-                    return write_json_response(
-                        &mut socket,
-                        http::StatusCode::BAD_REQUEST,
-                        &serde_json::json!({ "error": error }),
-                    )
-                    .await;
-                }
-            };
-            let client = match reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-            {
-                Ok(client) => client,
-                Err(error) => {
-                    return write_json_response(
-                        &mut socket,
-                        http::StatusCode::INTERNAL_SERVER_ERROR,
-                        &serde_json::json!({ "error": format!("Failed to build ONLYOFFICE callback client: {}", error) }),
-                    )
-                    .await;
-                }
-            };
-            let response = match client.get(source_url.clone()).send().await {
-                Ok(response) => response,
-                Err(error) => {
-                    return write_json_response(
-                        &mut socket,
-                        http::StatusCode::BAD_GATEWAY,
-                        &serde_json::json!({ "error": format!("ONLYOFFICE save download failed: {}", error) }),
-                    )
-                    .await;
-                }
-            };
-            if !response.status().is_success() {
-                return write_json_response(
-                    &mut socket,
-                    http::StatusCode::BAD_GATEWAY,
-                    &serde_json::json!({ "error": format!("ONLYOFFICE save download failed with {}", response.status()) }),
-                )
-                .await;
-            }
-            let bytes = match response.bytes().await {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    return write_json_response(
-                        &mut socket,
-                        http::StatusCode::BAD_GATEWAY,
-                        &serde_json::json!({ "error": format!("Failed to read ONLYOFFICE save bytes: {}", error) }),
-                    )
-                    .await;
-                }
-            };
-            if let Err(error) = write_workspace_file_bytes_atomically(&relative_path, &bytes) {
-                return write_json_response(
-                    &mut socket,
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &serde_json::json!({ "error": error }),
-                )
-                .await;
-            }
-        }
-        return write_json_response(
-            &mut socket,
-            http::StatusCode::OK,
-            &serde_json::json!({ "error": 0 }),
-        )
-        .await;
-    }
-
-    write_json_response(
-        &mut socket,
-        http::StatusCode::NOT_FOUND,
-        &serde_json::json!({ "error": "Route not found" }),
-    )
-    .await
-}
-
-async fn wait_for_onlyoffice_bridge_health() -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .map_err(|e| format!("Failed to build ONLYOFFICE bridge client: {}", e))?;
-    let url = format!(
-        "{}/__onlyoffice_api__/health",
-        onlyoffice_bridge_local_origin()
-    );
-    let mut last_error = "ONLYOFFICE bridge did not report readiness yet".to_string();
-    for _ in 0..30 {
-        match client.get(url.as_str()).send().await {
-            Ok(response) if response.status().is_success() => return Ok(()),
-            Ok(response) => {
-                last_error = format!("ONLYOFFICE bridge returned {}", response.status());
-            }
-            Err(error) => {
-                last_error = error.to_string();
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    Err(format!(
-        "Timed out waiting for ONLYOFFICE bridge readiness: {}",
-        last_error
-    ))
-}
-
-async fn start_onlyoffice_bridge(app: AppHandle) -> Result<(), String> {
-    if wait_for_onlyoffice_bridge_health().await.is_ok() {
+fn onlyoffice_internal_services_ready() -> Result<(), String> {
+    let output = docker_command()
+        .args([
+            "exec",
+            ONLYOFFICE_CONTAINER,
+            "curl",
+            "-fsS",
+            "--max-time",
+            "2",
+            "http://127.0.0.1:8000/healthcheck",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to check ONLYOFFICE internal health: {}", e))?;
+    if output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .eq_ignore_ascii_case("true")
+    {
         return Ok(());
     }
-
-    let _guard = onlyoffice_bridge_start_lock().lock().await;
-    if wait_for_onlyoffice_bridge_health().await.is_ok() {
-        return Ok(());
-    }
-
-    // The ONLYOFFICE container reaches the host via host.docker.internal, so
-    // this listener cannot be loopback-only on Linux. Desktop-only routes still
-    // reject non-loopback peers, and file/callback routes require signed tokens.
-    let bind_addr = format!("0.0.0.0:{}", ONLYOFFICE_BRIDGE_PORT);
-    match TcpListener::bind(bind_addr.as_str()).await {
-        Ok(listener) => {
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    let (socket, peer_addr) = match listener.accept().await {
-                        Ok(values) => values,
-                        Err(error) => {
-                            eprintln!("[Entropic] ONLYOFFICE bridge accept failed: {}", error);
-                            break;
-                        }
-                    };
-                    let app_handle = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        if let Err(error) =
-                            handle_onlyoffice_bridge_connection(socket, app_handle, peer_addr.ip())
-                                .await
-                        {
-                            eprintln!("[Entropic] ONLYOFFICE bridge request failed: {}", error);
-                        }
-                    });
-                }
-            });
-        }
-        Err(error) => {
-            if wait_for_onlyoffice_bridge_health().await.is_err() {
-                return Err(format!(
-                    "Failed to bind ONLYOFFICE desktop bridge on {}: {}",
-                    bind_addr, error
-                ));
-            }
-        }
-    }
-
-    wait_for_onlyoffice_bridge_health().await
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if stderr.is_empty() {
+        "ONLYOFFICE internal docservice is not ready yet".to_string()
+    } else {
+        stderr
+    })
 }
 
 async fn wait_for_onlyoffice_health() -> Result<(), String> {
@@ -7645,7 +6721,14 @@ async fn wait_for_onlyoffice_health() -> Result<(), String> {
     let mut last_error = "ONLYOFFICE did not report readiness yet".to_string();
     for _ in 0..90 {
         match client.get(url.as_str()).send().await {
-            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) if response.status().is_success() => {
+                match onlyoffice_internal_services_ready() {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        last_error = error;
+                    }
+                }
+            }
             Ok(response) => {
                 last_error = format!("ONLYOFFICE returned {}", response.status());
             }
@@ -7666,7 +6749,7 @@ fn onlyoffice_status_from_error(error: Option<String>) -> OnlyOfficeStatus {
     OnlyOfficeStatus {
         running,
         ready: running && error.is_none(),
-        public_url: onlyoffice_bridge_local_origin(),
+        public_url: onlyoffice_browser_service_local_origin(),
         image: onlyoffice_image_name(),
         error,
     }
@@ -7756,7 +6839,7 @@ async fn start_onlyoffice_sidecar(app: &AppHandle) -> Result<(), String> {
         "--network".to_string(),
         OPENCLAW_NETWORK.to_string(),
         "--add-host".to_string(),
-        docker_host_alias_arg(),
+        onlyoffice_docker_host_alias_arg(),
         "--security-opt".to_string(),
         "no-new-privileges".to_string(),
         "-e".to_string(),
@@ -9665,6 +8748,18 @@ fn gateway_post_start_reconcile_reasons(
         if current_base_url != expected_base_url {
             reasons.push("proxy base URL mismatch".to_string());
         }
+        let current_talk_provider = config_string_at_path(&cfg, "/talk/provider");
+        if current_talk_provider.as_deref() != Some("openai") {
+            reasons.push("talk provider mismatch".to_string());
+        }
+        let current_talk_base_url = config_string_at_path(&cfg, "/talk/providers/openai/baseUrl");
+        if current_talk_base_url != expected_base_url {
+            reasons.push("talk proxy base URL mismatch".to_string());
+        }
+        let current_talk_model = config_string_at_path(&cfg, "/talk/providers/openai/modelId");
+        if current_talk_model.as_deref() != Some(MANAGED_PROXY_TTS_MODEL) {
+            reasons.push("talk model mismatch".to_string());
+        }
     }
 
     let current_auth_profiles =
@@ -9964,6 +9059,47 @@ fn remove_openclaw_config_value(cfg: &mut serde_json::Value, path: &[&str]) {
     }
 }
 
+fn apply_managed_proxy_talk_config(
+    cfg: &mut serde_json::Value,
+    proxy_base_url: &str,
+    proxy_gateway_token: &str,
+) {
+    let tts_provider_config = serde_json::json!({
+        "apiKey": proxy_gateway_token,
+        "baseUrl": proxy_base_url,
+        "model": MANAGED_PROXY_TTS_MODEL,
+        "voice": MANAGED_PROXY_TTS_VOICE,
+        "responseFormat": MANAGED_PROXY_TTS_RESPONSE_FORMAT,
+    });
+    let talk_provider_config = serde_json::json!({
+        "apiKey": proxy_gateway_token,
+        "baseUrl": proxy_base_url,
+        "modelId": MANAGED_PROXY_TTS_MODEL,
+        "voiceId": MANAGED_PROXY_TTS_VOICE,
+        "responseFormat": MANAGED_PROXY_TTS_RESPONSE_FORMAT,
+    });
+
+    set_openclaw_config_value(
+        cfg,
+        &["messages", "tts", "auto"],
+        serde_json::json!("always"),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["messages", "tts", "provider"],
+        serde_json::json!("openai"),
+    );
+    set_openclaw_config_value(
+        cfg,
+        &["messages", "tts", "providers", "openai"],
+        tts_provider_config,
+    );
+    set_openclaw_config_value(cfg, &["talk", "provider"], serde_json::json!("openai"));
+    set_openclaw_config_value(cfg, &["talk", "providers", "openai"], talk_provider_config);
+    set_openclaw_config_value(cfg, &["talk", "interruptOnSpeech"], serde_json::json!(true));
+    set_openclaw_config_value(cfg, &["talk", "silenceTimeoutMs"], serde_json::json!(900));
+}
+
 fn append_unique_openclaw_config_array_strings(
     cfg: &mut serde_json::Value,
     path: &[&str],
@@ -10259,13 +9395,9 @@ async fn run_whatsapp_login_script(script: &str) -> Result<serde_json::Value, St
         start.elapsed().as_secs_f64()
     );
     let script = script.to_string();
-    let docker_host = get_docker_host();
     let output = tokio::task::spawn_blocking(move || {
         eprintln!("[WA-DEBUG] [inside spawn_blocking] Running docker exec now...");
-        let mut cmd = Command::new("docker");
-        if let Some(host) = docker_host {
-            cmd.env("DOCKER_HOST", host);
-        }
+        let mut cmd = docker_command();
         let result = cmd
             .args([
                 "exec",
@@ -10803,25 +9935,27 @@ done
             continue;
         };
         let Ok(decoded) = STANDARD.decode(encoded.trim()) else {
-            eprintln!(
-                "[Entropic] desktop action bridge: ignoring unreadable request {}",
+            let _ = append_client_log_line(&format!(
+                "desktop action bridge: ignoring unreadable request {}",
                 file
-            );
+            ));
             continue;
         };
         let Ok(action) = serde_json::from_slice::<DesktopActionPayload>(&decoded) else {
-            eprintln!(
-                "[Entropic] desktop action bridge: ignoring invalid request {}",
+            let _ = append_client_log_line(&format!(
+                "desktop action bridge: ignoring invalid request {}",
                 file
-            );
+            ));
             continue;
         };
         match validate_desktop_bridge_action(action) {
             Ok(validated) => actions.push(validated),
-            Err(err) => eprintln!(
-                "[Entropic] desktop action bridge: rejected request {}: {}",
-                file, err
-            ),
+            Err(err) => {
+                let _ = append_client_log_line(&format!(
+                    "desktop action bridge: rejected request {}: {}",
+                    file, err
+                ));
+            }
         }
     }
     Ok(actions)
@@ -10846,7 +9980,8 @@ pub fn start_desktop_action_bridge(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             if let Err(err) = poll_desktop_action_bridge_once(app.clone()).await {
-                eprintln!("[Entropic] desktop action bridge poll failed: {}", err);
+                let _ =
+                    append_client_log_line(&format!("desktop action bridge poll failed: {}", err));
             }
             sleep(Duration::from_millis(DESKTOP_ACTION_BRIDGE_POLL_MS)).await;
         }
@@ -11428,6 +10563,16 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
         .collect();
     let proxy_mode = read_container_env("ENTROPIC_PROXY_MODE").is_some();
     let base_url = read_container_env("ENTROPIC_PROXY_BASE_URL");
+    let proxy_gateway_token = if proxy_mode {
+        read_container_env("OPENROUTER_API_KEY")
+    } else {
+        None
+    };
+    let proxy_gateway_token_hash = proxy_gateway_token.as_deref().map(|token| {
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        format!("{:x}", hasher.finalize())
+    });
     let model = desired_selection.config_model.clone();
     let alias_model = desired_selection.alias_model.clone();
     let image_model = desired_selection.config_image_model.clone();
@@ -11490,6 +10635,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
         "container_id": container_id,
         "proxy_mode": proxy_mode,
         "base_url": &base_url,
+        "proxy_gateway_token_hash": &proxy_gateway_token_hash,
         "model": &model,
         "image_model": &image_model,
         "web_base_url": &web_base_url,
@@ -11711,6 +10857,13 @@ Use it for durable decisions, preferences, and facts that should persist across 
                 &mut cfg,
                 &["plugins", "entries", "duckduckgo", "config", "webSearch"],
             );
+        }
+    }
+    if proxy_mode {
+        if let (Some(base_url), Some(proxy_gateway_token)) =
+            (base_url.as_deref(), proxy_gateway_token.as_deref())
+        {
+            apply_managed_proxy_talk_config(&mut cfg, base_url, proxy_gateway_token);
         }
     }
     let memory_enabled = settings.memory_enabled;
@@ -18595,10 +17748,7 @@ pub async fn get_onlyoffice_status() -> Result<OnlyOfficeStatus, String> {
         return Ok(onlyoffice_status_from_error(None));
     }
     match wait_for_onlyoffice_health().await {
-        Ok(()) => match wait_for_onlyoffice_bridge_health().await {
-            Ok(()) => Ok(onlyoffice_status_from_error(None)),
-            Err(error) => Ok(onlyoffice_status_from_error(Some(error))),
-        },
+        Ok(()) => Ok(onlyoffice_status_from_error(None)),
         Err(error) => Ok(onlyoffice_status_from_error(Some(error))),
     }
 }
@@ -18606,7 +17756,6 @@ pub async fn get_onlyoffice_status() -> Result<OnlyOfficeStatus, String> {
 #[tauri::command]
 pub async fn ensure_onlyoffice_ready(app: AppHandle) -> Result<OnlyOfficeStatus, String> {
     start_onlyoffice_sidecar(&app).await?;
-    start_onlyoffice_bridge(app).await?;
     Ok(onlyoffice_status_from_error(None))
 }
 
@@ -18619,11 +17768,24 @@ pub async fn create_onlyoffice_session(
     if relative_path.is_empty() {
         return Err("A workspace office file path is required.".to_string());
     }
-    onlyoffice_file_spec_for_path(&relative_path)?;
+    let app_kind = onlyoffice_file_app_kind(&relative_path)?.to_string();
+    normalize_onlyoffice_spreadsheet_if_needed(&relative_path);
     workspace_file_metadata(&relative_path)?;
     let status = ensure_onlyoffice_ready(app.clone()).await?;
-    let app_kind = onlyoffice_file_app_kind(&relative_path)?.to_string();
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "Gateway container is not running.".to_string())?;
+    wait_for_browser_service(container)?;
     let secret = load_or_create_onlyoffice_jwt_secret(&app)?;
+    let container_secret =
+        read_container_env("ENTROPIC_ONLYOFFICE_JWT_SECRET").ok_or_else(|| {
+            "Gateway container is missing ONLYOFFICE session configuration.".to_string()
+        })?;
+    if container_secret.trim() != secret.trim() {
+        return Err(
+            "Gateway ONLYOFFICE session configuration is stale. Restart the sandbox and try again."
+                .to_string(),
+        );
+    }
     let open_token = sign_onlyoffice_path_token(&secret, "open", &relative_path)?;
     let encoded_path =
         url::form_urlencoded::byte_serialize(relative_path.as_bytes()).collect::<String>();
@@ -18638,7 +17800,7 @@ pub async fn create_onlyoffice_session(
         path: relative_path,
         url: format!(
             "{}/__onlyoffice__/open?path={}&token={}",
-            onlyoffice_bridge_local_origin(),
+            onlyoffice_browser_service_local_origin(),
             encoded_path,
             encoded_token
         ),
@@ -19056,6 +18218,8 @@ pub async fn generate_chat_audio(
     state: State<'_, AppState>,
     model: String,
     text: String,
+    voice_id: Option<String>,
+    speed: Option<f64>,
 ) -> Result<ChatAudioGenerationResult, String> {
     let _container = running_gateway_container_name()
         .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
@@ -19075,14 +18239,22 @@ pub async fn generate_chat_audio(
         .map_err(|e| format!("Failed to create audio generation client: {}", e))?;
 
     if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
-        return generate_proxy_chat_audio(&client, &model, &text).await;
+        return generate_proxy_chat_audio(&client, &model, &text, voice_id.as_deref(), speed).await;
     }
 
     let (provider, raw_model) = split_provider_model(&model, "Text to speech model")?;
     match provider {
         "openai" => {
             let api_key = read_local_text_to_speech_api_key(&state, "openai")?;
-            generate_openai_chat_audio(&client, &api_key, raw_model, &text).await
+            generate_openai_chat_audio(
+                &client,
+                &api_key,
+                raw_model,
+                &text,
+                voice_id.as_deref(),
+                speed,
+            )
+            .await
         }
         _ => Err(format!(
             "Local text to speech is not supported for {}. Choose an OpenAI TTS model in Settings.",

@@ -31,10 +31,8 @@ vm.runInNewContext(
 );
 
 const {
-  chatTaskNeedsConfirmation,
   formatVoiceTaskPrompt,
-  messageForMode,
-  previewForVoiceAction,
+  listeningMessage,
   resolveVoiceAction,
 } = module.exports;
 
@@ -58,17 +56,41 @@ sameJson(resolveVoiceAction("open ui smoke xlsx"), {
   type: "open_workspace_file",
   path: "ui-smoke.xlsx",
 });
+sameJson(resolveVoiceAction('open "hello.md" that is on my desktop'), {
+  type: "open_workspace_file",
+  path: "Desktop/hello.md",
+});
+sameJson(resolveVoiceAction("open hello dot md on my desktop"), {
+  type: "open_workspace_file",
+  path: "Desktop/hello.md",
+});
+sameJson(resolveVoiceAction("open Desktop slash hello dot md on my desktop"), {
+  type: "open_workspace_file",
+  path: "Desktop/hello.md",
+});
 sameJson(resolveVoiceAction("focus Settings"), {
   type: "focus_window",
   window: "settings",
 });
-sameJson(resolveVoiceAction("show spreadsheet"), {
+sameJson(resolveVoiceAction("show spreadsheet window"), {
   type: "focus_window",
   window: "sheets",
 });
 sameJson(resolveVoiceAction("Open this spreadsheet in Sheets"), {
   type: "focus_window",
   window: "sheets",
+});
+sameJson(resolveVoiceAction("open slides"), {
+  type: "focus_window",
+  window: "slides",
+});
+sameJson(resolveVoiceAction("open presentation"), {
+  type: "new_chat_task",
+  prompt: "open presentation",
+});
+sameJson(resolveVoiceAction("show presentation ideas"), {
+  type: "new_chat_task",
+  prompt: "show presentation ideas",
 });
 sameJson(resolveVoiceAction("Focus the email window"), {
   type: "focus_window",
@@ -111,49 +133,9 @@ sameJson(resolveVoiceAction("Open Settings"), {
   window: "settings",
 });
 
-assert.equal(messageForMode("dictation"), "Listening for dictation...");
-assert.equal(messageForMode("command"), "Listening for a desktop command...");
-assert.equal(messageForMode("conversation"), "Listening for a conversation turn...");
+assert.equal(listeningMessage(), "Listening.");
 
-assert.equal(chatTaskNeedsConfirmation("Voice command: send Alan an Outlook email"), true);
-assert.equal(chatTaskNeedsConfirmation("Voice command: move the Asana task to done"), true);
-assert.equal(chatTaskNeedsConfirmation("Voice command: create an Asana task from this paragraph"), true);
-assert.equal(chatTaskNeedsConfirmation("Voice command: use the Gmail integration to summarize my inbox"), true);
-assert.equal(chatTaskNeedsConfirmation("Voice command: run the project tests"), true);
-assert.equal(
-  chatTaskNeedsConfirmation("Voice command: summarize this note\n- Integrations: Gmail connected"),
-  false,
-);
-
-sameJson(previewForVoiceAction({ type: "open_workspace_file", path: "sales-plan.xlsx" }), {
-  message: "Open workspace file: sales-plan.xlsx?",
-  confirmLabel: "Open",
-});
-sameJson(previewForVoiceAction({ type: "open_browser_url", url: "https://mail.google.com" }), {
-  message: "Open browser URL: https://mail.google.com?",
-  confirmLabel: "Open",
-});
-sameJson(
-  previewForVoiceAction({
-    type: "new_chat_task",
-    prompt: "Voice command: send Alan an Outlook email",
-    autoSubmit: true,
-  }),
-  {
-    message: "Send this voice task to the agent now?",
-    confirmLabel: "Send",
-  },
-);
-assert.equal(
-  previewForVoiceAction({
-    type: "new_chat_task",
-    prompt: "Voice command: summarize this note",
-    autoSubmit: true,
-  }),
-  null,
-);
-
-const formatted = formatVoiceTaskPrompt("summarize this sheet", "command", {
+const formatted = formatVoiceTaskPrompt("summarize this sheet", {
   focusedWindow: "sheets",
   openWindows: ["finder", "sheets"],
   finderPath: "Reports",
@@ -163,8 +145,8 @@ const formatted = formatVoiceTaskPrompt("summarize this sheet", "command", {
   integrations: "Asana connected",
 });
 
-assert.match(formatted, /^Voice command: summarize this sheet/m);
-assert.match(formatted, /^Voice mode: command/m);
+assert.match(formatted, /^Spoken request: summarize this sheet/m);
+assert.doesNotMatch(formatted, /^Voice mode:/m);
 assert.match(formatted, /- Focused window: sheets/);
 assert.match(formatted, /- Selected workspace file: Reports\/sales-plan\.xlsx/);
 

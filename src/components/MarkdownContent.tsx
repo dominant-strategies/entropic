@@ -23,9 +23,8 @@ const CHAT_WORKSPACE_PREFIXES = [
 const LOCAL_BROWSER_HOSTS = new Set(["container.localhost", "runtime.localhost", "localhost", "127.0.0.1"]);
 const WORKSPACE_LINK_SCHEME = "entropic-workspace://";
 const BROWSER_WORKSPACE_EXTS = new Set(["html", "htm", "xlsx", "docx", "pptx"]);
-const RELATIVE_WORKSPACE_FILE_EXT_PATTERN = "html|htm|xlsx|docx|pptx";
 const DESKTOP_LINK_TOKEN_RE = new RegExp(
-  `((?:\\/data\\/(?:\\.openclaw\\/)?workspace|\\/home\\/node\\/\\.openclaw\\/workspace)(?:\\/[^\\s\`"'<>]+)?|(?:https?:\\/\\/)?(?:container\\.localhost|runtime\\.localhost|localhost|127\\.0\\.0\\.1)(?::\\d+)?(?:[/?#][^\\s\`"'<>]*)?|(?:[A-Za-z0-9._-]+\\/)*[A-Za-z0-9._-]+\\.(?:${RELATIVE_WORKSPACE_FILE_EXT_PATTERN}))`,
+  `((?:\\/data\\/(?:\\.openclaw\\/)?workspace|\\/home\\/node\\/\\.openclaw\\/workspace)(?:\\/[^\\s\`"'<>]+)?|(?:https?:\\/\\/)?(?:container\\.localhost|runtime\\.localhost|localhost|127\\.0\\.0\\.1)(?::\\d+)?(?:[/?#][^\\s\`"'<>]*)?)`,
   "gi",
 );
 
@@ -52,28 +51,8 @@ function normalizeWorkspacePath(raw: string): { path: string; looksLikeFile: boo
   return null;
 }
 
-function normalizeRelativeWorkspacePath(raw: string): { path: string; looksLikeFile: boolean } | null {
-  const { core } = splitWorkspaceToken(raw.trim());
-  if (!core || core.startsWith("/") || core.startsWith("./") || core.startsWith("../")) {
-    return null;
-  }
-  const parts = core.split("/").filter(Boolean);
-  if (parts.length === 0 || parts.some((part) => part === "." || part === "..")) {
-    return null;
-  }
-  const name = parts[parts.length - 1] || "";
-  const ext = name.split(".").pop()?.toLowerCase() || "";
-  if (!name.includes(".") || !BROWSER_WORKSPACE_EXTS.has(ext)) {
-    return null;
-  }
-  return {
-    path: parts.join("/"),
-    looksLikeFile: true,
-  };
-}
-
 function resolveWorkspaceChip(raw: string): WorkspaceChip | null {
-  const normalized = normalizeWorkspacePath(raw) || normalizeRelativeWorkspacePath(raw);
+  const normalized = normalizeWorkspacePath(raw);
   if (!normalized) {
     return null;
   }
@@ -226,9 +205,9 @@ function renderWorkspaceChip(
         display: "inline-flex",
         alignItems: "center",
         gap: "0.5rem",
-        borderColor: isBrowser ? "rgba(56,189,248,0.38)" : "rgba(148,163,184,0.38)",
-        background: isBrowser ? "rgba(56,189,248,0.14)" : "rgba(148,163,184,0.18)",
-        color: "inherit",
+        borderColor: "color-mix(in srgb, var(--chat-link-accent) 42%, transparent)",
+        background: "color-mix(in srgb, var(--chat-link-accent) 12%, transparent)",
+        color: "var(--chat-link-accent)",
         textDecoration: "none",
         verticalAlign: "middle",
       }}
@@ -240,8 +219,8 @@ function renderWorkspaceChip(
       <span
         className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full"
         style={{
-          background: isBrowser ? "rgba(56,189,248,0.22)" : "rgba(148,163,184,0.24)",
-          color: isBrowser ? "#0f766e" : "#475569",
+          background: "color-mix(in srgb, var(--chat-link-accent) 18%, transparent)",
+          color: "var(--chat-link-accent)",
         }}
       >
         <Icon className="h-3 w-3" />
@@ -308,7 +287,11 @@ function buildComponents(
           href={href}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-[var(--purple-accent)] underline underline-offset-2 hover:opacity-80"
+          className="underline underline-offset-2 hover:opacity-80"
+          style={{
+            color: "var(--chat-link-accent)",
+            textDecorationColor: "var(--chat-link-accent)",
+          }}
         >
           {children}
         </a>

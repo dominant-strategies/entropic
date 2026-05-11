@@ -11,6 +11,12 @@ type ChatAudioTranscriptionResponse = {
   text: string;
 };
 
+export function cleanRecordedVoiceTranscript(text: string) {
+  return text
+    .replace(/^voice-note-[^\n:]+\.(?:webm|wav|m4a|mp3|mp4|ogg):\s*/i, "")
+    .trim();
+}
+
 export function useAudioTranscription(model: string) {
   const [isTranscribing, setIsTranscribing] = useState(false);
 

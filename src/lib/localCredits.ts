@@ -46,6 +46,13 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
   "google/gemini-2.0-flash": { input: 12, output: 48 },
   "google/gemini-2.5-pro": { input: 150, output: 600 },
   "openrouter/free": { input: 5, output: 5 },
+  "venice/kimi-k2-6": { input: 102, output: 560 },
+  "venice/claude-opus-4-7": { input: 720, output: 3600 },
+  "venice/openai-gpt-55": { input: 750, output: 4500 },
+  "venice/deepseek-v3.2": { input: 40, output: 58 },
+  "venice/zai-org-glm-4.7-flash": { input: 16, output: 60 },
+  "venice/venice-uncensored-1-2": { input: 24, output: 108 },
+  "venice/openai-gpt-oss-120b": { input: 9, output: 36 },
 };
 
 const DEFAULT_PRICING: ModelPricing = {

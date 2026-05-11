@@ -1,22 +1,25 @@
-import { useEffect, useState } from "react";
-import { Loader2, Mic } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Loader2, Mic, Volume2 } from "lucide-react";
 import clsx from "clsx";
 import type { DesktopAction } from "../actions";
 import { validateDesktopAction } from "../actions";
-import { useAudioRecorder, type RecordedAudioAttachment } from "./useAudioRecorder";
-import { useAudioTranscription } from "./useAudioTranscription";
+import {
+  recordedAudioHasDetectedSpeech,
+  useAudioRecorder,
+  type RecordedAudioAttachment,
+} from "./useAudioRecorder";
+import { cleanRecordedVoiceTranscript, useAudioTranscription } from "./useAudioTranscription";
+import { useLiveSpeechRecognition } from "./useLiveSpeechRecognition";
 import { VoiceOverlay } from "./VoiceOverlay";
 import { clientLog } from "../../lib/clientLog";
 import {
   formatVoiceTaskPrompt,
-  messageForMode,
-  previewForVoiceAction,
+  listeningMessage,
   resolveVoiceAction,
   type VoiceDesktopContext,
-  type VoiceMode,
 } from "./voiceActions";
 
-type VoiceState = "idle" | "listening" | "transcribing" | "thinking" | "confirming" | "error";
+type VoiceState = "idle" | "listening" | "transcribing" | "thinking" | "error";
 
 type VoiceProviderProps = {
   audioUnderstandingModel: string;
@@ -24,6 +27,10 @@ type VoiceProviderProps = {
   shortcut?: string;
   dispatchAction: (action: DesktopAction) => Promise<void>;
 };
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
 function voiceActionLogPayload(action: DesktopAction): Record<string, string | boolean | undefined> {
   switch (action.type) {
@@ -36,7 +43,11 @@ function voiceActionLogPayload(action: DesktopAction): Record<string, string | b
     case "close_window":
       return { type: action.type, window: action.window };
     case "new_chat_task":
-      return { type: action.type, autoSubmit: action.autoSubmit === true };
+      return {
+        type: action.type,
+        autoSubmit: action.autoSubmit === true,
+        speakResponse: action.speakResponse === true,
+      };
   }
 }
 
@@ -85,66 +96,113 @@ export function VoiceProvider({
   dispatchAction,
 }: VoiceProviderProps) {
   const [state, setState] = useState<VoiceState>("idle");
-  const [mode, setMode] = useState<VoiceMode>("command");
+  const [conversationActive, setConversationActive] = useState(false);
+  const [voiceResponseActive, setVoiceResponseActive] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [pendingAction, setPendingAction] = useState<DesktopAction | null>(null);
-  const [confirmLabel, setConfirmLabel] = useState("Continue");
+  const [transcript, setTranscript] = useState<string | null>(null);
+  const conversationActiveRef = useRef(false);
+  const voiceResponseActiveRef = useRef(false);
+  const captureActiveRef = useRef(false);
+  const activeVoiceTurnRef = useRef(0);
   const { isTranscribing, transcribeAudio } = useAudioTranscription(audioUnderstandingModel);
 
   function clearVoiceState() {
     setState("idle");
     setMessage(null);
-    setPendingAction(null);
-    setConfirmLabel("Continue");
+    setTranscript(null);
+  }
+
+  function setVoiceConversationActive(active: boolean) {
+    conversationActiveRef.current = active;
+    setConversationActive(active);
+  }
+
+  function resumeConversationAfter(delayMs: number) {
+    window.setTimeout(() => {
+      if (!conversationActiveRef.current || captureActiveRef.current || voiceResponseActiveRef.current) return;
+      startVoiceCapture();
+    }, delayMs);
   }
 
   async function dispatchVoiceAction(action: DesktopAction) {
     setState("thinking");
-    setPendingAction(null);
     clientLog("voice.action.dispatch", voiceActionLogPayload(action));
     try {
       await dispatchAction(action);
+      if (action.type === "new_chat_task" && action.speakResponse === true) {
+        setVoiceResponseIsActive(true);
+        setState("thinking");
+        setMessage("Waiting for response...");
+        return;
+      }
       clearVoiceState();
+      if (conversationActiveRef.current && action.type !== "new_chat_task") {
+        resumeConversationAfter(600);
+      }
     } catch (error) {
+      setVoiceConversationActive(false);
       setState("error");
-      setMessage(error instanceof Error ? error.message : "Voice command failed.");
+      setMessage(error instanceof Error ? error.message : "Voice request failed.");
     }
   }
 
+  async function handleTranscriptText(rawTranscript: string, turnId = activeVoiceTurnRef.current) {
+    if (turnId !== activeVoiceTurnRef.current || !conversationActiveRef.current) return;
+    const transcriptText = cleanRecordedVoiceTranscript(rawTranscript);
+    setTranscript(transcriptText);
+    if (!transcriptText.trim()) {
+      setMessage("I didn't catch that.");
+      if (conversationActiveRef.current) {
+        resumeConversationAfter(900);
+      }
+      return;
+    }
+
+    let action = validateDesktopAction(resolveVoiceAction(transcriptText));
+    if (action.type === "new_chat_task") {
+      action = {
+        ...action,
+        prompt: formatVoiceTaskPrompt(action.prompt, desktopContext),
+        autoSubmit: true,
+        speakResponse: true,
+      };
+    }
+    setMessage(action.type === "new_chat_task" ? "Sending..." : "Running...");
+    await wait(250);
+    if (turnId !== activeVoiceTurnRef.current || !conversationActiveRef.current) return;
+    await dispatchVoiceAction(action);
+  }
+
   async function handleRecordedAudio(attachment: RecordedAudioAttachment) {
+    const turnId = activeVoiceTurnRef.current;
     setState("transcribing");
-    setMessage(mode === "dictation" ? "Transcribing dictation..." : "Transcribing voice command...");
+    setMessage("Transcribing...");
     try {
+      if (turnId !== activeVoiceTurnRef.current || !conversationActiveRef.current) {
+        return;
+      }
+      if (!recordedAudioHasDetectedSpeech(attachment)) {
+        clientLog("voice.audio.discarded_no_speech", {
+          durationMs: attachment.capture.durationMs,
+          speechSeen: attachment.capture.speechSeen,
+          speechMs: attachment.capture.speechMs,
+          peakLevel: attachment.capture.peakLevel,
+          autoStopTriggered: attachment.capture.autoStopTriggered,
+        });
+        setTranscript(null);
+        setMessage("I didn't catch that.");
+        if (conversationActiveRef.current) {
+          resumeConversationAfter(900);
+        }
+        return;
+      }
+
       const transcript = await transcribeAudio([attachment]);
-
-      if (mode === "dictation") {
-        setMessage(`Dictation: ${transcript}`);
-        await dispatchVoiceAction({ type: "new_chat_task", prompt: transcript, autoSubmit: false });
-        return;
-      }
-
-      let action = validateDesktopAction(resolveVoiceAction(transcript));
-      if (action.type === "new_chat_task") {
-        action = {
-          ...action,
-          prompt: formatVoiceTaskPrompt(action.prompt, mode, desktopContext),
-          autoSubmit: true,
-        };
-      }
-      const preview = previewForVoiceAction(action);
-      if (preview) {
-        clientLog("voice.action.confirmation_required", voiceActionLogPayload(action));
-        setPendingAction(action);
-        setConfirmLabel(preview.confirmLabel);
-        setState("confirming");
-        setMessage(preview.message);
-        return;
-      }
-      setMessage(`Voice: ${transcript}`);
-      await dispatchVoiceAction(action);
+      await handleTranscriptText(transcript, turnId);
     } catch (error) {
+      setVoiceConversationActive(false);
       setState("error");
-      setMessage(error instanceof Error ? error.message : "Voice command failed.");
+      setMessage(error instanceof Error ? error.message : "Voice request failed.");
     } finally {
       if (attachment.previewUrl.startsWith("blob:")) {
         URL.revokeObjectURL(attachment.previewUrl);
@@ -158,69 +216,215 @@ export function VoiceProvider({
       void handleRecordedAudio(attachment);
     },
     onError: (error) => {
+      setVoiceConversationActive(false);
       setState("error");
       setMessage(error);
-      setPendingAction(null);
+    },
+    autoStopOnSilence: {
+      levelThreshold: 0.0035,
+      silenceLevelThreshold: 0.0025,
+      peakSilenceRatio: 0.18,
+      noiseFloorMultiplier: 1.35,
+      silenceMs: 750,
+      minRecordingMs: 500,
+      checkIntervalMs: 60,
     },
   });
 
-  const busy =
-    recorder.isRecording || isTranscribing || state === "thinking" || state === "confirming";
+  const liveSpeech = useLiveSpeechRecognition({
+    onPartial: (text) => {
+      setState("listening");
+      setMessage(listeningMessage());
+      setTranscript(text);
+    },
+    onFinal: (text) => {
+      setTranscript(text);
+    },
+    onEnd: (text) => {
+      if (!conversationActiveRef.current) return;
+      const turnId = activeVoiceTurnRef.current;
+      setState("thinking");
+      setMessage("Sending...");
+      void handleTranscriptText(text, turnId).catch((error) => {
+        setVoiceConversationActive(false);
+        setState("error");
+        setMessage(error instanceof Error ? error.message : "Voice request failed.");
+      });
+    },
+    onError: (error) => {
+      setVoiceConversationActive(false);
+      setState("error");
+      setMessage(error);
+    },
+  });
+
+  const captureActive = liveSpeech.isListening || recorder.isRecording;
+  captureActiveRef.current = captureActive;
+  const captureSupported = liveSpeech.isSupported || recorder.isSupported;
+  const busy = captureActive || isTranscribing || state === "thinking" || voiceResponseActive;
+  const voiceSpeaking = voiceResponseActive && state !== "thinking";
+  const canInterruptVoiceReply = voiceSpeaking && captureSupported;
+  const canCancelVoiceTurn =
+    conversationActive && (captureActive || state === "transcribing" || isTranscribing);
+  const busyLabel =
+    voiceResponseActive
+      ? state === "thinking"
+        ? "Thinking"
+        : "Replying"
+      : captureActive
+        ? "Listening"
+        : state === "transcribing" || isTranscribing
+          ? "Transcribing"
+          : state === "thinking"
+            ? "Thinking"
+            : null;
+  const voiceButtonLabel = busyLabel
+    || (conversationActive
+      ? "Stop voice conversation"
+      : "Start voice conversation");
+
+  function setVoiceResponseIsActive(active: boolean) {
+    voiceResponseActiveRef.current = active;
+    setVoiceResponseActive(active);
+  }
 
   function startVoiceCapture() {
+    if (captureActive || voiceResponseActiveRef.current) return;
+    activeVoiceTurnRef.current += 1;
+    setVoiceConversationActive(true);
     setState("listening");
-    setMessage(messageForMode(mode));
-    setPendingAction(null);
+    setMessage(listeningMessage());
+    setTranscript(null);
+    window.dispatchEvent(new Event("entropic-voice-capture-started"));
+    if (liveSpeech.isSupported && liveSpeech.start()) {
+      return;
+    }
     void recorder.startRecording();
+  }
+
+  function cancelVoiceTurn() {
+    activeVoiceTurnRef.current += 1;
+    setVoiceConversationActive(false);
+    setVoiceResponseIsActive(false);
+    liveSpeech.abort();
+    recorder.cancelRecording();
+    clearVoiceState();
+  }
+
+  function interruptVoiceReplyAndStartCapture() {
+    setVoiceResponseIsActive(false);
+    clearVoiceState();
+    startVoiceCapture();
+  }
+
+  function stopVoiceCapture() {
+    setState("transcribing");
+    setMessage("Finalizing...");
+    if (liveSpeech.isListening) {
+      liveSpeech.stop();
+      return;
+    }
+    recorder.stopRecording();
+  }
+
+  function stopVoiceConversation() {
+    setVoiceConversationActive(false);
+    if (captureActive) {
+      stopVoiceCapture();
+      return;
+    }
+    clearVoiceState();
   }
 
   useEffect(() => {
     if (!shortcut?.trim()) return;
 
     function handleKeyDown(event: KeyboardEvent) {
-      if (!shortcutMatchesEvent(shortcut, event) || busy || recorder.isRecording) return;
+      if (!shortcutMatchesEvent(shortcut, event) || busy || captureActive) return;
       event.preventDefault();
       startVoiceCapture();
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [busy, recorder, shortcut]);
+  }, [busy, captureActive, shortcut]);
+
+  useEffect(() => {
+    function handleVoiceResponseStarted() {
+      setVoiceResponseIsActive(true);
+      setState("idle");
+      setMessage(null);
+      if (captureActive) {
+        stopVoiceCapture();
+      }
+    }
+
+    function handleVoiceResponseComplete() {
+      setVoiceResponseIsActive(false);
+      clearVoiceState();
+      if (!conversationActiveRef.current) return;
+      resumeConversationAfter(350);
+    }
+
+    window.addEventListener("entropic-voice-response-started", handleVoiceResponseStarted);
+    window.addEventListener("entropic-voice-response-complete", handleVoiceResponseComplete);
+    return () => {
+      window.removeEventListener("entropic-voice-response-started", handleVoiceResponseStarted);
+      window.removeEventListener("entropic-voice-response-complete", handleVoiceResponseComplete);
+    };
+  }, [captureActive, recorder]);
 
   return (
     <>
-      <div className="absolute bottom-24 right-5 z-20 flex items-center gap-2">
-        <select
-          value={mode}
-          onChange={(event) => setMode(event.target.value as VoiceMode)}
-          disabled={busy || recorder.isRecording}
-          className="h-9 rounded-xl border border-white/20 bg-black/40 px-2 text-xs font-medium text-white shadow-2xl backdrop-blur-xl outline-none transition disabled:opacity-50"
-          title="Voice mode"
-          aria-label="Voice mode"
-        >
-          <option value="dictation">Dictation</option>
-          <option value="command">Command</option>
-          <option value="conversation">Conversation</option>
-        </select>
+      <div className="absolute bottom-24 right-5 z-20 flex flex-col items-end gap-2">
         <button
           type="button"
           onClick={() => {
-            if (recorder.isRecording) {
-              recorder.stopRecording();
+            if (canInterruptVoiceReply) {
+              interruptVoiceReplyAndStartCapture();
+              return;
+            }
+            if (canCancelVoiceTurn) {
+              cancelVoiceTurn();
+              return;
+            }
+            if (voiceResponseActiveRef.current) return;
+            if (conversationActive && state === "idle") {
+              stopVoiceConversation();
               return;
             }
             startVoiceCapture();
           }}
-          disabled={!recorder.isSupported || (busy && !recorder.isRecording)}
+          disabled={!captureSupported || (busy && !canCancelVoiceTurn && !canInterruptVoiceReply)}
           className={clsx(
             "inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-white/25 bg-black/40 text-white shadow-2xl backdrop-blur-xl transition",
-            recorder.isRecording && "border-red-300/60 bg-red-500/30 text-red-100",
-            !recorder.isSupported && "cursor-not-allowed opacity-50",
+            conversationActive && !captureActive && "border-emerald-300/50 bg-emerald-500/20 text-emerald-100",
+            captureActive && "border-red-300/60 bg-red-500/30 text-red-100 shadow-red-500/20",
+            captureActive && "animate-pulse",
+            voiceResponseActive && !canInterruptVoiceReply && "cursor-not-allowed border-sky-300/50 bg-sky-500/20 text-sky-100 opacity-80",
+            canInterruptVoiceReply && "border-[var(--purple-accent)]/60 bg-[var(--purple-accent)]/25 text-white shadow-[0_16px_42px_rgba(91,36,139,0.32)] hover:bg-[var(--purple-accent)]/35",
+            !captureSupported && "cursor-not-allowed opacity-50",
           )}
-          title={recorder.isSupported ? `Voice ${mode}` : "Microphone unavailable"}
-          aria-label={`Voice ${mode}`}
+          title={
+            captureSupported
+              ? canInterruptVoiceReply
+                ? "Interrupt reply and speak"
+                : canCancelVoiceTurn
+                  ? "Stop voice conversation"
+                : voiceButtonLabel
+              : "Microphone unavailable"
+          }
+          aria-label={
+            canInterruptVoiceReply
+              ? "Interrupt reply and speak"
+              : canCancelVoiceTurn
+                ? "Stop voice conversation"
+                : voiceButtonLabel
+          }
         >
-          {busy && !recorder.isRecording ? (
+          {voiceSpeaking ? (
+            <Mic className="h-5 w-5 animate-pulse" />
+          ) : busy && !captureActive ? (
             <Loader2 className="h-5 w-5 animate-spin" />
           ) : (
             <Mic className="h-5 w-5" />
@@ -228,31 +432,11 @@ export function VoiceProvider({
         </button>
       </div>
       <VoiceOverlay
-        state={state === "error" || state === "listening" || state === "confirming" ? state : busy ? "transcribing" : "idle"}
-        mode={mode}
+        state={state === "error" ? state : "idle"}
         message={message}
-        confirmLabel={confirmLabel}
-        onModeChange={(nextMode) => {
-          if (recorder.isRecording || busy) return;
-          setMode(nextMode);
-        }}
-        onConfirm={
-          pendingAction
-            ? () => {
-                void dispatchVoiceAction(pendingAction);
-              }
-            : undefined
-        }
-        onCancel={
-          pendingAction
-            ? clearVoiceState
-            : recorder.isRecording
-            ? () => {
-                recorder.stopRecording();
-                clearVoiceState();
-              }
-            : undefined
-        }
+        transcript={transcript}
+        cancelLabel="Cancel"
+        onCancel={state === "error" ? clearVoiceState : undefined}
       />
     </>
   );

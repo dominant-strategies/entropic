@@ -75,6 +75,19 @@ const ONLYOFFICE_ALLOWED_CALLBACK_HOSTS = new Set(
     .map((value) => parseUrlOrNull(value)?.hostname?.toLowerCase())
     .filter(Boolean),
 );
+const ONLYOFFICE_ROOT_PROXY_PREFIXES = [
+  "/cache/",
+  "/coauthoring/",
+  "/doc/",
+  "/dictionaries/",
+  "/fonts/",
+  "/sdkjs/",
+  "/spellchecker/",
+  "/themes/",
+  "/web-apps/",
+];
+const ONLYOFFICE_VERSIONED_PROXY_RE =
+  /^\/\d+(?:\.\d+){1,3}-[A-Za-z0-9]+\/(?:cache|coauthoring|doc|dictionaries|fonts|sdkjs|spellchecker|themes|web-apps)\//;
 const ONLYOFFICE_URL_TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
 const WORKSPACE_RELOAD_IGNORED_DIRS = new Set([
   ".git",
@@ -484,10 +497,22 @@ function onlyOfficeUpstreamUrl() {
   return upstream;
 }
 
+function safeDecodePathname(pathname) {
+  try {
+    return decodeURIComponent(pathname);
+  } catch {
+    return pathname;
+  }
+}
+
 function onlyOfficeProxyPathForRequest(rawPath = "/") {
-  let nextPath = typeof rawPath === "string" && rawPath ? rawPath : "/";
+  const target = typeof rawPath === "string" && rawPath ? rawPath : "/";
+  const queryIndex = target.indexOf("?");
+  const pathname = queryIndex >= 0 ? target.slice(0, queryIndex) : target;
+  const suffix = queryIndex >= 0 ? target.slice(queryIndex) : "";
+  let nextPath = safeDecodePathname(pathname);
   if (nextPath === ONLYOFFICE_PUBLIC_BASE || nextPath === `${ONLYOFFICE_PUBLIC_BASE}/`) {
-    return "/";
+    return `/${suffix}`;
   }
   if (nextPath.startsWith(`${ONLYOFFICE_PUBLIC_BASE}/`)) {
     nextPath = nextPath.slice(ONLYOFFICE_PUBLIC_BASE.length);
@@ -495,19 +520,36 @@ function onlyOfficeProxyPathForRequest(rawPath = "/") {
   if (!nextPath.startsWith("/")) {
     nextPath = `/${nextPath}`;
   }
-  return nextPath;
+  return `${nextPath}${suffix}`;
 }
 
 function proxiedOnlyOfficeHeaders(req, upstream, upstreamPath) {
   const headers = { ...req.headers };
-  headers.host = upstream.host;
+  const publicHost = typeof req.headers.host === "string" ? req.headers.host : "";
+  headers.host = publicHost || upstream.host;
+  headers["x-forwarded-host"] = publicHost || upstream.host;
+  headers["x-forwarded-proto"] = "http";
+  headers["x-forwarded-prefix"] = ONLYOFFICE_PUBLIC_BASE;
   if (typeof headers.origin === "string") {
-    headers.origin = upstream.origin;
+    headers.origin = publicHost ? `http://${publicHost}` : upstream.origin;
   }
   if (typeof headers.referer === "string") {
-    headers.referer = `${upstream.origin}${upstreamPath}`;
+    headers.referer = publicHost
+      ? `http://${publicHost}${ONLYOFFICE_PUBLIC_BASE}${upstreamPath}`
+      : `${upstream.origin}${upstreamPath}`;
   }
   return headers;
+}
+
+function isOnlyOfficeProxyPath(pathname) {
+  const decodedPathname = safeDecodePathname(pathname);
+  if (decodedPathname === ONLYOFFICE_PUBLIC_BASE || decodedPathname.startsWith(`${ONLYOFFICE_PUBLIC_BASE}/`)) {
+    return true;
+  }
+  if (ONLYOFFICE_ROOT_PROXY_PREFIXES.some((prefix) => decodedPathname.startsWith(prefix))) {
+    return true;
+  }
+  return ONLYOFFICE_VERSIONED_PROXY_RE.test(decodedPathname);
 }
 
 function rewriteOnlyOfficeLocation(value, upstream) {
@@ -823,11 +865,9 @@ function onlyOfficeConfigPayload(rawPath, openToken) {
   if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
     throw new Error("Workspace file not found.");
   }
-  const stats = fs.statSync(filePath);
   const spec = onlyOfficeSpecForPath(relativePath);
-  normalizeOnlyOfficeDocumentIfNeeded(filePath, spec);
-  const normalizedStats = fs.statSync(filePath);
-  const key = onlyOfficeDocumentKey(relativePath, normalizedStats);
+  const stats = fs.statSync(filePath);
+  const key = onlyOfficeDocumentKey(relativePath, stats);
   const encodedPath = encodeURIComponent(relativePath);
   const documentUrlToken = signOnlyOfficePathToken("download", relativePath);
   const callbackUrlToken = signOnlyOfficePathToken("callback", relativePath);
@@ -875,7 +915,7 @@ function onlyOfficeConfigPayload(rawPath, openToken) {
     documentServerUrl: ONLYOFFICE_PUBLIC_BASE,
     fileKey: key,
     path: relativePath,
-    updatedAt: Math.round(normalizedStats.mtimeMs),
+    updatedAt: Math.round(stats.mtimeMs),
     config: {
       ...config,
       token: signJwt(config),
@@ -1816,23 +1856,8 @@ const server = http.createServer(async (req, res) => {
     const parts = url.pathname.split("/").filter(Boolean);
     const proxiedPort = proxyPortFromHostHeader(req.headers.host);
 
-    if (proxiedPort !== null) {
-      proxyLocalAppRequest(req, res, proxiedPort);
-      return;
-    }
-
-    if (url.pathname === ONLYOFFICE_PUBLIC_BASE || url.pathname.startsWith(`${ONLYOFFICE_PUBLIC_BASE}/`)) {
-      proxyOnlyOfficeRequest(req, res);
-      return;
-    }
-
     if (req.method === "GET" && url.pathname === "/health") {
       sendJson(res, 200, { ok: true, sessions: sessions.size });
-      return;
-    }
-
-    if (req.method === "GET" && parts.length >= 1 && parts[0] === "__workspace__") {
-      serveWorkspaceAsset(res, parts.slice(1));
       return;
     }
 
@@ -1879,6 +1904,21 @@ const server = http.createServer(async (req, res) => {
         });
         return;
       }
+    }
+
+    if (proxiedPort !== null) {
+      proxyLocalAppRequest(req, res, proxiedPort);
+      return;
+    }
+
+    if (isOnlyOfficeProxyPath(url.pathname)) {
+      proxyOnlyOfficeRequest(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && parts.length >= 1 && parts[0] === "__workspace__") {
+      serveWorkspaceAsset(res, parts.slice(1));
+      return;
     }
 
     if (!isAuthorizedBrowserControlRequest(req, url)) {
@@ -2014,7 +2054,7 @@ liveWss.on("connection", async (socket, _req, session) => {
 server.on("upgrade", (req, socket, head) => {
   try {
     const url = new URL(req.url || "/", `http://127.0.0.1:${PORT}`);
-    if (url.pathname === ONLYOFFICE_PUBLIC_BASE || url.pathname.startsWith(`${ONLYOFFICE_PUBLIC_BASE}/`)) {
+    if (isOnlyOfficeProxyPath(url.pathname)) {
       proxyOnlyOfficeUpgrade(req, socket, head);
       return;
     }

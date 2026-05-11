@@ -1,31 +1,19 @@
 import { Loader2, Mic } from "lucide-react";
-import clsx from "clsx";
-import type { VoiceMode } from "./voiceActions";
 
 type VoiceOverlayProps = {
-  state: "idle" | "listening" | "transcribing" | "thinking" | "speaking" | "confirming" | "error";
-  mode: VoiceMode;
+  state: "idle" | "listening" | "transcribing" | "thinking" | "speaking" | "error";
   message?: string | null;
   onCancel?: () => void;
-  onConfirm?: () => void;
-  onModeChange?: (mode: VoiceMode) => void;
-  confirmLabel?: string;
-};
-
-const MODE_LABELS: Record<VoiceMode, string> = {
-  dictation: "Dictation",
-  command: "Command",
-  conversation: "Conversation",
+  cancelLabel?: string;
+  transcript?: string | null;
 };
 
 export function VoiceOverlay({
   state,
-  mode,
   message,
   onCancel,
-  onConfirm,
-  onModeChange,
-  confirmLabel = "Continue",
+  cancelLabel = "Cancel",
+  transcript,
 }: VoiceOverlayProps) {
   if (state === "idle") {
     return null;
@@ -34,23 +22,16 @@ export function VoiceOverlay({
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-20 z-[100] flex justify-center px-4">
       <div className="pointer-events-auto flex max-w-2xl flex-col gap-3 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-card)] px-4 py-3 text-sm text-[var(--text-primary)] shadow-2xl">
-        <div className="flex flex-wrap items-center gap-2">
-          {(Object.keys(MODE_LABELS) as VoiceMode[]).map((candidate) => (
-            <button
-              key={candidate}
-              type="button"
-              onClick={() => onModeChange?.(candidate)}
-              className={clsx(
-                "rounded-full px-2.5 py-1 text-[11px] font-medium transition",
-                candidate === mode
-                  ? "bg-[var(--text-primary)] text-[var(--bg-card)]"
-                  : "bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]",
-              )}
-            >
-              {MODE_LABELS[candidate]}
-            </button>
-          ))}
-        </div>
+        {transcript ? (
+          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-3 py-2">
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-secondary)]">
+              Heard
+            </div>
+            <div className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-[var(--text-primary)]">
+              {transcript}
+            </div>
+          </div>
+        ) : null}
         <div className="flex items-center gap-3">
           {state === "listening" ? (
             <Mic className="h-4 w-4 text-red-300" />
@@ -58,22 +39,13 @@ export function VoiceOverlay({
             <Loader2 className="h-4 w-4 animate-spin text-[var(--text-secondary)]" />
           )}
           <span className="min-w-0 flex-1">{message || state}</span>
-          {onConfirm ? (
-            <button
-              type="button"
-              onClick={onConfirm}
-              className="ml-2 rounded-md bg-[var(--text-primary)] px-2 py-1 text-xs font-medium text-[var(--bg-card)] hover:opacity-90"
-            >
-              {confirmLabel}
-            </button>
-          ) : null}
           {onCancel ? (
             <button
               type="button"
               onClick={onCancel}
               className="rounded-md px-2 py-1 text-xs text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
             >
-              Cancel
+              {cancelLabel}
             </button>
           ) : null}
         </div>

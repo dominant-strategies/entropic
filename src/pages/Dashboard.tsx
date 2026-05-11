@@ -52,6 +52,13 @@ import {
 import { loadSettingsWarmState } from "../lib/settingsWarmState";
 import { DESKTOP_ACTION_EVENT, type DesktopAction } from "../desktop/actions";
 import { clientLog } from "../lib/clientLog";
+import {
+  DEFAULT_VOICE_SPEECH_RATE,
+  DEFAULT_VOICE_SPEECH_VOICE,
+  normalizeVoiceSpeechRate,
+  normalizeVoiceSpeechVoice,
+  type VoiceSpeechVoice,
+} from "../desktop/voice/voicePreferences";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -429,16 +436,16 @@ type Props = {
 };
 
 // Default models per mode
-const DEFAULT_PROXY_MODEL = "openai/gpt-5.4";
+const DEFAULT_PROXY_MODEL = "venice/kimi-k2-6";
 const DEFAULT_PROXY_ANTHROPIC_MODEL = "anthropic/claude-opus-4-6";
 const DEFAULT_PROXY_GOOGLE_MODEL = "google/gemini-3.1-pro-preview";
 const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_PROXY_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
 const DEFAULT_LOCAL_OPENAI_IMAGE_GENERATION_MODEL = "openai/gpt-image-1";
 const DEFAULT_LOCAL_GOOGLE_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
-const DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL = "google/gemini-3-flash-preview";
+const DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL = "venice/nvidia/parakeet-tdt-0.6b-v3";
 const DEFAULT_LOCAL_AUDIO_UNDERSTANDING_MODEL = "google/gemini-3-flash-preview";
-const DEFAULT_PROXY_TEXT_TO_SPEECH_MODEL = "openai/gpt-4o-audio-preview";
+const DEFAULT_PROXY_TEXT_TO_SPEECH_MODEL = "venice/tts-kokoro";
 const DEFAULT_LOCAL_TEXT_TO_SPEECH_MODEL = "openai/gpt-4o-mini-tts";
 const GATEWAY_FAILURE_THRESHOLD = 3;
 const FEEDBACK_FORM_URL = entropicSitePath("/feedback");
@@ -599,9 +606,6 @@ function remapAudioUnderstandingModelForMode(model: string, useLocalKeys: boolea
   if (PROXY_AUDIO_UNDERSTANDING_MODEL_IDS.has(base)) {
     return base;
   }
-  if (base.startsWith("openai/")) {
-    return "openai/gpt-4o-transcribe";
-  }
   return DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL;
 }
 
@@ -675,6 +679,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       : DEFAULT_PROXY_AUDIO_UNDERSTANDING_MODEL,
   );
   const [voiceShortcut, setVoiceShortcut] = useState("");
+  const [voiceSpeechRate, setVoiceSpeechRate] = useState(DEFAULT_VOICE_SPEECH_RATE);
+  const [voiceSpeechVoice, setVoiceSpeechVoice] =
+    useState<VoiceSpeechVoice>(DEFAULT_VOICE_SPEECH_VOICE);
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [currentChatSession, setCurrentChatSession] = useState<string | null>(null);
   const [pendingChatSession, setPendingChatSession] = useState<string | null>(null);
@@ -874,6 +881,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           isLocal,
         );
         const nextVoiceShortcut = bootstrap.settings.voiceShortcut || "";
+        const nextVoiceSpeechRate = normalizeVoiceSpeechRate(
+          bootstrap.settings.voiceSpeechRate ?? DEFAULT_VOICE_SPEECH_RATE,
+        );
+        const nextVoiceSpeechVoice = normalizeVoiceSpeechVoice(
+          bootstrap.settings.voiceSpeechVoice ?? DEFAULT_VOICE_SPEECH_VOICE,
+        );
 
         selectedModelRef.current = nextSelectedModel;
         imageModelRef.current = nextImageModel;
@@ -886,6 +899,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         setTextToSpeechModel(nextTextToSpeechModel);
         setAudioUnderstandingModel(nextAudioUnderstandingModel);
         setVoiceShortcut(nextVoiceShortcut);
+        setVoiceSpeechRate(nextVoiceSpeechRate);
+        setVoiceSpeechVoice(nextVoiceSpeechVoice);
         dispatchBootstrap({ type: "bootstrap_loaded", payload: bootstrap });
 
         const normalizedPatch: Partial<DesktopSettingsSnapshot> = {};
@@ -906,6 +921,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         }
         if ((bootstrap.settings.voiceShortcut || "") !== nextVoiceShortcut) {
           normalizedPatch.voiceShortcut = nextVoiceShortcut;
+        }
+        if (bootstrap.settings.voiceSpeechRate !== nextVoiceSpeechRate) {
+          normalizedPatch.voiceSpeechRate = nextVoiceSpeechRate;
+        }
+        if ((bootstrap.settings.voiceSpeechVoice || "") !== nextVoiceSpeechVoice) {
+          normalizedPatch.voiceSpeechVoice = nextVoiceSpeechVoice;
         }
         if (Object.keys(normalizedPatch).length > 0) {
           await updateDesktopSettings(normalizedPatch);
@@ -2361,6 +2382,26 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
   }
 
+  async function handleVoiceSpeechRateChange(value: number) {
+    const next = normalizeVoiceSpeechRate(value);
+    setVoiceSpeechRate(next);
+    try {
+      await updateDesktopSettings({ voiceSpeechRate: next });
+    } catch (error) {
+      console.error("[Entropic] Failed to save voiceSpeechRate:", error);
+    }
+  }
+
+  async function handleVoiceSpeechVoiceChange(value: VoiceSpeechVoice) {
+    const next = normalizeVoiceSpeechVoice(value);
+    setVoiceSpeechVoice(next);
+    try {
+      await updateDesktopSettings({ voiceSpeechVoice: next });
+    } catch (error) {
+      console.error("[Entropic] Failed to save voiceSpeechVoice:", error);
+    }
+  }
+
   async function handleImageModelChange(value: string) {
     setImageModel(value);
     imageModelRef.current = value;
@@ -2439,6 +2480,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         imageGenerationModel={imageGenerationModel}
         textToSpeechModel={textToSpeechModel}
         audioUnderstandingModel={audioUnderstandingModel}
+        voiceSpeechRate={voiceSpeechRate}
+        voiceSpeechVoice={voiceSpeechVoice}
         integrationsSyncing={integrationsSyncing}
         integrationsMissing={integrationsMissing}
         onNavigate={setCurrentPage}
@@ -2496,11 +2539,15 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           textToSpeechModel={textToSpeechModel}
           audioUnderstandingModel={audioUnderstandingModel}
           voiceShortcut={voiceShortcut}
+          voiceSpeechRate={voiceSpeechRate}
+          voiceSpeechVoice={voiceSpeechVoice}
           onCodeModelChange={handleCodeModelChange}
           onImageGenerationModelChange={handleImageGenerationModelChange}
           onTextToSpeechModelChange={handleTextToSpeechModelChange}
           onAudioUnderstandingModelChange={handleAudioUnderstandingModelChange}
           onVoiceShortcutChange={handleVoiceShortcutChange}
+          onVoiceSpeechRateChange={handleVoiceSpeechRateChange}
+          onVoiceSpeechVoiceChange={handleVoiceSpeechVoiceChange}
           onImageModelChange={handleImageModelChange}
         />
       </Suspense>
@@ -2553,11 +2600,15 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             textToSpeechModel={textToSpeechModel}
             audioUnderstandingModel={audioUnderstandingModel}
             voiceShortcut={voiceShortcut}
+            voiceSpeechRate={voiceSpeechRate}
+            voiceSpeechVoice={voiceSpeechVoice}
             onCodeModelChange={handleCodeModelChange}
             onImageGenerationModelChange={handleImageGenerationModelChange}
             onTextToSpeechModelChange={handleTextToSpeechModelChange}
             onAudioUnderstandingModelChange={handleAudioUnderstandingModelChange}
             onVoiceShortcutChange={handleVoiceShortcutChange}
+            onVoiceSpeechRateChange={handleVoiceSpeechRateChange}
+            onVoiceSpeechVoiceChange={handleVoiceSpeechVoiceChange}
             onImageModelChange={handleImageModelChange}
             pendingDesktopAction={pendingDesktopAction}
             onDesktopActionHandled={(id) => {

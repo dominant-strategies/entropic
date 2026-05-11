@@ -10,6 +10,8 @@ export type DesktopSettingsSnapshot = {
   textToSpeechModel?: string;
   audioUnderstandingModel?: string;
   voiceShortcut?: string;
+  voiceSpeechRate?: number;
+  voiceSpeechVoice?: string;
   desktopWallpaper?: string;
   desktopCustomWallpaper?: string;
 };
@@ -26,6 +28,8 @@ const SETTING_KEYS = [
   "textToSpeechModel",
   "audioUnderstandingModel",
   "voiceShortcut",
+  "voiceSpeechRate",
+  "voiceSpeechVoice",
   "desktopWallpaper",
   "desktopCustomWallpaper",
 ] as const satisfies ReadonlyArray<keyof DesktopSettingsSnapshot>;
@@ -50,6 +54,17 @@ function normalizeString(value: unknown): string | undefined {
   return trimmed || undefined;
 }
 
+function normalizeNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : undefined;
+  }
+  return undefined;
+}
+
 function normalizeDesktopSettings(
   raw: Partial<DesktopSettingsSnapshot> | null | undefined,
 ): DesktopSettingsSnapshot {
@@ -64,9 +79,24 @@ function normalizeDesktopSettings(
     textToSpeechModel: normalizeString(raw?.textToSpeechModel),
     audioUnderstandingModel: normalizeString(raw?.audioUnderstandingModel),
     voiceShortcut: normalizeString(raw?.voiceShortcut),
+    voiceSpeechRate: normalizeNumber(raw?.voiceSpeechRate),
+    voiceSpeechVoice: normalizeString(raw?.voiceSpeechVoice),
     desktopWallpaper: normalizeString(raw?.desktopWallpaper),
     desktopCustomWallpaper: normalizeString(raw?.desktopCustomWallpaper),
   };
+}
+
+function normalizeDesktopSettingsPatch(
+  raw: Partial<DesktopSettingsSnapshot>,
+): Partial<DesktopSettingsSnapshot> {
+  const normalized = normalizeDesktopSettings(raw);
+  const patch: Partial<DesktopSettingsSnapshot> = {};
+  for (const key of SETTING_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(raw, key)) {
+      patch[key] = normalized[key] as never;
+    }
+  }
+  return patch;
 }
 
 async function getStore(): Promise<Store> {
@@ -124,7 +154,7 @@ export async function loadDesktopSettings(opts?: {
 export async function updateDesktopSettings(
   patch: Partial<DesktopSettingsSnapshot>,
 ): Promise<DesktopSettingsSnapshot> {
-  const normalizedPatch = normalizeDesktopSettings(patch);
+  const normalizedPatch = normalizeDesktopSettingsPatch(patch);
   const runUpdate = async () => {
     const previous = await loadDesktopSettings();
     const next = normalizeDesktopSettings({ ...previous, ...normalizedPatch });
