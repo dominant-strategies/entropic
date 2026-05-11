@@ -16,7 +16,6 @@
 <p align="center">
   <a href="#quick-start"><img alt="Get Started" src="https://img.shields.io/static/v1?label=Get%20Started&message=Quick%20Start&color=111827"></a>
   <a href="https://github.com/dominant-strategies/entropic"><img alt="Repository" src="https://img.shields.io/static/v1?label=Repository&message=GitHub&color=111827"></a>
-  <a href="https://star-history.com/#dominant-strategies/entropic&Date"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/dominant-strategies/entropic?style=flat&label=GitHub%20Stars&color=111827"></a>
   <a href="./CONTRIBUTING.md"><img alt="Contribute" src="https://img.shields.io/static/v1?label=Contribute&message=Guidelines&color=111827"></a>
   <a href="https://github.com/dominant-strategies/entropic-releases/releases"><img alt="Preview Releases" src="https://img.shields.io/static/v1?label=Preview&message=Releases&color=111827"></a>
   <a href="./docs/OPEN_SOURCE_CHECKLIST.md"><img alt="Launch Checklist" src="https://img.shields.io/static/v1?label=Launch&message=Checklist&color=111827"></a>
@@ -145,11 +144,11 @@ Unsigned preview builds are currently acceptable for local and user-test use.
 macOS and Linux:
 
 ```bash
-pnpm dev:runtime:status   # Check if the runtime VM and Docker are ready
-pnpm dev:runtime:start    # Start the runtime (Colima VM + Docker)
+pnpm dev:runtime:status   # Check if the runtime Docker backend is ready
+pnpm dev:runtime:start    # Start the runtime (Colima on macOS, native Docker on Linux)
 pnpm dev:runtime:up       # Start runtime and launch the OpenClaw container
 pnpm dev:runtime:stop     # Stop the runtime
-pnpm dev:runtime:prune    # Remove the runtime VM and reclaim disk space
+pnpm dev:runtime:prune    # Remove runtime state and reclaim disk space
 pnpm dev:runtime:logs     # Tail the OpenClaw container logs
 ```
 
@@ -166,7 +165,7 @@ pnpm dev:wsl:prune        # Remove the WSL runtime and reclaim disk space
 
 ```bash
 pnpm build
-cargo check --manifest-path src-tauri/Cargo.toml
+cargo check --manifest-path src-tauri/Cargo.toml --no-default-features
 ```
 
 ## Project Docs

@@ -6,7 +6,7 @@ pub(crate) const RUNTIME_MANAGER_SERVER_FLAG: &str = "--entropic-runtime-manager
 pub fn maybe_handle_runtime_manager_cli() -> Option<i32> {
     #[cfg(target_os = "windows")]
     {
-        return windows::maybe_handle_runtime_manager_cli();
+        windows::maybe_handle_runtime_manager_cli()
     }
     #[cfg(not(target_os = "windows"))]
     {

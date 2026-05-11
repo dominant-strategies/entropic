@@ -1,9 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { platform } from "@tauri-apps/plugin-os";
-import { check } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
-import { getVersion } from "@tauri-apps/api/app";
 import { SetupScreen } from "./pages/SetupScreen";
 import { DockerInstall } from "./pages/DockerInstall";
 import { Dashboard } from "./pages/Dashboard";
@@ -20,6 +17,7 @@ import { clientLog } from "./lib/clientLog";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { getLocalCreditBalance } from "./lib/localCredits";
 import { updaterEnabled } from "./lib/buildProfile";
+import { checkForAppUpdates } from "./lib/updater";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -48,51 +46,12 @@ function AppContent() {
     if (!updaterEnabled) {
       return;
     }
-    let cancelled = false;
-    const runUpdate = async () => {
-      try {
-        const currentVersion = await getVersion();
-        console.log(`[Updater] Current version: ${currentVersion}`);
-        clientLog("app.updater.check", { currentVersion });
-
-        const update = await check();
-        if (!update) {
-          console.log("[Updater] No updates available");
-          clientLog("app.updater.no_update", { currentVersion });
-          return;
-        }
-
-        if (cancelled) return;
-
-        const targetVersion = update.version;
-        console.log(`[Updater] Update available: ${currentVersion} -> ${targetVersion}`);
-        clientLog("app.updater.available", { currentVersion, targetVersion });
-
-        // Loop prevention: Ensure target version is actually different
-        if (currentVersion === targetVersion) {
-          console.warn("[Updater] Target version matches current version, skipping update to prevent loop");
-          clientLog("app.updater.loop_prevented", { currentVersion, targetVersion });
-          return;
-        }
-
-        console.log("[Updater] Downloading and installing update...");
-        clientLog("app.updater.installing", { currentVersion, targetVersion });
-
-        await update.downloadAndInstall();
-
-        if (!cancelled) {
-          console.log("[Updater] Update installed, relaunching...");
-          clientLog("app.updater.relaunch", { targetVersion });
-          await relaunch();
-        }
-      } catch (error) {
-        console.warn("[Updater] Check failed:", error);
-        clientLog("app.updater.failed", { error: String(error) });
-      }
-    };
-    runUpdate();
+    void checkForAppUpdates({ source: "startup", autoInstall: true });
+    const interval = window.setInterval(() => {
+      void checkForAppUpdates({ source: "background", autoInstall: false });
+    }, 6 * 60 * 60 * 1000);
     return () => {
-      cancelled = true;
+      window.clearInterval(interval);
     };
   }, []);
 

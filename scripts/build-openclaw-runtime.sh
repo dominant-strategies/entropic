@@ -73,6 +73,9 @@ ensure_docker_ready_for_mode() {
     fi
 
     ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
+    if [ -z "$ACTIVE_DOCKER_HOST" ]; then
+        ACTIVE_DOCKER_HOST="$(entropic_native_linux_docker_host "$DOCKER_BIN" || true)"
+    fi
     if [ -z "$ACTIVE_DOCKER_HOST" ] && [ -n "$COLIMA_BIN" ]; then
         echo "Starting Colima for $(entropic_mode_label) runtime build..."
         ACTIVE_DOCKER_HOST="$(entropic_start_colima_for_mode "$DOCKER_BIN" "$COLIMA_BIN" "$PROJECT_ROOT" || true)"
@@ -87,19 +90,24 @@ ensure_docker_ready_for_mode() {
         return 0
     fi
 
-    echo "ERROR: No $(entropic_mode_label) Colima Docker socket is reachable."
+    echo "ERROR: No $(entropic_mode_label) Docker host is reachable."
     echo "Mode: $(entropic_runtime_mode)"
     echo "Colima home: $ENTROPIC_COLIMA_HOME"
     echo ""
     echo "Fix options:"
-    echo "  1. Start mode runtime first:"
-    if [ "$(entropic_runtime_mode)" = "dev" ]; then
+    echo "  1. Start the required Docker runtime first:"
+    if entropic_is_native_linux_runtime; then
+        echo "     sudo systemctl start docker"
+        echo "     sudo usermod -aG docker \$USER   # if permissions fail"
+    elif [ "$(entropic_runtime_mode)" = "dev" ]; then
         echo "     pnpm dev:runtime:start"
     else
         echo "     ENTROPIC_RUNTIME_MODE=prod ./scripts/build-for-user-test.sh"
     fi
-    echo "  2. For one-off Desktop fallback (build scripts only):"
-    echo "     ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 $0"
+    if ! entropic_is_native_linux_runtime; then
+        echo "  2. For one-off Desktop fallback (build scripts only):"
+        echo "     ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP=1 $0"
+    fi
     return 1
 }
 
@@ -188,28 +196,52 @@ rsync -a --delete "$OPENCLAW_SOURCE/dist/" "$STAGING_DIR/dist/"
 # Copy package.json
 rsync -a "$OPENCLAW_SOURCE/package.json" "$STAGING_DIR/package.json"
 
+# Build a compatibility dependency list from all upstream extension manifests.
+# OpenClaw's compiled root dist can statically import channel SDKs even when we
+# choose not to bundle those extensions into Nova's runtime image, so the image
+# still needs their runtime packages available at the root node_modules level.
+python3 - <<'PY' "$OPENCLAW_SOURCE" "$STAGING_DIR/all-extension-runtime-deps.txt"
+import json
+import pathlib
+import sys
+
+source_root = pathlib.Path(sys.argv[1]) / "extensions"
+output_path = pathlib.Path(sys.argv[2])
+merged = {}
+
+for manifest in sorted(source_root.glob("*/package.json")):
+    pkg = json.loads(manifest.read_text())
+    for group in ("dependencies", "optionalDependencies"):
+        for dep, spec in (pkg.get(group) or {}).items():
+            merged.setdefault(dep, spec)
+
+output_path.write_text(
+    " ".join(f"{dep}@{spec}" for dep, spec in sorted(merged.items())) + "\n",
+    encoding="utf-8",
+)
+PY
+
 # Copy docs/reference/templates (required for agent workspace)
 echo "Copying templates..."
 mkdir -p "$STAGING_DIR/docs/reference"
 rsync -a --delete "$OPENCLAW_SOURCE/docs/reference/templates/" "$STAGING_DIR/docs/reference/templates/"
 
 # Copy bundled plugins (curated set for the store)
+rm -rf "$STAGING_DIR/extensions" "$STAGING_DIR/bundled-skills"
 mkdir -p "$STAGING_DIR/extensions"
 mkdir -p "$STAGING_DIR/bundled-skills"
 
 PLUGINS_TO_BUNDLE=(
     "memory-core"
     "memory-lancedb"
+    "lossless-claw"
     "entropic-integrations"
-    "discord"
-    "telegram"
-    "slack"
-    "whatsapp"
-    "msteams"
-    "voice-call"
-    "matrix"
-    "googlechat"
 )
+
+# Telegram ships with the upstream OpenClaw runtime image as a bundled dist
+# plugin. Copying the raw source extension from the adjacent OpenClaw checkout
+# can drift ahead of the SDK/runtime version baked into the image and break
+# channel startup on reload, so prefer the image-bundled Telegram plugin.
 
 for plugin in "${PLUGINS_TO_BUNDLE[@]}"; do
     if [ -d "$OPENCLAW_SOURCE/extensions/$plugin" ]; then

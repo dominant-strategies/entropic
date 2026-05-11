@@ -153,6 +153,22 @@ entropic_find_colima_binary() {
     return 1
 }
 
+entropic_host_os() {
+    uname -s 2>/dev/null || true
+}
+
+entropic_is_wsl() {
+    if [ -n "${WSL_DISTRO_NAME:-}" ]; then
+        return 0
+    fi
+
+    [ -f /proc/version ] && grep -qi microsoft /proc/version 2>/dev/null
+}
+
+entropic_is_native_linux_runtime() {
+    [ "$(entropic_host_os)" = "Linux" ] && ! entropic_is_wsl
+}
+
 entropic_docker_host_is_available() {
     local docker_bin="$1"
     local candidate="$2"
@@ -172,6 +188,38 @@ entropic_docker_host_for_profile() {
         printf '%s\n' "$candidate"
         return 0
     fi
+    return 1
+}
+
+entropic_native_linux_docker_host() {
+    local docker_bin="$1"
+    local context
+    local host
+    local runtime_dir
+
+    entropic_is_native_linux_runtime || return 1
+
+    context="$("$docker_bin" context show 2>/dev/null || true)"
+    if [ -n "$context" ]; then
+        host="$("$docker_bin" context inspect "$context" --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null | head -n1 || true)"
+        if entropic_docker_host_is_available "$docker_bin" "$host"; then
+            printf '%s\n' "$host"
+            return 0
+        fi
+    fi
+
+    if entropic_docker_host_is_available "$docker_bin" "unix:///var/run/docker.sock"; then
+        printf '%s\n' "unix:///var/run/docker.sock"
+        return 0
+    fi
+
+    runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    host="unix://$runtime_dir/docker.sock"
+    if entropic_docker_host_is_available "$docker_bin" "$host"; then
+        printf '%s\n' "$host"
+        return 0
+    fi
+
     return 1
 }
 
@@ -226,8 +274,26 @@ entropic_run_colima() {
     "$colima_bin" "$@"
 }
 
+entropic_qemu_system_binary() {
+    local arch
+    arch="$(uname -m 2>/dev/null || true)"
+    case "$arch" in
+        arm64|aarch64)
+            printf '%s\n' "qemu-system-aarch64"
+            ;;
+        x86_64|amd64)
+            printf '%s\n' "qemu-system-x86_64"
+            ;;
+        *)
+            printf '%s\n' "qemu-system-$arch"
+            ;;
+    esac
+}
+
 entropic_qemu_available() {
-    command -v qemu-img >/dev/null 2>&1
+    local qemu_system_bin
+    qemu_system_bin="$(entropic_qemu_system_binary)"
+    command -v qemu-img >/dev/null 2>&1 && command -v "$qemu_system_bin" >/dev/null 2>&1
 }
 
 entropic_cleanup_stale_colima_profile() {
@@ -298,7 +364,7 @@ entropic_start_colima_for_mode() {
         fi
 
         if [ "$vm_type" = "qemu" ] && ! entropic_qemu_available; then
-            echo "WARNING: Skipping Colima qemu fallback for profile $profile because qemu-img is not installed." >&2
+            echo "WARNING: Skipping Colima qemu fallback for profile $profile because $(entropic_qemu_system_binary) and qemu-img are both required." >&2
             continue
         fi
 

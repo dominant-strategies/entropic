@@ -56,7 +56,7 @@ docker_args=(
     -p "127.0.0.1:${PORT}:18789"
     -p "127.0.0.1:${BROWSER_HOST_PORT}:19791"
     --restart unless-stopped
-    --health-cmd="curl -sf http://localhost:18789/health || exit 1"
+    --health-cmd="curl -sf http://localhost:18789/healthz || exit 1"
     --health-interval=10s
     --health-timeout=3s
     --health-start-period=10s
@@ -73,7 +73,7 @@ echo ""
 # Wait for health
 echo "Waiting for gateway to be ready..."
 for i in {1..30}; do
-    if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+    if curl -sf "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
         echo -e "${GREEN}OpenClaw gateway is ready at http://127.0.0.1:${PORT}${NC}"
         exit 0
     fi

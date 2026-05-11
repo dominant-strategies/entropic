@@ -72,6 +72,7 @@ WORKDIR /app
 # Copy OpenClaw package metadata and deps first (stable for caching)
 COPY --chown=node:node package.json ./package.json
 COPY --chown=node:node node_modules ./node_modules
+COPY --chown=node:node all-extension-runtime-deps.txt ./all-extension-runtime-deps.txt
 COPY --chown=node:node docs ./docs
 COPY --chown=node:node extensions ./extensions
 COPY --chown=node:node browser-service ./browser-service
@@ -81,6 +82,17 @@ COPY --chown=node:node dist ./dist
 
 # Copy bundled skills (seeded into /data/skills/ at startup by entrypoint)
 COPY --chown=node:node bundled-skills /app/bundled-skills
+
+# Upstream's compiled root dist can statically import SDKs owned by optional
+# channel extensions, even when Nova chooses not to ship those extensions in the
+# runtime image. Install a compatibility dependency list generated from all
+# upstream extension manifests so /app/dist stays resolvable without modifying
+# upstream OpenClaw itself.
+RUN EXT_DEPS="$(tr '\n' ' ' </app/all-extension-runtime-deps.txt)" && \
+    if [ -n "$EXT_DEPS" ]; then \
+      echo "Installing upstream extension compatibility deps into root node_modules..." && \
+      npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-save $EXT_DEPS; \
+    fi
 
 # Install bundled skill dependencies (runs as root before USER node)
 RUN for skill in /app/bundled-skills/*/; do \
@@ -153,10 +165,12 @@ USER node
 ENV NODE_PATH="/data/.bun/install/global/node_modules:/home/node/.bun/install/global/node_modules"
 
 # Health check
-# /health can return 503 when control-ui assets are intentionally omitted.
-# Probe an authenticated endpoint that reflects gateway liveness instead.
+# Use the shallow gateway probe endpoints that upstream exposes specifically
+# for container/runtime liveness. Routes like /__openclaw__/canvas/ now carry
+# auth/capability semantics and can fail during normal startup even when the
+# gateway process itself is healthy enough to finish booting.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s \
-    CMD sh -c 'if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then curl -fsS -H "Authorization: Bearer ${OPENCLAW_GATEWAY_TOKEN}" "http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/__openclaw__/canvas/" >/dev/null; else curl -fsS "http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/__openclaw__/canvas/" >/dev/null; fi || exit 1'
+    CMD sh -c 'curl -fsS "http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/healthz" >/dev/null || exit 1'
 
 EXPOSE 18789 19791 19793
 

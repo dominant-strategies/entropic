@@ -8,6 +8,32 @@ type Props = {
   onSetupComplete: () => void;
 };
 
+type SavedChannelsState = {
+  discord_enabled?: boolean;
+  discord_token?: string;
+  telegram_enabled?: boolean;
+  telegram_token?: string;
+  telegram_dm_policy?: string;
+  telegram_group_policy?: string;
+  telegram_config_writes?: boolean;
+  telegram_require_mention?: boolean;
+  telegram_reply_to_mode?: string;
+  telegram_link_preview?: boolean;
+  slack_enabled?: boolean;
+  slack_bot_token?: string;
+  slack_app_token?: string;
+  googlechat_enabled?: boolean;
+  googlechat_service_account?: string;
+  googlechat_audience_type?: string;
+  googlechat_audience?: string;
+  whatsapp_enabled?: boolean;
+  whatsapp_allow_from?: string;
+};
+
+type GatewayMutationResult = {
+  wsReconnectExpected: boolean;
+};
+
 export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) {
   const [loadingState, setLoadingState] = useState(false);
   const [savingToken, setSavingToken] = useState(false);
@@ -26,10 +52,7 @@ export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) 
     setErrorMsg(null);
     setStatusMsg(null);
     Promise.all([
-      invoke<{
-        telegram_enabled?: boolean;
-        telegram_token?: string;
-      }>("get_agent_profile_state"),
+      invoke<SavedChannelsState>("get_saved_channels_state"),
       invoke<boolean>("get_telegram_connection_status").catch(() => false),
     ])
       .then(([state, telegramConnected]) => {
@@ -91,66 +114,50 @@ export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) 
         return;
       }
 
-      const state = await invoke<{
-        discord_enabled?: boolean;
-        discord_token?: string;
-        telegram_dm_policy?: string;
-        telegram_group_policy?: string;
-        telegram_config_writes?: boolean;
-        telegram_require_mention?: boolean;
-        telegram_reply_to_mode?: string;
-        telegram_link_preview?: boolean;
-        slack_enabled?: boolean;
-        slack_bot_token?: string;
-        slack_app_token?: string;
-        googlechat_enabled?: boolean;
-        googlechat_service_account?: string;
-        googlechat_audience_type?: string;
-        googlechat_audience?: string;
-        whatsapp_enabled?: boolean;
-        whatsapp_allow_from?: string;
-      }>("get_agent_profile_state");
+      const state = await invoke<SavedChannelsState>("get_saved_channels_state");
 
-      await invoke("set_channels_config", {
-        discordEnabled: state.discord_enabled ?? false,
-        discordToken: state.discord_token ?? "",
-        telegramEnabled: true,
-        telegramToken: trimmedToken,
-        telegramDmPolicy: state.telegram_dm_policy ?? "pairing",
-        telegramGroupPolicy: state.telegram_group_policy ?? "allowlist",
-        telegramConfigWrites: state.telegram_config_writes ?? false,
-        telegramRequireMention: state.telegram_require_mention ?? true,
-        telegramReplyToMode: state.telegram_reply_to_mode ?? "off",
-        telegramLinkPreview: state.telegram_link_preview ?? true,
-        slackEnabled: state.slack_enabled ?? false,
-        slackBotToken: state.slack_bot_token ?? "",
-        slackAppToken: state.slack_app_token ?? "",
-        googlechatEnabled: state.googlechat_enabled ?? false,
-        googlechatServiceAccount: state.googlechat_service_account ?? "",
-        googlechatAudienceType: state.googlechat_audience_type ?? "app-url",
-        googlechatAudience: state.googlechat_audience ?? "",
-        whatsappEnabled: state.whatsapp_enabled ?? false,
-        whatsappAllowFrom: state.whatsapp_allow_from ?? "",
+      const result = await invoke<GatewayMutationResult>("apply_gateway_mutation", {
+        request: {
+          channels: {
+            discordEnabled: state.discord_enabled ?? false,
+            discordToken: state.discord_token ?? "",
+            telegramEnabled: true,
+            telegramToken: trimmedToken,
+            telegramDmPolicy: state.telegram_dm_policy ?? "pairing",
+            telegramGroupPolicy: state.telegram_group_policy ?? "allowlist",
+            telegramConfigWrites: state.telegram_config_writes ?? false,
+            telegramRequireMention: state.telegram_require_mention ?? true,
+            telegramReplyToMode: state.telegram_reply_to_mode ?? "off",
+            telegramLinkPreview: state.telegram_link_preview ?? true,
+            slackEnabled: state.slack_enabled ?? false,
+            slackBotToken: state.slack_bot_token ?? "",
+            slackAppToken: state.slack_app_token ?? "",
+            googlechatEnabled: state.googlechat_enabled ?? false,
+            googlechatServiceAccount: state.googlechat_service_account ?? "",
+            googlechatAudienceType: state.googlechat_audience_type ?? "app-url",
+            googlechatAudience: state.googlechat_audience ?? "",
+            whatsappEnabled: state.whatsapp_enabled ?? false,
+            whatsappAllowFrom: state.whatsapp_allow_from ?? "",
+          },
+        },
       });
 
       setTokenSaved(true);
       const botHandle = validation.username?.trim() ? ` (@${validation.username.trim()})` : "";
 
-      // Restart or start gateway so the new token takes effect immediately
       const gatewayRunning = await invoke<boolean>("get_gateway_status").catch(() => false);
       if (gatewayRunning) {
-        setStatusMsg(`Bot token saved${botHandle}. Restarting gateway...`);
-        try {
-          await invoke("restart_gateway_in_place");
-        } catch {
-          // Non-fatal — token is saved, gateway restart can be done manually
-        }
+        setStatusMsg(
+          result.wsReconnectExpected
+            ? `Bot token saved${botHandle}. Gateway is reloading Telegram configuration. Send /start to your bot and paste the pairing code below.`
+            : `Bot token saved${botHandle}. Send /start to your bot and paste the pairing code below.`,
+        );
       } else {
-        setStatusMsg(`Bot token saved${botHandle}. Starting gateway...`);
+        setStatusMsg(
+          `Bot token saved${botHandle}. Starting gateway. Send /start to your bot and paste the pairing code below.`,
+        );
         window.dispatchEvent(new CustomEvent("entropic-start-gateway"));
       }
-
-      setStatusMsg(`Bot token saved${botHandle}. Send /start to your bot and paste the pairing code below.`);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       setErrorMsg(`Failed to save bot token: ${detail}`);
@@ -172,11 +179,11 @@ export function TelegramSetupModal({ isOpen, onClose, onSetupComplete }: Props) 
       });
       setPairingCode("");
       setStatusMsg(result || "Pairing approved.");
-      const telegramConnected = await invoke<boolean>("get_telegram_connection_status").catch(() => false);
-      setConnected(Boolean(telegramConnected));
-      if (telegramConnected) {
-        onSetupComplete();
-      }
+      setConnected(true);
+      invoke("send_telegram_welcome_message").catch(() => {
+        // Non-fatal. Pairing already succeeded.
+      });
+      onSetupComplete();
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       setErrorMsg(`Failed to approve pairing: ${detail}`);

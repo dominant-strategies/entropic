@@ -581,6 +581,15 @@ impl Platform {
     }
 }
 
+fn macos_system_docker_paths() -> &'static [&'static str] {
+    &[
+        "/usr/local/bin/docker",
+        "/opt/homebrew/bin/docker",
+        "/opt/local/bin/docker",
+        "/usr/bin/docker",
+    ]
+}
+
 impl Runtime {
     pub fn new(resources_dir: PathBuf, vm_config: RuntimeVmConfig) -> Self {
         debug_log("=== Runtime::new() called ===");
@@ -619,10 +628,30 @@ impl Runtime {
             .join("docker")
     }
 
-    /// Find docker - prefer system on Linux, bundled on macOS
+    /// Find docker - prefer system on Linux/macOS, bundled as a fallback.
     fn docker_path(&self) -> Option<PathBuf> {
         match Platform::detect() {
             Platform::Linux => {
+                if let Ok(system) = which::which("docker") {
+                    return Some(system);
+                }
+                let bundled = self.bundled_docker_path();
+                if bundled.exists() {
+                    return Some(bundled);
+                }
+                None
+            }
+            Platform::MacOS => {
+                // Prefer the system Docker CLI on macOS. The bundled CLI can
+                // pass a basic existence check but hang on real daemon calls in
+                // dev environments, which leaves the app stuck on the loading
+                // screen while runtime detection waits on `docker info`.
+                for candidate in macos_system_docker_paths() {
+                    let path = PathBuf::from(candidate);
+                    if path.exists() {
+                        return Some(path);
+                    }
+                }
                 if let Ok(system) = which::which("docker") {
                     return Some(system);
                 }
@@ -1729,7 +1758,7 @@ impl Runtime {
 
         #[cfg(target_os = "windows")]
         {
-            return self.windows_wsl_feature_states_from_system();
+            self.windows_wsl_feature_states_from_system()
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -2913,32 +2942,31 @@ fi
                 path.display(),
                 e
             ));
-            return;
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            match std::fs::metadata(path) {
-                Ok(metadata) => {
-                    let mut perms = metadata.permissions();
-                    perms.set_mode(0o700);
-                    if let Err(e) = std::fs::set_permissions(path, perms) {
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                match std::fs::metadata(path) {
+                    Ok(metadata) => {
+                        let mut perms = metadata.permissions();
+                        perms.set_mode(0o700);
+                        if let Err(e) = std::fs::set_permissions(path, perms) {
+                            debug_log(&format!(
+                                "Failed to set permissions for runtime {} at {}: {}",
+                                label,
+                                path.display(),
+                                e
+                            ));
+                        }
+                    }
+                    Err(e) => {
                         debug_log(&format!(
-                            "Failed to set permissions for runtime {} at {}: {}",
+                            "Failed to read metadata for runtime {} at {}: {}",
                             label,
                             path.display(),
                             e
                         ));
                     }
-                }
-                Err(e) => {
-                    debug_log(&format!(
-                        "Failed to read metadata for runtime {} at {}: {}",
-                        label,
-                        path.display(),
-                        e
-                    ));
                 }
             }
         }

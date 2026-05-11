@@ -20,6 +20,17 @@ resolve_entropic_skill_path() {
     fi
 }
 
+resolve_plugin_load_path() {
+    plugin_id="$1"
+
+    if [ -d "/app/extensions/${plugin_id}" ]; then
+        printf '%s' "/app/extensions/${plugin_id}"
+        return
+    fi
+
+    resolve_entropic_skill_path "${plugin_id}"
+}
+
 append_plugin_load_path() {
     raw_path="$1"
     if [ -z "$raw_path" ]; then
@@ -33,19 +44,59 @@ append_plugin_load_path() {
     PLUGIN_LOAD_PATHS="${PLUGIN_LOAD_PATHS}\"${escaped_path}\""
 }
 
+is_bundled_plugin() {
+    plugin_id="$1"
+    [ -f "/app/dist/extensions/${plugin_id}/index.js" ] || [ -f "/app/dist/extensions/${plugin_id}/index.mjs" ]
+}
+
 append_auth_profile() {
     key="$1"
     provider="$2"
     value="$3"
+
+    case "|${AUTH_PROFILE_KEYS}|" in
+        *"|${key}|"*) return ;;
+    esac
 
     if [ -n "${AUTH_PROFILES}" ]; then
         AUTH_PROFILES="${AUTH_PROFILES},"
     fi
     AUTH_PROFILES="${AUTH_PROFILES}
     \"${key}\": { \"type\": \"api_key\", \"provider\": \"${provider}\", \"key\": \"${value}\" }"
+    if [ -n "${AUTH_PROFILE_KEYS}" ]; then
+        AUTH_PROFILE_KEYS="${AUTH_PROFILE_KEYS}|"
+    fi
+    AUTH_PROFILE_KEYS="${AUTH_PROFILE_KEYS}${key}"
+}
+
+append_proxy_model_auth_aliases() {
+    model="$1"
+    value="$2"
+    base_model="${model%%:*}"
+    provider="${base_model%%/*}"
+
+    case "$provider" in
+        anthropic)
+            append_auth_profile "anthropic:default" "anthropic" "$value"
+            ;;
+        google)
+            append_auth_profile "google:default" "google" "$value"
+            ;;
+        openai)
+            append_auth_profile "openai:default" "openai" "$value"
+            ;;
+        openai-codex)
+            append_auth_profile "openai:default" "openai" "$value"
+            append_auth_profile "openai-codex:default" "openai-codex" "$value"
+            ;;
+        openrouter)
+            append_auth_profile "openrouter:default" "openrouter" "$value"
+            ;;
+    esac
 }
 
 AUTH_PROFILES=""
+AUTH_PROFILE_KEYS=""
 
 AUTH_DIR="/home/node/.openclaw/agents/main/agent"
 mkdir -p "$AUTH_DIR"
@@ -54,7 +105,10 @@ if [ -n "$ANTHROPIC_API_KEY" ]; then
     append_auth_profile "anthropic:default" "anthropic" "$(json_escape "${ANTHROPIC_API_KEY}")"
 fi
 if [ -n "$OPENROUTER_API_KEY" ]; then
-    append_auth_profile "openrouter:default" "openrouter" "$(json_escape "${OPENROUTER_API_KEY}")"
+    OPENROUTER_API_KEY_ESC="$(json_escape "${OPENROUTER_API_KEY}")"
+    append_auth_profile "openrouter:default" "openrouter" "${OPENROUTER_API_KEY_ESC}"
+    append_proxy_model_auth_aliases "${OPENCLAW_MODEL:-}" "${OPENROUTER_API_KEY_ESC}"
+    append_proxy_model_auth_aliases "${OPENCLAW_IMAGE_MODEL:-}" "${OPENROUTER_API_KEY_ESC}"
 fi
 if [ -n "$OPENAI_API_KEY" ]; then
     append_auth_profile "openai:default" "openai" "$(json_escape "${OPENAI_API_KEY}")"
@@ -272,6 +326,9 @@ PLUGIN_ENTRIES="\"entropic-integrations\": { \"enabled\": true }"
 ALSO_ALLOW="\"entropic-integrations\""
 PLUGIN_LOAD_PATHS=""
 
+if [ -d "/app/extensions/lossless-claw" ]; then
+    PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"lossless-claw\": { \"enabled\": true }"
+fi
 if [ -d "/app/extensions/entropic-x" ] || [ -d "/data/entropic-skills/entropic-x" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-x" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-x/current" ]; then
     PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"entropic-x\": { \"enabled\": true }"
     ALSO_ALLOW="${ALSO_ALLOW}, \"x_search\", \"x_profile\", \"x_thread\", \"x_user_tweets\""
@@ -279,8 +336,11 @@ fi
 if [ -d "/app/extensions/entropic-quai-builder" ] || [ -d "/data/entropic-skills/entropic-quai-builder" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-quai-builder" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-quai-builder/current" ]; then
     PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"entropic-quai-builder\": { \"enabled\": true }"
 fi
-append_plugin_load_path "$(resolve_entropic_skill_path "entropic-x")"
-append_plugin_load_path "$(resolve_entropic_skill_path "entropic-quai-builder")"
+if ! is_bundled_plugin "lossless-claw"; then
+    append_plugin_load_path "$(resolve_plugin_load_path "lossless-claw")"
+fi
+append_plugin_load_path "$(resolve_plugin_load_path "entropic-x")"
+append_plugin_load_path "$(resolve_plugin_load_path "entropic-quai-builder")"
 if [ -n "$MEMORY_CONFIG" ]; then
     PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, ${MEMORY_CONFIG}"
 fi
@@ -387,7 +447,7 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
       "http://127.0.0.1:5174"
       ],
       "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": true
+      "dangerouslyDisableDeviceAuth": false
     }${GATEWAY_AUTH_BLOCK}
   },
   "plugins": {
@@ -419,6 +479,34 @@ const pruneLegacyControlUiFallback = (value) => {
   const controlUi = gateway.controlUi;
   if (!controlUi || typeof controlUi !== 'object' || Array.isArray(controlUi)) return;
   delete controlUi.dangerouslyAllowHostHeaderOriginFallback;
+  controlUi.dangerouslyDisableDeviceAuth = false;
+};
+
+const stripBundledPluginOverrides = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const plugins = value.plugins;
+  if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return;
+
+  const entries = plugins.entries;
+  if (entries && typeof entries === 'object' && !Array.isArray(entries)) {
+    if (fs.existsSync('/app/dist/extensions/telegram/index.js') || fs.existsSync('/app/dist/extensions/telegram/index.mjs')) {
+      delete entries.telegram;
+    }
+  }
+
+  const load = plugins.load;
+  if (!load || typeof load !== 'object' || Array.isArray(load) || !Array.isArray(load.paths)) return;
+  const bundledRoots = [
+    '/app/extensions/lossless-claw',
+    '/app/dist/extensions/lossless-claw',
+    '/app/extensions/telegram',
+    '/app/dist/extensions/telegram',
+  ];
+  load.paths = load.paths.filter((raw) => {
+    if (typeof raw !== 'string') return true;
+    const path = raw.trim();
+    return !bundledRoots.some((root) => path === root || path.startsWith(`${root}/`));
+  });
 };
 
 const isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -439,9 +527,13 @@ try {
   const persisted = JSON.parse(fs.readFileSync(persistedPath, 'utf8'));
   pruneLegacyControlUiFallback(current);
   pruneLegacyControlUiFallback(persisted);
+  stripBundledPluginOverrides(current);
+  stripBundledPluginOverrides(persisted);
   const merged = mergePreferCurrent(persisted, current);
   pruneLegacyControlUiFallback(merged);
+  stripBundledPluginOverrides(merged);
   fs.writeFileSync(currentPath, JSON.stringify(merged, null, 2));
+  fs.writeFileSync(persistedPath, JSON.stringify(merged, null, 2));
 } catch (error) {
   console.error('[entrypoint] Failed to merge persisted openclaw config:', error?.message || error);
 }
@@ -478,8 +570,8 @@ fi
 
 # Start the gateway
 PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
-TOKEN_PARAM=""
+set -- node /app/dist/index.js gateway --bind lan --port "${PORT}" --allow-unconfigured
 if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
-    TOKEN_PARAM="--token ${OPENCLAW_GATEWAY_TOKEN}"
+    set -- "$@" --token "${OPENCLAW_GATEWAY_TOKEN}"
 fi
-exec node /app/dist/index.js gateway --bind lan --port "${PORT}" --allow-unconfigured ${TOKEN_PARAM}
+exec "$@"

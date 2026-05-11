@@ -12,10 +12,12 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $ScriptDir ".."))
 $RuntimeTar = Join-Path $ProjectRoot "src-tauri\resources\openclaw-runtime.tar.gz"
 $RuntimeResourcesDir = Join-Path $ProjectRoot "src-tauri\resources\runtime"
+$DebugRuntimeResourcesDir = Join-Path $ProjectRoot "src-tauri\target\debug\resources\runtime"
 $LocalAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { (Join-Path $HOME "AppData\Local") }
 $ManagedWslRoot = Join-Path $LocalAppData "Entropic\runtime\wsl"
 $ManagedWslArtifact = Join-Path $RuntimeResourcesDir "entropic-runtime.tar"
 $ManagedWslArtifactHash = Join-Path $RuntimeResourcesDir "entropic-runtime.sha256"
+$ManagedWslArtifactTarHash = Join-Path $RuntimeResourcesDir "entropic-runtime.tar.sha256"
 $DebugBinaryPath = Join-Path $ProjectRoot "src-tauri\target\debug\entropic.exe"
 $ReleaseBinaryPath = Join-Path $ProjectRoot "src-tauri\target\release\entropic.exe"
 
@@ -28,6 +30,9 @@ function Test-FileNonEmpty([string]$Path) {
 
 function Get-DevRuntimeInputPaths {
     return @(
+        (Join-Path $ProjectRoot "..\openclaw\package.json"),
+        (Join-Path $ProjectRoot "..\openclaw\dist\.buildstamp"),
+        (Join-Path $ProjectRoot "..\openclaw\dist\index.js"),
         (Join-Path $ProjectRoot "openclaw-runtime\entrypoint.sh"),
         (Join-Path $ProjectRoot "openclaw-runtime\Dockerfile"),
         (Join-Path $ProjectRoot "scripts\build-openclaw-runtime.sh"),
@@ -99,6 +104,45 @@ function Write-WslArtifactHashes([string]$ArtifactPath) {
     $hash = (Get-FileHash -Path $ArtifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -Path "$ArtifactPath.sha256" -Value $hash -NoNewline
     Set-Content -Path $ManagedWslArtifactHash -Value $hash -NoNewline
+}
+
+function Copy-FileIfChanged([string]$Source, [string]$Destination) {
+    if (-not (Test-Path -Path $Source -PathType Leaf)) {
+        return
+    }
+
+    $shouldCopy = $true
+    if (Test-Path -Path $Destination -PathType Leaf) {
+        $sourceInfo = Get-Item -Path $Source
+        $destinationInfo = Get-Item -Path $Destination
+        $shouldCopy = ($sourceInfo.Length -ne $destinationInfo.Length) -or
+            ($sourceInfo.LastWriteTimeUtc -ne $destinationInfo.LastWriteTimeUtc)
+    }
+
+    if ($shouldCopy) {
+        Copy-Item -Path $Source -Destination $Destination -Force
+    }
+}
+
+function Sync-WslRuntimeArtifactsToDebugResources {
+    if (-not (Test-FileNonEmpty $ManagedWslArtifact) -or -not (Test-FileNonEmpty $ManagedWslArtifactHash)) {
+        return
+    }
+
+    New-Item -ItemType Directory -Force -Path $DebugRuntimeResourcesDir | Out-Null
+
+    $debugArtifact = Join-Path $DebugRuntimeResourcesDir "entropic-runtime.tar"
+    $debugArtifactHash = Join-Path $DebugRuntimeResourcesDir "entropic-runtime.sha256"
+    $debugArtifactTarHash = Join-Path $DebugRuntimeResourcesDir "entropic-runtime.tar.sha256"
+
+    Copy-FileIfChanged -Source $ManagedWslArtifact -Destination $debugArtifact
+    Copy-FileIfChanged -Source $ManagedWslArtifactHash -Destination $debugArtifactHash
+
+    if (Test-Path -Path $ManagedWslArtifactTarHash -PathType Leaf) {
+        Copy-FileIfChanged -Source $ManagedWslArtifactTarHash -Destination $debugArtifactTarHash
+    } elseif (Test-Path -Path "$ManagedWslArtifact.sha256" -PathType Leaf) {
+        Copy-FileIfChanged -Source "$ManagedWslArtifact.sha256" -Destination $debugArtifactTarHash
+    }
 }
 
 function Ensure-WslRuntimeArtifacts {
@@ -226,6 +270,7 @@ if ($ReleaseBinary) {
     if ($Mode -eq "dev") {
         Ensure-DevRuntimeTar
         Ensure-WslRuntimeArtifacts
+        Sync-WslRuntimeArtifactsToDebugResources
     }
     Stop-StaleDebugEntropicProcess
     & pnpm.cmd tauri:dev

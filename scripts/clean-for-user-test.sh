@@ -62,6 +62,9 @@ echo "🐳 Cleaning production runtime Docker artifacts..."
 
 if [ -n "$DOCKER_BIN" ]; then
     ACTIVE_DOCKER_HOST="$(entropic_resolve_mode_docker_host "$DOCKER_BIN" || true)"
+    if [ -z "$ACTIVE_DOCKER_HOST" ]; then
+        ACTIVE_DOCKER_HOST="$(entropic_native_linux_docker_host "$DOCKER_BIN" || true)"
+    fi
 fi
 
 if [ -n "$ACTIVE_DOCKER_HOST" ]; then
@@ -74,7 +77,7 @@ if [ -n "$ACTIVE_DOCKER_HOST" ]; then
     run_docker rmi -f openclaw-runtime:latest entropic-skill-scanner:latest 2>/dev/null || true
     echo "✅ Production daemon artifacts cleaned"
 else
-    echo "⚠️  Production Colima Docker socket not reachable; skipping daemon cleanup."
+    echo "⚠️  Production Docker host not reachable; skipping daemon cleanup."
 fi
 
 # ============================================

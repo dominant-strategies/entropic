@@ -147,7 +147,7 @@ Run these before opening a PR:
 
 ```bash
 pnpm build
-cargo check --manifest-path src-tauri/Cargo.toml
+cargo check --manifest-path src-tauri/Cargo.toml --no-default-features
 ```
 
 If your change affects Windows bootstrap or runtime code, also validate with the
