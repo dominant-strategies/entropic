@@ -2,7 +2,7 @@ import type { CronSchedule } from "./gateway";
 import type { IntegrationProvider } from "./integrations";
 
 export type SuggestionTaskPreset = "hourly" | "daily" | "daily_10am" | "weekdays";
-export type QuickActionHandoffPage = "store" | "channels";
+export type QuickActionHandoffPage = "store" | "integrations" | "channels";
 export type QuickActionRunMode = "suggest_and_schedule" | "direct_send";
 
 export type ChatQuickActionIcon = "mail" | "calendar" | "trending" | "globe" | "activity" | "bot" | "user";
@@ -165,7 +165,7 @@ Ask for explicit approval before writing files. If approved, update USER.md.`,
       label: "Gmail",
       required: true,
     },
-    handoffPage: "store",
+    handoffPage: "integrations",
   },
   {
     id: "calendar_check",
@@ -181,7 +181,7 @@ Ask for explicit approval before writing files. If approved, update USER.md.`,
       label: "Google Calendar",
       required: true,
     },
-    handoffPage: "store",
+    handoffPage: "integrations",
   },
   {
     id: "x_trending_news",

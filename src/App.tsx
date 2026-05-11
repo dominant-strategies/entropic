@@ -26,6 +26,19 @@ type RuntimeStatus = {
   docker_ready: boolean;
 };
 
+function isTauriRuntime(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const globalWindow = window as typeof window & {
+    __TAURI__?: { core?: { invoke?: unknown } };
+    __TAURI_INTERNALS__?: { invoke?: unknown };
+  };
+  return Boolean(
+    globalWindow.__TAURI_INTERNALS__?.invoke || globalWindow.__TAURI__?.core?.invoke
+  );
+}
+
 type AppState = "loading" | "signin" | "onboarding" | "docker-install" | "setup" | "ready";
 
 const DEFAULT_AGENT_NAME = "Joulie";
@@ -263,8 +276,12 @@ function App() {
   const devScreen = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get("devScreen")
     : null;
+  const tauriRuntime = isTauriRuntime();
 
   useEffect(() => {
+    if (!tauriRuntime) {
+      return;
+    }
     try {
       const os = platform();
       const isMac = os === "macos";
@@ -277,10 +294,27 @@ function App() {
       document.documentElement.classList.remove("platform-macos");
       document.body.classList.remove("platform-macos");
     };
-  }, []);
+  }, [tauriRuntime]);
 
   if (devScreen) {
     return <DevScreenPreview />;
+  }
+
+  if (!tauriRuntime) {
+    return (
+      <div className="h-screen w-screen flex items-center justify-center bg-[var(--bg-primary)] p-6">
+        <main className="w-full max-w-lg rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-8 shadow-xl text-center">
+          <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-3">
+            Entropic Runs In The Desktop App
+          </h1>
+          <p className="text-sm leading-relaxed text-[var(--text-secondary)]">
+            This browser tab is only the local dev bundle. OAuth should return to the Entropic
+            desktop app via the <code>entropic-dev://</code> deep link. If you just completed sign-in
+            or an integration approval, switch back to the app.
+          </p>
+        </main>
+      </div>
+    );
   }
 
   return (

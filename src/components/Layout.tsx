@@ -42,6 +42,7 @@ function startDrag(e: React.MouseEvent) {
 export type Page =
   | "chat"
   | "store"
+  | "integrations"
   | "skills"
   | "channels"
   | "files"
@@ -74,7 +75,7 @@ const baseNavItems: { id: Page; label: string; icon: typeof MessageSquare }[] = 
   { id: "files", label: "Desktop", icon: FolderOpen },
   { id: "jobs", label: "Jobs", icon: CalendarClock },
   { id: "channels", label: "Messaging", icon: Radio },
-  // { id: "store", label: "Integrations", icon: Puzzle },
+  { id: "integrations", label: "Integrations", icon: Puzzle },
   { id: "skills", label: "Skills", icon: Sparkles },
   { id: "billing", label: "Billing", icon: CreditCard },
   { id: "settings", label: "Settings", icon: Settings },

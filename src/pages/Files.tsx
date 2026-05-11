@@ -235,10 +235,10 @@ const DESKTOP_MODAL_Z = 2100;
 const DESKTOP_ICON_WIDTH = 84;
 const DESKTOP_ICON_HEIGHT = 110;
 const DESKTOP_ICON_GRID_START_X = 28;
-const DESKTOP_ICON_GRID_START_Y = 192;
+const DESKTOP_ICON_GRID_START_Y = 72;
 const DESKTOP_ICON_GRID_STEP_X = 96;
 const DESKTOP_ICON_GRID_STEP_Y = 108;
-const WORKSPACE_ICON_GRID_Y = 72;
+const WORKSPACE_ICON_GRID_Y = DESKTOP_ICON_GRID_START_Y;
 const LOCAL_BROWSER_INPUT_RE = /^(?:container\.localhost|runtime\.localhost|localhost|127\.0\.0\.1)(?::\d+)?(?:[/?#].*)?$/i;
 const BROWSER_DESKTOP_MIN_VIEWPORT_WIDTH = 1180;
 const BROWSER_DESKTOP_MIN_VIEWPORT_HEIGHT = 760;
@@ -3716,13 +3716,14 @@ export function Files({
     focusWindow("chat");
   }
 
-  function handleDesktopChatNavigate(page: "chat" | "store" | "skills" | "channels" | "files" | "tasks" | "jobs" | "settings" | "billing") {
+  function handleDesktopChatNavigate(page: "chat" | "store" | "integrations" | "skills" | "channels" | "files" | "tasks" | "jobs" | "settings" | "billing") {
     switch (page) {
       case "chat":
         setChatOpen(true);
         focusWindow("chat");
         return;
       case "store":
+      case "integrations":
         setPluginsOpen(true);
         focusWindow("plugins");
         return;
@@ -5295,6 +5296,7 @@ export function Files({
             >
               <Suspense fallback={PANEL_FALLBACK}>
                 <PluginStore
+                  view="integrations"
                   integrationsSyncing={integrationsSyncing}
                   integrationsMissing={integrationsMissing}
                 />
@@ -5331,6 +5333,7 @@ export function Files({
             >
               <Suspense fallback={PANEL_FALLBACK}>
                 <SkillsStore
+                  view="skills"
                   integrationsSyncing={integrationsSyncing}
                   integrationsMissing={integrationsMissing}
                 />
