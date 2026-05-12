@@ -10,6 +10,7 @@ import { getFileColor, getFileIcon } from "./FileIcons";
 export type FilePreviewState =
   | { kind: "text"; name: string; path: string; content: string }
   | { kind: "image"; name: string; path: string; dataUrl: string }
+  | { kind: "video"; name: string; path: string; src: string; mimeType?: string }
   | { kind: "binary"; name: string; path: string; size: number };
 
 type FilePreviewWindowProps = {
@@ -183,6 +184,20 @@ export function FilePreviewWindow({
             />
           </div>
         ) : null}
+        {preview.kind === "video" ? (
+          <div className="flex items-center justify-center p-4">
+            <video
+              src={preview.src}
+              controls
+              playsInline
+              preload="metadata"
+              className="max-h-[70vh] max-w-full rounded-lg shadow-lg"
+            >
+              {preview.mimeType ? <source src={preview.src} type={preview.mimeType} /> : null}
+              Your browser does not support video playback.
+            </video>
+          </div>
+        ) : null}
         {preview.kind === "binary" ? (
           <div className="p-6 text-sm" style={{ color: "#d4d4d4" }}>
             <p className="mb-2 font-medium">Preview not available</p>
@@ -236,6 +251,8 @@ export function FilePreviewWindow({
           </span>
         ) : preview.kind === "image" ? (
           <span>Image preview</span>
+        ) : preview.kind === "video" ? (
+          <span>Video preview</span>
         ) : (
           <span>{formatSize(preview.size)}</span>
         )}

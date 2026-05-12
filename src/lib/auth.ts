@@ -622,6 +622,64 @@ export async function getBalance(): Promise<BalanceResponse> {
 }
 
 /**
+ * Upload a file to the backend's /v1/uploads endpoint. Used for image
+ * references in media generation flows (e.g. image-to-video). Returns the
+ * provider-hosted URL that downstream generation requests can reference.
+ *
+ * `apiRequest` is JSON-only, so this uses raw fetch to build the multipart
+ * body while reusing the same Supabase access token for auth.
+ */
+export interface UploadFileResponse {
+  url: string;
+  filename: string;
+  content_type: string;
+  size: number;
+}
+
+export async function uploadFileForMedia(
+  blob: Blob,
+  fileName: string,
+): Promise<UploadFileResponse> {
+  const token = await getAccessToken();
+  if (!token) {
+    throw new ApiRequestError("Not authenticated", { status: 401, kind: "http" });
+  }
+
+  const form = new FormData();
+  form.append("file", blob, fileName);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}/v1/uploads`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+  } catch (error: any) {
+    throw new ApiRequestError("Upload network error", { kind: "network", data: error });
+  }
+
+  if (!response.ok) {
+    let errorBody: any = {};
+    try {
+      errorBody = await response.json();
+    } catch {
+      try {
+        errorBody = { raw: await response.text() };
+      } catch {
+        errorBody = {};
+      }
+    }
+    throw new ApiRequestError(
+      extractApiErrorMessage(errorBody, `Upload failed (${response.status})`),
+      { status: response.status, data: errorBody, kind: "http" },
+    );
+  }
+
+  return (await response.json()) as UploadFileResponse;
+}
+
+/**
  * Get usage summary
  */
 export async function getUsage(days = 30): Promise<UsageResponse> {

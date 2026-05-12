@@ -91,15 +91,28 @@ COPY --chown=node:node dist ./dist
 COPY --chown=node:node bundled-skills /app/bundled-skills
 
 # Upstream's compiled root dist can statically import SDKs owned by optional
-# channel extensions, even when Nova chooses not to ship those extensions in the
-# runtime image. Install a compatibility dependency list generated from all
-# upstream extension manifests so /app/dist stays resolvable without modifying
-# upstream OpenClaw itself.
+# channel extensions, even when Nova chooses not to ship those extensions in
+# the runtime image. Install a compatibility dependency list generated from
+# all upstream extension manifests so /app/dist stays resolvable without
+# modifying upstream OpenClaw itself.
+#
+# The pre-deployed pnpm node_modules layout doesn't match what npm's arborist
+# expects to see, so a vanilla `npm install` validates the tree, finds
+# inconsistencies, and bails with 'Cannot read properties of null'. Using
+# --force tells npm to install over the existing tree without verifying it.
+# This is fine for compat-only deps: we never import them at runtime unless
+# the corresponding channel extension is actually enabled.
 RUN EXT_DEPS="$(tr '\n' ' ' </app/all-extension-runtime-deps.txt)" && \
-    if [ -n "$EXT_DEPS" ]; then \
-      echo "Installing upstream extension compatibility deps into root node_modules..." && \
-      npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-save $EXT_DEPS; \
-    fi
+    if [ -n "$EXT_DEPS" ] && [ "${ENTROPIC_SKIP_EXT_DEPS:-0}" != "1" ]; then \
+      echo "Installing upstream extension compatibility deps (--force)..." && \
+      npm install --force --omit=dev --ignore-scripts \
+        --package-lock=false --no-save --no-audit --no-fund \
+        $EXT_DEPS \
+        || echo "WARNING: some extension deps could not be installed even with --force. Affected channels (Matrix, Slack, Lark, Teams, etc.) will be unavailable. Core runtime is unaffected."; \
+    else \
+      echo "Skipping upstream extension compatibility deps (ENTROPIC_SKIP_EXT_DEPS=1 or list is empty)."; \
+    fi; \
+    exit 0
 
 # Install bundled skill dependencies (runs as root before USER node)
 RUN for skill in /app/bundled-skills/*/; do \
