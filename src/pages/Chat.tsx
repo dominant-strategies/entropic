@@ -22,6 +22,7 @@ import {
   Puzzle,
   User,
   FileText,
+  Film,
   Music2,
   Mic,
 } from "lucide-react";
@@ -85,7 +86,7 @@ import { appendDiagnosticLog } from "../lib/diagnostics";
 import { entropicSitePath } from "../lib/buildProfile";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { getLocalCreditBalance } from "../lib/localCredits";
-import { signInWithDiscord, signInWithEmail, signInWithGoogle, signUpWithEmail, createCheckout, getBalance } from "../lib/auth";
+import { apiRequest, signInWithDiscord, signInWithEmail, signInWithGoogle, signUpWithEmail, createCheckout, getBalance, uploadFileForMedia } from "../lib/auth";
 import entropicLogo from "../assets/entropic-logo.png";
 import type { Page } from "../components/Layout";
 import {
@@ -187,7 +188,7 @@ type DesktopHandoff = {
   action: "open" | "preview" | "browser";
   looksLikeFile?: boolean;
 };
-type ComposerMode = "chat" | "shell" | "image";
+type ComposerMode = "chat" | "shell" | "image" | "video";
 type ChatTerminalState = {
   cwd: string;
 };
@@ -948,6 +949,10 @@ const HISTORY_LIMIT = 500;
 const ACTIVE_RUN_IDLE_TIMEOUT_MS = 120_000;
 const MAX_ATTACHMENTS_PER_MESSAGE = 4;
 const MAX_ATTACHMENT_BYTES = 5_000_000;
+// Image references for video/image generation go straight to the provider's
+// file upload endpoint (no LLM context bloat concern), so we allow a much
+// larger ceiling here than for chat-message attachments. Backend cap is 32 MB.
+const MAX_MEDIA_REFERENCE_BYTES = 32_000_000;
 const GENERATED_IMAGES_DEST_PATH = "generated-images";
 
 const QUICK_ACTION_ICONS: Record<ChatQuickActionIcon, typeof Mail> = {
@@ -1442,6 +1447,23 @@ export function Chat({
   } | null>(null);
   const [telegramSetupOpen, setTelegramSetupOpen] = useState(false);
   const [composerModeBySession, setComposerModeBySession] = useState<Record<string, ComposerMode>>({});
+  // Video-mode provider toggle. MuAPI is the default (cheaper per-second,
+  // full feature surface). Venice is an alternative (~$2.50/video vs MuAPI's
+  // ~$1.13 for 5s/720p) — kept here as session state since users may want to
+  // flip mid-session for quality comparisons.
+  const [videoProvider, setVideoProvider] = useState<"muapi" | "venice">("muapi");
+  // Quality / resolution for video generation. Defaults to 720p — the
+  // sensible balance of quality vs cost. 480p is preview-grade and only
+  // supported on MuAPI; 1080p is the "high" tier on both providers and
+  // costs roughly 3× the 720p tier on MuAPI.
+  const [videoQuality, setVideoQuality] = useState<"480p" | "720p" | "1080p">("720p");
+  // Venice doesn't expose a stable 480p tier — auto-bump to 720p when the
+  // user flips to Venice while 480p was selected.
+  useEffect(() => {
+    if (videoProvider === "venice" && videoQuality === "480p") {
+      setVideoQuality("720p");
+    }
+  }, [videoProvider, videoQuality]);
   const [terminalStateBySession, setTerminalStateBySession] = useState<Record<string, ChatTerminalState>>({});
   const [integrationSetupBySession, setIntegrationSetupBySession] = useState<Record<string, IntegrationSetupState>>({});
   const [quickSuggestionBySession, setQuickSuggestionBySession] = useState<Record<string, QuickSuggestionState>>({});
@@ -1868,6 +1890,7 @@ export function Chat({
   function attachmentKindLabel(mimeType: string): string {
     const normalized = mimeType.trim().toLowerCase();
     if (normalized.startsWith("image/")) return "image";
+    if (normalized.startsWith("video/")) return "video";
     if (normalized.startsWith("audio/")) return "audio";
     if (normalized.startsWith("text/")) return "text";
     if (normalized === "application/pdf") return "pdf";
@@ -1882,6 +1905,13 @@ export function Chat({
           alt={attachment.fileName}
           className="w-8 h-8 rounded object-cover"
         />
+      );
+    }
+    if (attachment.mimeType.startsWith("video/")) {
+      return (
+        <div className="flex h-8 w-8 items-center justify-center rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)]">
+          <Film className="h-4 w-4" />
+        </div>
       );
     }
     if (attachment.mimeType.startsWith("audio/")) {
@@ -1902,14 +1932,15 @@ export function Chat({
     const files = filesInput ? Array.from(filesInput) : [];
     if (files.length === 0) return;
 
-    const allowedFiles =
-      activeComposerMode === "image"
-        ? files.filter((file) => file.type.startsWith("image/"))
-        : files;
+    const isMediaReferenceMode =
+      activeComposerMode === "image" || activeComposerMode === "video";
+    const allowedFiles = isMediaReferenceMode
+      ? files.filter((file) => file.type.startsWith("image/"))
+      : files;
     if (allowedFiles.length === 0) {
       setError(
-        activeComposerMode === "image"
-          ? "Only image attachments are supported in Image mode."
+        isMediaReferenceMode
+          ? `Only image attachments are supported in ${activeComposerMode === "image" ? "Image" : "Video"} mode.`
           : "No supported attachments were selected.",
       );
       return;
@@ -1928,10 +1959,16 @@ export function Chat({
       setError(null);
     }
 
+    // Media-reference attachments go to the provider's file service and can
+    // be large; chat-message attachments are base64'd into LLM context so we
+    // keep the smaller cap there.
+    const sizeCap = isMediaReferenceMode ? MAX_MEDIA_REFERENCE_BYTES : MAX_ATTACHMENT_BYTES;
+    const sizeCapLabel = isMediaReferenceMode ? "32 MB" : "5 MB";
+
     const nextAttachments: PendingAttachment[] = [];
     for (const file of selectedFiles) {
-      if (file.size > MAX_ATTACHMENT_BYTES) {
-        setError(`${file.name} is too large. Max size is 5 MB per file.`);
+      if (file.size > sizeCap) {
+        setError(`${file.name} is too large. Max size is ${sizeCapLabel} per file in this mode.`);
         continue;
       }
       try {
@@ -5231,6 +5268,224 @@ export function Chat({
       return;
     }
 
+    if (composerMode === "video") {
+      // Video mode bypasses the LLM and posts directly to the backend's video
+      // generation route, then polls until terminal. With image attachments
+      // we switch to image-to-video (seedance-2.0-i2v) and pass the uploaded
+      // URLs as references. Default: Seedance 2 basic quality, 5s, 16:9.
+      if (!useLocalKeys && !proxyEnabled) {
+        const message = "Video generation requires proxy mode in Settings.";
+        setError(message);
+        appendAssistantNotice(message, sendSession);
+        return;
+      }
+      const imageAttachments = pendingAttachments.filter((a) =>
+        a.mimeType.startsWith("image/"),
+      );
+      const nonImageAttachment = pendingAttachments.find(
+        (a) => !a.mimeType.startsWith("image/"),
+      );
+      if (nonImageAttachment) {
+        const message = "Video mode only accepts image attachments as references.";
+        setError(message);
+        appendAssistantNotice(message, sendSession);
+        return;
+      }
+      if (!userMessageContent && imageAttachments.length === 0) {
+        const message = "Enter a video prompt or attach a reference image.";
+        setError(message);
+        appendAssistantNotice(message, sendSession);
+        return;
+      }
+
+      const userMessage: Message = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: userVisibleContent,
+        sentAt: Date.now(),
+        attachments: imageAttachments.length
+          ? imageAttachments.map((a) => ({
+              fileName: a.fileName,
+              mimeType: a.mimeType,
+              previewUrl: a.previewUrl || `data:${a.mimeType};base64,${a.content}`,
+            }))
+          : undefined,
+      };
+      appendLocalMessage(userMessage, sendSession);
+
+      if (!content && sendSession) {
+        setDraftsBySession((prev) => ({ ...prev, [sendSession]: "" }));
+        if (textareaRef.current) {
+          textareaRef.current.style.height = "auto";
+          textareaRef.current.style.overflowY = "hidden";
+        }
+      }
+
+      setIsLoading(true);
+      setError(null);
+
+      type VideoSubmissionResponse = {
+        id: string | null;
+        provider_request_id: string;
+        status: string;
+        model: string;
+        cost_cents: number;
+      };
+      type VideoStatusResponse = {
+        id: string;
+        provider_request_id: string;
+        status: string;
+        outputs: string[];
+        thumbnail_url: string | null;
+        cost_cents: number;
+        refunded_cents: number;
+        refund_reason: string | null;
+        error: string | null;
+      };
+
+      try {
+        const provider = videoProvider;
+        // Reference image handling depends on the provider:
+        //   Venice: accepts data URLs natively in `image_url` — skip the
+        //           upload entirely, just pass the base64 inline.
+        //   MuAPI:  needs hosted URLs, so we upload each attachment to
+        //           /v1/uploads (proxies to MuAPI's file service) first.
+        let referenceUrls: string[] = [];
+        if (imageAttachments.length > 0) {
+          if (provider === "venice") {
+            referenceUrls = imageAttachments.map(
+              (att) => `data:${att.mimeType};base64,${att.content}`,
+            );
+          } else {
+            setThinkingStatus(
+              imageAttachments.length === 1
+                ? "Uploading reference image"
+                : `Uploading ${imageAttachments.length} reference images`,
+            );
+            referenceUrls = await Promise.all(
+              imageAttachments.map(async (att) => {
+                const binary = atob(att.content);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i += 1) {
+                  bytes[i] = binary.charCodeAt(i);
+                }
+                const blob = new Blob([bytes], { type: att.mimeType });
+                const result = await uploadFileForMedia(blob, att.fileName);
+                return result.url;
+              }),
+            );
+          }
+        }
+
+        const useImageToVideo = referenceUrls.length > 0;
+        // Venice doesn't have a stable 480p tier — fall back to 720p there.
+        const effectiveQuality =
+          provider === "venice" && videoQuality === "480p" ? "720p" : videoQuality;
+        setThinkingStatus(
+          `Submitting ${useImageToVideo ? "image-to-video" : "video"} job (${provider}, ${effectiveQuality})`,
+        );
+
+        // Map (provider, quality) → upstream model slug + quality param:
+        //   MuAPI 480p     → model `seedance-2.0-t2v-480p`, quality 'basic'
+        //   MuAPI 720p     → model `seedance-2.0-t2v`,      quality 'basic'
+        //   MuAPI 1080p    → model `seedance-2.0-t2v`,      quality 'high'
+        //   Venice 720p    → model `venice/seedance-2.0-t2v`, quality 'basic'
+        //   Venice 1080p   → model `venice/seedance-2.0-t2v`, quality 'high'
+        let modelSlug: string;
+        let qualityParam: "basic" | "high";
+        if (provider === "venice") {
+          modelSlug = useImageToVideo ? "venice/seedance-2.0-i2v" : "venice/seedance-2.0-t2v";
+          qualityParam = effectiveQuality === "1080p" ? "high" : "basic";
+        } else if (effectiveQuality === "480p") {
+          modelSlug = useImageToVideo ? "seedance-2.0-i2v-480p" : "seedance-2.0-t2v-480p";
+          qualityParam = "basic";
+        } else {
+          modelSlug = useImageToVideo ? "seedance-2.0-i2v" : "seedance-2.0-t2v";
+          qualityParam = effectiveQuality === "1080p" ? "high" : "basic";
+        }
+
+        const submission = await apiRequest<VideoSubmissionResponse>(
+          "/v1/videos/generations",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              prompt: userMessageContent || "",
+              provider,
+              model: modelSlug,
+              duration: 5,
+              aspect_ratio: "16:9",
+              quality: qualityParam,
+              ...(useImageToVideo ? { images_list: referenceUrls } : {}),
+            }),
+          },
+        );
+
+        if (!submission.id) {
+          throw new Error("Backend did not return a generation id to poll.");
+        }
+        const generationId = submission.id;
+
+        setThinkingStatus("Generating video (this can take 30s–2min)");
+
+        const POLL_INTERVAL_MS = 5_000;
+        const POLL_TIMEOUT_MS = 10 * 60 * 1000;
+        const deadline = Date.now() + POLL_TIMEOUT_MS;
+        let finalStatus: VideoStatusResponse | null = null;
+
+        while (Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+          const status = await apiRequest<VideoStatusResponse>(
+            `/v1/generations/${generationId}`,
+          );
+          if (status.status === "completed" || status.status === "failed" || status.status === "refunded") {
+            finalStatus = status;
+            break;
+          }
+        }
+
+        if (!finalStatus) {
+          throw new Error(
+            `Timed out after ${POLL_TIMEOUT_MS / 1000}s waiting for the video.`,
+          );
+        }
+
+        if (finalStatus.status !== "completed" || finalStatus.outputs.length === 0) {
+          const reason = finalStatus.refund_reason
+            ? ` (${finalStatus.refund_reason})`
+            : "";
+          const detail = finalStatus.error || "no output";
+          throw new Error(`Generation ${finalStatus.status}${reason}: ${detail}`);
+        }
+
+        const videoUrl = finalStatus.outputs[0];
+        const generatedCount = finalStatus.outputs.length;
+        appendLocalMessage(
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: `Generated ${generatedCount} video clip${generatedCount === 1 ? "" : "s"}.`,
+            sentAt: Date.now(),
+            attachments: finalStatus.outputs.map((url, index) => ({
+              fileName: `video-${index + 1}.mp4`,
+              mimeType: "video/mp4",
+              previewUrl: url,
+            })),
+          },
+          sendSession,
+        );
+        void videoUrl; // referenced via attachments
+      } catch (e) {
+        const message = formatUnknownUiError(e, "Failed to generate video.");
+        setError(message);
+        appendAssistantNotice(`I couldn't generate that video: ${message}`, sendSession);
+      } finally {
+        clearPendingAttachments();
+        setIsLoading(false);
+        setThinkingStatus(null);
+      }
+      return;
+    }
+
     const liveClient = clientRef.current;
     const shouldQueueForReconnect =
       gatewayStarting || isConnecting || connectInFlightRef.current || gatewayRunning;
@@ -6384,6 +6639,7 @@ export function Chat({
           const saveUnsupportedReason = getGeneratedImageWorkspaceSaveUnsupportedReason(attachment);
           const isImage = attachment.mimeType.startsWith("image/");
           const isAudio = attachment.mimeType.startsWith("audio/");
+          const isVideo = attachment.mimeType.startsWith("video/");
           const canSaveToWorkspace = isImage && !saveUnsupportedReason;
           return (
             <div
@@ -6395,6 +6651,14 @@ export function Chat({
                   src={attachment.previewUrl}
                   alt={attachment.fileName}
                   className="block h-auto max-h-[360px] w-full object-contain"
+                />
+              ) : isVideo ? (
+                <video
+                  src={attachment.previewUrl}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  className="block h-auto max-h-[360px] w-full bg-black object-contain"
                 />
               ) : isAudio ? (
                 <div className="px-3 pt-3">
@@ -7354,7 +7618,7 @@ export function Chat({
           <input
             ref={fileInputRef}
             type="file"
-            accept={activeComposerMode === "image" ? "image/*" : "image/*,audio/*,text/*,.txt,.md,.markdown,.csv,.json,.log"}
+            accept={activeComposerMode === "image" || activeComposerMode === "video" ? "image/*" : "image/*,audio/*,text/*,.txt,.md,.markdown,.csv,.json,.log"}
             multiple
             className="hidden"
             onChange={(event) => {
@@ -7368,6 +7632,7 @@ export function Chat({
                 { key: "chat", label: "Chat", icon: Bot },
                 { key: "shell", label: "Shell", icon: Terminal },
                 { key: "image", label: "Image", icon: ImageIcon },
+                { key: "video", label: "Video", icon: Film },
               ] as const).map((mode) => {
                 const Icon = mode.icon;
                 const active = activeComposerMode === mode.key;
@@ -7421,6 +7686,103 @@ export function Chat({
                   </span>
                 </div>
               </div>
+            ) : activeComposerMode === "video" ? (
+              <div className="min-w-0 max-w-full text-[11px] text-[var(--text-tertiary)]">
+                <div className="inline-flex min-w-0 max-w-full flex-wrap items-center gap-2 px-1 py-0.5">
+                  <Film className="h-3.5 w-3.5 shrink-0" />
+                  <span className="shrink-0 font-medium text-[var(--text-secondary)]">provider</span>
+                  <div className="inline-flex items-center rounded-md border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] p-0.5">
+                    {(
+                      [
+                        { key: "muapi", label: "MuAPI", hint: "Seedance 2 · cheaper, full features" },
+                        { key: "venice", label: "Venice", hint: "Seedance 2 · $2.50 flat per video" },
+                      ] as const
+                    ).map((opt) => {
+                      const active = videoProvider === opt.key;
+                      return (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() => setVideoProvider(opt.key)}
+                          title={opt.hint}
+                          aria-pressed={active}
+                          className={clsx(
+                            "rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors",
+                            active
+                              ? "bg-[var(--bg-secondary)] text-[var(--text-primary)]"
+                              : "text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]",
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <span className="shrink-0 font-medium text-[var(--text-secondary)]">quality</span>
+                  <div className="inline-flex items-center rounded-md border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] p-0.5">
+                    {(() => {
+                      // Per-quality cost preview for a 5-second clip — user-facing
+                      // prices (after margin). Venice numbers come from the live
+                      // quote endpoint (probed 2026-05-12). MuAPI numbers are
+                      // derived from the token formula ($7/M tokens).
+                      const muapiCost: Record<"480p" | "720p" | "1080p", string> = {
+                        "480p": "$0.51",
+                        "720p": "$1.13",
+                        "1080p": "$2.55",
+                      };
+                      const veniceCost: Record<"480p" | "720p" | "1080p", string> = {
+                        "480p": "$0.65",
+                        "720p": "$1.35",
+                        "1080p": "$3.51",
+                      };
+                      const options = (
+                        [
+                          { key: "480p", label: "480p" },
+                          { key: "720p", label: "720p" },
+                          { key: "1080p", label: "1080p" },
+                        ] as const
+                      ).filter((opt) => videoProvider !== "venice" || opt.key !== "480p");
+                      return options.map((opt) => {
+                        const active = videoQuality === opt.key;
+                        const cost =
+                          videoProvider === "venice" ? veniceCost[opt.key] : muapiCost[opt.key];
+                        return (
+                          <button
+                            key={opt.key}
+                            type="button"
+                            onClick={() => setVideoQuality(opt.key)}
+                            title={`${opt.label} · ~${cost} per 5-sec clip`}
+                            aria-pressed={active}
+                            className={clsx(
+                              "rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors",
+                              active
+                                ? "bg-[var(--bg-secondary)] text-[var(--text-primary)]"
+                                : "text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]",
+                            )}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      });
+                    })()}
+                  </div>
+                  <span
+                    className="shrink-0 font-mono text-[10px] text-[var(--text-tertiary)]"
+                    title="Estimated user-facing cost for a 5-second clip"
+                  >
+                    ~
+                    {videoProvider === "venice"
+                      ? videoQuality === "1080p"
+                        ? "$3.51"
+                        : "$1.35"
+                      : videoQuality === "480p"
+                        ? "$0.51"
+                        : videoQuality === "1080p"
+                          ? "$2.55"
+                          : "$1.13"}
+                  </span>
+                </div>
+              </div>
             ) : activeComposerMode === "chat" && hasPendingAudioAttachments ? (
               <div className="flex items-center gap-1 text-[11px] text-[var(--text-tertiary)]">
                 <button
@@ -7441,8 +7803,8 @@ export function Chat({
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isLoading}
                 className="btn-secondary !p-2.5"
-                title={activeComposerMode === "image" ? "Attach reference image" : "Attach file"}
-                aria-label={activeComposerMode === "image" ? "Attach reference image" : "Attach file"}
+                title={activeComposerMode === "image" || activeComposerMode === "video" ? "Attach reference image" : "Attach file"}
+                aria-label={activeComposerMode === "image" || activeComposerMode === "video" ? "Attach reference image" : "Attach file"}
               >
                 <Paperclip className="w-4 h-4" />
               </button>

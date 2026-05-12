@@ -202,6 +202,13 @@ type PersistedBrowserTab = {
 
 const HIDDEN_FILES = new Set(["HEARTBEAT.md", "IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md"]);
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
+const VIDEO_EXTS = new Set(["mp4", "mov", "webm", "m4v"]);
+const VIDEO_MIME_BY_EXT: Record<string, string> = {
+  mp4: "video/mp4",
+  mov: "video/quicktime",
+  webm: "video/webm",
+  m4v: "video/x-m4v",
+};
 const BINARY_EXTS = new Set(["pdf", "zip", "xlsx", "xls", "docx", "pptx"]);
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
 const DESKTOP_HANDOFF_EVENT = "entropic-desktop-handoff";
@@ -3547,6 +3554,25 @@ export function Files({
               ? "image/jpeg"
               : `image/${ext}`;
         setPreview({ kind: "image", name: entry.name, path: entry.path, dataUrl: `data:${mime};base64,${base64}` });
+        focusWindow("preview");
+        return;
+      }
+      if (VIDEO_EXTS.has(ext)) {
+        // Load via the authenticated Tauri command and present as a base64
+        // data URL. The workspace browser endpoint has an auth gate the
+        // embedded webview can't satisfy from a <video> tag, so we route
+        // through the Rust side which already has the auth context.
+        // Tradeoff: data URL inflates the payload ~33%, so this works for
+        // generated clips (typically a few MB) but not arbitrary uploads.
+        const base64 = await invoke<string>("read_workspace_file_base64", { path: entry.path });
+        const mime = VIDEO_MIME_BY_EXT[ext] || "video/mp4";
+        setPreview({
+          kind: "video",
+          name: entry.name,
+          path: entry.path,
+          src: `data:${mime};base64,${base64}`,
+          mimeType: mime,
+        });
         focusWindow("preview");
         return;
       }
