@@ -93,6 +93,10 @@ COPY --chown=node:node dist ./dist
 # Copy bundled skills (seeded into /data/skills/ at startup by entrypoint)
 COPY --chown=node:node bundled-skills /app/bundled-skills
 
+# Docker builds from Windows/WSL worktrees can preserve permissive 0777 modes.
+# OpenClaw blocks world-writable plugin paths, so normalize bundled plugin roots.
+RUN chmod -R go-w /app/extensions /app/dist/extensions /app/bundled-skills
+
 # Upstream's compiled root dist can statically import SDKs owned by optional
 # channel extensions, even when Nova chooses not to ship those extensions in the
 # runtime image. Install a compatibility dependency list generated from all
