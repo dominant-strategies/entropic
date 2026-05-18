@@ -40,9 +40,9 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Install pnpm
-        shell: pwsh
-        run: npm install -g pnpm
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
 
       - name: Validate release version
         shell: pwsh
@@ -124,8 +124,9 @@ jobs:
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install pnpm
-        run: npm install -g pnpm
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
 
       - name: Validate SSL.com signing secrets
         env:
