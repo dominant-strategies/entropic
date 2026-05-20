@@ -24,6 +24,10 @@ export async function ensureOnlyOfficeReady(): Promise<OnlyOfficeStatus> {
   return invoke<OnlyOfficeStatus>("ensure_onlyoffice_ready");
 }
 
+export async function warmOnlyOfficeIfInstalled(): Promise<OnlyOfficeStatus> {
+  return invoke<OnlyOfficeStatus>("warm_onlyoffice_if_installed");
+}
+
 export async function createOnlyOfficeSession(path: string): Promise<OnlyOfficeSession> {
   return invoke<OnlyOfficeSession>("create_onlyoffice_session", { path });
 }

@@ -6011,6 +6011,167 @@ fn parse_markdown_bold_field(content: &str, field: &str) -> Option<String> {
     None
 }
 
+fn identity_field_line(field: &str, value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        format!("- **{}:**", field)
+    } else {
+        format!("- **{}:** {}", field, trimmed)
+    }
+}
+
+fn build_identity_markdown(
+    name: &str,
+    creature: &str,
+    vibe: &str,
+    emoji: &str,
+    avatar: Option<&str>,
+) -> String {
+    let mut body = String::from("# IDENTITY.md - Who Am I?\n\n");
+    body.push_str(&identity_field_line("Name", name));
+    body.push('\n');
+    body.push_str(&identity_field_line("Creature", creature));
+    body.push('\n');
+    body.push_str(&identity_field_line("Vibe", vibe));
+    body.push('\n');
+    body.push_str(&identity_field_line("Emoji", emoji));
+    body.push('\n');
+    body.push_str(&identity_field_line("Avatar", avatar.unwrap_or_default()));
+    body.push('\n');
+    body
+}
+
+fn identity_inline_field_label(line: &str) -> Option<String> {
+    let stripped = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .or_else(|| line.strip_prefix("+ "))
+        .unwrap_or(line)
+        .trim();
+    if stripped.is_empty() {
+        return None;
+    }
+    let label = stripped
+        .split_once(':')
+        .map(|(label, _)| label)
+        .or_else(|| stripped.split_once(" - ").map(|(label, _)| label))?;
+    let normalized = normalize_markdown_field_label(label);
+    if matches!(
+        normalized.as_str(),
+        "name" | "creature" | "vibe" | "emoji" | "avatar"
+    ) {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+fn identity_field_insert_index(lines: &[String]) -> usize {
+    if lines
+        .first()
+        .map(|line| line.trim_start().starts_with('#'))
+        .unwrap_or(false)
+    {
+        let mut index = 1;
+        while index < lines.len() && lines[index].trim().is_empty() {
+            index += 1;
+        }
+        index
+    } else {
+        0
+    }
+}
+
+fn merge_identity_markdown(
+    existing: &str,
+    name: &str,
+    creature: &str,
+    vibe: &str,
+    emoji: &str,
+    avatar: Option<&str>,
+) -> String {
+    if existing.trim().is_empty() {
+        return build_identity_markdown(name, creature, vibe, emoji, avatar);
+    }
+
+    let values = [
+        ("name", "Name", name),
+        ("creature", "Creature", creature),
+        ("vibe", "Vibe", vibe),
+        ("emoji", "Emoji", emoji),
+        ("avatar", "Avatar", avatar.unwrap_or_default()),
+    ];
+    let mut lines: Vec<String> = existing.lines().map(|line| line.to_string()).collect();
+    let mut seen = [false; 5];
+
+    for line in &mut lines {
+        let Some(label) = identity_inline_field_label(line.trim()) else {
+            continue;
+        };
+        if let Some((index, (_, display, value))) = values
+            .iter()
+            .enumerate()
+            .find(|(_, (key, _, _))| *key == label)
+        {
+            *line = identity_field_line(display, value);
+            seen[index] = true;
+        }
+    }
+
+    let mut missing = Vec::new();
+    for (index, (_, display, value)) in values.iter().enumerate() {
+        if !seen[index] {
+            missing.push(identity_field_line(display, value));
+        }
+    }
+    if !missing.is_empty() {
+        missing.push(String::new());
+        let insert_at = identity_field_insert_index(&lines);
+        lines.splice(insert_at..insert_at, missing);
+    }
+
+    let mut merged = lines.join("\n");
+    merged.push('\n');
+    merged
+}
+
+#[cfg(test)]
+mod identity_markdown_tests {
+    use super::merge_identity_markdown;
+
+    #[test]
+    fn merge_identity_markdown_updates_fields_and_preserves_notes() {
+        let existing = "# IDENTITY.md - Who Am I?\n\n- **Name:** Entropic\n\n## Notes\nKeep this custom note.\n";
+
+        let merged = merge_identity_markdown(existing, "Joulie", "", "", "", None);
+
+        assert!(merged.contains("- **Name:** Joulie"));
+        assert!(!merged.contains("- **Name:** Entropic"));
+        assert!(merged.contains("## Notes\nKeep this custom note."));
+    }
+
+    #[test]
+    fn merge_identity_markdown_adds_canonical_fields_before_custom_body() {
+        let existing =
+            "# Custom Identity\n\n## Name\nEntropic\n\nFreeform instructions stay here.\n";
+
+        let merged = merge_identity_markdown(
+            existing,
+            "Joulie",
+            "Assistant",
+            "Practical",
+            ":)",
+            Some("data:image/png;base64,abc"),
+        );
+
+        assert!(merged.starts_with(
+            "# Custom Identity\n\n- **Name:** Joulie\n- **Creature:** Assistant\n- **Vibe:** Practical\n- **Emoji:** :)\n- **Avatar:** data:image/png;base64,abc\n\n"
+        ));
+        assert!(merged.contains("## Name\nEntropic"));
+        assert!(merged.contains("Freeform instructions stay here."));
+    }
+}
+
 fn sanitize_identity_name(raw: &str) -> Option<String> {
     let mut value = raw.trim().to_string();
     if value.is_empty() {
@@ -6895,13 +7056,21 @@ fn onlyoffice_pull_failure_message(image: &str, detail: &str) -> String {
     format!("Failed to pull ONLYOFFICE image {}: {}", image, fallback)
 }
 
-fn ensure_onlyoffice_image() -> Result<(), String> {
+fn onlyoffice_image_installed() -> Result<bool, String> {
     let image = onlyoffice_image_name();
     let check = docker_command()
         .args(["image", "inspect", image.as_str()])
         .output()
         .map_err(|e| format!("Failed to check ONLYOFFICE image: {}", e))?;
     if check.status.success() {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn ensure_onlyoffice_image() -> Result<(), String> {
+    let image = onlyoffice_image_name();
+    if onlyoffice_image_installed()? {
         return Ok(());
     }
 
@@ -10897,16 +11066,14 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
             })
         });
 
-    let mut id_body = String::from("# IDENTITY.md - Who Am I?\n\n");
-    id_body.push_str(&format!("- **Name:** {}\n", identity_name));
-    id_body.push_str(&format!("- **Creature:** {}\n", identity_creature));
-    id_body.push_str(&format!("- **Vibe:** {}\n", identity_vibe));
-    id_body.push_str(&format!("- **Emoji:** {}\n", identity_emoji));
-    if let Some(url) = &identity_avatar {
-        id_body.push_str(&format!("- **Avatar:** {}\n", url));
-    } else {
-        id_body.push_str("- **Avatar:**\n");
-    }
+    let id_body = merge_identity_markdown(
+        &existing_identity_raw,
+        &identity_name,
+        &identity_creature,
+        &identity_vibe,
+        &identity_emoji,
+        identity_avatar.as_deref(),
+    );
 
     let memory_bootstrap = r#"# MEMORY.md - Long-Term Workspace Memory
 
@@ -15412,16 +15579,14 @@ pub async fn set_identity(
     save_agent_settings(&app, settings)?;
 
     if gateway_running {
-        let mut body = String::from("# IDENTITY.md - Who Am I?\n\n");
-        body.push_str(&format!("- **Name:** {}\n", next_name));
-        body.push_str(&format!("- **Creature:** {}\n", creature));
-        body.push_str(&format!("- **Vibe:** {}\n", vibe));
-        body.push_str(&format!("- **Emoji:** {}\n", emoji));
-        if let Some(ref url) = next_avatar {
-            body.push_str(&format!("- **Avatar:** {}\n", url));
-        } else {
-            body.push_str("- **Avatar:**\n");
-        }
+        let body = merge_identity_markdown(
+            &existing,
+            &next_name,
+            &creature,
+            &vibe,
+            &emoji,
+            next_avatar.as_deref(),
+        );
 
         if let Err(error) = write_container_file(&workspace_file("IDENTITY.md"), &body) {
             println!(
@@ -18570,6 +18735,19 @@ pub async fn get_onlyoffice_status() -> Result<OnlyOfficeStatus, String> {
 
 #[tauri::command]
 pub async fn ensure_onlyoffice_ready(app: AppHandle) -> Result<OnlyOfficeStatus, String> {
+    start_onlyoffice_sidecar(&app).await?;
+    Ok(onlyoffice_status_from_error(None))
+}
+
+#[tauri::command]
+pub async fn warm_onlyoffice_if_installed(app: AppHandle) -> Result<OnlyOfficeStatus, String> {
+    if !named_gateway_container_exists(ONLYOFFICE_CONTAINER, false)
+        && !onlyoffice_image_installed()?
+    {
+        return Ok(onlyoffice_status_from_error(Some(
+            "ONLYOFFICE image is not installed; skipped startup warmup.".to_string(),
+        )));
+    }
     start_onlyoffice_sidecar(&app).await?;
     Ok(onlyoffice_status_from_error(None))
 }

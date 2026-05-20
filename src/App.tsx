@@ -19,7 +19,7 @@ import { getLocalCreditBalance } from "./lib/localCredits";
 import { updaterEnabled } from "./lib/buildProfile";
 import { checkForAppUpdates } from "./lib/updater";
 import { DEFAULT_AGENT_NAME, DEFAULT_SOUL } from "./lib/agentDefaults";
-import { ensureOnlyOfficeReady } from "./lib/office";
+import { warmOnlyOfficeIfInstalled } from "./lib/office";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -111,7 +111,7 @@ function AppContent() {
     onlyOfficeWarmupStartedRef.current = true;
     window.setTimeout(() => {
       clientLog("app.onlyoffice.warmup.start");
-      void ensureOnlyOfficeReady()
+      void warmOnlyOfficeIfInstalled()
         .then((status) => {
           clientLog("app.onlyoffice.warmup.success", {
             running: status.running,

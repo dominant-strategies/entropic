@@ -321,6 +321,7 @@ pub fn run() {
             commands::approve_gateway_device_pairing,
             commands::get_onlyoffice_status,
             commands::ensure_onlyoffice_ready,
+            commands::warm_onlyoffice_if_installed,
             commands::create_onlyoffice_session,
             commands::list_workspace_files,
             commands::create_workspace_directory,

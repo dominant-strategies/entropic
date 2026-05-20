@@ -1780,7 +1780,6 @@ export function Settings({
                   <textarea 
                     value={soul} 
                     onChange={e => setSoul(e.target.value)}
-                    onBlur={() => persistPersonalityInstructions()}
                     className="min-h-[420px] w-full rounded-xl border border-transparent bg-[var(--system-gray-6)] p-3 text-left text-sm leading-relaxed text-[var(--text-primary)] transition-all resize-y focus:bg-[var(--bg-card)] focus:ring-2 focus:ring-[var(--system-blue)]/20"
                     rows={18}
                     placeholder="Example: Be concise, ask clarifying questions before destructive actions, prefer practical steps, and explain tradeoffs when a decision matters."
