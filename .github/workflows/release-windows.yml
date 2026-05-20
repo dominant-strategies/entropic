@@ -194,7 +194,8 @@ jobs:
           printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$KEY_PATH"
           chmod 600 "$KEY_PATH"
 
-          pnpm tauri signer sign -f "$KEY_PATH" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$INSTALLER_PATH"
+          env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PASSWORD \
+            pnpm tauri signer sign -f "$KEY_PATH" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$INSTALLER_PATH"
 
           SIG_PATH="${INSTALLER_PATH}.sig"
           if [ ! -s "$SIG_PATH" ]; then
