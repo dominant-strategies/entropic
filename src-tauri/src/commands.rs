@@ -7880,6 +7880,45 @@ fn browser_service_request_message(container: &str, base_error: &str) -> String 
     browser_service_message(container, "Browser request failed.", base_error)
 }
 
+fn browser_service_onlyoffice_unsupported_message(status: &str, body: &str) -> String {
+    let detail = if body.trim().is_empty() {
+        format!("HTTP {}", status)
+    } else {
+        format!("HTTP {}: {}", status, clipped_tail(body, 500))
+    };
+    format!(
+        "The running sandbox browser service does not support ONLYOFFICE document routes yet ({}). Rebuild or update the OpenClaw runtime image, restart the gateway, then open the file again.",
+        detail
+    )
+}
+
+fn ensure_browser_service_onlyoffice_support(container: &str) -> Result<(), String> {
+    let url = format!(
+        "http://127.0.0.1:{}/__onlyoffice__/open?path=probe.pptx&token=probe",
+        BROWSER_SERVICE_PORT
+    );
+    let raw = docker_exec_output(&[
+        "exec",
+        container,
+        "curl",
+        "-sS",
+        "--max-time",
+        BROWSER_SERVICE_CONNECT_TIMEOUT_SECS,
+        "-w",
+        "\n%{http_code}",
+        &url,
+    ])
+    .map_err(|e| browser_service_request_message(container, &e))?;
+    let (body, status) = raw
+        .rsplit_once('\n')
+        .map(|(body, status)| (body.trim(), status.trim()))
+        .unwrap_or((raw.trim(), ""));
+    if status == "200" && body.contains("Entropic Office") {
+        return Ok(());
+    }
+    Err(browser_service_onlyoffice_unsupported_message(status, body))
+}
+
 fn parse_browser_service_http_output(raw: &str) -> Result<(u16, String), String> {
     const STATUS_MARKER: &str = "\n__ENTROPIC_BROWSER_HTTP_STATUS__:";
     let marker_index = raw
@@ -18547,10 +18586,11 @@ pub async fn create_onlyoffice_session(
     let app_kind = onlyoffice_file_app_kind(&relative_path)?.to_string();
     normalize_onlyoffice_spreadsheet_if_needed(&relative_path);
     workspace_file_metadata(&relative_path)?;
-    let status = ensure_onlyoffice_ready(app.clone()).await?;
     let container = running_gateway_container_name()
         .ok_or_else(|| "Gateway container is not running.".to_string())?;
     wait_for_browser_service(container)?;
+    ensure_browser_service_onlyoffice_support(container)?;
+    let status = ensure_onlyoffice_ready(app.clone()).await?;
     let secret = load_or_create_onlyoffice_jwt_secret(&app)?;
     let container_secret =
         read_container_env("ENTROPIC_ONLYOFFICE_JWT_SECRET").ok_or_else(|| {
