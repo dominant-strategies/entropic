@@ -1,6 +1,6 @@
 [package]
 name = "entropic"
-version = "0.1.16"
+version = "0.1.17"
 description = "OpenClaw Desktop - AI assistant with secure sandboxing"
 authors = ["OpenClaw Team"]
 license = "MIT"

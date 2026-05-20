@@ -761,6 +761,9 @@ export function Channels() {
                             ? "Message your bot on Telegram and send /start. If Telegram does not reply, the pairing code will appear here automatically."
                             : "Start the gateway, then message your bot on Telegram and send /start to receive a pairing code."}
                         </p>
+                        <p className="mt-1 text-xs text-[var(--text-tertiary)]">
+                          If you are not receiving a pairing code, restart the gateway and send /start again.
+                        </p>
                       </div>
                       {checkingConnection && (
                         <Loader2 className="w-4 h-4 animate-spin text-[var(--text-tertiary)] flex-shrink-0" />

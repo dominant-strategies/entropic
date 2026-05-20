@@ -1,11 +1,12 @@
 import { Store } from "@tauri-apps/plugin-store";
+import { DEFAULT_AGENT_NAME } from "./agentDefaults";
 
 export type AgentProfile = {
   name: string;
   avatarDataUrl?: string;
 };
 
-const DEFAULT_PROFILE_NAME = "Entropic";
+const DEFAULT_PROFILE_NAME = DEFAULT_AGENT_NAME;
 
 const DEFAULT_PROFILE: AgentProfile = {
   name: DEFAULT_PROFILE_NAME,
@@ -51,6 +52,11 @@ export function sanitizeProfileName(raw: unknown, fallback = DEFAULT_PROFILE_NAM
   return value || fallback;
 }
 
+function normalizeStoredProfileName(raw: unknown): string {
+  const name = sanitizeProfileName(raw, DEFAULT_PROFILE_NAME);
+  return name.toLowerCase() === "entropic" ? DEFAULT_PROFILE_NAME : name;
+}
+
 export function isRenderableAvatarDataUrl(raw: unknown): raw is string {
   if (typeof raw !== "string") return false;
   const value = raw.trim();
@@ -82,7 +88,7 @@ export async function loadProfile(): Promise<AgentProfile> {
   if (!raw || typeof raw !== "object") return DEFAULT_PROFILE;
 
   const record = raw as Record<string, unknown>;
-  const name = sanitizeProfileName(record.name, DEFAULT_PROFILE.name);
+  const name = normalizeStoredProfileName(record.name);
   const avatarDataUrl = isRenderableAvatarDataUrl(record.avatarDataUrl)
     ? record.avatarDataUrl.trim()
     : undefined;
@@ -93,7 +99,7 @@ export async function loadProfile(): Promise<AgentProfile> {
 export async function saveProfile(profile: AgentProfile): Promise<void> {
   const store = await getStore();
   const normalized: AgentProfile = {
-    name: sanitizeProfileName(profile.name, DEFAULT_PROFILE.name),
+    name: normalizeStoredProfileName(profile.name),
     avatarDataUrl: isRenderableAvatarDataUrl(profile.avatarDataUrl)
       ? profile.avatarDataUrl.trim()
       : undefined,
@@ -147,7 +153,8 @@ export async function loadOnboardingData(): Promise<OnboardingData | null> {
     return {
       soul,
       userName: typeof data.userName === "string" ? data.userName : undefined,
-      agentName: typeof data.agentName === "string" ? data.agentName : undefined,
+      agentName:
+        typeof data.agentName === "string" ? normalizeStoredProfileName(data.agentName) : undefined,
       completedAt: typeof data.completedAt === "string" ? data.completedAt : undefined,
     };
   } catch {

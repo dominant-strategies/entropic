@@ -147,7 +147,7 @@ pub struct RuntimeVmConfig {
 
 pub const DEFAULT_RUNTIME_VM_CPU: u8 = 2;
 pub const DEFAULT_RUNTIME_VM_MEMORY_GB: u16 = 4;
-pub const DEFAULT_RUNTIME_VM_DISK_GB: u16 = 20;
+pub const DEFAULT_RUNTIME_VM_DISK_GB: u16 = 30;
 
 impl Default for RuntimeVmConfig {
     fn default() -> Self {

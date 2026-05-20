@@ -25,7 +25,6 @@ import jiraLogo from "../assets/integrations/jira.svg";
 import salesforceLogo from "../assets/integrations/salesforce.svg";
 import hubspotLogo from "../assets/integrations/hubspot.svg";
 import airtableLogo from "../assets/integrations/airtable.svg";
-import xBrandLogo from "../assets/integrations/x.svg";
 import supabaseLogo from "../assets/integrations/supabase.svg";
 import microsoftTeamsLogo from "../assets/integrations/microsoft-teams.svg";
 import onedriveLogo from "../assets/integrations/onedrive.svg";
@@ -318,7 +317,6 @@ const JiraBrand = brandLogo(jiraLogo, "Jira");
 const SalesforceBrand = brandLogo(salesforceLogo, "Salesforce");
 const HubSpotBrand = brandLogo(hubspotLogo, "HubSpot");
 const AirtableBrand = brandLogo(airtableLogo, "Airtable");
-const XBrand = brandLogo(xBrandLogo, "X");
 const SupabaseBrand = brandLogo(supabaseLogo, "Supabase");
 const PipedriveBrand = brandLogo(pipedriveLogo, "Pipedrive");
 

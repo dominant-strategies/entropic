@@ -59,7 +59,7 @@ import {
   type VoiceSpeechVoice,
 } from "../desktop/voice/voicePreferences";
 import { AgentAvatar } from "../components/AgentAvatar";
-import { DEFAULT_SOUL, normalizeDefaultSoul } from "../lib/agentDefaults";
+import { DEFAULT_AGENT_NAME, DEFAULT_SOUL, normalizeDefaultSoul } from "../lib/agentDefaults";
 type Props = {
   gatewayRunning: boolean;
   onGatewayToggle: () => void;
@@ -132,16 +132,20 @@ type RuntimeResourceUsage = {
 
 type LocalKeyProvider = "anthropic" | "google" | "openai" | "openrouter";
 
+const DEFAULT_RUNTIME_CPU = 2;
+const DEFAULT_RUNTIME_MEMORY_GB = 4;
+const DEFAULT_RUNTIME_DISK_GB = 30;
+
 function clampRuntimeCpu(value?: number | null) {
-  return Math.min(16, Math.max(1, value ?? 2));
+  return Math.min(16, Math.max(1, value ?? DEFAULT_RUNTIME_CPU));
 }
 
 function clampRuntimeMemoryGb(value?: number | null) {
-  return Math.min(64, Math.max(2, value ?? 4));
+  return Math.min(64, Math.max(2, value ?? DEFAULT_RUNTIME_MEMORY_GB));
 }
 
 function clampRuntimeDiskGb(value?: number | null) {
-  return Math.min(500, Math.max(20, value ?? 20));
+  return Math.min(500, Math.max(20, value ?? DEFAULT_RUNTIME_DISK_GB));
 }
 
 type SettingsSection =
@@ -669,7 +673,9 @@ export function Settings({
     useState<LocalKeyProvider | null>(null);
   const [localKeyError, setLocalKeyError] = useState<string | null>(null);
   const [localKeyNotice, setLocalKeyNotice] = useState<string | null>(null);
-  const [profile, setProfile] = useState<AgentProfile>(cachedWarmState?.profile ?? { name: "Entropic" });
+  const [profile, setProfile] = useState<AgentProfile>(
+    cachedWarmState?.profile ?? { name: DEFAULT_AGENT_NAME },
+  );
   const [runtimeCpu, setRuntimeCpu] = useState(initialRuntimeCpu);
   const [runtimeMemoryGb, setRuntimeMemoryGb] = useState(initialRuntimeMemoryGb);
   const [runtimeDiskGb, setRuntimeDiskGb] = useState(initialRuntimeDiskGb);
@@ -897,6 +903,16 @@ export function Settings({
 
     clearPendingIdentityPersist();
     identityPersistTimeoutRef.current = window.setTimeout(commit, 400);
+  }
+
+  function persistPersonalityInstructions(nextSoul = soul) {
+    const normalized = normalizeDefaultSoul(nextSoul);
+    setSoul(normalized);
+    void invoke("set_personality", { soul: normalized }).catch(() => {});
+  }
+
+  function applyPersonalityTemplate(templateSoul: string) {
+    persistPersonalityInstructions(templateSoul);
   }
 
   // Keep profile name in sync when Chat (or any other page) updates it
@@ -1269,6 +1285,7 @@ export function Settings({
   }
 
   const [isEditingPersonality, setIsEditingPersonality] = useState(false);
+  const [personalityPreviewOpen, setPersonalityPreviewOpen] = useState(false);
   const [logsExpanded, setLogsExpanded] = useState(false);
   const [gatewayDiagnosticsExpanded, setGatewayDiagnosticsExpanded] = useState(false);
   const [activeSection, setActiveSection] = useState<SettingsSection>("profile");
@@ -1721,10 +1738,37 @@ export function Settings({
             </div>
 
             <div>
-              <div className="mb-3 flex items-center justify-center gap-3">
+              <div className="mb-3 flex items-center justify-center">
                 <label className="text-xs font-bold uppercase tracking-wide text-[var(--text-secondary)]">Personality instructions</label>
-                <button 
-                  onClick={() => setIsEditingPersonality(!isEditingPersonality)}
+              </div>
+
+              <div className="mb-3 flex flex-wrap justify-center gap-2">
+                {PERSONALITY_TEMPLATES.map((template) => (
+                  <button
+                    key={template.label}
+                    type="button"
+                    onClick={() => applyPersonalityTemplate(template.text)}
+                    className="rounded-full border border-[var(--border-subtle)] bg-[var(--system-gray-6)] px-3 py-1 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--system-blue)] hover:text-white"
+                  >
+                    {template.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="mb-3 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsEditingPersonality((current) => {
+                      const next = !current;
+                      if (next) {
+                        setPersonalityPreviewOpen(true);
+                      } else {
+                        persistPersonalityInstructions();
+                      }
+                      return next;
+                    });
+                  }}
                   className="shrink-0 rounded-md px-2 py-1 text-xs font-semibold text-[var(--system-blue)] hover:bg-[var(--system-blue)]/10"
                 >
                   {isEditingPersonality ? "Done editing" : "Edit instructions"}
@@ -1733,24 +1777,10 @@ export function Settings({
               
               {isEditingPersonality ? (
                 <div className="space-y-3 animate-fade-in">
-                  <div className="mb-2 flex flex-wrap justify-center gap-2">
-                    {PERSONALITY_TEMPLATES.map((t) => (
-                      <button
-                        key={t.label}
-                        onClick={() => {
-                          setSoul(t.text);
-                          invoke("set_personality", { soul: t.text });
-                        }}
-                        className="px-3 py-1 text-xs rounded-full bg-[var(--system-gray-6)] hover:bg-[var(--system-blue)] hover:text-white transition-colors border border-[var(--border-subtle)]"
-                      >
-                        {t.label}
-                      </button>
-                    ))}
-                  </div>
                   <textarea 
                     value={soul} 
                     onChange={e => setSoul(e.target.value)}
-                    onBlur={() => invoke("set_personality", { soul })}
+                    onBlur={() => persistPersonalityInstructions()}
                     className="min-h-[420px] w-full rounded-xl border border-transparent bg-[var(--system-gray-6)] p-3 text-left text-sm leading-relaxed text-[var(--text-primary)] transition-all resize-y focus:bg-[var(--bg-card)] focus:ring-2 focus:ring-[var(--system-blue)]/20"
                     rows={18}
                     placeholder="Example: Be concise, ask clarifying questions before destructive actions, prefer practical steps, and explain tradeoffs when a decision matters."
@@ -1758,11 +1788,26 @@ export function Settings({
                   />
                 </div>
               ) : (
-                <div className="min-h-[320px] max-h-[520px] overflow-y-auto rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-4 py-3 text-left">
-                  <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-[var(--text-secondary)]">
-                    {soul || "No custom personality instructions yet. Click Edit instructions to define how your agent should communicate and make decisions."}
-                  </pre>
-                </div>
+                <details
+                  open={personalityPreviewOpen}
+                  onToggle={(event) => setPersonalityPreviewOpen(event.currentTarget.open)}
+                  className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] text-left"
+                >
+                  <summary className="flex list-none items-center justify-between gap-3 px-4 py-3 text-sm font-medium text-[var(--text-primary)] cursor-pointer [&::-webkit-details-marker]:hidden">
+                    <span>Instructions</span>
+                    <ChevronDown
+                      className={clsx(
+                        "h-4 w-4 shrink-0 text-[var(--text-secondary)] transition-transform",
+                        personalityPreviewOpen && "rotate-180",
+                      )}
+                    />
+                  </summary>
+                  <div className="max-h-[520px] overflow-y-auto border-t border-[var(--border-subtle)] px-4 py-3">
+                    <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-[var(--text-secondary)]">
+                      {soul || "No custom personality instructions yet."}
+                    </pre>
+                  </div>
+                </details>
               )}
             </div>
           </div>

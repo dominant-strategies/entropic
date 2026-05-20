@@ -19,6 +19,7 @@ import { getLocalCreditBalance } from "./lib/localCredits";
 import { updaterEnabled } from "./lib/buildProfile";
 import { checkForAppUpdates } from "./lib/updater";
 import { DEFAULT_AGENT_NAME, DEFAULT_SOUL } from "./lib/agentDefaults";
+import { ensureOnlyOfficeReady } from "./lib/office";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -48,6 +49,7 @@ function AppContent() {
   const [appState, setAppState] = useState<AppState>("loading");
   const [_os, setOs] = useState<string>("");
   const appStateBeforeSignInRef = useRef<AppState>("ready");
+  const onlyOfficeWarmupStartedRef = useRef(false);
 
   useEffect(() => {
     if (!updaterEnabled) {
@@ -101,6 +103,27 @@ function AppContent() {
     window.addEventListener("entropic-require-signin", onRequireSignIn);
     return () => window.removeEventListener("entropic-require-signin", onRequireSignIn);
   }, []);
+
+  function warmOnlyOffice() {
+    if (onlyOfficeWarmupStartedRef.current) {
+      return;
+    }
+    onlyOfficeWarmupStartedRef.current = true;
+    window.setTimeout(() => {
+      clientLog("app.onlyoffice.warmup.start");
+      void ensureOnlyOfficeReady()
+        .then((status) => {
+          clientLog("app.onlyoffice.warmup.success", {
+            running: status.running,
+            ready: status.ready,
+            image: status.image,
+          });
+        })
+        .catch((error) => {
+          clientLog("app.onlyoffice.warmup.failed", { error: String(error) });
+        });
+    }, 1500);
+  }
 
   async function init() {
     clientLog("app.init.start", { isAuthenticated, isAuthConfigured });
@@ -167,6 +190,7 @@ function AppContent() {
 
       if (result.docker_ready) {
         setAppState("ready");
+        warmOnlyOffice();
         clientLog("app.state.ready");
       } else if (currentPlatform === "linux" && !result.docker_ready) {
         setAppState("docker-install");
@@ -191,6 +215,7 @@ function AppContent() {
       setStatus(result);
       if (result.docker_ready) {
         setAppState("ready");
+        warmOnlyOffice();
       }
     } catch (error) {
       console.error("Failed to check status:", error);

@@ -2549,6 +2549,7 @@ const RUNTIME_IMAGE: &str = "openclaw-runtime:latest";
 const SCANNER_IMAGE_REPO: &str = "entropic-skill-scanner";
 const DEFAULT_SCANNER_GIT_REPO: &str = "https://github.com/cisco-ai-defense/skill-scanner.git";
 const DEFAULT_SCANNER_GIT_COMMIT: &str = "dff88dc5fa0fff6382ddb6eff19d245745b93f7a";
+const DEFAULT_AGENT_NAME: &str = "Joulie";
 const DEFAULT_RUNTIME_RELEASE_REPO: &str = "dominant-strategies/entropic-releases";
 const DEFAULT_RUNTIME_RELEASE_TAG: &str = "runtime-latest";
 const DEFAULT_APP_MANIFEST_URL: &str =
@@ -5187,7 +5188,7 @@ impl Default for StoredAgentSettings {
                     enabled: true,
                 },
             ],
-            identity_name: "Entropic".to_string(),
+            identity_name: DEFAULT_AGENT_NAME.to_string(),
             identity_avatar: None,
             discord_enabled: false,
             discord_token: String::new(),
@@ -5273,10 +5274,15 @@ const MANAGED_PLUGIN_IDS: &[&str] = &[
 const DISABLED_NATIVE_SKILL_IDS: &[&str] = &["patchright-browser"];
 const GATEWAY_MUTATION_LOCK_TIMEOUT_SECS: u64 = 15;
 static GATEWAY_START_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+static ONLYOFFICE_START_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 static APPLIED_AGENT_SETTINGS_FINGERPRINT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 fn gateway_start_lock() -> &'static AsyncMutex<()> {
     GATEWAY_START_LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
+fn onlyoffice_start_lock() -> &'static AsyncMutex<()> {
+    ONLYOFFICE_START_LOCK.get_or_init(|| AsyncMutex::new(()))
 }
 
 fn applied_agent_settings_fingerprint() -> &'static Mutex<Option<String>> {
@@ -6075,6 +6081,16 @@ fn sanitize_identity_name(raw: &str) -> Option<String> {
     }
 }
 
+fn sanitize_stored_identity_name(raw: &str) -> Option<String> {
+    sanitize_identity_name(raw).and_then(|name| {
+        if name.eq_ignore_ascii_case("entropic") {
+            None
+        } else {
+            Some(name)
+        }
+    })
+}
+
 fn state_file(path: &str) -> String {
     let trimmed = path.trim_start_matches('/');
     if trimmed.is_empty() {
@@ -6815,26 +6831,12 @@ async fn wait_for_onlyoffice_health() -> Result<(), String> {
         .timeout(Duration::from_secs(4))
         .build()
         .map_err(|e| format!("Failed to build ONLYOFFICE health client: {}", e))?;
-    let url = format!(
-        "http://127.0.0.1:{}/web-apps/apps/api/documents/api.js",
-        ONLYOFFICE_HOST_PORT
-    );
     let mut last_error = "ONLYOFFICE did not report readiness yet".to_string();
     for _ in 0..90 {
-        match client.get(url.as_str()).send().await {
-            Ok(response) if response.status().is_success() => {
-                match onlyoffice_internal_services_ready() {
-                    Ok(()) => return Ok(()),
-                    Err(error) => {
-                        last_error = error;
-                    }
-                }
-            }
-            Ok(response) => {
-                last_error = format!("ONLYOFFICE returned {}", response.status());
-            }
+        match probe_onlyoffice_health(&client).await {
+            Ok(()) => return Ok(()),
             Err(error) => {
-                last_error = error.to_string();
+                last_error = error;
             }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -6843,6 +6845,26 @@ async fn wait_for_onlyoffice_health() -> Result<(), String> {
         "Timed out waiting for ONLYOFFICE readiness: {}",
         last_error
     ))
+}
+
+async fn check_onlyoffice_health_once() -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .map_err(|e| format!("Failed to build ONLYOFFICE health client: {}", e))?;
+    probe_onlyoffice_health(&client).await
+}
+
+async fn probe_onlyoffice_health(client: &reqwest::Client) -> Result<(), String> {
+    let url = format!(
+        "http://127.0.0.1:{}/web-apps/apps/api/documents/api.js",
+        ONLYOFFICE_HOST_PORT
+    );
+    match client.get(url.as_str()).send().await {
+        Ok(response) if response.status().is_success() => onlyoffice_internal_services_ready(),
+        Ok(response) => Err(format!("ONLYOFFICE returned {}", response.status())),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn onlyoffice_status_from_error(error: Option<String>) -> OnlyOfficeStatus {
@@ -6854,6 +6876,23 @@ fn onlyoffice_status_from_error(error: Option<String>) -> OnlyOfficeStatus {
         image: onlyoffice_image_name(),
         error,
     }
+}
+
+fn onlyoffice_pull_failure_message(image: &str, detail: &str) -> String {
+    let trimmed = detail.trim();
+    let fallback = if trimmed.is_empty() {
+        "unknown error"
+    } else {
+        trimmed
+    };
+    let lower = fallback.to_ascii_lowercase();
+    if lower.contains("no space left on device") || lower.contains("failed to extract layer") {
+        return format!(
+            "Failed to pull ONLYOFFICE image {}: Docker ran out of runtime disk space while extracting the image. Increase Entropic's runtime disk to at least 30 GB in Settings > System, restart the sandbox, then try again. Raw Docker error: {}",
+            image, fallback
+        );
+    }
+    format!("Failed to pull ONLYOFFICE image {}: {}", image, fallback)
 }
 
 fn ensure_onlyoffice_image() -> Result<(), String> {
@@ -6875,18 +6914,11 @@ fn ensure_onlyoffice_image() -> Result<(), String> {
     }
 
     let stderr = String::from_utf8_lossy(&pull.stderr).trim().to_string();
-    Err(format!(
-        "Failed to pull ONLYOFFICE image {}: {}",
-        image,
-        if stderr.is_empty() {
-            "unknown error".to_string()
-        } else {
-            stderr
-        }
-    ))
+    Err(onlyoffice_pull_failure_message(&image, &stderr))
 }
 
 async fn start_onlyoffice_sidecar(app: &AppHandle) -> Result<(), String> {
+    let _guard = onlyoffice_start_lock().lock().await;
     let expected_image = onlyoffice_image_name();
     let check = docker_command()
         .args(["ps", "-q", "-f", &format!("name={}", ONLYOFFICE_CONTAINER)])
@@ -10797,11 +10829,41 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
         }
     }
     let tools_body = build_tools_markdown(&settings.capabilities);
+    let heartbeat_path = workspace_file("HEARTBEAT.md");
+    let tools_path = workspace_file("TOOLS.md");
+    let identity_path = workspace_file("IDENTITY.md");
+    let existing_identity_raw = read_container_file(&identity_path).unwrap_or_default();
+    let identity_name = sanitize_stored_identity_name(&settings.identity_name)
+        .unwrap_or_else(|| DEFAULT_AGENT_NAME.to_string());
+    let identity_creature =
+        parse_markdown_bold_field(&existing_identity_raw, "Creature").unwrap_or_default();
+    let identity_vibe =
+        parse_markdown_bold_field(&existing_identity_raw, "Vibe").unwrap_or_default();
+    let identity_emoji =
+        parse_markdown_bold_field(&existing_identity_raw, "Emoji").unwrap_or_default();
+    let identity_avatar = settings
+        .identity_avatar
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            parse_markdown_bold_field(&existing_identity_raw, "Avatar").and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+        });
 
     let mut id_body = String::from("# IDENTITY.md - Who Am I?\n\n");
-    id_body.push_str(&format!("- **Name:** {}\n", settings.identity_name.trim()));
-    id_body.push_str("- **Creature:**\n- **Vibe:**\n- **Emoji:**\n");
-    if let Some(url) = &settings.identity_avatar {
+    id_body.push_str(&format!("- **Name:** {}\n", identity_name));
+    id_body.push_str(&format!("- **Creature:** {}\n", identity_creature));
+    id_body.push_str(&format!("- **Vibe:** {}\n", identity_vibe));
+    id_body.push_str(&format!("- **Emoji:** {}\n", identity_emoji));
+    if let Some(url) = &identity_avatar {
         id_body.push_str(&format!("- **Avatar:** {}\n", url));
     } else {
         id_body.push_str("- **Avatar:**\n");
@@ -10825,9 +10887,6 @@ Use it for durable decisions, preferences, and facts that should persist across 
         "# {date}\n\n- [ ] Add raw notes from this session here while they are still fresh.\n",
         date = today
     );
-    let heartbeat_path = workspace_file("HEARTBEAT.md");
-    let tools_path = workspace_file("TOOLS.md");
-    let identity_path = workspace_file("IDENTITY.md");
     let memory_path = workspace_file("MEMORY.md");
     let soul_path = workspace_file("SOUL.md");
     let thinking_level_env = Some(desired_selection.thinking_level.clone());
@@ -10878,7 +10937,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
         ContainerFileWrite {
             path: &identity_path,
             content: &id_body,
-            only_if_missing: true,
+            only_if_missing: false,
         },
         ContainerFileWrite {
             path: &memory_path,
@@ -12964,6 +13023,12 @@ fn default_agent_settings() -> StoredAgentSettings {
     StoredAgentSettings::default()
 }
 
+fn normalize_agent_settings(mut settings: StoredAgentSettings) -> StoredAgentSettings {
+    settings.identity_name = sanitize_stored_identity_name(&settings.identity_name)
+        .unwrap_or_else(|| DEFAULT_AGENT_NAME.to_string());
+    settings
+}
+
 fn desktop_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
@@ -13003,7 +13068,7 @@ fn runtime_vm_config_from_settings(settings: &StoredAgentSettings) -> RuntimeVmC
 
 fn load_agent_settings(app: &AppHandle) -> StoredAgentSettings {
     let stored = load_auth(app);
-    stored.agent_settings.unwrap_or_else(default_agent_settings)
+    normalize_agent_settings(stored.agent_settings.unwrap_or_else(default_agent_settings))
 }
 
 fn save_agent_settings(app: &AppHandle, settings: StoredAgentSettings) -> Result<(), String> {
@@ -14681,10 +14746,12 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
     } else {
         String::new()
     };
-    let identity_name = parse_markdown_bold_field(&identity_raw, "Name")
-        .and_then(|value| sanitize_identity_name(&value))
-        .or_else(|| sanitize_identity_name(&stored.identity_name))
-        .unwrap_or_else(|| "Entropic".to_string());
+    let identity_name = sanitize_stored_identity_name(&stored.identity_name)
+        .or_else(|| {
+            parse_markdown_bold_field(&identity_raw, "Name")
+                .and_then(|value| sanitize_stored_identity_name(&value))
+        })
+        .unwrap_or_else(|| DEFAULT_AGENT_NAME.to_string());
     let identity_avatar = parse_markdown_bold_field(&identity_raw, "Avatar")
         .or_else(|| stored.identity_avatar.clone())
         .and_then(|value| {
@@ -15288,10 +15355,10 @@ pub async fn set_identity(
     let next_name = sanitize_identity_name(&name)
         .or_else(|| {
             parse_markdown_bold_field(&existing, "Name")
-                .and_then(|value| sanitize_identity_name(&value))
+                .and_then(|value| sanitize_stored_identity_name(&value))
         })
-        .or_else(|| sanitize_identity_name(&stored.identity_name))
-        .unwrap_or_else(|| "Entropic".to_string());
+        .or_else(|| sanitize_stored_identity_name(&stored.identity_name))
+        .unwrap_or_else(|| DEFAULT_AGENT_NAME.to_string());
     let next_avatar = avatar_data_url
         .as_ref()
         .map(|value| value.trim())
@@ -18456,7 +18523,7 @@ pub async fn get_onlyoffice_status() -> Result<OnlyOfficeStatus, String> {
     if !named_gateway_container_exists(ONLYOFFICE_CONTAINER, true) {
         return Ok(onlyoffice_status_from_error(None));
     }
-    match wait_for_onlyoffice_health().await {
+    match check_onlyoffice_health_once().await {
         Ok(()) => Ok(onlyoffice_status_from_error(None)),
         Err(error) => Ok(onlyoffice_status_from_error(Some(error))),
     }

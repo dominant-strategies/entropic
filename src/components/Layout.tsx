@@ -30,6 +30,7 @@ import {
   sanitizeProfileName,
   type AgentProfile,
 } from "../lib/profile";
+import { DEFAULT_AGENT_NAME } from "../lib/agentDefaults";
 import { AgentAvatar } from "./AgentAvatar";
 
 function startDrag(e: React.MouseEvent) {
@@ -109,7 +110,7 @@ export function Layout({
   onNewChat,
   onChatSessionAction,
 }: Props) {
-  const [profile, setProfile] = useState<AgentProfile>({ name: "Entropic" });
+  const [profile, setProfile] = useState<AgentProfile>({ name: DEFAULT_AGENT_NAME });
   const [isMacOS, setIsMacOS] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showAllChatSessions, setShowAllChatSessions] = useState(false);

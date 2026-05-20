@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
+import { DEFAULT_AGENT_NAME } from "../lib/agentDefaults";
 import { sanitizeProfileName } from "../lib/profile";
 
 type AgentAvatarProps = {
@@ -27,7 +28,7 @@ function nextHash(seed: number): number {
 }
 
 function buildPixelAvatar(name: string) {
-  const clean = sanitizeProfileName(name, "Entropic");
+  const clean = sanitizeProfileName(name, DEFAULT_AGENT_NAME);
   let cursor = hashString(clean.toLowerCase());
   const hue = cursor % 360;
   const cells: boolean[] = Array.from({ length: 25 }, () => false);

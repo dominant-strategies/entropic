@@ -286,6 +286,16 @@ body {
   background: var(--border-primary);
 }
 
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]) {
+  cursor: pointer;
+}
+
+button:disabled,
+[role="button"][aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
 .desktop-app-window[data-window-active="false"],
 .desktop-app-window[data-window-active="false"] * {
   scrollbar-width: none;
