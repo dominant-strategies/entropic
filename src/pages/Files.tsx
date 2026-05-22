@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { loadOnboardingData } from "../lib/profile";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
-import { loadDesktopSettings, updateDesktopSettings } from "../lib/settingsStore";
+import { loadDesktopSettings, updateDesktopSettings, type ChatTextSize } from "../lib/settingsStore";
 import type {
   ChatSession as SharedChatSession,
   ChatSessionActionRequest,
@@ -127,6 +127,7 @@ type Props = {
   voiceShortcut: string;
   voiceSpeechRate: number;
   voiceSpeechVoice: VoiceSpeechVoice;
+  chatTextSize: ChatTextSize;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onTextToSpeechModelChange: (model: string) => void;
@@ -134,6 +135,7 @@ type Props = {
   onVoiceShortcutChange: (shortcut: string) => void | Promise<void>;
   onVoiceSpeechRateChange: (rate: number) => void | Promise<void>;
   onVoiceSpeechVoiceChange: (voice: VoiceSpeechVoice) => void | Promise<void>;
+  onChatTextSizeChange: (size: ChatTextSize) => void | Promise<void>;
   onImageModelChange: (model: string) => void;
   pendingDesktopAction?: { id: string; action: DesktopAction } | null;
   onDesktopActionHandled?: (id: string) => void;
@@ -920,6 +922,7 @@ export function Files({
   voiceShortcut,
   voiceSpeechRate,
   voiceSpeechVoice,
+  chatTextSize,
   onCodeModelChange,
   onImageGenerationModelChange,
   onTextToSpeechModelChange,
@@ -927,6 +930,7 @@ export function Files({
   onVoiceShortcutChange,
   onVoiceSpeechRateChange,
   onVoiceSpeechVoiceChange,
+  onChatTextSizeChange,
   onImageModelChange,
   pendingDesktopAction,
   onDesktopActionHandled,
@@ -4775,6 +4779,7 @@ export function Files({
               audioUnderstandingModel={audioUnderstandingModel}
               voiceSpeechRate={voiceSpeechRate}
               voiceSpeechVoice={voiceSpeechVoice}
+              chatTextSize={chatTextSize}
               integrationsSyncing={integrationsSyncing}
               integrationsMissing={integrationsMissing}
               formatDate={formatDate}
@@ -5039,6 +5044,7 @@ export function Files({
             voiceShortcut={voiceShortcut}
             voiceSpeechRate={voiceSpeechRate}
             voiceSpeechVoice={voiceSpeechVoice}
+            chatTextSize={chatTextSize}
             onCodeModelChange={onCodeModelChange}
             onImageGenerationModelChange={onImageGenerationModelChange}
             onTextToSpeechModelChange={onTextToSpeechModelChange}
@@ -5046,6 +5052,7 @@ export function Files({
             onVoiceShortcutChange={onVoiceShortcutChange}
             onVoiceSpeechRateChange={onVoiceSpeechRateChange}
             onVoiceSpeechVoiceChange={onVoiceSpeechVoiceChange}
+            onChatTextSizeChange={onChatTextSizeChange}
             onImageModelChange={onImageModelChange}
             onClose={{
               plugins: () => setPluginsOpen(false),

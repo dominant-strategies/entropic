@@ -35,7 +35,7 @@ import {
   type DiagnosticLogEntry,
   type DiagnosticLogType,
 } from "../lib/diagnostics";
-import { loadDesktopSettings, updateDesktopSettings } from "../lib/settingsStore";
+import { loadDesktopSettings, updateDesktopSettings, type ChatTextSize } from "../lib/settingsStore";
 import {
   getCachedSettingsWarmState,
   loadSettingsWarmState,
@@ -77,6 +77,7 @@ type Props = {
   voiceShortcut: string;
   voiceSpeechRate: number;
   voiceSpeechVoice: VoiceSpeechVoice;
+  chatTextSize: ChatTextSize;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onTextToSpeechModelChange: (model: string) => void;
@@ -84,6 +85,7 @@ type Props = {
   onVoiceShortcutChange: (shortcut: string) => void | Promise<void>;
   onVoiceSpeechRateChange: (rate: number) => void | Promise<void>;
   onVoiceSpeechVoiceChange: (voice: VoiceSpeechVoice) => void | Promise<void>;
+  onChatTextSizeChange: (size: ChatTextSize) => void | Promise<void>;
   onImageModelChange: (model: string) => void;
 };
 
@@ -135,6 +137,11 @@ type LocalKeyProvider = "anthropic" | "google" | "openai" | "openrouter";
 const DEFAULT_RUNTIME_CPU = 2;
 const DEFAULT_RUNTIME_MEMORY_GB = 4;
 const DEFAULT_RUNTIME_DISK_GB = 30;
+const CHAT_TEXT_SIZE_OPTIONS: Array<{ value: ChatTextSize; label: string }> = [
+  { value: "compact", label: "Small" },
+  { value: "comfortable", label: "Medium" },
+  { value: "large", label: "Large" },
+];
 
 function clampRuntimeCpu(value?: number | null) {
   return Math.min(16, Math.max(1, value ?? DEFAULT_RUNTIME_CPU));
@@ -652,6 +659,7 @@ export function Settings({
   voiceShortcut,
   voiceSpeechRate,
   voiceSpeechVoice,
+  chatTextSize,
   onCodeModelChange,
   onImageGenerationModelChange,
   onTextToSpeechModelChange,
@@ -659,6 +667,7 @@ export function Settings({
   onVoiceShortcutChange,
   onVoiceSpeechRateChange,
   onVoiceSpeechVoiceChange,
+  onChatTextSizeChange,
   onImageModelChange,
 }: Props) {
   const cachedWarmState = getCachedSettingsWarmState();
@@ -1861,6 +1870,34 @@ export function Settings({
                 >
                   <Icon className="w-3.5 h-3.5" />
                   <span>{opt.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          label="Assistant Text"
+          icon={ScrollText}
+          description="Reply text size"
+        >
+          <div className="inline-flex items-center rounded-lg border border-[var(--border-default)] bg-[var(--bg-tertiary)] p-0.5">
+            {CHAT_TEXT_SIZE_OPTIONS.map((opt) => {
+              const active = chatTextSize === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => {
+                    void onChatTextSizeChange(opt.value);
+                  }}
+                  className={clsx(
+                    "inline-flex min-w-[4rem] items-center justify-center rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
+                    active
+                      ? "bg-[var(--bg-card)] text-[var(--text-primary)] shadow-sm"
+                      : "text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]"
+                  )}
+                >
+                  {opt.label}
                 </button>
               );
             })}

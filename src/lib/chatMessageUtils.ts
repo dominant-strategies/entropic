@@ -82,9 +82,45 @@ export const BILLING_RECOVERY_MESSAGE =
   "You're out of credits. Add credits to continue using Entropic in proxy mode.";
 
 const CHAT_HISTORY_OMITTED_PLACEHOLDER = "[chat.history omitted: message too large]";
+const SUBAGENT_CONTEXT_PREFIX = "[Subagent Context]";
+const AGENT_IDENTITY_CONTEXT_START = "[[ENTROPIC_AGENT_IDENTITY]]";
+const AGENT_IDENTITY_CONTEXT_END = "[[END_ENTROPIC_AGENT_IDENTITY]]";
 
 function isChatHistoryOmittedPlaceholder(raw?: string | null): boolean {
   return (raw || "").trim() === CHAT_HISTORY_OMITTED_PLACEHOLDER;
+}
+
+function isNoReplyAssistantSentinel(raw?: string | null): boolean {
+  const text = (raw || "").trim();
+  return /^(?:NO_REPLY|<NO_REPLY>|\[NO_REPLY\])$/i.test(text);
+}
+
+export function isInternalSubagentContextPrompt(raw?: string | null): boolean {
+  const text = (raw || "").trim();
+  if (!text.startsWith(SUBAGENT_CONTEXT_PREFIX)) return false;
+  return (
+    /^\[Subagent Context\]\s+You are running as a subagent\b/i.test(text) ||
+    /^\[Subagent Context\]\s+This subagent session is persistent\b/i.test(text) ||
+    /^\[Subagent Context\]\s+Your prior run ended while waiting for descendant subagent completions\b/i.test(text) ||
+    /^\[Subagent Context\]\s+All pending descendants for that run have now settled\b/i.test(text) ||
+    /^\[Subagent Context\]\s+Continue your workflow using these results\b/i.test(text) ||
+    /\bYour assigned task is in the system prompt under \*\*Your Role\*\*/i.test(text)
+  );
+}
+
+export function stripInternalAgentIdentityContext(raw: string): string {
+  if (!raw || !raw.includes(AGENT_IDENTITY_CONTEXT_START)) return raw;
+  let text = raw;
+  const blockPattern = new RegExp(
+    `${AGENT_IDENTITY_CONTEXT_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?${AGENT_IDENTITY_CONTEXT_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`,
+    "g",
+  );
+  text = text.replace(blockPattern, "");
+  text = text.replace(
+    new RegExp(`${AGENT_IDENTITY_CONTEXT_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*$`, "g"),
+    "",
+  );
+  return text.trimStart();
 }
 
 // ── Slash-command parsing ──────────────────────────────────────
@@ -252,6 +288,13 @@ export function sanitizeGatewayErrorMessage(raw?: string | null): string {
 
   if (/session file path must be within sessions directory/i.test(message)) {
     return "The conversation history path was invalid. Restart the sandbox and retry.";
+  }
+
+  if (
+    /\b(?:http\s*)?401\b/i.test(message) &&
+    /(?:authentication_error|invalid authentication credentials|unauthorized)/i.test(message)
+  ) {
+    return "Authentication failed. Refresh your session or reconnect the provider, then resend your message.";
   }
 
   const providerMatches = [...message.matchAll(/No API key found for provider "([^"]+)"/g)];
@@ -496,11 +539,17 @@ export function stripOpenClawStatusLines(raw: string): string {
 
 export function sanitizeAssistantDisplayContent(raw: string): string {
   if (!raw) return "";
+  if (isNoReplyAssistantSentinel(raw)) return "";
   if (isChatHistoryOmittedPlaceholder(raw)) return "";
-  let text = stripConversationMetadata(raw);
+  let text = stripInternalAgentIdentityContext(stripConversationMetadata(raw));
+  if (isNoReplyAssistantSentinel(text)) return "";
   if (isChatHistoryOmittedPlaceholder(text)) return "";
   text = stripExternalUntrustedSections(text);
+  text = stripInternalAgentIdentityContext(text);
+  if (isNoReplyAssistantSentinel(text)) return "";
   text = stripOpenClawStatusLines(text);
+  text = stripInternalAgentIdentityContext(text);
+  if (isNoReplyAssistantSentinel(text)) return "";
 
   try {
     const direct = JSON.parse(text);
@@ -590,7 +639,7 @@ function extractVoicePromptDisplayContent(raw: string): string | null {
 }
 
 function extractInternalRoutingDisplayContent(raw: string): string | null {
-  const text = raw.trim();
+  const text = stripInternalAgentIdentityContext(raw).trim();
   if (!text) return null;
   const isKnownRoutingPrompt =
     /^\s*Use the local Entropic workspace Office workflow for this request\./i.test(text) ||
@@ -611,7 +660,7 @@ function extractInternalRoutingDisplayContent(raw: string): string | null {
 }
 
 function normalizeUserDisplayText(raw: string): string {
-  let text = raw.trim();
+  let text = stripInternalAgentIdentityContext(raw).trim();
   for (let i = 0; i < 4; i += 1) {
     const original = extractInternalRoutingDisplayContent(text);
     if (!original || original === text) {
@@ -658,8 +707,8 @@ export function extractMessageTimestamp(message: GatewayMessage): number | null 
 // ── User content normalization ─────────────────────────────────
 
 export function normalizeUserContent(content: string, fallbackTimestamp?: number | null): { content: string; sentAt: number | null } {
-  const withoutMeta = stripConversationMetadata(content).trim();
-  if (withoutMeta.startsWith(INTERNAL_USER_PROMPT_PREFIX)) {
+  const withoutMeta = stripInternalAgentIdentityContext(stripConversationMetadata(content)).trim();
+  if (withoutMeta.startsWith(INTERNAL_USER_PROMPT_PREFIX) || isInternalSubagentContextPrompt(withoutMeta)) {
     return {
       content: "",
       sentAt: fallbackTimestamp ?? null,
@@ -891,6 +940,9 @@ export function normalizeGatewayMessage(message: GatewayMessage, id: string): Me
   const messageTimestamp = extractMessageTimestamp(message);
   const mediaAttachments = extractGatewayMediaAttachments(message);
   if (hasText && isChatHistoryOmittedPlaceholder(text)) {
+    return null;
+  }
+  if (hasText && isInternalSubagentContextPrompt(text)) {
     return null;
   }
   if (roleRaw === "user") {

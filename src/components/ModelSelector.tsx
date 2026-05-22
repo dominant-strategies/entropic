@@ -6,10 +6,15 @@ import { Model } from "../lib/auth";
 // Proxy-mode models (routed through Entropic backend)
 export const PROXY_MODELS: Model[] = [
   { id: "openai/gpt-5.5", name: "GPT-5.5", provider: "OpenAI", tier: "recommended", group: "OpenRouter" },
+  { id: "venice/openai-gpt-55-pro", name: "GPT-5.5 Pro (Anonymized)", provider: "Venice", tier: "premium" },
   { id: "venice/claude-opus-4-7", name: "Claude Opus 4.7 (Deanonymized)", provider: "Venice", tier: "premium" },
   { id: "venice/kimi-k2-6", name: "Kimi K2.6 (Private)", provider: "Venice", tier: "premium" },
   { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6", provider: "MoonshotAI", tier: "premium", group: "OpenRouter" },
+  { id: "venice/deepseek-v4-pro", name: "DeepSeek V4 Pro (Anonymized)", provider: "Venice", tier: "reasoning" },
+  { id: "venice/deepseek-v4-flash", name: "DeepSeek V4 Flash (Anonymized)", provider: "Venice", tier: "fast" },
   { id: "venice/deepseek-v3.2", name: "DeepSeek V3.2 (Private)", provider: "Venice", tier: "reasoning" },
+  { id: "venice/zai-org-glm-5-1", name: "GLM 5.1 (Private)", provider: "Venice", tier: "reasoning" },
+  { id: "venice/grok-4-3", name: "Grok 4.3 (Private)", provider: "Venice", tier: "reasoning" },
   { id: "venice/zai-org-glm-4.7-flash", name: "GLM 4.7 Flash (Private)", provider: "Venice", tier: "fast" },
   { id: "venice/olafangensan-glm-4.7-flash-heretic", name: "GLM 4.7 Flash Heretic (Private)", provider: "Venice", tier: "fast" },
   { id: "venice/venice-uncensored-1-2", name: "Venice Uncensored 1.2 (Private)", provider: "Venice", tier: "fast" },
@@ -32,6 +37,11 @@ export const PROXY_MODELS: Model[] = [
 // Local-keys models (direct provider API access)
 export const LOCAL_MODELS: Model[] = [
   // OpenRouter — local-key mode uses the user's OpenRouter key directly.
+  { id: "openrouter/venice/openai-gpt-55-pro", name: "GPT-5.5 Pro (Venice)", provider: "OpenRouter", tier: "premium" },
+  { id: "openrouter/venice/deepseek-v4-pro", name: "DeepSeek V4 Pro (Venice)", provider: "OpenRouter", tier: "reasoning" },
+  { id: "openrouter/venice/deepseek-v4-flash", name: "DeepSeek V4 Flash (Venice)", provider: "OpenRouter", tier: "fast" },
+  { id: "openrouter/venice/zai-org-glm-5-1", name: "GLM 5.1 (Venice)", provider: "OpenRouter", tier: "reasoning" },
+  { id: "openrouter/venice/grok-4-3", name: "Grok 4.3 (Venice)", provider: "OpenRouter", tier: "reasoning" },
   { id: "openrouter/moonshotai/kimi-k2.6", name: "Kimi K2.6", provider: "OpenRouter", tier: "premium" },
   { id: "openrouter/anthropic/claude-opus-4.7", name: "Claude Opus 4.7", provider: "OpenRouter", tier: "premium" },
   { id: "openrouter/openai/gpt-5.5", name: "GPT-5.5", provider: "OpenRouter", tier: "recommended" },

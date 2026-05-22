@@ -20,6 +20,7 @@ import type {
   WindowSize,
 } from "../windowManager";
 import type { VoiceSpeechVoice } from "../voice/voicePreferences";
+import type { ChatTextSize } from "../../lib/settingsStore";
 
 const DEFAULT_DESKTOP_CHAT_TITLE = "New chat";
 
@@ -64,6 +65,7 @@ type ChatDesktopAppProps = {
   audioUnderstandingModel: string;
   voiceSpeechRate: number;
   voiceSpeechVoice: VoiceSpeechVoice;
+  chatTextSize: ChatTextSize;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
   formatDate: (timestamp: number) => string;
@@ -127,6 +129,7 @@ export function ChatDesktopApp({
   audioUnderstandingModel,
   voiceSpeechRate,
   voiceSpeechVoice,
+  chatTextSize,
   integrationsSyncing,
   integrationsMissing,
   formatDate,
@@ -379,6 +382,7 @@ export function ChatDesktopApp({
               audioUnderstandingModel={audioUnderstandingModel}
               voiceSpeechRate={voiceSpeechRate}
               voiceSpeechVoice={voiceSpeechVoice}
+              chatTextSize={chatTextSize}
               integrationsSyncing={integrationsSyncing}
               integrationsMissing={integrationsMissing}
               onNavigate={onNavigate}

@@ -91,6 +91,7 @@ import { appendDiagnosticLog } from "../lib/diagnostics";
 import { entropicSitePath } from "../lib/buildProfile";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { getLocalCreditBalance } from "../lib/localCredits";
+import { DEFAULT_CHAT_TEXT_SIZE, type ChatTextSize } from "../lib/settingsStore";
 import { signInWithDiscord, signInWithEmail, signInWithGoogle, signUpWithEmail, createCheckout, getBalance } from "../lib/auth";
 import entropicLogo from "../assets/entropic-logo.png";
 import asanaLogo from "../assets/integrations/asana.svg";
@@ -101,6 +102,9 @@ import googleSheetsLogo from "../assets/integrations/google-sheets.svg";
 import microsoftTeamsLogo from "../assets/integrations/microsoft-teams.svg";
 import oneDriveLogo from "../assets/integrations/onedrive.svg";
 import outlookLogo from "../assets/integrations/outlook.svg";
+import wordLogo from "../assets/integrations/word.svg";
+import powerpointLogo from "../assets/integrations/powerpoint.svg";
+import excelLogo from "../assets/integrations/excel.svg";
 import type { Page } from "../components/Layout";
 import {
   type Message,
@@ -146,6 +150,7 @@ import {
   isChannelOrSystemSessionKey,
   shouldDisplayGatewaySession,
   isChannelOriginGatewayMessage,
+  isInternalSubagentContextPrompt,
   normalizeGatewayMessage,
 } from "../lib/chatMessageUtils";
 import {
@@ -379,6 +384,46 @@ function officeWorkspaceFileMeta(path: string):
     return { kind: "slides", label: "PowerPoint presentation", appLabel: "Slides", Icon: Presentation, accent: "#EA580C" };
   }
   return null;
+}
+
+function createOfficeQuickStartFileName(action: {
+  filePrefix: string;
+  extension: "docx" | "xlsx" | "pptx";
+}): string {
+  const stamp = new Date()
+    .toISOString()
+    .slice(0, 19)
+    .replace(/[-:T]/g, "");
+  return `${action.filePrefix}-${stamp}.${action.extension}`;
+}
+
+function formatOfficeQuickStartPrompt(action: {
+  filePrefix: string;
+  extension: "docx" | "xlsx" | "pptx";
+  promptLabel: string;
+}): string {
+  const fileName = createOfficeQuickStartFileName(action);
+  return [
+    `Create a new local workspace ${action.promptLabel} named "${fileName}".`,
+    "Use the local Entropic workspace Office workflow, create the file in `/data/workspace`, and open it in ONLYOFFICE when ready.",
+    "Keep the starter file clean and editable, then tell me the workspace path.",
+  ].join(" ");
+}
+
+function isChatScrollNearBottom(element: HTMLElement): boolean {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
+}
+
+function assistantMessageHasRenderableContent(message: Message): boolean {
+  if (message.role !== "assistant") return true;
+  if (message.kind === "toolResult" || message.terminalResult) return true;
+  if (message.content.trim()) return true;
+  if ((message.attachments?.length ?? 0) > 0) return true;
+  const payload = message.assistantPayload;
+  return Boolean(
+    payload &&
+      (payload.hadToolPayload || payload.events.length > 0 || payload.errors.length > 0)
+  );
 }
 
 function isTransientGatewayConnectCloseMessage(raw?: string | null): boolean {
@@ -1509,6 +1554,12 @@ const MAX_ATTACHMENTS_PER_MESSAGE = 4;
 const MAX_ATTACHMENT_BYTES = 25_000_000;
 const MAX_ATTACHMENT_MB = Math.floor(MAX_ATTACHMENT_BYTES / 1_000_000);
 const GENERATED_IMAGES_DEST_PATH = "generated-images";
+const CHAT_AUTO_SCROLL_THRESHOLD_PX = 96;
+const CHAT_TEXT_SIZE_CLASSES: Record<ChatTextSize, string> = {
+  compact: "text-[13px] leading-[1.65]",
+  comfortable: "text-[15px] leading-[1.7]",
+  large: "text-[16px] leading-[1.75]",
+};
 
 const QUICK_ACTION_ICONS: Record<ChatQuickActionIcon, typeof Mail> = {
   mail: Mail,
@@ -1528,6 +1579,9 @@ const GoogleDriveLogo = brandAssetLogo(googleDriveLogo, "Google Drive");
 const GoogleSheetsLogo = brandAssetLogo(googleSheetsLogo, "Google Sheets");
 const MicrosoftTeamsLogo = brandAssetLogo(microsoftTeamsLogo, "Microsoft Teams");
 const AsanaLogo = brandAssetLogo(asanaLogo, "Asana");
+const WordLogo = brandAssetLogo(wordLogo, "Microsoft Word");
+const PowerPointLogo = brandAssetLogo(powerpointLogo, "Microsoft PowerPoint");
+const ExcelLogo = brandAssetLogo(excelLogo, "Microsoft Excel");
 
 const INTEGRATION_LOGOS: Partial<Record<
   IntegrationQuickActionRequirement["provider"],
@@ -1551,6 +1605,54 @@ const HOME_PRIMARY_INTEGRATIONS = [
   { name: "Asana", provider: "asana", Logo: AsanaLogo, size: "small" },
   { name: "X", provider: "x", Logo: XLogo, size: "small" },
 ] as const;
+
+type HomeOfficeActionKind = "docs" | "sheets" | "slides";
+
+const HOME_OFFICE_ACTIONS: Array<{
+  kind: HomeOfficeActionKind;
+  name: string;
+  filePrefix: string;
+  extension: "docx" | "xlsx" | "pptx";
+  promptLabel: string;
+  Logo: ComponentType<{ className?: string }>;
+  accent: string;
+  size: "small";
+}> = [
+  {
+    kind: "docs",
+    name: "Word",
+    filePrefix: "Word",
+    extension: "docx",
+    promptLabel: "Word document",
+    Logo: WordLogo,
+    accent: "#2563EB",
+    size: "small",
+  },
+  {
+    kind: "slides",
+    name: "PowerPoint",
+    filePrefix: "PowerPoint",
+    extension: "pptx",
+    promptLabel: "PowerPoint presentation",
+    Logo: PowerPointLogo,
+    accent: "#EA580C",
+    size: "small",
+  },
+  {
+    kind: "sheets",
+    name: "Excel",
+    filePrefix: "Excel",
+    extension: "xlsx",
+    promptLabel: "Excel workbook",
+    Logo: ExcelLogo,
+    accent: "#16A34A",
+    size: "small",
+  },
+];
+
+type HomeWelcomeAction =
+  | ({ actionType: "integration" } & typeof HOME_PRIMARY_INTEGRATIONS[number])
+  | ({ actionType: "office" } & typeof HOME_OFFICE_ACTIONS[number]);
 
 const CRON_GUARD_LINES = [
   "This is a scheduled run. Do NOT create, edit, or run cron jobs.",
@@ -2017,6 +2119,7 @@ export function Chat({
   audioUnderstandingModel,
   voiceSpeechRate = DEFAULT_VOICE_SPEECH_RATE,
   voiceSpeechVoice = DEFAULT_VOICE_SPEECH_VOICE,
+  chatTextSize = DEFAULT_CHAT_TEXT_SIZE,
   integrationsSyncing,
   integrationsMissing,
   onNavigate,
@@ -2043,6 +2146,7 @@ export function Chat({
   audioUnderstandingModel: string;
   voiceSpeechRate?: number;
   voiceSpeechVoice?: VoiceSpeechVoice;
+  chatTextSize?: ChatTextSize;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
   onNavigate?: (page: Page) => void;
@@ -2136,7 +2240,10 @@ export function Chat({
   const [quickSuggestionBySession, setQuickSuggestionBySession] = useState<Record<string, QuickSuggestionState>>({});
   const [builderChecklistBySession, setBuilderChecklistBySession] = useState<Record<string, BuilderChecklistState>>({});
 
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const shouldStickToBottomRef = useRef(true);
+  const lastRenderedMessageCountRef = useRef(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const clientRef = useRef<GatewayClient | null>(null);
@@ -3151,7 +3258,10 @@ export function Chat({
 
       const messageSummary = summarizeSessionTitleFromMessages(sessionMessagesRef.current[session.key] || []);
       const displayName = session.displayName?.trim() || "";
-      const safeDisplayName = !isGenericConversationTitle(displayName) ? displayName : "";
+      const normalizedDisplayName = displayName
+        ? normalizeUserContent(displayName, session.updatedAt).content.replace(/\s+/g, " ").trim()
+        : "";
+      const safeDisplayName = !isGenericConversationTitle(normalizedDisplayName) ? normalizedDisplayName : "";
       const baseTitle = messageSummary || safeDisplayName || `Chat ${session.key.slice(0, 8)}`;
 
       const key = titleDedupKey(baseTitle);
@@ -3196,13 +3306,26 @@ export function Chat({
     );
   }
 
+  function isGenericProviderAuthFailure(message?: string | null): boolean {
+    if (!message) return false;
+    const text = message.toLowerCase();
+    const hasAuthStatus = text.includes("401") || text.includes("unauthorized");
+    const hasAuthMarker =
+      text.includes("authentication_error") ||
+      text.includes("invalid authentication credentials") ||
+      text.includes("invalid api key") ||
+      text.includes("incorrect api key");
+    return hasAuthStatus && hasAuthMarker;
+  }
+
   function isProviderOAuthExpiryFailure(message?: string | null): boolean {
     if (!message) return false;
     const text = message.toLowerCase();
     return (
       text.includes("oauth token has expired") ||
       (text.includes("authentication_error") && text.includes("refresh your existing token")) ||
-      (text.includes("authentication_error") && text.includes("obtain a new token"))
+      (text.includes("authentication_error") && text.includes("obtain a new token")) ||
+      (isGenericProviderAuthFailure(message) && Boolean(currentRecoverableOAuthProvider()))
     );
   }
 
@@ -3330,7 +3453,7 @@ export function Chat({
     providerOAuthRecoveryInFlightRef.current = true;
     lastProviderOAuthRecoveryAtRef.current = now;
     const label = providerDisplayName(provider);
-    setError(`${label} OAuth token expired. Refreshing...`);
+    setError(`${label} OAuth token needs refresh. Refreshing...`);
     addDiag(`provider oauth failure detected from ${source}; refreshing ${provider}`);
 
     try {
@@ -3355,7 +3478,7 @@ export function Chat({
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       addDiag(`provider oauth recovery failed for ${provider}: ${detail}`);
-      setError(`${label} OAuth token expired. Refresh failed. Sign in again in Settings.`);
+      setError(`${label} OAuth token refresh failed. Sign in again in Settings.`);
       return false;
     } finally {
       providerOAuthRecoveryInFlightRef.current = false;
@@ -4066,8 +4189,23 @@ export function Chat({
     void applySessionAction(requestedSessionAction);
   }, [requestedSessionAction]);
 
+  function handleMessagesScroll() {
+    const container = messagesScrollRef.current;
+    if (!container) return;
+    shouldStickToBottomRef.current = isChatScrollNearBottom(container);
+  }
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: isLoading ? "auto" : "smooth" });
+    const previousCount = lastRenderedMessageCountRef.current;
+    lastRenderedMessageCountRef.current = messages.length;
+    const latestMessage = messages[messages.length - 1] ?? null;
+    if (messages.length > previousCount && latestMessage?.role === "user") {
+      shouldStickToBottomRef.current = true;
+    }
+    if (!shouldStickToBottomRef.current) return;
+    requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: isLoading ? "auto" : "smooth" });
+    });
   }, [messages, isLoading, integrationSetup, quickSuggestion]);
 
   useEffect(() => {
@@ -4482,6 +4620,7 @@ export function Chat({
       const onAgent = (event: AgentEvent) => handleAgentEvent(event);
       const onError = (err: string) => {
         const normalizedError = sanitizeGatewayErrorMessage(err);
+        const authProbe = `${err}\n${normalizedError}`;
         const transientConnectClose = isTransientGatewayConnectCloseMessage(normalizedError);
         // Suppress errors during startup grace period (first 15 seconds after component mount)
         const inStartupGracePeriod = Date.now() - componentMountedAt < 15_000;
@@ -4514,17 +4653,17 @@ export function Chat({
 
         // Route OAuth expiry by mode: proxy mode refreshes the proxy session,
         // local-keys mode refreshes the provider token directly.
-        if (isProviderOAuthExpiryFailure(normalizedError)) {
+        if (isProviderOAuthExpiryFailure(authProbe)) {
           if (proxyEnabled) {
             if (!proxyAuthRecoveryInFlightRef.current) {
               triggerProxyAuthRecovery("gateway error");
             }
             addDiag(`gateway error (proxy oauth intercepted): ${normalizedError}`);
           } else {
-            void recoverExpiredProviderOAuth("gateway error", normalizedError);
+            void recoverExpiredProviderOAuth("gateway error", authProbe);
             addDiag(`gateway error (provider oauth intercepted): ${normalizedError}`);
           }
-        } else if (isProxyAuthFailure(normalizedError)) {
+        } else if (proxyEnabled && isProxyAuthFailure(authProbe)) {
           if (!proxyAuthRecoveryInFlightRef.current) {
             triggerProxyAuthRecovery("gateway error");
           }
@@ -4545,7 +4684,7 @@ export function Chat({
           }
         }
         setLastGatewayError(normalizedError);
-        if (!isProxyAuthFailure(normalizedError)) {
+        if (!(proxyEnabled && isProxyAuthFailure(authProbe))) {
           addDiag(`gateway error: ${normalizedError}${inStartupGracePeriod ? ' (suppressed: startup grace period)' : ''}`);
         }
       };
@@ -4694,6 +4833,7 @@ export function Chat({
       const trimmed = text.trim();
       if (!hasText) return hasNonText;
       if (trimmed.startsWith(INTERNAL_USER_PROMPT_PREFIX)) return false;
+      if (isInternalSubagentContextPrompt(stripConversationMetadata(trimmed))) return false;
       if (/^pre-compaction memory flush\b/i.test(trimmed)) return false;
       if (/^please summarize the conversation\b/i.test(trimmed)) return false;
       return true;
@@ -4900,6 +5040,16 @@ export function Chat({
         : eventRunId
           ? runSessionKeyRef.current[eventRunId] || ""
           : "";
+    const isInternalSubagentContextEvent = Boolean(
+      event.message &&
+        isInternalSubagentContextPrompt(
+          stripConversationMetadata(extractMessageText(event.message as GatewayMessage).text),
+        ),
+    );
+    if (isInternalSubagentContextEvent) {
+      addDiag(`ignored internal subagent context event runId=${eventRunId || "unknown"}`);
+      return;
+    }
     if (isActiveRun) {
       lastEventByRunIdRef.current[eventRunId!] = Date.now();
       refreshActiveRunTimeout(eventRunId!);
@@ -4992,7 +5142,13 @@ export function Chat({
         if (eventRunId) {
           streamedAssistantRunIdsRef.current.add(eventRunId);
         }
-        if (isProxyAuthFailure(text)) {
+        if (isProviderOAuthExpiryFailure(text)) {
+          if (proxyEnabled) {
+            triggerProxyAuthRecovery("chat message");
+          } else {
+            void recoverExpiredProviderOAuth("chat message", text);
+          }
+        } else if (proxyEnabled && isProxyAuthFailure(text)) {
           triggerProxyAuthRecovery("chat message");
         }
         if (eventRunId) {
@@ -5191,7 +5347,7 @@ export function Chat({
           });
         }
       }
-      if (!handledOAuthExpiryInProxyMode && isProxyAuthFailure(errorMessage)) {
+      if (!handledOAuthExpiryInProxyMode && proxyEnabled && isProxyAuthFailure(rawErrorMessage)) {
         triggerProxyAuthRecovery("chat error event");
       }
     } else if (event.state === "aborted") {
@@ -5739,7 +5895,7 @@ export function Chat({
   function isRecoverablePendingSendError(error: unknown, message: string): boolean {
     if (
       isProviderOAuthExpiryFailure(message) ||
-      isProxyAuthFailure(message) ||
+      (proxyEnabled && isProxyAuthFailure(message)) ||
       isGatewayAuthRateLimited(message) ||
       isContainerRestartingError(message) ||
       isTransientGatewayConnectCloseMessage(message)
@@ -5947,7 +6103,7 @@ export function Chat({
       } else {
         handledProviderOAuth = await recoverExpiredProviderOAuth("queued send", errorMessage);
       }
-      if (!handledProviderOAuth && isProxyAuthFailure(errorMessage)) {
+      if (!handledProviderOAuth && proxyEnabled && isProxyAuthFailure(errorMessage)) {
         triggerProxyAuthRecovery("queued send");
       }
 
@@ -6064,6 +6220,7 @@ export function Chat({
         content: userMessageContent,
         sentAt: Date.now(),
       };
+      shouldStickToBottomRef.current = true;
       appendLocalMessage(userMessage, sendSession);
 
       if (!content && sendSession) {
@@ -6182,6 +6339,7 @@ export function Chat({
             }))
           : undefined,
       };
+      shouldStickToBottomRef.current = true;
       appendLocalMessage(userMessage, sendSession);
 
       if (!content && sendSession) {
@@ -6264,6 +6422,7 @@ export function Chat({
         : undefined,
     };
     visibleMessagesSessionRef.current = sendSession;
+    shouldStickToBottomRef.current = true;
     setMessages(prev => [...prev, userMessage]);
 
     // Persist the user message immediately so it survives navigation
@@ -6677,7 +6836,7 @@ export function Chat({
       } else {
         handledProviderOAuth = await recoverExpiredProviderOAuth("send failed", errorMessage);
       }
-      if (!handledProviderOAuth && isProxyAuthFailure(errorMessage)) {
+      if (!handledProviderOAuth && proxyEnabled && isProxyAuthFailure(errorMessage)) {
         triggerProxyAuthRecovery("send failed");
       }
       if (isRecoverablePendingSendError(e, errorMessage)) {
@@ -6810,6 +6969,20 @@ export function Chat({
       status: "connecting",
       error: `Finish connecting ${integration.name}, then click this icon again.`,
     });
+  }
+
+  function handleHomeOfficeActionClick(action: typeof HOME_OFFICE_ACTIONS[number]) {
+    const sessionKey = currentSessionRef.current || ensureComposerSession();
+    if (!sessionKey) return;
+    setError(null);
+    setShowWelcome(false);
+    shouldStickToBottomRef.current = true;
+    setComposerModeForSession(sessionKey, "chat");
+    setIntegrationSetupForSession(sessionKey, null);
+    setQuickSuggestionForSession(sessionKey, null);
+    setBuilderChecklistForSession(sessionKey, null);
+    setIntegrationLaunchForSession(sessionKey, null);
+    void handleSend(formatOfficeQuickStartPrompt(action));
   }
 
   async function handleHomeIntegrationClick(integration: typeof HOME_PRIMARY_INTEGRATIONS[number]) {
@@ -7895,10 +8068,11 @@ export function Chat({
   function renderToolActivityList(activities: ChatToolActivity[]) {
     if (activities.length === 0) return null;
     const ordered = [...activities].sort((a, b) => b.seq - a.seq);
-    const hasRunning = ordered.some((activity) => activity.status === "running");
+    const runningActivities = ordered.filter((activity) => activity.status === "running");
+    const hasRunning = runningActivities.length > 0;
     const completeCount = ordered.filter((activity) => activity.status === "complete").length;
     const failedCount = ordered.filter((activity) => activity.status === "error").length;
-    const runningCount = ordered.filter((activity) => activity.status === "running").length;
+    const runningCount = runningActivities.length;
 
     const statusText = (activity: ChatToolActivity) => {
       if (activity.status === "error") return "Failed";
@@ -7922,59 +8096,80 @@ export function Chat({
       return activity.resultSummary ?? activity.detail ?? "";
     };
     const renderStatusIcon = (activity: ChatToolActivity) => {
-      if (activity.status === "error") return <X className="h-3.5 w-3.5" />;
-      if (activity.status === "complete") return <Check className="h-3.5 w-3.5" />;
-      return <Loader2 className="h-3.5 w-3.5 animate-spin" />;
+      if (activity.status === "error") return <X className="h-3.5 w-3.5 text-red-500" />;
+      if (activity.status === "complete") return <Check className="h-3.5 w-3.5 text-emerald-500" />;
+      return <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--text-tertiary)]" />;
     };
-    const headerMeta =
-      failedCount > 0
+    const latestActivity = runningActivities[0] ?? ordered[0];
+    const latestSummary = latestActivity ? summaryText(latestActivity) : "";
+    const listActivities = hasRunning ? runningActivities : ordered;
+    const canExpand = listActivities.length > 1;
+    const countMeta = hasRunning
+      ? `${runningCount} running`
+      : failedCount > 0
         ? `${failedCount} failed`
-        : hasRunning
-          ? `${runningCount} running`
-          : `${completeCount} succeeded`;
-    const headerIcon =
-      failedCount > 0
-        ? <X className="h-3.5 w-3.5 text-red-500" />
-        : hasRunning
-          ? <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--text-tertiary)]" />
-          : <Check className="h-3.5 w-3.5 text-emerald-500" />;
+        : `${completeCount} succeeded`;
+    const renderActivityRow = (activity: ChatToolActivity) => {
+      const summary = summaryText(activity);
+      const firstLink = activity.links?.[0] ?? (activity.url ? { url: activity.url } : undefined);
+      const linkLabel = firstLink?.domain ?? domainFromUrl(firstLink?.url) ?? firstLink?.url;
+      return (
+        <div key={activity.id} className="flex min-w-0 items-center gap-2 rounded-lg px-2 py-1.5">
+          <span className="shrink-0">{renderStatusIcon(activity)}</span>
+          <span className="shrink-0 font-medium text-[var(--text-primary)]">{displayLabel(activity)}</span>
+          <span className="shrink-0 text-[var(--text-tertiary)]">{statusText(activity)}</span>
+          {summary ? (
+            <span className="min-w-0 truncate text-[var(--text-tertiary)]">{summary}</span>
+          ) : null}
+          {firstLink?.url && linkLabel ? (
+            <a
+              href={firstLink.url}
+              target="_blank"
+              rel="noreferrer"
+              className="ml-auto inline-flex min-w-0 shrink items-center gap-1 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
+              title={firstLink.url}
+            >
+              <Globe className="h-3 w-3 shrink-0" />
+              <span className="truncate">{linkLabel}</span>
+            </a>
+          ) : null}
+        </div>
+      );
+    };
+
+    if (!latestActivity) return null;
+    const summaryContent = (
+      <>
+        <span className="shrink-0">{renderStatusIcon(latestActivity)}</span>
+        <span className="shrink-0 font-medium text-[var(--text-primary)]">{displayLabel(latestActivity)}</span>
+        <span className="shrink-0 text-[var(--text-tertiary)]">{statusText(latestActivity)}</span>
+        {latestSummary ? (
+          <span className="min-w-0 truncate text-[var(--text-tertiary)]">{latestSummary}</span>
+        ) : null}
+      </>
+    );
+
+    if (!canExpand) {
+      return (
+        <div className="flex list-none items-center gap-2 rounded-lg border border-transparent py-1.5 text-xs text-[var(--text-secondary)]">
+          {summaryContent}
+        </div>
+      );
+    }
 
     return (
-      <details className="group text-xs text-[var(--text-secondary)]" open={hasRunning}>
-        <summary className="flex cursor-pointer list-none items-center gap-2 py-1 [&::-webkit-details-marker]:hidden">
-          <span className="shrink-0">{headerIcon}</span>
-          <span className="shrink-0 font-medium text-[var(--text-primary)]">Tool calls</span>
-          <span className="shrink-0 text-[var(--text-tertiary)]">{headerMeta}</span>
-          <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180" />
+      <details className="group text-xs text-[var(--text-secondary)]">
+        <summary
+          className="flex cursor-pointer list-none items-center gap-2 rounded-lg border border-transparent px-2 py-1.5 text-[var(--text-secondary)] transition-colors hover:border-[var(--border-subtle)] hover:bg-[var(--bg-tertiary)]/60 [&::-webkit-details-marker]:hidden"
+        >
+          {summaryContent}
+          <span className="ml-auto shrink-0 rounded-full bg-[var(--bg-tertiary)] px-2 py-0.5 text-[11px] text-[var(--text-tertiary)]">
+            {countMeta}
+          </span>
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180" />
         </summary>
-        <div className="mt-1 space-y-1 pl-5">
-          {ordered.map((activity) => {
-            const summary = summaryText(activity);
-            const firstLink = activity.links?.[0] ?? (activity.url ? { url: activity.url } : undefined);
-            const linkLabel = firstLink?.domain ?? domainFromUrl(firstLink?.url) ?? firstLink?.url;
-            return (
-              <div key={activity.id} className="flex min-w-0 items-center gap-2">
-                <span className="shrink-0">{renderStatusIcon(activity)}</span>
-                <span className="shrink-0 text-[var(--text-primary)]">{displayLabel(activity)}</span>
-                <span className="shrink-0 text-[var(--text-tertiary)]">{statusText(activity)}</span>
-                {summary ? (
-                  <span className="min-w-0 truncate text-[var(--text-tertiary)]">{summary}</span>
-                ) : null}
-                {firstLink?.url && linkLabel ? (
-                  <a
-                    href={firstLink.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="ml-auto inline-flex min-w-0 shrink items-center gap-1 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
-                    title={firstLink.url}
-                  >
-                    <Globe className="h-3 w-3 shrink-0" />
-                    <span className="truncate">{linkLabel}</span>
-                  </a>
-                ) : null}
-              </div>
-            );
-          })}
+        <div className="mt-1 space-y-0.5 border-l border-[var(--border-subtle)] pl-3">
+          {listActivities.map(renderActivityRow)}
         </div>
       </details>
     );
@@ -8475,10 +8670,18 @@ export function Chat({
 
   const renderWelcome = () => {
     const userName = onboardingData?.userName || "there";
-    const integrationRows = [
-      HOME_PRIMARY_INTEGRATIONS.slice(0, 4),
-      HOME_PRIMARY_INTEGRATIONS.slice(4, 8),
-      HOME_PRIMARY_INTEGRATIONS.slice(8, 12),
+    const welcomeIntegrationActions: HomeWelcomeAction[] = HOME_PRIMARY_INTEGRATIONS.map((integration) => ({
+      ...integration,
+      actionType: "integration",
+    }));
+    const welcomeOfficeActions: HomeWelcomeAction[] = HOME_OFFICE_ACTIONS.map((action) => ({
+      ...action,
+      actionType: "office",
+    }));
+    const welcomeRows: HomeWelcomeAction[][] = [
+      welcomeIntegrationActions.slice(0, 4),
+      welcomeIntegrationActions.slice(4, 8),
+      [...welcomeOfficeActions, ...welcomeIntegrationActions.slice(8, 9)],
     ];
 
     return (
@@ -8487,36 +8690,47 @@ export function Chat({
           Hey {userName}
         </h2>
         <div className="flex w-full max-w-[620px] flex-col items-center gap-9">
-          {integrationRows.map((row, rowIndex) => (
+          {welcomeRows.map((row, rowIndex) => (
             <div
-              key={`integration-row-${rowIndex}`}
+              key={`home-action-row-${rowIndex}`}
               className="flex w-full items-start justify-center gap-7 sm:gap-11"
             >
-              {row.map((integration) => {
-                const { name, Logo, size } = integration;
+              {row.map((action) => {
+                const { name, Logo, size } = action;
                 const large = size === "large";
                 const medium = size === "medium";
+                const isOfficeAction = action.actionType === "office";
+                const iconClassName = clsx(
+                  "object-contain drop-shadow-sm transition-transform duration-200 ease-out group-hover:-translate-y-1 group-hover:scale-105",
+                  large
+                    ? "h-[46px] w-[46px]"
+                    : medium
+                      ? "h-[38px] w-[38px]"
+                      : "h-[32px] w-[32px]"
+                );
                 return (
                   <button
-                    key={name}
+                    key={`${action.actionType}-${name}`}
                     type="button"
                     onClick={() => {
-                      void handleHomeIntegrationClick(integration);
+                      if (action.actionType === "office") {
+                        handleHomeOfficeActionClick(action);
+                        return;
+                      }
+                      void handleHomeIntegrationClick(action);
                     }}
+                    disabled={isOfficeAction && currentSessionIsWorking}
                     className="group flex w-[72px] flex-col items-center gap-2 rounded-xl focus:outline-none focus:ring-2 focus:ring-[var(--purple-accent)]/25"
-                    aria-label={`Open Integrations to connect ${name}`}
-                    title={`Connect ${name}`}
+                    aria-label={isOfficeAction ? `Create ${name} file in ONLYOFFICE` : `Open Integrations to connect ${name}`}
+                    title={isOfficeAction ? `Create ${name} file in ONLYOFFICE` : `Connect ${name}`}
                   >
-                    <Logo
-                      className={clsx(
-                        "object-contain drop-shadow-sm transition-transform duration-200 ease-out group-hover:-translate-y-1 group-hover:scale-105",
-                        large
-                          ? "h-[46px] w-[46px]"
-                          : medium
-                            ? "h-[38px] w-[38px]"
-                            : "h-[32px] w-[32px]"
-                      )}
-                    />
+                    {isOfficeAction ? (
+                      <span className={iconClassName} style={{ color: action.accent }} aria-hidden="true">
+                        <Logo className="h-full w-full" />
+                      </span>
+                    ) : (
+                      <Logo className={iconClassName} />
+                    )}
                     <span
                       className="max-w-[76px] truncate text-[10px] font-medium leading-none text-[var(--text-primary)] transition-colors group-hover:text-[var(--text-secondary)]"
                     >
@@ -8702,6 +8916,13 @@ export function Chat({
     if (msg.role === "user" && !bodyContent) {
       return null;
     }
+    if (
+      msg.role === "assistant" &&
+      !assistantMessageHasRenderableContent(msg) &&
+      (toolActivityByRunId[msg.id]?.length ?? 0) === 0
+    ) {
+      return null;
+    }
     if (msg.role === "assistant") {
       return (
         <div key={msg.id} className="group flex w-full min-w-0 justify-start py-2">
@@ -8730,7 +8951,7 @@ export function Chat({
                   {chatAgentName}
                 </button>
               </div>
-              <div className="min-w-0 text-[var(--chat-assistant-text)]">
+              <div className={clsx("min-w-0 text-[var(--chat-assistant-text)]", CHAT_TEXT_SIZE_CLASSES[chatTextSize])}>
                 {renderAssistantContent(msg)}
               </div>
               {messageTime || canCopy ? (
@@ -8788,7 +9009,7 @@ export function Chat({
         </div>
       </div>
     );
-  }), [chatAgentAvatarUrl, chatAgentName, copiedMessageId, messages, openAgentProfileSettings, toolActivityByRunId]);
+  }), [chatAgentAvatarUrl, chatAgentName, chatTextSize, copiedMessageId, messages, openAgentProfileSettings, toolActivityByRunId]);
 
   const currentSessionHasQueuedWork = Boolean(
     currentSession && outboxEntries.some((entry) => entry.sessionKey === currentSession)
@@ -9007,7 +9228,11 @@ export function Chat({
       )}
 
       {/* Messages or Welcome */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 pt-3 pb-2">
+      <div
+        ref={messagesScrollRef}
+        onScroll={handleMessagesScroll}
+        className="flex-1 overflow-y-auto overflow-x-hidden px-4 pt-3 pb-2"
+      >
         <div className={clsx("min-w-0 space-y-3", wideLayout ? "w-full max-w-none" : "mx-auto max-w-3xl")}>
           {messages.length === 0 && showWelcome ? (
             renderWelcome()

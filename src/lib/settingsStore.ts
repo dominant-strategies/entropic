@@ -12,9 +12,13 @@ export type DesktopSettingsSnapshot = {
   voiceShortcut?: string;
   voiceSpeechRate?: number;
   voiceSpeechVoice?: string;
+  chatTextSize?: ChatTextSize;
   desktopWallpaper?: string;
   desktopCustomWallpaper?: string;
 };
+
+export type ChatTextSize = "compact" | "comfortable" | "large";
+export const DEFAULT_CHAT_TEXT_SIZE: ChatTextSize = "comfortable";
 
 const SETTINGS_FILE = "entropic-settings.json";
 
@@ -30,6 +34,7 @@ const SETTING_KEYS = [
   "voiceShortcut",
   "voiceSpeechRate",
   "voiceSpeechVoice",
+  "chatTextSize",
   "desktopWallpaper",
   "desktopCustomWallpaper",
 ] as const satisfies ReadonlyArray<keyof DesktopSettingsSnapshot>;
@@ -65,6 +70,12 @@ function normalizeNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+export function normalizeChatTextSize(value: unknown): ChatTextSize | undefined {
+  return value === "compact" || value === "comfortable" || value === "large"
+    ? value
+    : undefined;
+}
+
 function normalizeDesktopSettings(
   raw: Partial<DesktopSettingsSnapshot> | null | undefined,
 ): DesktopSettingsSnapshot {
@@ -81,6 +92,7 @@ function normalizeDesktopSettings(
     voiceShortcut: normalizeString(raw?.voiceShortcut),
     voiceSpeechRate: normalizeNumber(raw?.voiceSpeechRate),
     voiceSpeechVoice: normalizeString(raw?.voiceSpeechVoice),
+    chatTextSize: normalizeChatTextSize(raw?.chatTextSize),
     desktopWallpaper: normalizeString(raw?.desktopWallpaper),
     desktopCustomWallpaper: normalizeString(raw?.desktopCustomWallpaper),
   };

@@ -16,6 +16,7 @@ import {
 import { AppWindow } from "../AppWindow";
 import { getWindowZ, type WindowKey, type WindowPoint, type WindowResizeDirection, type WindowSize } from "../windowManager";
 import type { VoiceSpeechVoice } from "../voice/voicePreferences";
+import type { ChatTextSize } from "../../lib/settingsStore";
 
 const PluginStore = lazy(() => import("../../pages/Store").then((m) => ({ default: m.Store })));
 const SkillsStore = lazy(() => import("../../pages/Store").then((m) => ({ default: m.Store })));
@@ -69,6 +70,7 @@ type DesktopUtilityWindowsProps = {
   voiceShortcut: string;
   voiceSpeechRate: number;
   voiceSpeechVoice: VoiceSpeechVoice;
+  chatTextSize: ChatTextSize;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onTextToSpeechModelChange: (model: string) => void;
@@ -76,6 +78,7 @@ type DesktopUtilityWindowsProps = {
   onVoiceShortcutChange: (shortcut: string) => void | Promise<void>;
   onVoiceSpeechRateChange: (rate: number) => void | Promise<void>;
   onVoiceSpeechVoiceChange: (voice: VoiceSpeechVoice) => void | Promise<void>;
+  onChatTextSizeChange: (size: ChatTextSize) => void | Promise<void>;
   onImageModelChange: (model: string) => void;
   onClose: Record<UtilityWindowKey, () => void>;
   onFocus: (window: WindowKey) => void;
@@ -109,6 +112,7 @@ export function DesktopUtilityWindows({
   voiceShortcut,
   voiceSpeechRate,
   voiceSpeechVoice,
+  chatTextSize,
   onCodeModelChange,
   onImageGenerationModelChange,
   onTextToSpeechModelChange,
@@ -116,6 +120,7 @@ export function DesktopUtilityWindows({
   onVoiceShortcutChange,
   onVoiceSpeechRateChange,
   onVoiceSpeechVoiceChange,
+  onChatTextSizeChange,
   onImageModelChange,
   onClose,
   onFocus,
@@ -289,6 +294,7 @@ export function DesktopUtilityWindows({
               voiceShortcut={voiceShortcut}
               voiceSpeechRate={voiceSpeechRate}
               voiceSpeechVoice={voiceSpeechVoice}
+              chatTextSize={chatTextSize}
               onCodeModelChange={onCodeModelChange}
               onImageGenerationModelChange={onImageGenerationModelChange}
               onTextToSpeechModelChange={onTextToSpeechModelChange}
@@ -296,6 +302,7 @@ export function DesktopUtilityWindows({
               onVoiceShortcutChange={onVoiceShortcutChange}
               onVoiceSpeechRateChange={onVoiceSpeechRateChange}
               onVoiceSpeechVoiceChange={onVoiceSpeechVoiceChange}
+              onChatTextSizeChange={onChatTextSizeChange}
               onImageModelChange={onImageModelChange}
             />
           </Suspense>

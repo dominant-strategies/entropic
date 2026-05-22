@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" viewBox="0 0 32 32">
+  <title>Microsoft Word</title>
+  <path fill="#41a5ee" d="M12 6.5h14.5A1.5 1.5 0 0 1 28 8v16a1.5 1.5 0 0 1-1.5 1.5H12z"/>
+  <path fill="#2b7cd3" d="M12 6.5h14.5A1.5 1.5 0 0 1 28 8v3.5H12z"/>
+  <path fill="#185abd" d="M12 11.5h16v5H12z"/>
+  <path fill="#103f91" d="M12 16.5h16v5H12z"/>
+  <path fill="#0f2f76" d="M12 21.5h16V24a1.5 1.5 0 0 1-1.5 1.5H12z"/>
+  <path fill="#fff" opacity=".95" d="M16 9h9v1.4h-9zm0 4h9v1.4h-9zm0 4h9v1.4h-9zm0 4h7v1.4h-7z"/>
+  <path fill="#185abd" d="M4 5.25 14 3.5v25L4 26.75A1.5 1.5 0 0 1 2.75 25.27V6.73A1.5 1.5 0 0 1 4 5.25z"/>
+  <path fill="#fff" d="M11.22 20.8H9.72l-1.18-5.38-1.24 5.38H5.79L4.2 11.2h1.42l1.01 5.68 1.31-5.68h1.25l1.23 5.76 1.08-5.76h1.34z"/>
+</svg>

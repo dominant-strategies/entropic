@@ -46,8 +46,11 @@ import {
   hostedFeaturesEnabled,
 } from "../lib/buildProfile";
 import {
+  DEFAULT_CHAT_TEXT_SIZE,
   primeDesktopSettings,
+  normalizeChatTextSize,
   type DesktopSettingsSnapshot,
+  type ChatTextSize,
   updateDesktopSettings,
 } from "../lib/settingsStore";
 import { loadSettingsWarmState } from "../lib/settingsWarmState";
@@ -708,6 +711,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [voiceSpeechRate, setVoiceSpeechRate] = useState(DEFAULT_VOICE_SPEECH_RATE);
   const [voiceSpeechVoice, setVoiceSpeechVoice] =
     useState<VoiceSpeechVoice>(DEFAULT_VOICE_SPEECH_VOICE);
+  const [chatTextSize, setChatTextSize] = useState<ChatTextSize>(DEFAULT_CHAT_TEXT_SIZE);
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [currentChatSession, setCurrentChatSession] = useState<string | null>(null);
   const [pendingChatSession, setPendingChatSession] = useState<string | null>(null);
@@ -912,6 +916,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         const nextVoiceSpeechVoice = normalizeVoiceSpeechVoice(
           bootstrap.settings.voiceSpeechVoice ?? DEFAULT_VOICE_SPEECH_VOICE,
         );
+        const nextChatTextSize =
+          normalizeChatTextSize(bootstrap.settings.chatTextSize) ?? DEFAULT_CHAT_TEXT_SIZE;
 
         selectedModelRef.current = nextSelectedModel;
         imageModelRef.current = nextImageModel;
@@ -926,6 +932,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         setVoiceShortcut(nextVoiceShortcut);
         setVoiceSpeechRate(nextVoiceSpeechRate);
         setVoiceSpeechVoice(nextVoiceSpeechVoice);
+        setChatTextSize(nextChatTextSize);
         dispatchBootstrap({ type: "bootstrap_loaded", payload: bootstrap });
 
         const normalizedPatch: Partial<DesktopSettingsSnapshot> = {};
@@ -955,6 +962,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         }
         if ((bootstrap.settings.voiceSpeechVoice || "") !== nextVoiceSpeechVoice) {
           normalizedPatch.voiceSpeechVoice = nextVoiceSpeechVoice;
+        }
+        if ((bootstrap.settings.chatTextSize || DEFAULT_CHAT_TEXT_SIZE) !== nextChatTextSize) {
+          normalizedPatch.chatTextSize = nextChatTextSize;
         }
         if (Object.keys(normalizedPatch).length > 0) {
           await updateDesktopSettings(normalizedPatch);
@@ -2430,6 +2440,16 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
   }
 
+  async function handleChatTextSizeChange(value: ChatTextSize) {
+    const next = normalizeChatTextSize(value) ?? DEFAULT_CHAT_TEXT_SIZE;
+    setChatTextSize(next);
+    try {
+      await updateDesktopSettings({ chatTextSize: next });
+    } catch (error) {
+      console.error("[Entropic] Failed to save chatTextSize:", error);
+    }
+  }
+
   async function handleImageModelChange(value: string) {
     setImageModel(value);
     imageModelRef.current = value;
@@ -2525,6 +2545,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         audioUnderstandingModel={audioUnderstandingModel}
         voiceSpeechRate={voiceSpeechRate}
         voiceSpeechVoice={voiceSpeechVoice}
+        chatTextSize={chatTextSize}
         integrationsSyncing={integrationsSyncing}
         integrationsMissing={integrationsMissing}
         onNavigate={setCurrentPage}
@@ -2585,6 +2606,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           voiceShortcut={voiceShortcut}
           voiceSpeechRate={voiceSpeechRate}
           voiceSpeechVoice={voiceSpeechVoice}
+          chatTextSize={chatTextSize}
           onCodeModelChange={handleCodeModelChange}
           onImageGenerationModelChange={handleImageGenerationModelChange}
           onTextToSpeechModelChange={handleTextToSpeechModelChange}
@@ -2592,6 +2614,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           onVoiceShortcutChange={handleVoiceShortcutChange}
           onVoiceSpeechRateChange={handleVoiceSpeechRateChange}
           onVoiceSpeechVoiceChange={handleVoiceSpeechVoiceChange}
+          onChatTextSizeChange={handleChatTextSizeChange}
           onImageModelChange={handleImageModelChange}
         />
       </Suspense>
@@ -2646,6 +2669,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             voiceShortcut={voiceShortcut}
             voiceSpeechRate={voiceSpeechRate}
             voiceSpeechVoice={voiceSpeechVoice}
+            chatTextSize={chatTextSize}
             onCodeModelChange={handleCodeModelChange}
             onImageGenerationModelChange={handleImageGenerationModelChange}
             onTextToSpeechModelChange={handleTextToSpeechModelChange}
@@ -2653,6 +2677,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             onVoiceShortcutChange={handleVoiceShortcutChange}
             onVoiceSpeechRateChange={handleVoiceSpeechRateChange}
             onVoiceSpeechVoiceChange={handleVoiceSpeechVoiceChange}
+            onChatTextSizeChange={handleChatTextSizeChange}
             onImageModelChange={handleImageModelChange}
             pendingDesktopAction={pendingDesktopAction}
             onDesktopActionHandled={(id) => {

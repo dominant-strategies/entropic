@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" viewBox="0 0 32 32">
+  <title>Microsoft Excel</title>
+  <path fill="#33c481" d="M12 6.5h14.5A1.5 1.5 0 0 1 28 8v16a1.5 1.5 0 0 1-1.5 1.5H12z"/>
+  <path fill="#21a366" d="M12 6.5h7v19h-7z"/>
+  <path fill="#107c41" d="M12 12h16v4H12z"/>
+  <path fill="#185c37" d="M12 20h16v4a1.5 1.5 0 0 1-1.5 1.5H12z"/>
+  <path fill="#fff" opacity=".92" d="M20 9h5v2h-5zm0 4h5v2h-5zm0 4h5v2h-5zm0 4h5v2h-5zm-6-12h4v2h-4zm0 4h4v2h-4zm0 4h4v2h-4zm0 4h4v2h-4z"/>
+  <path fill="#107c41" d="M4 5.25 14 3.5v25L4 26.75A1.5 1.5 0 0 1 2.75 25.27V6.73A1.5 1.5 0 0 1 4 5.25z"/>
+  <path fill="#fff" d="m5.1 20.8 2.27-4.86-2.08-4.74h1.68l1.2 3.04 1.27-3.04h1.55l-2.11 4.65 2.26 4.95H9.47l-1.36-3.23-1.39 3.23z"/>
+</svg>
