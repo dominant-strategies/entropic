@@ -14,10 +14,13 @@ import {
 } from "../lib/profile";
 import { useAuth } from "../contexts/AuthContext";
 import {
+  filterModelsForConnectedProviders,
+  LOCAL_MODELS,
   LOCAL_AUDIO_UNDERSTANDING_MODELS,
   LOCAL_IMAGE_GENERATION_MODELS,
   LOCAL_TEXT_TO_SPEECH_MODELS,
   ModelSelector,
+  type OpenAiLocalAuthKind,
   PROXY_AUDIO_UNDERSTANDING_MODELS,
   PROXY_IMAGE_GENERATION_MODELS,
   PROXY_TEXT_TO_SPEECH_MODELS,
@@ -133,6 +136,11 @@ type RuntimeResourceUsage = {
 };
 
 type LocalKeyProvider = "anthropic" | "google" | "openai" | "openrouter";
+
+// The OpenClaw runtime does not currently support the Anthropic/Claude direct-API path,
+// so the Anthropic provider is hidden from the local-keys UI. Backend support is left
+// intact; flip this to re-expose the Anthropic OAuth + API-key rows.
+const SHOW_ANTHROPIC_PROVIDER = false;
 
 const DEFAULT_RUNTIME_CPU = 2;
 const DEFAULT_RUNTIME_MEMORY_GB = 4;
@@ -710,17 +718,24 @@ export function Settings({
       providers: [],
     },
   );
-  const connectedProviders = authState.providers.filter(p => p.has_key).map(p => p.id);
+  const openAiProviderStatus = authState.providers.find((provider) => provider.id === "openai");
+  const openAiAuthKind: OpenAiLocalAuthKind | null =
+    openAiProviderStatus?.auth_kind ??
+    (oauthStatus["openai"] === "openai_codex" ? "codex" : null);
+  const connectedProviders = authState.providers
+    .filter((provider) => provider.has_key && (SHOW_ANTHROPIC_PROVIDER || provider.id !== "anthropic"))
+    .map((provider) => provider.id);
+  const connectedProviderKey = connectedProviders.join(",");
   const localImageGenerationProviders: string[] = connectedProviders.filter(
-    (provider) => provider === "google" || provider === "openai",
+    (provider) => provider === "google" || (provider === "openai" && openAiAuthKind === "api_key"),
   );
   const localImageGenerationProviderKey = localImageGenerationProviders.join(",");
   const localAudioUnderstandingProviders: string[] = connectedProviders.filter(
-    (provider) => provider === "google" || provider === "openai",
+    (provider) => provider === "google" || (provider === "openai" && openAiAuthKind === "api_key"),
   );
   const localAudioUnderstandingProviderKey = localAudioUnderstandingProviders.join(",");
   const localTextToSpeechProviders: string[] = connectedProviders.filter(
-    (provider) => provider === "openai",
+    (provider) => provider === "openai" && openAiAuthKind === "api_key",
   );
   const localTextToSpeechProviderKey = localTextToSpeechProviders.join(",");
   const normalizedVoiceSpeechRate = normalizeVoiceSpeechRate(voiceSpeechRate);
@@ -1102,7 +1117,9 @@ export function Settings({
       await invoke("set_api_key", { provider, key: "" });
       const state = await refreshAuthStateSnapshot();
       setApiKeys((prev) => ({ ...prev, [provider]: "" }));
-      const anyKeyRemaining = state.providers.some((entry) => entry.has_key);
+      const anyKeyRemaining = state.providers.some(
+        (entry) => entry.has_key && (SHOW_ANTHROPIC_PROVIDER || entry.id !== "anthropic"),
+      );
       if (!anyKeyRemaining && useLocalKeys) {
         await onUseLocalKeysChange(false);
       }
@@ -1120,6 +1137,39 @@ export function Settings({
       setLocalKeySavingProvider(null);
     }
   }
+
+  useEffect(() => {
+    if (!useLocalKeys || authMetaLoading || connectedProviders.length === 0) {
+      return;
+    }
+    const availableModels = filterModelsForConnectedProviders(
+      LOCAL_MODELS,
+      connectedProviders,
+      openAiAuthKind,
+    );
+    if (availableModels.length === 0) {
+      return;
+    }
+    if (availableModels.some((model) => model.id === selectedModel)) {
+      return;
+    }
+
+    const preferredOpenAiModel =
+      openAiAuthKind === "api_key"
+        ? "openai/gpt-5.5"
+        : "openai-codex/gpt-5.5:reasoning=medium";
+    const replacement =
+      availableModels.find((model) => model.id === preferredOpenAiModel)?.id ??
+      availableModels[0].id;
+    onModelChange(replacement);
+  }, [
+    authMetaLoading,
+    connectedProviderKey,
+    onModelChange,
+    openAiAuthKind,
+    selectedModel,
+    useLocalKeys,
+  ]);
 
   useEffect(() => {
     if (!useLocalKeys || authMetaLoading || localImageGenerationProviders.length === 0) {
@@ -1418,7 +1468,9 @@ export function Settings({
       }
       const state = await refreshAuthStateSnapshot();
       // If no provider keys remain, switch back to proxy (managed) mode.
-      const anyKeyRemaining = state.providers.some((p) => p.has_key);
+      const anyKeyRemaining = state.providers.some(
+        (p) => p.has_key && (SHOW_ANTHROPIC_PROVIDER || p.id !== "anthropic"),
+      );
       if (!anyKeyRemaining && useLocalKeys) {
         await onUseLocalKeysChange(false);
       }
@@ -1931,7 +1983,14 @@ export function Settings({
         <SettingsGroup title="Intelligence">
           <SettingsRow label="Primary Model" icon={Cpu} wideControl>
             <div className="settings-row-dropdown w-full">
-              <ModelSelector wide selectedModel={selectedModel} onModelChange={onModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
+              <ModelSelector
+                wide
+                selectedModel={selectedModel}
+                onModelChange={onModelChange}
+                useLocalKeys={useLocalKeys}
+                connectedProviders={useLocalKeys ? connectedProviders : undefined}
+                openAiAuthKind={openAiAuthKind}
+              />
             </div>
           </SettingsRow>
           {!useLocalKeys && (
@@ -1993,19 +2052,18 @@ export function Settings({
                     onModelChange={onImageGenerationModelChange}
                     models={LOCAL_IMAGE_GENERATION_MODELS}
                     connectedProviders={localImageGenerationProviders}
+                    openAiAuthKind={openAiAuthKind}
                   />
                 </div>
               </SettingsRow>
               <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
-                Local image generation supports OpenAI and Google keys. Anthropic local keys accept
-                image input, but do not generate image output.
+                Local image generation supports OpenAI API keys and Google keys.
               </div>
             </>
           )}
           {useLocalKeys && !authMetaLoading && localImageGenerationProviders.length === 0 && (
             <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
-              Connect an OpenAI or Google API key to use local image generation. Anthropic local
-              keys accept image input, but do not generate image output.
+              Connect an OpenAI API key or Google key to use local image generation.
             </div>
           )}
           {useLocalKeys && !authMetaLoading && localTextToSpeechProviders.length > 0 && (
@@ -2017,6 +2075,7 @@ export function Settings({
                   onModelChange={onTextToSpeechModelChange}
                   models={LOCAL_TEXT_TO_SPEECH_MODELS}
                   connectedProviders={localTextToSpeechProviders}
+                  openAiAuthKind={openAiAuthKind}
                 />
               </div>
             </SettingsRow>
@@ -2035,6 +2094,7 @@ export function Settings({
                   onModelChange={onAudioUnderstandingModelChange}
                   models={LOCAL_AUDIO_UNDERSTANDING_MODELS}
                   connectedProviders={localAudioUnderstandingProviders}
+                  openAiAuthKind={openAiAuthKind}
                 />
               </div>
             </SettingsRow>
@@ -2273,6 +2333,8 @@ export function Settings({
 
         {useLocalKeys && (
           <>
+            {SHOW_ANTHROPIC_PROVIDER && (
+            <>
             {/* ── Anthropic ── */}
             <div className="px-4 pt-3 pb-1">
               <span className="text-[11px] font-medium uppercase tracking-wider text-[var(--text-tertiary)]">Anthropic</span>
@@ -2399,6 +2461,8 @@ export function Settings({
                 </SettingsRow>
               );
             })()}
+            </>
+            )}
 
             {/* ── OpenAI ── */}
             <div className="px-4 pt-3 pb-1">

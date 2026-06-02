@@ -47,19 +47,16 @@ export const LOCAL_MODELS: Model[] = [
   { id: "openrouter/openai/gpt-5.5", name: "GPT-5.5", provider: "OpenRouter", tier: "recommended" },
   { id: "openrouter/tencent/hy3-preview", name: "HY3 Preview", provider: "OpenRouter", tier: "premium" },
   { id: "openrouter/deepseek/deepseek-v3.2", name: "DeepSeek V3.2", provider: "OpenRouter", tier: "reasoning" },
-  // Anthropic — thinking-enabled variants first
-  { id: "anthropic/claude-opus-4.7:thinking", name: "Claude Opus 4.7 (Thinking)", provider: "Anthropic", tier: "premium" },
-  { id: "anthropic/claude-opus-4.7", name: "Claude Opus 4.7", provider: "Anthropic", tier: "premium" },
-  { id: "anthropic/claude-opus-4-6:thinking", name: "Claude Opus 4.6 (Thinking)", provider: "Anthropic", tier: "premium" },
-  { id: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6", provider: "Anthropic", tier: "premium" },
-  { id: "anthropic/claude-opus-4-5:thinking", name: "Claude Opus 4.5 (Thinking)", provider: "Anthropic", tier: "premium" },
-  { id: "anthropic/claude-opus-4-5", name: "Claude Opus 4.5", provider: "Anthropic", tier: "premium" },
-  { id: "anthropic/claude-sonnet-4-5-20250929:thinking", name: "Claude Sonnet 4.5 (Thinking)", provider: "Anthropic", tier: "recommended" },
-  { id: "anthropic/claude-sonnet-4-5-20250929", name: "Claude Sonnet 4.5", provider: "Anthropic", tier: "recommended" },
-  { id: "anthropic/claude-sonnet-4-20250514:thinking", name: "Claude Sonnet 4 (Thinking)", provider: "Anthropic", tier: "recommended" },
-  { id: "anthropic/claude-sonnet-4-20250514", name: "Claude Sonnet 4", provider: "Anthropic", tier: "recommended" },
-  { id: "anthropic/claude-haiku-3-5-20241022", name: "Claude Haiku 3.5", provider: "Anthropic", tier: "fast" },
+  // OpenAI (API key) — uses the openai/ provider prefix, authed by a standard sk- key.
+  { id: "openai/gpt-5.5", name: "GPT-5.5", provider: "OpenAI", tier: "recommended" },
+  { id: "openai/gpt-5.4", name: "GPT-5.4", provider: "OpenAI", tier: "recommended" },
+  { id: "openai/gpt-5.4-mini", name: "GPT-5.4 Mini", provider: "OpenAI", tier: "fast" },
+  { id: "openai/gpt-5.4-nano", name: "GPT-5.4 Nano", provider: "OpenAI", tier: "fast" },
   // OpenAI Codex — uses openai-codex/ provider prefix for OAuth auth-profiles
+  { id: "openai-codex/gpt-5.5:reasoning=xhigh", name: "GPT-5.5 (Extra High)", provider: "OpenAI", tier: "premium" },
+  { id: "openai-codex/gpt-5.5:reasoning=high", name: "GPT-5.5 (High)", provider: "OpenAI", tier: "premium" },
+  { id: "openai-codex/gpt-5.5:reasoning=medium", name: "GPT-5.5 (Medium)", provider: "OpenAI", tier: "recommended" },
+  { id: "openai-codex/gpt-5.5:reasoning=low", name: "GPT-5.5 (Low)", provider: "OpenAI", tier: "fast" },
   { id: "openai-codex/gpt-5.3-codex:reasoning=xhigh", name: "GPT-5.3 Codex (Extra High)", provider: "OpenAI", tier: "premium" },
   { id: "openai-codex/gpt-5.3-codex:reasoning=high", name: "GPT-5.3 Codex (High)", provider: "OpenAI", tier: "premium" },
   { id: "openai-codex/gpt-5.3-codex:reasoning=medium", name: "GPT-5.3 Codex (Medium)", provider: "OpenAI", tier: "premium" },
@@ -212,6 +209,8 @@ export const LOCAL_TEXT_TO_SPEECH_MODEL_IDS = new Set(
   LOCAL_TEXT_TO_SPEECH_MODELS.map((m) => m.id),
 );
 
+export type OpenAiLocalAuthKind = "api_key" | "codex";
+
 // Map provider display names to auth provider IDs
 const PROVIDER_AUTH_ID: Record<string, string> = {
   Anthropic: "anthropic",
@@ -220,6 +219,33 @@ const PROVIDER_AUTH_ID: Record<string, string> = {
   OpenRouter: "openrouter",
   Venice: "venice",
 };
+
+export function filterModelsForConnectedProviders(
+  models: Model[],
+  connectedProviders?: string[],
+  openAiAuthKind?: OpenAiLocalAuthKind | null,
+): Model[] {
+  if (!connectedProviders) {
+    return models;
+  }
+
+  return models.filter((model) => {
+    const providerId = PROVIDER_AUTH_ID[model.provider] ?? model.provider.toLowerCase();
+    if (!connectedProviders.includes(providerId)) {
+      return false;
+    }
+    if (providerId !== "openai") {
+      return true;
+    }
+    if (model.id.startsWith("openai-codex/")) {
+      return openAiAuthKind === "codex";
+    }
+    if (model.id.startsWith("openai/")) {
+      return openAiAuthKind === "api_key";
+    }
+    return true;
+  });
+}
 
 const TIER_ICONS: Record<string, typeof Zap> = {
   fast: Zap,
@@ -248,6 +274,7 @@ interface ModelSelectorProps {
   models?: Model[];
   /** Provider IDs that have keys configured (e.g. ["anthropic", "openai"]). When set, only matching providers are shown. */
   connectedProviders?: string[];
+  openAiAuthKind?: OpenAiLocalAuthKind | null;
 }
 
 export function ModelSelector({
@@ -258,12 +285,15 @@ export function ModelSelector({
   useLocalKeys = false,
   models,
   connectedProviders,
+  openAiAuthKind,
 }: ModelSelectorProps) {
   const allModels = models ?? (useLocalKeys ? LOCAL_MODELS : PROXY_MODELS);
   // Filter to only show models from providers the user has connected
-  const availableModels = connectedProviders && connectedProviders.length > 0
-    ? allModels.filter(m => connectedProviders.includes(PROVIDER_AUTH_ID[m.provider] ?? m.provider.toLowerCase()))
-    : allModels;
+  const availableModels = filterModelsForConnectedProviders(
+    allModels,
+    connectedProviders,
+    openAiAuthKind,
+  );
   const [isOpen, setIsOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);

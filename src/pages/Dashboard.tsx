@@ -443,7 +443,10 @@ type Props = {
 const DEFAULT_PROXY_MODEL = "openai/gpt-5.5";
 const DEFAULT_PROXY_ANTHROPIC_MODEL = "anthropic/claude-opus-4-6";
 const DEFAULT_PROXY_GOOGLE_MODEL = "google/gemini-3.1-pro-preview";
-const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
+// Local-keys default is OpenAI/Codex. The backend re-routes this to the model id that
+// matches the user's actual OpenAI credential (Codex OAuth → openai-codex/*, or a plain
+// sk- API key → openai/*), so this default works for both.
+const DEFAULT_LOCAL_MODEL = "openai-codex/gpt-5.5:reasoning=medium";
 const DEFAULT_PROXY_VISION_MODEL = "google/gemini-3.1-flash-image-preview";
 const DEFAULT_PROXY_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
 const DEFAULT_LOCAL_OPENAI_IMAGE_GENERATION_MODEL = "openai/gpt-image-1";

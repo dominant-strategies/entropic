@@ -28,7 +28,12 @@ export type RuntimeVersionInfo = {
 
 export type AuthStateSnapshot = {
   active_provider: string | null;
-  providers: Array<{ id: string; has_key: boolean; last4?: string | null }>;
+  providers: Array<{
+    id: string;
+    has_key: boolean;
+    last4?: string | null;
+    auth_kind?: "api_key" | "codex" | null;
+  }>;
 };
 
 export type SettingsWarmState = {

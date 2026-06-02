@@ -89,8 +89,13 @@ fn bytes_to_lower_hex(bytes: impl AsRef<[u8]>) -> String {
 }
 const CLIENT_LOG_READ_MAX_BYTES: usize = 512 * 1024;
 const DEFAULT_PROXY_GATEWAY_MODEL: &str = "openai/gpt-5.5";
-const DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL: &str = "anthropic/claude-opus-4-6:thinking";
-const DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL: &str = "openai-codex/gpt-5.3-codex";
+// OpenAI has two distinct local-key auth paths that take different model id prefixes:
+//   - Codex OAuth (ChatGPT sign-in) → `openai-codex/*` models (openai-codex auth profile)
+//   - A standard `sk-` API key       → `openai/*` models (openai auth profile)
+// Picking the wrong prefix for the available credential makes the gateway fail to
+// authenticate, so the default is resolved from the credential kind, not hardcoded.
+const DEFAULT_LOCAL_OPENAI_CODEX_GATEWAY_MODEL: &str = "openai-codex/gpt-5.5:reasoning=medium";
+const DEFAULT_LOCAL_OPENAI_APIKEY_GATEWAY_MODEL: &str = "openai/gpt-5.5";
 const DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL: &str = "google/gemini-2.5-pro";
 const DEFAULT_LOCAL_OPENROUTER_GATEWAY_MODEL: &str = "openrouter/free";
 const OPENROUTER_API_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -740,7 +745,6 @@ fn venice_provider_model_id(model: &str) -> String {
 
 fn local_gateway_model_key_provider(provider: &str) -> Option<&'static str> {
     match provider {
-        "anthropic" => Some("anthropic"),
         "openai" | "openai-codex" => Some("openai"),
         "google" => Some("google"),
         "openrouter" => Some("openrouter"),
@@ -748,13 +752,88 @@ fn local_gateway_model_key_provider(provider: &str) -> Option<&'static str> {
     }
 }
 
-fn default_local_gateway_model_for_provider(provider: &str) -> &'static str {
+/// Which OpenAI local-key auth path the user has configured.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenAiAuthKind {
+    /// Standard `sk-...` API key → `openai/*` models via the `openai` auth profile.
+    ApiKey,
+    /// Codex OAuth (ChatGPT sign-in) access token → `openai-codex/*` models.
+    Codex,
+    /// No OpenAI credential configured.
+    None,
+}
+
+fn openai_auth_kind(api_keys: &HashMap<String, String>) -> OpenAiAuthKind {
+    match api_keys
+        .get("openai")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        None => OpenAiAuthKind::None,
+        // Standard OpenAI API keys are `sk-...` (including `sk-proj-...`). Codex OAuth
+        // access tokens are JWTs that are NOT valid as OPENAI_API_KEY and instead drive
+        // the `openai-codex` auth profile. This mirrors the env-passing logic that only
+        // exports OPENAI_API_KEY for `sk-` values.
+        Some(value) if value.starts_with("sk-") => OpenAiAuthKind::ApiKey,
+        Some(_) => OpenAiAuthKind::Codex,
+    }
+}
+
+/// Default OpenAI local model for the configured credential kind.
+fn default_local_openai_model(api_keys: &HashMap<String, String>) -> &'static str {
+    match openai_auth_kind(api_keys) {
+        OpenAiAuthKind::ApiKey => DEFAULT_LOCAL_OPENAI_APIKEY_GATEWAY_MODEL,
+        OpenAiAuthKind::Codex | OpenAiAuthKind::None => DEFAULT_LOCAL_OPENAI_CODEX_GATEWAY_MODEL,
+    }
+}
+
+/// Map any requested OpenAI-family model onto a form the configured OpenAI credential
+/// can actually authenticate (Codex OAuth → `openai-codex/*`; `sk-` API key → `openai/*`).
+/// Returns `None` when no OpenAI credential is configured, so the caller can fall
+/// through to another provider.
+fn normalize_openai_local_model(
+    requested_model: &str,
+    api_keys: &HashMap<String, String>,
+) -> Option<String> {
+    let base_model = model_base_ref(requested_model);
+    match openai_auth_kind(api_keys) {
+        OpenAiAuthKind::None => None,
+        OpenAiAuthKind::Codex => {
+            // Already a Codex id → keep as-is (preserves any :reasoning= suffix).
+            if requested_model.starts_with("openai-codex/") {
+                return Some(requested_model.to_string());
+            }
+            // Map known `openai/*` ids onto their Codex equivalents.
+            let mapped = match base_model {
+                "openai/gpt-5.5" => "openai-codex/gpt-5.5:reasoning=medium",
+                "openai/gpt-5.3-codex" => "openai-codex/gpt-5.3-codex:reasoning=medium",
+                "openai/gpt-5.2" => "openai-codex/gpt-5.2:reasoning=medium",
+                "openai/gpt-5.2-codex" => "openai-codex/gpt-5.2-codex:reasoning=medium",
+                _ => DEFAULT_LOCAL_OPENAI_CODEX_GATEWAY_MODEL,
+            };
+            Some(mapped.to_string())
+        }
+        OpenAiAuthKind::ApiKey => {
+            // A standard API key drives `openai/*` models directly. It cannot use the
+            // Codex OAuth profile, so `openai-codex/*` requests are downgraded to a
+            // known-good `openai/*` default rather than failing to authenticate.
+            if requested_model.starts_with("openai/") {
+                return Some(requested_model.to_string());
+            }
+            Some(DEFAULT_LOCAL_OPENAI_APIKEY_GATEWAY_MODEL.to_string())
+        }
+    }
+}
+
+fn default_local_gateway_model_for_provider(
+    provider: &str,
+    api_keys: &HashMap<String, String>,
+) -> String {
     match provider {
-        "anthropic" => DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL,
-        "openai" | "openai-codex" => DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL,
-        "google" => DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL,
-        "openrouter" => DEFAULT_LOCAL_OPENROUTER_GATEWAY_MODEL,
-        _ => DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL,
+        "openai" | "openai-codex" => default_local_openai_model(api_keys).to_string(),
+        "google" => DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL.to_string(),
+        "openrouter" => DEFAULT_LOCAL_OPENROUTER_GATEWAY_MODEL.to_string(),
+        _ => default_local_openai_model(api_keys).to_string(),
     }
 }
 
@@ -768,13 +847,13 @@ fn choose_local_gateway_provider(
         }
     }
 
-    for provider in ["anthropic", "openai", "google", "openrouter"] {
+    for provider in ["openai", "google", "openrouter"] {
         if has_configured_provider_key(api_keys, provider) {
             return provider;
         }
     }
 
-    "anthropic"
+    "openai"
 }
 
 fn normalize_local_gateway_model(
@@ -798,19 +877,15 @@ fn normalize_local_gateway_model(
                             }
                         }
                     }
-                    "openai-codex" if has_configured_provider_key(api_keys, "openai") => {
-                        return requested_model.to_string();
-                    }
-                    "openai" if has_configured_provider_key(api_keys, "openai") => {
-                        let base_model = model_base_ref(requested_model);
-                        let mapped = match base_model {
-                            "openai/gpt-5.5" => "openai-codex/gpt-5.5:reasoning=medium",
-                            "openai/gpt-5.3-codex" => "openai-codex/gpt-5.3-codex:reasoning=medium",
-                            "openai/gpt-5.2" => "openai-codex/gpt-5.2:reasoning=medium",
-                            "openai/gpt-5.2-codex" => "openai-codex/gpt-5.2-codex:reasoning=medium",
-                            _ => DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL,
-                        };
-                        return mapped.to_string();
+                    "openai" | "openai-codex" => {
+                        // Route to whichever OpenAI auth path the user actually has,
+                        // remapping the prefix if needed. Falls through to another
+                        // provider when no OpenAI credential is configured.
+                        if let Some(mapped) =
+                            normalize_openai_local_model(requested_model, api_keys)
+                        {
+                            return mapped;
+                        }
                     }
                     _ => {}
                 }
@@ -819,7 +894,7 @@ fn normalize_local_gateway_model(
     }
 
     let fallback_provider = choose_local_gateway_provider(active_provider, api_keys);
-    default_local_gateway_model_for_provider(fallback_provider).to_string()
+    default_local_gateway_model_for_provider(fallback_provider, api_keys)
 }
 
 fn local_image_generation_provider_name(provider: &str) -> &str {
@@ -2594,8 +2669,17 @@ fn runtime_release_repo() -> String {
 
 const DEFAULT_RUNTIME_MANIFEST_NAME: &str = "runtime-manifest.json";
 const RUNTIME_MANIFEST_MAX_AGE_SECS: u64 = 60 * 60; // 1 hour
-const RUNTIME_TAR_MAX_TIME_SECS: u16 = 600; // 10 minutes
-const RUNTIME_TAR_SETUP_MAX_TIME_SECS: u16 = 180; // 3 minutes
+                                                    // The runtime tar is large (~1.2-1.9 GB). The total-time cap is only a safety net;
+                                                    // genuinely stalled transfers are aborted much sooner via the stall limit below.
+                                                    // A hard 10-minute cap silently failed for users on slower/fluctuating connections,
+                                                    // surfacing as "OpenClaw runtime image not available".
+const RUNTIME_TAR_MAX_TIME_SECS: u16 = 3600; // 60 minutes (safety net only)
+const RUNTIME_TAR_SETUP_MAX_TIME_SECS: u16 = 3600; // 60 minutes (safety net only)
+                                                   // Abort a download only when it makes effectively no progress (< 1 KiB/s) for this
+                                                   // long. This lets slow-but-steady connections finish a multi-GB download instead of
+                                                   // being killed by a fixed total-time budget.
+const RUNTIME_DOWNLOAD_STALL_LIMIT_SECS: u16 = 120;
+const RUNTIME_DOWNLOAD_STALL_MIN_BYTES_PER_SEC: u32 = 1024;
 const APP_MANIFEST_CACHE_NAME: &str = "entropic-app-latest.json";
 const APP_MANIFEST_MAX_AGE_SECS: u64 = 60 * 60; // 1 hour
 
@@ -2866,10 +2950,13 @@ fn download_url_to_path(
     retries: u8,
     connect_timeout_secs: u16,
     max_time_secs: u16,
+    resume_partial: bool,
 ) -> Result<(), String> {
     let retries_str = retries.to_string();
     let connect_timeout_str = connect_timeout_secs.to_string();
     let max_time_str = max_time_secs.to_string();
+    let stall_limit_str = RUNTIME_DOWNLOAD_STALL_LIMIT_SECS.to_string();
+    let stall_min_bytes_str = RUNTIME_DOWNLOAD_STALL_MIN_BYTES_PER_SEC.to_string();
     let mut curl_cmd = Command::new("curl");
     curl_cmd
         .arg("-fL")
@@ -2877,13 +2964,30 @@ fn download_url_to_path(
         .arg(&retries_str)
         .arg("--retry-delay")
         .arg("2")
+        // Retry even when the connection is refused (transient GitHub/CDN hiccups).
+        .arg("--retry-connrefused")
         .arg("--connect-timeout")
         .arg(&connect_timeout_str)
+        // Total-time cap is a generous safety net for large downloads and the real
+        // timeout for small manifest fetches.
         .arg("--max-time")
         .arg(&max_time_str)
         .arg("-o")
         .arg(output_path)
         .arg(url);
+    if resume_partial {
+        curl_cmd
+            // Resume an interrupted partial download instead of restarting from zero.
+            // Integrity is still verified by sha256 (manifest path) after the transfer.
+            .arg("-C")
+            .arg("-")
+            // Abort only on a genuine stall (no meaningful progress), not on a slow but
+            // steadily-progressing multi-GB transfer.
+            .arg("--speed-limit")
+            .arg(&stall_min_bytes_str)
+            .arg("--speed-time")
+            .arg(&stall_limit_str);
+    }
     apply_windows_no_window(&mut curl_cmd);
     let curl = curl_cmd.output();
 
@@ -2892,13 +2996,25 @@ fn download_url_to_path(
         Ok(out) => {
             let curl_stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let wget_tries = format!("--tries={}", retries.max(1));
-            let wget_timeout = format!("--timeout={}", max_time_secs);
             let mut wget_cmd = Command::new("wget");
+            if resume_partial {
+                // -c resumes an interrupted partial download instead of restarting.
+                wget_cmd.arg("-c");
+                // Abort a stalled read after the stall limit instead of capping total time,
+                // so slow-but-steady multi-GB downloads can complete.
+                wget_cmd
+                    .arg(format!("--connect-timeout={}", connect_timeout_secs))
+                    .arg(format!(
+                        "--read-timeout={}",
+                        RUNTIME_DOWNLOAD_STALL_LIMIT_SECS
+                    ));
+            } else {
+                wget_cmd.arg(format!("--timeout={}", max_time_secs));
+            }
             wget_cmd
                 .arg("-O")
                 .arg(output_path)
                 .arg(&wget_tries)
-                .arg(&wget_timeout)
                 .arg(url);
             apply_windows_no_window(&mut wget_cmd);
             let wget = wget_cmd.output();
@@ -2916,13 +3032,25 @@ fn download_url_to_path(
         }
         Err(cerr) => {
             let wget_tries = format!("--tries={}", retries.max(1));
-            let wget_timeout = format!("--timeout={}", max_time_secs);
             let mut wget_cmd = Command::new("wget");
+            if resume_partial {
+                // -c resumes an interrupted partial download instead of restarting.
+                wget_cmd.arg("-c");
+                // Abort a stalled read after the stall limit instead of capping total time,
+                // so slow-but-steady multi-GB downloads can complete.
+                wget_cmd
+                    .arg(format!("--connect-timeout={}", connect_timeout_secs))
+                    .arg(format!(
+                        "--read-timeout={}",
+                        RUNTIME_DOWNLOAD_STALL_LIMIT_SECS
+                    ));
+            } else {
+                wget_cmd.arg(format!("--timeout={}", max_time_secs));
+            }
             wget_cmd
                 .arg("-O")
                 .arg(output_path)
                 .arg(&wget_tries)
-                .arg(&wget_timeout)
                 .arg(url);
             apply_windows_no_window(&mut wget_cmd);
             let wget = wget_cmd.output();
@@ -3064,7 +3192,7 @@ fn fetch_runtime_manifest_to_cache() -> Result<RuntimeReleaseManifest, String> {
         .ok_or_else(|| "Could not resolve runtime manifest partial path".to_string())?;
     let _ = fs::remove_file(&partial_path);
 
-    download_url_to_path(&manifest_url, &partial_path, 1, 3, 10).map_err(|e| {
+    download_url_to_path(&manifest_url, &partial_path, 1, 3, 10, false).map_err(|e| {
         format!(
             "Runtime manifest download failed.\n\
              • URL: {}\n\
@@ -3156,7 +3284,7 @@ fn fetch_app_manifest_to_cache() -> Result<AppReleaseManifest, String> {
         .ok_or_else(|| "Could not resolve app manifest partial path".to_string())?;
     let _ = fs::remove_file(&partial_path);
 
-    download_url_to_path(&manifest_url, &partial_path, 1, 3, 10).map_err(|e| {
+    download_url_to_path(&manifest_url, &partial_path, 1, 3, 10, false).map_err(|e| {
         format!(
             "App manifest download failed.\n\
              • URL: {}\n\
@@ -3302,7 +3430,7 @@ fn download_runtime_tar_to_cache_from_url(
         .ok_or_else(|| "Could not resolve runtime cache partial path".to_string())?;
     let _ = fs::remove_file(&partial_path);
 
-    download_url_to_path(url, &partial_path, 2, 10, max_time_secs).map_err(|e| {
+    download_url_to_path(url, &partial_path, 2, 10, max_time_secs, true).map_err(|e| {
         format!(
             "Runtime tar download failed.\n\
              • URL: {}\n\
@@ -3358,16 +3486,47 @@ fn download_runtime_tar_from_manifest_to_cache(max_time_secs: u16) -> Result<Pat
 
     let partial_path = runtime_cached_tar_partial_path()
         .ok_or_else(|| "Could not resolve runtime cache partial path".to_string())?;
-    let _ = fs::remove_file(&partial_path);
+    // Intentionally keep any existing .partial so an interrupted multi-GB download
+    // resumes (curl -C - / wget -c) across app launches. Integrity is verified by the
+    // sha256 check below; a stale/mismatched partial fails that check and is removed,
+    // so the next attempt restarts cleanly.
+    //
+    // If a previous run finished the download but crashed before renaming, the partial
+    // is already complete: salvage it directly rather than asking the server to resume
+    // past EOF (which would 416-error). Only hash the partial when its size already
+    // matches the expected size, so an incomplete partial isn't re-hashed every launch.
+    let partial_is_complete = manifest
+        .selected_runtime_size_bytes()
+        .and_then(|expected| partial_path.metadata().ok().map(|m| m.len() == expected))
+        .unwrap_or(false);
+    if partial_is_complete
+        && runtime_cached_tar_matches_sha(&partial_path, &manifest.sha256).unwrap_or(false)
+    {
+        if let Err(e) = fs::rename(&partial_path, &final_path) {
+            println!(
+                "[Entropic] Failed to promote completed runtime partial ({} -> {}): {}",
+                partial_path.display(),
+                final_path.display(),
+                e
+            );
+        } else {
+            if let Some(checksum_path) = runtime_cached_tar_checksum_path() {
+                let _ = fs::write(checksum_path, format!("{}\n", manifest.sha256));
+            }
+            return Ok(final_path);
+        }
+    }
 
-    download_url_to_path(&manifest.url, &partial_path, 2, 10, max_time_secs).map_err(|e| {
-        format!(
-            "Runtime tar download failed for manifest version {}.\n\
+    download_url_to_path(&manifest.url, &partial_path, 2, 10, max_time_secs, true).map_err(
+        |e| {
+            format!(
+                "Runtime tar download failed for manifest version {}.\n\
              • URL: {}\n\
              • {}",
-            manifest.version, manifest.url, e
-        )
-    })?;
+                manifest.version, manifest.url, e
+            )
+        },
+    )?;
 
     let partial_meta = partial_path.metadata().map_err(|e| {
         format!(
@@ -4152,23 +4311,37 @@ fn ensure_runtime_image() -> Result<(), String> {
         ));
     }
 
-    let mut error = String::from(
-        "OpenClaw runtime image not available.\n\
-         • No cached or bundled runtime image tar found.\n",
-    );
+    let mut error = String::from("OpenClaw runtime image could not be prepared.\n");
     if let Some(sync_err) = runtime_tar_sync_error {
-        error.push_str("• Runtime download from entropic-releases failed:\n");
+        // The normal path on a fresh install is downloading the runtime image from the
+        // GitHub release. Surface why it failed so users know to retry / check network
+        // rather than thinking a registry must be configured.
+        error.push_str("• Downloading the runtime image failed:\n");
         for line in sync_err.lines() {
             error.push_str("  ");
             error.push_str(line);
             error.push('\n');
         }
-        error.push_str("• Check network, VPN, firewall, or GitHub release access and retry.\n");
+        error.push_str(
+            "• This is usually a slow or interrupted connection. The download resumes \
+             where it left off, so retrying often succeeds.\n",
+        );
+        error.push_str(&format!("• Source: {}\n", runtime_manifest_url()));
+        error.push_str("• If you are behind a VPN/firewall/proxy, allow github.com and its release CDN, then retry.\n");
+    } else {
+        // No download error recorded: either a local/cached tar was found but could not
+        // be loaded into Docker, or the download reported success without yielding a
+        // usable tar. Point at the likely culprits.
+        error.push_str("• No usable runtime image tar was found and the runtime image is not loaded in Docker.\n");
+        error.push_str(&format!(
+            "• Expected download source: {}\n",
+            runtime_manifest_url()
+        ));
+        error.push_str(
+            "• Make sure Docker/Colima is running, then retry to re-download the runtime image.\n",
+        );
     }
-    error.push_str(
-        "• Registry pull fallback is disabled (set OPENCLAW_RUNTIME_REGISTRY to enable).\n\
-         • To build locally: ./scripts/build-openclaw-runtime.sh",
-    );
+    error.push_str("• Advanced: set OPENCLAW_RUNTIME_REGISTRY to pull from a container registry, or build locally with ./scripts/build-openclaw-runtime.sh");
     Err(error)
 }
 
@@ -4684,6 +4857,7 @@ pub struct AuthProviderStatus {
     pub id: String,
     pub has_key: bool,
     pub last4: Option<String>,
+    pub auth_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -10840,7 +11014,10 @@ fn build_oauth_auth_profiles(stored: &StoredAuth) -> serde_json::Value {
     let anthropic_meta = stored.oauth_metadata.get("anthropic");
     let anthropic_key = stored.keys.get("anthropic");
     if let (Some(meta), Some(access_token)) = (anthropic_meta, anthropic_key) {
-        if meta.source == "claude_code" && !access_token.is_empty() {
+        if meta.source == "claude_code"
+            && !access_token.is_empty()
+            && access_token.starts_with("sk-ant-oat01-")
+        {
             println!(
                 "[Entropic] Writing Anthropic OAuth credentials to auth-profiles.json (token len={})",
                 access_token.len()
@@ -10861,7 +11038,10 @@ fn build_oauth_auth_profiles(stored: &StoredAuth) -> serde_json::Value {
     let openai_meta = stored.oauth_metadata.get("openai");
     let openai_key = stored.keys.get("openai");
     if let (Some(meta), Some(access_token)) = (openai_meta, openai_key) {
-        if meta.source == "openai_codex" && !access_token.is_empty() {
+        if meta.source == "openai_codex"
+            && !access_token.is_empty()
+            && !access_token.starts_with("sk-")
+        {
             println!(
                 "[Entropic] Writing OpenAI Codex OAuth credentials to auth-profiles.json (token len={})",
                 access_token.len()
@@ -13754,9 +13934,7 @@ pub async fn set_api_key(
     let mut stored = load_auth(&app);
     stored.keys = keys.clone();
     stored.active_provider = active.clone();
-    if is_empty {
-        stored.oauth_metadata.remove(&provider);
-    }
+    stored.oauth_metadata.remove(&provider);
     save_auth(&app, &stored)?;
     Ok(())
 }
@@ -13796,10 +13974,20 @@ pub async fn get_auth_state(state: State<'_, AppState>) -> Result<AuthState, Str
                     None
                 }
             });
+            let auth_kind = if id == "openai" {
+                match openai_auth_kind(&keys) {
+                    OpenAiAuthKind::ApiKey => Some("api_key".to_string()),
+                    OpenAiAuthKind::Codex => Some("codex".to_string()),
+                    OpenAiAuthKind::None => None,
+                }
+            } else {
+                None
+            };
             AuthProviderStatus {
                 id: id.to_string(),
                 has_key: keys.contains_key(id),
                 last4,
+                auth_kind,
             }
         })
         .collect();
@@ -13889,13 +14077,12 @@ async fn start_gateway_inner(
 
     let gateway_token = expected_gateway_token(app)?;
 
-    let has_any_local_api_key = has_configured_provider_key(&api_keys, "anthropic")
-        || has_configured_provider_key(&api_keys, "openai")
+    let has_any_local_api_key = has_configured_provider_key(&api_keys, "openai")
         || has_configured_provider_key(&api_keys, "google")
         || has_configured_provider_key(&api_keys, "openrouter");
     if !has_any_local_api_key {
         return Err(
-            "No local API key configured. Add an Anthropic/OpenAI/Google/OpenRouter key in Settings, or sign in and disable 'Use Local Keys'."
+            "No local API key configured. Add an OpenAI/Google/OpenRouter key (or sign in with Codex) in Settings, or sign in and disable 'Use Local Keys'."
                 .to_string(),
         );
     }
