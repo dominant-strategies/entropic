@@ -635,6 +635,31 @@ function sleep(ms: number) {
   });
 }
 
+const OFFICE_MISSING_FILE_RETRY_DELAYS_MS = [0, 400, 800, 1200, 1800, 2600];
+
+function isWorkspaceOfficeFileMissingError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.toLowerCase().includes("workspace office file not found or not readable");
+}
+
+async function createOnlyOfficeSessionWithMissingFileRetry(path: string) {
+  let lastError: unknown = null;
+  for (const delayMs of OFFICE_MISSING_FILE_RETRY_DELAYS_MS) {
+    if (delayMs > 0) {
+      await sleep(delayMs);
+    }
+    try {
+      return await createOnlyOfficeSession(path);
+    } catch (error) {
+      lastError = error;
+      if (!isWorkspaceOfficeFileMissingError(error)) {
+        throw error;
+      }
+    }
+  }
+  throw lastError ?? new Error("Workspace office file not found or not readable.");
+}
+
 function browserCommandTimeoutMessage(command: string) {
   return `Browser command \`${command}\` timed out after ${Math.round(BROWSER_CLIENT_REQUEST_TIMEOUT_MS / 1000)}s. The runtime browser service may still be launching or stuck.`;
 }
@@ -3261,6 +3286,20 @@ export function Files({
     }
   }
 
+  function removeOfficeRecent(kind: OfficeAppKind, path: string) {
+    switch (kind) {
+      case "sheets":
+        setSheetsRecent((current) => current.filter((entry) => entry.path !== path));
+        return;
+      case "docs":
+        setDocsRecent((current) => current.filter((entry) => entry.path !== path));
+        return;
+      case "slides":
+        setSlidesRecent((current) => current.filter((entry) => entry.path !== path));
+        return;
+    }
+  }
+
   function openOfficeAppHomeInChat() {
     createNewChatSession();
   }
@@ -3275,7 +3314,7 @@ export function Files({
     try {
       setError(null);
       clientLog("office.open.start", { appKind: officeKind, path: entry.path });
-      const session = await createOnlyOfficeSession(entry.path);
+      const session = await createOnlyOfficeSessionWithMissingFileRetry(entry.path);
       const nextSession: OfficeAppSession = {
         path: entry.path,
         name: session.fileName || entry.name,
@@ -3307,7 +3346,12 @@ export function Files({
         path: entry.path,
         error: e instanceof Error ? e.message : String(e),
       });
-      setError(`Failed to start ONLYOFFICE: ${e instanceof Error ? e.message : String(e)}`);
+      if (isWorkspaceOfficeFileMissingError(e)) {
+        removeOfficeRecent(officeKind, entry.path);
+        setError(`Workspace office file is no longer available: ${entry.path}`);
+      } else {
+        setError(`Failed to start ONLYOFFICE: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
     return true;
   }

@@ -368,6 +368,30 @@ function workspacePathExtension(path: string): string {
   return workspacePathName(path).split(".").pop()?.toLowerCase() || "";
 }
 
+async function workspaceFileExists(path: string): Promise<boolean> {
+  const normalized = normalizeChatWorkspacePath(path) ?? path;
+  const name = workspacePathName(normalized);
+  if (!name || name === "Workspace") return false;
+  return invoke<boolean>("workspace_file_exists", { path: normalized });
+}
+
+async function waitForWorkspaceFile(path: string, timeoutMs = 8000): Promise<boolean> {
+  const startedAt = Date.now();
+  let delayMs = 250;
+  while (Date.now() - startedAt <= timeoutMs) {
+    try {
+      if (await workspaceFileExists(path)) {
+        return true;
+      }
+    } catch {
+      // The gateway may still be finishing the command that creates the file.
+    }
+    await delay(delayMs);
+    delayMs = Math.min(1000, Math.round(delayMs * 1.5));
+  }
+  return false;
+}
+
 function officeWorkspaceFileMeta(path: string):
   | { kind: "docs"; label: "Word document"; appLabel: "Docs"; Icon: ComponentType<{ className?: string }>; accent: string }
   | { kind: "sheets"; label: "Excel workbook"; appLabel: "Sheets"; Icon: ComponentType<{ className?: string }>; accent: string }
@@ -5252,15 +5276,27 @@ export function Chat({
         if (pendingOfficeOpen) {
           delete workspaceOfficeOpenByRunIdRef.current[eventRunId];
           addDiag(`workspace office auto-open path=${pendingOfficeOpen.path}`);
-          clientLog("chat.office.auto_open", {
-            runId: eventRunId,
-            path: pendingOfficeOpen.path,
-          });
-          void handoffWorkspacePathToDesktop({
-            path: pendingOfficeOpen.path,
-            action: "open",
-            looksLikeFile: true,
-          });
+          void (async () => {
+            const ready = await waitForWorkspaceFile(pendingOfficeOpen.path);
+            clientLog("chat.office.auto_open", {
+              runId: eventRunId,
+              path: pendingOfficeOpen.path,
+              ready,
+            });
+            if (!ready) {
+              clientLog("chat.office.auto_open.skipped_missing", {
+                runId: eventRunId,
+                path: pendingOfficeOpen.path,
+              });
+              setError(`Workspace file is not available yet: ${pendingOfficeOpen.path}`);
+              return;
+            }
+            await handoffWorkspacePathToDesktop({
+              path: pendingOfficeOpen.path,
+              action: "open",
+              looksLikeFile: true,
+            });
+          })();
         }
         const revertModel = runRevertModelRef.current[eventRunId];
         if (revertModel && currentSessionRef.current && clientRef.current) {

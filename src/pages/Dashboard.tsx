@@ -456,6 +456,7 @@ const DEFAULT_LOCAL_AUDIO_UNDERSTANDING_MODEL = "google/gemini-3-flash-preview";
 const DEFAULT_PROXY_TEXT_TO_SPEECH_MODEL = "venice/tts-kokoro";
 const DEFAULT_LOCAL_TEXT_TO_SPEECH_MODEL = "openai/gpt-4o-mini-tts";
 const GATEWAY_FAILURE_THRESHOLD = 3;
+const GATEWAY_UNHEALTHY_RECOVERY_THRESHOLD = 6;
 const FEEDBACK_FORM_URL = entropicSitePath("/feedback");
 
 function stripModelParams(model: string) {
@@ -733,7 +734,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const retryTimeoutRef = useRef<number | null>(null);
   const retryIntervalRef = useRef<number | null>(null);
   const runtimeAutoRefreshAttemptedRef = useRef(false);
-  const runtimeAutoCleanupAttemptedRef = useRef(false);
+  const gatewayUnhealthyRecoveryInFlightRef = useRef(false);
+  const gatewayUnhealthyRestartAttemptedRef = useRef(false);
   const fullSyncRef = useRef(false);
   const [providerSwitchConfirm, setProviderSwitchConfirm] = useState<{
     oldProvider: string;
@@ -791,6 +793,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }
 
   function markGatewayStopped() {
+    gatewayUnhealthyRestartAttemptedRef.current = false;
     setAwaitingChatConnection(false);
     setGatewayLifecycleMode("idle");
     updateGatewayState({
@@ -813,6 +816,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }
 
   function markGatewayReady(mode: GatewayLaunchMode) {
+    gatewayUnhealthyRestartAttemptedRef.current = false;
     setGatewayLifecycleMode("idle");
     updateGatewayState({
       gatewayRunning: true,
@@ -1280,6 +1284,16 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     );
   }
 
+  function isGatewayCrashLoopError(message: string): boolean {
+    const text = message.toLowerCase();
+    return (
+      text.includes("gateway container is crash-looping") ||
+      text.includes("container is restarting") ||
+      text.includes("exit_code=9") ||
+      text.includes("oom_killed=true")
+    );
+  }
+
   function shouldAutoRefreshRuntime(message: string): boolean {
     const text = message.toLowerCase();
     return (
@@ -1330,31 +1344,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     await checkGateway();
   }
 
-  async function tryAutoRecoverRuntime(message: string): Promise<"cleanup" | "refresh" | null> {
+  async function tryAutoRecoverRuntime(message: string): Promise<"refresh" | null> {
     if (!shouldAutoRefreshRuntime(message)) {
       return null;
-    }
-
-    if (!runtimeAutoCleanupAttemptedRef.current) {
-      runtimeAutoCleanupAttemptedRef.current = true;
-      try {
-        setStartupError({
-          message: "Repairing sandbox runtime and retrying startup...",
-        });
-        setShowGatewayStartup(true);
-        setGatewayStartupStage("launch");
-        markGatewayStopped();
-        try {
-          await invoke("stop_gateway");
-        } catch (error) {
-          console.warn("[Entropic] Failed to stop gateway before automatic runtime repair:", error);
-        }
-        await invoke("reset_isolated_runtime");
-        runtimeAutoRefreshAttemptedRef.current = false;
-        return "cleanup";
-      } catch (error) {
-        console.warn("[Entropic] Automatic runtime cleanup failed:", error);
-      }
     }
 
     if (await tryAutoRefreshRuntime(message)) {
@@ -1533,7 +1525,6 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       gatewayHealthFailureStreakRef.current = 0;
       markGatewayReady("proxy");
       runtimeAutoRefreshAttemptedRef.current = false;
-      runtimeAutoCleanupAttemptedRef.current = false;
       clearGatewayRetry();
       setStartupError(null);
       setGatewayStartupStage("idle");
@@ -1618,6 +1609,30 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           ],
         });
         clearGatewayRetry();
+        setGatewayStartupStage("idle");
+        setShowGatewayStartup(false);
+        setGatewayLifecycleMode("idle");
+        return false;
+      }
+
+      if (isGatewayCrashLoopError(message)) {
+        setStartupError({
+          message,
+          actions: [
+            {
+              label: "Open Settings",
+              onClick: () => setCurrentPage("settings"),
+            },
+            {
+              label: "Retry",
+              onClick: () => {
+                void startGatewayProxyFlow({ model, image, stopFirst: true, allowRetry: false });
+              },
+            },
+          ],
+        });
+        clearGatewayRetry();
+        markGatewayStopped();
         setGatewayStartupStage("idle");
         setShowGatewayStartup(false);
         setGatewayLifecycleMode("idle");
@@ -1893,6 +1908,75 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     imageModel,
   ]);
 
+  async function recoverStaleUnhealthyGateway(
+    liveBootstrap: AppBootstrapState | null,
+    failureStreak: number,
+    source: string,
+  ): Promise<boolean> {
+    const containerRunning =
+      liveBootstrap?.gatewayContainerRunning ?? bootstrapState.gatewayContainerRunning;
+    const launchMode = liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode;
+    const healthStatus =
+      liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus;
+    const isUnhealthy = healthStatus.trim().toLowerCase() === "unhealthy";
+    const recoveryMode: GatewayLaunchMode = useLocalKeys || !isAuthConfigured ? "local" : "proxy";
+
+    if (
+      !containerRunning ||
+      launchMode === "stopped" ||
+      !isUnhealthy ||
+      failureStreak < GATEWAY_UNHEALTHY_RECOVERY_THRESHOLD ||
+      gatewayUnhealthyRestartAttemptedRef.current ||
+      gatewayUnhealthyRecoveryInFlightRef.current ||
+      isTogglingGateway ||
+      startGatewayInFlightRef.current
+    ) {
+      return false;
+    }
+
+    gatewayUnhealthyRestartAttemptedRef.current = true;
+    gatewayUnhealthyRecoveryInFlightRef.current = true;
+    clearGatewayRetry();
+    setIsTogglingGateway(true);
+    setStartupError({
+      message: "Gateway stopped responding; restarting sandbox gateway...",
+    });
+    setShowGatewayStartup(true);
+    setGatewayStartupStage("launch");
+    markGatewayStarting(recoveryMode);
+    setGatewayLifecycleMode("restarting");
+
+    console.warn(
+      `[Entropic] Gateway has been unhealthy for ${failureStreak} health checks (${source}); restarting as ${recoveryMode} gateway (container was ${launchMode}).`,
+    );
+
+    try {
+      if (recoveryMode === "proxy") {
+        return await startGatewayProxyFlow({
+          model: selectedModelRef.current,
+          image: imageModelRef.current,
+          stopFirst: true,
+          allowRetry: false,
+        });
+      }
+
+      await invoke("restart_gateway", { model: selectedModelRef.current });
+      completeGatewayReady("local");
+      return true;
+    } catch (error) {
+      const message = extractGatewayStartError(error);
+      console.error("[Entropic] Failed to recover unhealthy gateway:", error);
+      setStartupError({ message });
+      setGatewayStartupStage("idle");
+      setShowGatewayStartup(false);
+      setGatewayLifecycleMode("idle");
+      return false;
+    } finally {
+      gatewayUnhealthyRecoveryInFlightRef.current = false;
+      setIsTogglingGateway(false);
+    }
+  }
+
   async function checkGateway(): Promise<boolean> {
     try {
       const running = await getGatewayStatusCached({ force: true });
@@ -1925,6 +2009,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         console.warn(
           `[Entropic] Gateway health transient miss (${failureStreak}/${GATEWAY_FAILURE_THRESHOLD}); keeping running state`
         );
+        return true;
+      }
+
+      if (await recoverStaleUnhealthyGateway(liveBootstrap, failureStreak, "health miss")) {
         return true;
       }
 
@@ -1976,6 +2064,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         console.warn(
           `[Entropic] Gateway status check error treated as transient (${failureStreak}/${GATEWAY_FAILURE_THRESHOLD})`
         );
+        return true;
+      }
+
+      if (await recoverStaleUnhealthyGateway(liveBootstrap, failureStreak, "health error")) {
         return true;
       }
 
@@ -2701,6 +2793,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
   }
 
+  const showBlockingStartupOverlay = showGatewayStartup && currentPage !== "settings";
+  const showStartupNotice = Boolean(
+    startupError && (!showGatewayStartup || currentPage === "settings"),
+  );
+  const startupNoticeTitle = showGatewayStartup ? "Sandbox Startup" : "Gateway Start Failed";
+
   return (
     <Layout
       currentPage={currentPage}
@@ -2752,7 +2850,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           </div>
         </div>
       )}
-      {showGatewayStartup && (
+      {showBlockingStartupOverlay && (
         <SandboxStartupOverlay
           stage={gatewayStartupStage}
           retryIn={gatewayRetryIn}
@@ -2761,9 +2859,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           showFirstTimeHint
         />
       )}
-      {!showGatewayStartup && startupError && (
+      {showStartupNotice && startupError && (
         <div className="absolute right-4 top-4 z-40 w-[min(28rem,calc(100%-2rem))] rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-sm text-[var(--text-primary)] shadow-lg">
-          <div className="font-medium">Gateway Start Failed</div>
+          <div className="font-medium">{startupNoticeTitle}</div>
           <div className="mt-1 text-xs">{startupError.message}</div>
           <div className="mt-3 flex flex-wrap gap-2">
             {startupError.actions && startupError.actions.length > 0 && startupError.actions.map((action) => (

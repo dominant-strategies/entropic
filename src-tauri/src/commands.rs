@@ -13157,6 +13157,236 @@ fn container_is_restarting() -> bool {
         .eq_ignore_ascii_case("true")
 }
 
+fn gateway_container_inspect() -> Option<serde_json::Value> {
+    let output = docker_command()
+        .args(["inspect", OPENCLAW_CONTAINER])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let inspected: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).ok()?;
+    inspected.into_iter().next()
+}
+
+fn gateway_container_state_summary(inspected: &serde_json::Value) -> String {
+    let state = inspected.get("State").and_then(|value| value.as_object());
+    let config = inspected.get("Config").and_then(|value| value.as_object());
+    let image = config
+        .and_then(|cfg| cfg.get("Image"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let status = state
+        .and_then(|s| s.get("Status"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let restarting = state
+        .and_then(|s| s.get("Restarting"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let oom_killed = state
+        .and_then(|s| s.get("OOMKilled"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let exit_code = state
+        .and_then(|s| s.get("ExitCode"))
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+    let error = state
+        .and_then(|s| s.get("Error"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let started_at = state
+        .and_then(|s| s.get("StartedAt"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let finished_at = state
+        .and_then(|s| s.get("FinishedAt"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let restart_count = inspected
+        .get("RestartCount")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+    let id = inspected
+        .get("Id")
+        .and_then(|value| value.as_str())
+        .map(|value| value.chars().take(12).collect::<String>())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    format!(
+        "container={} image={} status={} restarting={} restart_count={} exit_code={} oom_killed={} started_at={} finished_at={} error={}",
+        id,
+        image,
+        status,
+        restarting,
+        restart_count,
+        exit_code,
+        oom_killed,
+        started_at,
+        finished_at,
+        if error.trim().is_empty() { "none" } else { error.trim() }
+    )
+}
+
+fn gateway_container_log_tail() -> Option<String> {
+    let output = docker_command()
+        .args(["logs", "--tail", "80", OPENCLAW_CONTAINER])
+        .output()
+        .ok()?;
+    let mut combined = String::new();
+    if !output.stdout.is_empty() {
+        combined.push_str(&String::from_utf8_lossy(&output.stdout));
+    }
+    if !output.stderr.is_empty() {
+        if !combined.ends_with('\n') && !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    let trimmed = combined.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn sanitize_gateway_diagnostic_line(line: &str) -> String {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("token")
+        || lower.contains("api_key")
+        || lower.contains("authorization")
+        || lower.contains("bearer ")
+        || lower.contains("secret")
+    {
+        return "[redacted log line containing credential-like text]".to_string();
+    }
+
+    const MAX_LINE_CHARS: usize = 500;
+    let mut clipped = String::new();
+    for (idx, ch) in line.chars().enumerate() {
+        if idx >= MAX_LINE_CHARS {
+            clipped.push_str("...");
+            break;
+        }
+        clipped.push(ch);
+    }
+    clipped
+}
+
+fn sanitize_gateway_log_tail(raw: &str) -> String {
+    raw.lines()
+        .rev()
+        .take(40)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(sanitize_gateway_diagnostic_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn append_client_log_block(header: &str, body: &str) {
+    let _ = append_client_log_line(header);
+    for line in body.lines() {
+        let _ = append_client_log_line(&format!("  {}", line));
+    }
+}
+
+fn record_gateway_container_diagnostics(context: &str, inspected: &serde_json::Value) -> String {
+    let summary = gateway_container_state_summary(inspected);
+    let _ = append_client_log_line(&format!(
+        "gateway container diagnostics [{}]: {}",
+        context, summary
+    ));
+    println!(
+        "[Entropic] Gateway container diagnostics [{}]: {}",
+        context, summary
+    );
+
+    if let Some(log_tail) = gateway_container_log_tail() {
+        let sanitized = sanitize_gateway_log_tail(&log_tail);
+        if !sanitized.trim().is_empty() {
+            append_client_log_block(
+                &format!("gateway container log tail [{}]:", context),
+                &sanitized,
+            );
+            println!(
+                "[Entropic] Gateway container log tail [{}]:\n{}",
+                context, sanitized
+            );
+        }
+    }
+
+    summary
+}
+
+fn push_gateway_recreate_reason(reasons: &mut Vec<String>, reason: impl Into<String>) {
+    reasons.push(reason.into());
+}
+
+fn log_gateway_recreate_decision(context: &str, reasons: &[String]) {
+    let reason_summary = if reasons.is_empty() {
+        "unknown config mismatch".to_string()
+    } else {
+        reasons.join(", ")
+    };
+    let state_summary = gateway_container_inspect()
+        .map(|inspected| gateway_container_state_summary(&inspected))
+        .unwrap_or_else(|| "container state unavailable".to_string());
+    let message = format!(
+        "gateway container recreate requested [{}]: {}; {}",
+        context, reason_summary, state_summary
+    );
+    let _ = append_client_log_line(&message);
+    println!("[Entropic] {}", message);
+}
+
+fn gateway_crash_loop_error(context: &str, initial_error: &str) -> Option<String> {
+    let inspected = gateway_container_inspect()?;
+    let state = inspected.get("State").and_then(|value| value.as_object());
+    let status = state
+        .and_then(|s| s.get("Status"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let restarting = state
+        .and_then(|s| s.get("Restarting"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let exit_code = state
+        .and_then(|s| s.get("ExitCode"))
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+    let oom_killed = state
+        .and_then(|s| s.get("OOMKilled"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let restart_count = inspected
+        .get("RestartCount")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+    let crashed = restarting
+        || oom_killed
+        || restart_count >= 2
+        || (!matches!(status, "running" | "created") && exit_code != 0);
+
+    if !crashed {
+        return None;
+    }
+
+    let summary = record_gateway_container_diagnostics(context, &inspected);
+    let kill_hint = if exit_code == 9 || oom_killed {
+        " Exit code 9/OOM usually means the sandbox process was killed during boot; increase Entropic runtime memory in Settings > Runtime, restart the sandbox, and retry."
+    } else {
+        ""
+    };
+    Some(append_colima_runtime_hint(format!(
+        "{}: gateway container is crash-looping before it can accept connections ({}). Initial health error: {}.{}",
+        context, summary, initial_error, kill_hint
+    )))
+}
+
 fn should_tolerate_gateway_startup_error(err: &str) -> bool {
     gateway_health_error_is_startup_transient(err)
         && container_running()
@@ -13165,6 +13395,9 @@ fn should_tolerate_gateway_startup_error(err: &str) -> bool {
 }
 
 fn finish_health_wait_or_tolerate_starting(err: String, context: &str) -> Result<(), String> {
+    if let Some(crash_error) = gateway_crash_loop_error(context, &err) {
+        return Err(crash_error);
+    }
     if should_tolerate_gateway_startup_error(&err) {
         println!(
             "[Entropic] {}: {} (continuing; container still warming up)",
@@ -13248,6 +13481,13 @@ async fn recover_gateway_health_inner(
     if let Err(initial) = wait_for_gateway_health_strict(token, 12).await {
         let mut initial_error = initial;
 
+        if let Some(crash_error) = gateway_crash_loop_error(
+            &format!("{} failed initial health check", label),
+            &initial_error,
+        ) {
+            return Err(crash_error);
+        }
+
         // If the runtime booted with an older config shape, force-write the latest
         // control UI settings before attempting longer waits/restarts.
         if gateway_health_error_suggests_control_ui_auth(&initial_error) {
@@ -13314,6 +13554,12 @@ async fn recover_gateway_health_inner(
                 }
             } else if matches!(health_status.as_deref(), Some("unhealthy")) || !container_running()
             {
+                if let Some(crash_error) = gateway_crash_loop_error(
+                    &format!("{} failed health check before restart", label),
+                    &initial_error,
+                ) {
+                    return Err(crash_error);
+                }
                 println!(
                     "[Entropic] {} health check failed with container state {:?}; attempting restart: {}",
                     label, health_status, initial_error
@@ -14166,6 +14412,75 @@ async fn start_gateway_inner(
             (Some(current), Some(latest)) => current == latest,
             _ => true,
         };
+        let mut recreate_reasons = Vec::new();
+        if is_proxy_container {
+            push_gateway_recreate_reason(&mut recreate_reasons, "existing container is proxy-mode");
+        }
+        if !auth_type_matches {
+            push_gateway_recreate_reason(
+                &mut recreate_reasons,
+                "local Anthropic auth type changed",
+            );
+        }
+        if current_gateway_token.as_deref() != Some(gateway_token.as_str()) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "gateway token changed");
+        }
+        if current_schema.as_deref() != Some(ENTROPIC_GATEWAY_SCHEMA_VERSION) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "gateway schema changed");
+        }
+        if current_model.as_deref() != Some(base_model) {
+            push_gateway_recreate_reason(
+                &mut recreate_reasons,
+                format!(
+                    "model changed current={} expected={}",
+                    current_model.as_deref().unwrap_or("<unset>"),
+                    base_model
+                ),
+            );
+        }
+        if current_browser_host_port.as_deref() != Some(BROWSER_SERVICE_HOST_PORT) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "browser host port changed");
+        }
+        if current_browser_headful.as_deref() != Some("1") {
+            push_gateway_recreate_reason(&mut recreate_reasons, "browser headful mode changed");
+        }
+        if current_browser_allow_unsafe_no_sandbox.as_deref()
+            != Some(BROWSER_ALLOW_UNSAFE_NO_SANDBOX)
+        {
+            push_gateway_recreate_reason(
+                &mut recreate_reasons,
+                "browser unsafe no-sandbox setting changed",
+            );
+        }
+        if current_browser_allow_insecure_secure_contexts.as_deref()
+            != Some(BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS)
+        {
+            push_gateway_recreate_reason(
+                &mut recreate_reasons,
+                "browser insecure secure-context setting changed",
+            );
+        }
+        if current_onlyoffice_public_base.as_deref() != Some(ONLYOFFICE_PUBLIC_BASE_URL) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "OnlyOffice public base changed");
+        }
+        if current_onlyoffice_internal_base.as_deref() != Some(ONLYOFFICE_INTERNAL_BASE_URL) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "OnlyOffice internal base changed");
+        }
+        if current_onlyoffice_upstream_base.as_deref() != Some(ONLYOFFICE_UPSTREAM_BASE_URL) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "OnlyOffice upstream base changed");
+        }
+        if current_onlyoffice_jwt_secret.as_deref() != Some(onlyoffice_jwt_secret.as_str()) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "OnlyOffice JWT secret changed");
+        }
+        if current_onlyoffice_user_name.as_deref() != Some(onlyoffice_user_name.as_str()) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "OnlyOffice user name changed");
+        }
+        if current_openclaw_home.as_deref() != Some("/home/node") {
+            push_gateway_recreate_reason(&mut recreate_reasons, "OPENCLAW_HOME changed");
+        }
+        if !image_matches_latest {
+            push_gateway_recreate_reason(&mut recreate_reasons, "runtime image changed");
+        }
         if !is_proxy_container
             && auth_type_matches
             && current_gateway_token.as_deref() == Some(gateway_token.as_str())
@@ -14196,11 +14511,16 @@ async fn start_gateway_inner(
                         "[Entropic] Matching gateway container failed health check; recreating: {}",
                         err
                     );
+                    push_gateway_recreate_reason(
+                        &mut recreate_reasons,
+                        format!("matching config failed health check: {}", err),
+                    );
                 }
             }
         }
 
         // Container config doesn't match — recreate it.
+        log_gateway_recreate_decision("local start", &recreate_reasons);
         let _ = docker_command()
             .args(["rm", "-f", OPENCLAW_CONTAINER])
             .output();
@@ -14214,6 +14534,10 @@ async fn start_gateway_inner(
         .map_err(|e| format!("Failed to check container: {}", e))?;
 
     if !check_all.stdout.is_empty() {
+        log_gateway_recreate_decision(
+            "local start stopped container cleanup",
+            &["stopped gateway container exists".to_string()],
+        );
         let _ = docker_command()
             .args(["rm", "-f", OPENCLAW_CONTAINER])
             .output();
@@ -14425,7 +14749,9 @@ async fn start_gateway_inner(
 
     // Apply persisted settings to the fresh container
     let settings_started = Instant::now();
-    apply_agent_settings(app, state)?;
+    apply_agent_settings(app, state).map_err(|err| {
+        gateway_crash_loop_error("Gateway failed during post-launch config", &err).unwrap_or(err)
+    })?;
     println!(
         "[Entropic] Startup timing: post_launch_config={}ms",
         settings_started.elapsed().as_millis()
@@ -14744,6 +15070,78 @@ async fn start_gateway_with_proxy_inner(
             _ => true,
         };
         let token_matches = current_token.as_deref() == Some(gateway_token.as_str());
+        let mut recreate_reasons = Vec::new();
+        if !proxy_matches {
+            push_gateway_recreate_reason(&mut recreate_reasons, "proxy API base changed");
+        }
+        if !web_base_matches {
+            push_gateway_recreate_reason(&mut recreate_reasons, "proxy web base changed");
+        }
+        if !gateway_token_matches {
+            push_gateway_recreate_reason(&mut recreate_reasons, "gateway token changed");
+        }
+        if !schema_matches {
+            push_gateway_recreate_reason(&mut recreate_reasons, "gateway schema changed");
+        }
+        if !model_matches {
+            push_gateway_recreate_reason(
+                &mut recreate_reasons,
+                format!(
+                    "model changed current={} expected={}",
+                    current_model.as_deref().unwrap_or("<unset>"),
+                    runtime_model_ref
+                ),
+            );
+        }
+        if !image_matches {
+            push_gateway_recreate_reason(&mut recreate_reasons, "image model changed");
+        }
+        if !container_image_matches_latest {
+            push_gateway_recreate_reason(&mut recreate_reasons, "runtime image changed");
+        }
+        if !token_matches {
+            push_gateway_recreate_reason(&mut recreate_reasons, "proxy API token changed");
+        }
+        if current_browser_host_port.as_deref() != Some(BROWSER_SERVICE_HOST_PORT) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "browser host port changed");
+        }
+        if current_browser_headful.as_deref() != Some("1") {
+            push_gateway_recreate_reason(&mut recreate_reasons, "browser headful mode changed");
+        }
+        if current_browser_allow_unsafe_no_sandbox.as_deref()
+            != Some(BROWSER_ALLOW_UNSAFE_NO_SANDBOX)
+        {
+            push_gateway_recreate_reason(
+                &mut recreate_reasons,
+                "browser unsafe no-sandbox setting changed",
+            );
+        }
+        if current_browser_allow_insecure_secure_contexts.as_deref()
+            != Some(BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS)
+        {
+            push_gateway_recreate_reason(
+                &mut recreate_reasons,
+                "browser insecure secure-context setting changed",
+            );
+        }
+        if current_onlyoffice_public_base.as_deref() != Some(ONLYOFFICE_PUBLIC_BASE_URL) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "OnlyOffice public base changed");
+        }
+        if current_onlyoffice_internal_base.as_deref() != Some(ONLYOFFICE_INTERNAL_BASE_URL) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "OnlyOffice internal base changed");
+        }
+        if current_onlyoffice_upstream_base.as_deref() != Some(ONLYOFFICE_UPSTREAM_BASE_URL) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "OnlyOffice upstream base changed");
+        }
+        if current_onlyoffice_jwt_secret.as_deref() != Some(onlyoffice_jwt_secret.as_str()) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "OnlyOffice JWT secret changed");
+        }
+        if current_onlyoffice_user_name.as_deref() != Some(onlyoffice_user_name.as_str()) {
+            push_gateway_recreate_reason(&mut recreate_reasons, "OnlyOffice user name changed");
+        }
+        if current_openclaw_home.as_deref() != Some("/home/node") {
+            push_gateway_recreate_reason(&mut recreate_reasons, "OPENCLAW_HOME changed");
+        }
 
         if proxy_matches
             && web_base_matches
@@ -14799,6 +15197,7 @@ async fn start_gateway_with_proxy_inner(
             println!("[Entropic] OPENROUTER_API_KEY changed; tearing down proxy container to apply new credentials.");
         }
         // Remove running container to ensure proxy config/model updates take effect
+        log_gateway_recreate_decision("proxy start", &recreate_reasons);
         let _ = docker_command()
             .args(["rm", "-f", OPENCLAW_CONTAINER])
             .output();
@@ -14813,6 +15212,10 @@ async fn start_gateway_with_proxy_inner(
 
     if !check_all.stdout.is_empty() {
         // Remove existing container to recreate with new proxy config
+        log_gateway_recreate_decision(
+            "proxy start stopped container cleanup",
+            &["stopped gateway container exists".to_string()],
+        );
         let _ = docker_command()
             .args(["rm", "-f", OPENCLAW_CONTAINER])
             .output();
@@ -14899,7 +15302,10 @@ async fn start_gateway_with_proxy_inner(
 
     // Apply persisted settings
     let settings_started = Instant::now();
-    apply_agent_settings(app, state)?;
+    apply_agent_settings(app, state).map_err(|err| {
+        gateway_crash_loop_error("Proxy gateway failed during post-launch config", &err)
+            .unwrap_or(err)
+    })?;
     println!(
         "[Entropic] Startup timing (proxy): post_launch_config={}ms",
         settings_started.elapsed().as_millis()
@@ -15033,6 +15439,13 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
     if !gateway_container_exists(true) {
         println!("[Entropic] Container not running");
         return Ok(false);
+    }
+
+    if let Some(health_status) = container_health_status() {
+        if health_status == "unhealthy" {
+            println!("[Entropic] Container health status is unhealthy; skipping operator probe");
+            return Ok(false);
+        }
     }
 
     let ws_url = gateway_ws_url();
@@ -18478,6 +18891,18 @@ pub async fn list_workspace_files(path: String) -> Result<Vec<WorkspaceFileEntry
         });
     }
     Ok(entries)
+}
+
+#[tauri::command]
+pub async fn workspace_file_exists(path: String) -> Result<bool, String> {
+    let container = running_gateway_container_name()
+        .ok_or_else(|| "OpenClaw runtime is not running. Start the sandbox first.".to_string())?;
+    let sanitized = sanitize_workspace_path(&path)?;
+    if sanitized.is_empty() {
+        return Ok(false);
+    }
+    let full_path = format!("{}/{}", WORKSPACE_ROOT, sanitized);
+    Ok(resolve_workspace_regular_file_path(container, &full_path, "File not found").is_ok())
 }
 
 #[tauri::command]

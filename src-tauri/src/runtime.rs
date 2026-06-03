@@ -3217,32 +3217,20 @@ fi
             )));
         }
 
-        let mut auto_reset_attempted = false;
         if allow_auto_reset && self.should_auto_reset_isolated_runtime(&reason) {
-            auto_reset_attempted = true;
             debug_log(
-                "Detected Colima state likely recoverable via isolated runtime reset; attempting one-time auto-reset",
+                "Detected Colima state that may need an isolated runtime reset; refusing automatic reset because it removes sandbox workspace data",
             );
-            match self.reset_isolated_colima_runtime() {
-                Ok(()) => {
-                    debug_log("Auto-reset succeeded; retrying Colima startup once");
-                    return self.start_colima_internal(false);
-                }
-                Err(e) => {
-                    reason = format!(
-                        "{}\n\nEntropic attempted an automatic isolated runtime reset, but it failed: {}",
-                        reason, e
-                    );
-                }
-            }
+            reason = format!(
+                "{}\n\nEntropic detected isolated runtime state that may need a reset, but did not reset it automatically because that removes the sandbox workspace stored in the runtime.",
+                reason
+            );
         }
 
         let heading = if fell_back_from_vz && last_failed_profile == Some(ENTROPIC_QEMU_PROFILE) {
-            "VZ was unavailable and qemu startup failed. To reset Entropic's isolated runtime:"
-        } else if auto_reset_attempted {
-            "Entropic attempted an automatic isolated runtime reset. If this keeps happening, run a manual reset for Entropic's isolated runtime:"
+            "VZ was unavailable and qemu startup failed. To reset Entropic's isolated runtime, including its sandbox workspace data, run:"
         } else {
-            "If this keeps happening, run a manual reset for Entropic's isolated runtime:"
+            "If this keeps happening, you can manually reset Entropic's isolated runtime. This removes the sandbox workspace data stored in that runtime:"
         };
         let profile_to_reset = last_failed_profile.unwrap_or(ENTROPIC_VZ_PROFILE);
         let reset_commands = self

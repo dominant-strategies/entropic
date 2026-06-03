@@ -324,6 +324,7 @@ pub fn run() {
             commands::warm_onlyoffice_if_installed,
             commands::create_onlyoffice_session,
             commands::list_workspace_files,
+            commands::workspace_file_exists,
             commands::create_workspace_directory,
             commands::create_workspace_file,
             commands::read_workspace_file,
