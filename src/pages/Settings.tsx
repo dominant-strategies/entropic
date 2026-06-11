@@ -113,6 +113,13 @@ type RuntimeFetchResult = {
   cache_path: string;
 };
 
+type RuntimeCacheClearResult = {
+  cache_dir?: string | null;
+  removed_paths: string[];
+  missing_paths: string[];
+  errors: string[];
+};
+
 const RESET_STORE_FILES = [
   "entropic-auth.json",
   "entropic-settings.json",
@@ -758,6 +765,7 @@ export function Settings({
   const [runtimeVersionLoading, setRuntimeVersionLoading] = useState(false);
   const [authMetaLoading, setAuthMetaLoading] = useState(false);
   const [runtimeFetchLoading, setRuntimeFetchLoading] = useState(false);
+  const [runtimeCacheClearLoading, setRuntimeCacheClearLoading] = useState(false);
   const [appUpdateState, setAppUpdateState] = useState<UpdaterStatus | null>(() => readUpdaterStatus());
   const [appUpdateNotice, setAppUpdateNotice] = useState<string | null>(null);
   const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
@@ -1580,6 +1588,37 @@ export function Settings({
       setGatewayConfigError(`Failed to heal gateway config: ${detail}`);
     } finally {
       setGatewayConfigActionLoading(false);
+    }
+  }
+
+  async function handleClearRuntimeCache() {
+    const confirmed = await ask(
+      "Clear the cached OpenClaw runtime image and manifest? Entropic will download the runtime image again the next time setup or sandbox startup needs it.",
+      {
+        title: "Clear Runtime Cache",
+        kind: "warning",
+        okLabel: "Clear Cache",
+        cancelLabel: "Cancel",
+      }
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setRuntimeCacheClearLoading(true);
+    try {
+      const result = await invoke<RuntimeCacheClearResult>("clear_openclaw_runtime_cache");
+      invoke<RuntimeVersionInfo>("get_runtime_version_info").then(setRuntimeVersionInfo).catch(() => {});
+      const summary =
+        `Removed: ${result.removed_paths.length}\n` +
+        `Already missing: ${result.missing_paths.length}\n` +
+        (result.cache_dir ? `Cache: ${result.cache_dir}\n` : "") +
+        (result.errors.length > 0 ? `\nWarnings:\n${result.errors.join("\n")}` : "");
+      alert(`Runtime cache cleared.\n\n${summary}`);
+    } catch (err) {
+      alert("Failed to clear runtime cache: " + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setRuntimeCacheClearLoading(false);
     }
   }
 
@@ -2881,39 +2920,53 @@ export function Settings({
                     : ""}
                 </div>
               )}
-              <button
-                onClick={async () => {
-                  setRuntimeFetchLoading(true);
-                  try {
-                    const result = await invoke<RuntimeFetchResult>("fetch_latest_openclaw_runtime");
-                    invoke<RuntimeVersionInfo>("get_runtime_version_info").then(setRuntimeVersionInfo).catch(() => {});
-                    const shortCommit = result.runtime_openclaw_commit
-                      ? ` (${result.runtime_openclaw_commit.slice(0, 7)})`
-                      : "";
-                    alert(
-                      "Runtime cache updated.\n\n" +
-                        `Version: ${result.runtime_version}${shortCommit}\n` +
-                        (result.runtime_download_asset_name
-                          ? `Asset: ${result.runtime_download_asset_name}\n`
-                          : "") +
-                        (typeof result.runtime_download_size_bytes === "number"
-                          ? `Download: ${formatBytes(result.runtime_download_size_bytes)}\n`
-                          : "") +
-                        `SHA256: ${result.runtime_sha256}\n` +
-                        `Path: ${result.cache_path}`
-                    );
-                  } catch (err) {
-                    alert("Failed to fetch latest runtime: " + (err instanceof Error ? err.message : String(err)));
-                  } finally {
-                    setRuntimeFetchLoading(false);
-                  }
-                }}
-                disabled={runtimeFetchLoading}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                {runtimeFetchLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                {runtimeFetchLoading ? "Fetching..." : "Fetch Latest Runtime"}
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={async () => {
+                    setRuntimeFetchLoading(true);
+                    try {
+                      const result = await invoke<RuntimeFetchResult>("fetch_latest_openclaw_runtime");
+                      invoke<RuntimeVersionInfo>("get_runtime_version_info").then(setRuntimeVersionInfo).catch(() => {});
+                      const shortCommit = result.runtime_openclaw_commit
+                        ? ` (${result.runtime_openclaw_commit.slice(0, 7)})`
+                        : "";
+                      alert(
+                        "Runtime cache updated.\n\n" +
+                          `Version: ${result.runtime_version}${shortCommit}\n` +
+                          (result.runtime_download_asset_name
+                            ? `Asset: ${result.runtime_download_asset_name}\n`
+                            : "") +
+                          (typeof result.runtime_download_size_bytes === "number"
+                            ? `Download: ${formatBytes(result.runtime_download_size_bytes)}\n`
+                            : "") +
+                          `SHA256: ${result.runtime_sha256}\n` +
+                          `Path: ${result.cache_path}`
+                      );
+                    } catch (err) {
+                      alert("Failed to fetch latest runtime: " + (err instanceof Error ? err.message : String(err)));
+                    } finally {
+                      setRuntimeFetchLoading(false);
+                    }
+                  }}
+                  disabled={runtimeFetchLoading || runtimeCacheClearLoading}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {runtimeFetchLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {runtimeFetchLoading ? "Fetching..." : "Fetch Latest Runtime"}
+                </button>
+                <button
+                  onClick={() => void handleClearRuntimeCache()}
+                  disabled={runtimeFetchLoading || runtimeCacheClearLoading}
+                  className="px-4 py-2 border border-[var(--border-primary)] bg-[var(--bg-card)] hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {runtimeCacheClearLoading ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="w-4 h-4" />
+                  )}
+                  {runtimeCacheClearLoading ? "Clearing..." : "Clear Runtime Cache"}
+                </button>
+              </div>
             </div>
           </div>
 

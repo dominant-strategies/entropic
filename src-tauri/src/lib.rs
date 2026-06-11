@@ -215,6 +215,7 @@ pub fn run() {
             commands::check_runtime_status,
             commands::get_runtime_version_info,
             commands::fetch_latest_openclaw_runtime,
+            commands::clear_openclaw_runtime_cache,
             commands::append_client_log,
             commands::read_client_log,
             commands::clear_client_log,

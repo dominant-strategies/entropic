@@ -2903,6 +2903,49 @@ fn app_cached_manifest_partial_path() -> Option<PathBuf> {
     runtime_cache_dir().map(|dir| dir.join("entropic-app-latest.json.partial"))
 }
 
+fn runtime_image_cache_artifact_paths() -> Vec<PathBuf> {
+    [
+        runtime_cached_tar_path(),
+        runtime_cached_tar_partial_path(),
+        runtime_cached_tar_checksum_path(),
+        runtime_cached_manifest_path(),
+        runtime_cached_manifest_partial_path(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn path_is_runtime_cached_tar(path: &Path) -> bool {
+    runtime_cached_tar_path()
+        .as_deref()
+        .map(|cached| cached == path)
+        .unwrap_or(false)
+}
+
+fn clear_runtime_image_cache_files() -> RuntimeCacheClearResult {
+    let mut removed_paths = Vec::new();
+    let mut missing_paths = Vec::new();
+    let mut errors = Vec::new();
+
+    for path in runtime_image_cache_artifact_paths() {
+        match fs::remove_file(&path) {
+            Ok(()) => removed_paths.push(path.display().to_string()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                missing_paths.push(path.display().to_string());
+            }
+            Err(err) => errors.push(format!("{}: {}", path.display(), err)),
+        }
+    }
+
+    RuntimeCacheClearResult {
+        cache_dir: runtime_cache_dir().map(|path| path.display().to_string()),
+        removed_paths,
+        missing_paths,
+        errors,
+    }
+}
+
 fn runtime_cached_tar_valid() -> bool {
     let Some(path) = runtime_cached_tar_path() else {
         return false;
@@ -3407,6 +3450,35 @@ fn runtime_cached_tar_matches_sha(tar_path: &Path, expected_sha: &str) -> Result
         return Ok(true);
     }
     Ok(false)
+}
+
+/// Full re-hash of the cached runtime tar against the cached manifest, bypassing the
+/// mtime-based checksum marker. Used after a failed docker load to distinguish a
+/// corrupted cache (clear and re-download) from an environmental failure (keep the
+/// cache — re-downloading the same bytes would not help).
+fn cached_runtime_tar_hash_mismatch(tar_path: &Path) -> bool {
+    let Some(manifest) = read_cached_runtime_manifest() else {
+        return false;
+    };
+    match sha256_for_file(tar_path) {
+        Ok(actual) => {
+            let mismatch = actual != manifest.sha256;
+            if mismatch {
+                println!(
+                    "[Entropic] Cached runtime tar hash mismatch (expected {}, actual {}).",
+                    manifest.sha256, actual
+                );
+            }
+            mismatch
+        }
+        Err(err) => {
+            println!(
+                "[Entropic] Failed to hash cached runtime tar after load failure: {}",
+                err
+            );
+            true
+        }
+    }
 }
 
 fn download_runtime_tar_to_cache_from_url(
@@ -4083,7 +4155,11 @@ fn load_runtime_from_tar(tar_path: &Path) -> Result<bool, String> {
     }
     let stderr = String::from_utf8_lossy(&load.stderr);
     println!("[Entropic] docker load failed: {}", stderr);
-    Ok(false)
+    Err(format!(
+        "docker load failed for {}: {}",
+        tar_path.display(),
+        stderr.trim()
+    ))
 }
 
 fn load_scanner_from_tar(tar_path: &Path) -> Result<bool, String> {
@@ -4183,7 +4259,43 @@ fn download_scanner_tar_from_release(scanner_image: &str) -> Result<(), String> 
     Err("Scanner image not found after download and load".to_string())
 }
 
+fn docker_daemon_ready() -> bool {
+    docker_command()
+        .args(["info", "--format", "{{.ServerVersion}}"])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+fn wait_for_docker_daemon(max_attempts: usize, delay: Duration) -> bool {
+    for attempt in 1..=max_attempts {
+        if docker_daemon_ready() {
+            return true;
+        }
+        if attempt < max_attempts {
+            println!(
+                "[Entropic] Docker daemon not responding (attempt {}/{}). Retrying...",
+                attempt, max_attempts
+            );
+            std::thread::sleep(delay);
+        }
+    }
+    false
+}
+
 fn ensure_runtime_image() -> Result<(), String> {
+    // Everything below (image inspect, docker load, registry pull) needs the Docker
+    // daemon. Fail fast with a clear message instead of downloading a multi-GB tar
+    // that cannot be loaded anyway.
+    if !wait_for_docker_daemon(5, Duration::from_secs(1)) {
+        return Err(String::from(
+            "OpenClaw runtime image could not be prepared.\n\
+             • Docker is not responding (the daemon is not running or still starting).\n\
+             • Start Docker Desktop or Colima — or wait for Entropic's isolated runtime to finish starting — then retry.\n\
+             • The runtime image download was skipped until Docker is reachable.",
+        ));
+    }
+
     if cfg!(debug_assertions) && runtime_image_id()?.is_some() {
         println!(
                 "[Entropic] Debug build detected; using local runtime image and skipping bundled runtime tar reload."
@@ -4192,8 +4304,12 @@ fn ensure_runtime_image() -> Result<(), String> {
     }
 
     let local_runtime_tar = find_local_runtime_tar();
+    let has_local_runtime_tar = local_runtime_tar.is_some();
     let local_image_present = runtime_image_id()?.is_some();
     let mut runtime_tar_sync_error: Option<String> = None;
+    let mut runtime_tar_load_error: Option<String> = None;
+    let mut cached_runtime_tar_invalid = false;
+    let mut tar_load_attempted = false;
     if local_runtime_tar.is_none() {
         if let Err(sync_err) =
             download_runtime_tar_to_cache(!local_image_present, RUNTIME_TAR_MAX_TIME_SECS)
@@ -4228,34 +4344,93 @@ fn ensure_runtime_image() -> Result<(), String> {
     let mut require_local_reload = false;
 
     if let Some(tar_path) = runtime_tar_path.as_ref() {
-        let tar_signature = bundled_runtime_signature_from_manifest(tar_path).map_err(|e| {
-            println!("[Entropic] Failed to read bundled runtime signature: {}", e);
-            e
-        });
-
-        if let Ok(tar_signature) = tar_signature {
-            let local_image_id = runtime_image_id()?;
-            if let Some(local_image_id) = local_image_id {
-                let local_signature = local_image_id
-                    .trim()
-                    .trim_start_matches("sha256:")
-                    .to_string();
-                if local_signature == tar_signature {
-                    return Ok(());
-                }
-                require_local_reload = true;
-                println!(
+        match bundled_runtime_signature_from_manifest(tar_path) {
+            Ok(tar_signature) => {
+                let local_image_id = runtime_image_id()?;
+                if let Some(local_image_id) = local_image_id {
+                    let local_signature = local_image_id
+                        .trim()
+                        .trim_start_matches("sha256:")
+                        .to_string();
+                    if local_signature == tar_signature {
+                        return Ok(());
+                    }
+                    require_local_reload = true;
+                    println!(
                     "[Entropic] Runtime image signature changed (local: {}, bundled: {}). Reloading bundled runtime image.",
                     local_signature, tar_signature
                 );
-            }
+                }
 
-            if load_runtime_from_tar(tar_path)? {
-                return Ok(());
+                tar_load_attempted = true;
+                match load_runtime_from_tar(tar_path) {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    Err(err) => {
+                        println!("[Entropic] Runtime tar load failed: {}", err);
+                        // A cached tar whose bytes no longer match the manifest is
+                        // corrupt: clear it and re-download once. If the hash still
+                        // matches, the failure is environmental — keep the cache.
+                        if !has_local_runtime_tar
+                            && path_is_runtime_cached_tar(tar_path)
+                            && cached_runtime_tar_hash_mismatch(tar_path)
+                        {
+                            cached_runtime_tar_invalid = true;
+                        }
+                        runtime_tar_load_error = Some(err);
+                    }
+                }
+            }
+            Err(err) => {
+                println!(
+                    "[Entropic] Failed to read bundled runtime signature: {}",
+                    err
+                );
+                if !has_local_runtime_tar && path_is_runtime_cached_tar(tar_path) {
+                    cached_runtime_tar_invalid = true;
+                }
+                runtime_tar_load_error = Some(err);
             }
         }
 
         println!("[Entropic] Falling back to docker image lookup/pull flow for runtime image.");
+    }
+
+    if cached_runtime_tar_invalid {
+        println!(
+            "[Entropic] Cached runtime tar is not readable. Clearing cache and retrying download once."
+        );
+        let clear_result = clear_runtime_image_cache_files();
+        if !clear_result.errors.is_empty() {
+            println!(
+                "[Entropic] Runtime cache clear warnings: {}",
+                clear_result.errors.join(" | ")
+            );
+        }
+        match download_runtime_tar_to_cache(true, RUNTIME_TAR_MAX_TIME_SECS) {
+            Ok(recovered_tar) => {
+                runtime_tar_sync_error = None;
+                runtime_tar_path = Some(recovered_tar.clone());
+                tar_load_attempted = true;
+                match load_runtime_from_tar(&recovered_tar) {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    Err(err) => {
+                        println!(
+                            "[Entropic] Runtime tar load failed after cache recovery: {}",
+                            err
+                        );
+                        runtime_tar_load_error = Some(err);
+                    }
+                }
+            }
+            Err(err) => {
+                runtime_tar_sync_error = Some(format!(
+                    "Runtime cache recovery failed after clearing stale cache: {}",
+                    err
+                ));
+            }
+        }
     }
 
     // 2. Already present?
@@ -4263,17 +4438,36 @@ fn ensure_runtime_image() -> Result<(), String> {
         .args(["image", "inspect", RUNTIME_IMAGE])
         .output()
         .map_err(|e| format!("Failed to check image: {}", e))?;
-    if !require_local_reload && check.status.success() {
+    if check.status.success() {
+        if require_local_reload {
+            // A newer bundled/cached runtime exists but reloading it failed. The
+            // local image still works — run on it instead of blocking setup; the
+            // reload is retried on the next launch.
+            println!(
+                "[Entropic] Bundled runtime reload failed; continuing with the existing local runtime image. Reload error: {}",
+                runtime_tar_load_error.as_deref().unwrap_or("unknown")
+            );
+        }
         return Ok(());
     }
 
     println!("[Entropic] Runtime image not found locally, attempting to load...");
 
     if let Some(tar_path) = runtime_tar_path.as_ref() {
-        match load_runtime_from_tar(tar_path) {
-            Ok(true) => return Ok(()),
-            Ok(false) => {} // no tar found or load failed, continue
-            Err(e) => println!("[Entropic] Bundled tar check failed: {}", e),
+        if tar_load_attempted {
+            println!(
+                "[Entropic] Skipping repeat docker load for {}; an earlier attempt in this run already failed.",
+                tar_path.display()
+            );
+        } else {
+            match load_runtime_from_tar(tar_path) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {} // no tar found or load failed, continue
+                Err(e) => {
+                    println!("[Entropic] Bundled tar check failed: {}", e);
+                    runtime_tar_load_error = Some(e);
+                }
+            }
         }
     }
 
@@ -4332,6 +4526,14 @@ fn ensure_runtime_image() -> Result<(), String> {
         // No download error recorded: either a local/cached tar was found but could not
         // be loaded into Docker, or the download reported success without yielding a
         // usable tar. Point at the likely culprits.
+        if let Some(load_err) = runtime_tar_load_error {
+            error.push_str("• Loading the runtime image into Docker failed:\n");
+            for line in load_err.lines() {
+                error.push_str("  ");
+                error.push_str(line);
+                error.push('\n');
+            }
+        }
         error.push_str("• No usable runtime image tar was found and the runtime image is not loaded in Docker.\n");
         error.push_str(&format!(
             "• Expected download source: {}\n",
@@ -13746,6 +13948,14 @@ pub struct RuntimeFetchResult {
     pub cache_path: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuntimeCacheClearResult {
+    pub cache_dir: Option<String>,
+    pub removed_paths: Vec<String>,
+    pub missing_paths: Vec<String>,
+    pub errors: Vec<String>,
+}
+
 fn asset_name_from_url(raw: &str) -> Option<String> {
     let parsed = Url::parse(raw).ok()?;
     parsed
@@ -13777,6 +13987,11 @@ pub fn fetch_latest_openclaw_runtime() -> Result<RuntimeFetchResult, String> {
         runtime_download_size_bytes,
         cache_path: tar_path.display().to_string(),
     })
+}
+
+#[tauri::command]
+pub fn clear_openclaw_runtime_cache() -> RuntimeCacheClearResult {
+    clear_runtime_image_cache_files()
 }
 
 #[tauri::command]
@@ -18453,6 +18668,25 @@ async fn run_first_time_setup_internal(
                 error: Some(format!("{}: {}", cleanup_error, e)),
             };
             return Err(format!("Failed to clean isolated runtime: {}", e));
+        }
+
+        {
+            let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
+            *progress = SetupProgress {
+                stage: "cleanup".to_string(),
+                message: "Clearing cached runtime image...".to_string(),
+                percent: 8,
+                complete: false,
+                error: None,
+            };
+        }
+
+        let cache_clear = clear_runtime_image_cache_files();
+        if !cache_clear.errors.is_empty() {
+            println!(
+                "[Entropic] Runtime image cache cleanup warnings: {}",
+                cache_clear.errors.join(" | ")
+            );
         }
     }
 

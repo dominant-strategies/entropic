@@ -132,6 +132,14 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY_SHA1 }}
         run: pnpm tauri build
 
+      - name: Copy runtime image into app bundle
+        run: |
+          set -euo pipefail
+          APP_RESOURCES="src-tauri/target/release/bundle/macos/Entropic.app/Contents/Resources"
+          mkdir -p "$APP_RESOURCES"
+          cp "src-tauri/resources/openclaw-runtime.tar.gz" "$APP_RESOURCES/openclaw-runtime.tar.gz"
+          ls -lh "$APP_RESOURCES/openclaw-runtime.tar.gz"
+
       - name: Sign bundled binaries
         env:
           CERT: ${{ env.APPLE_SIGNING_IDENTITY_SHA1 }}

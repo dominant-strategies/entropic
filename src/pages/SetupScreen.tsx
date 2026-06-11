@@ -231,6 +231,49 @@ function diagnoseSetupError(rawError: string): SetupErrorDiagnosis {
     };
   }
 
+  if (lower.includes("docker is not responding")) {
+    return {
+      title: "Docker Isn’t Running",
+      summary:
+        "Entropic could not reach the Docker daemon, so the OpenClaw runtime image could not be checked or loaded. No download was attempted.",
+      causes: [
+        "Docker Desktop (or Colima) is not running or was quit",
+        "Entropic’s isolated Colima runtime is still starting or failed to start",
+        "The Docker daemon crashed or is restarting",
+      ],
+      actions: [
+        "Start Docker Desktop or Colima, wait until it reports ready, then click Retry Setup.",
+        "On macOS, click Retry with Cleanup to reset Entropic’s isolated Colima runtime if it will not start.",
+        "If Docker is already running, restart it and retry.",
+      ],
+      technical,
+    };
+  }
+
+  if (
+    lower.includes("openclaw runtime image could not be prepared") ||
+    lower.includes("openclaw runtime image not available") ||
+    lower.includes("runtime tar download failed") ||
+    lower.includes("no usable runtime image tar")
+  ) {
+    return {
+      title: "Runtime Image Couldn’t Be Prepared",
+      summary:
+        "Entropic could not download, verify, or load the OpenClaw runtime image into the local sandbox.",
+      causes: [
+        "The large runtime image download was interrupted or blocked",
+        "The cached runtime image is incomplete or corrupted",
+        "Docker or Entropic’s isolated Colima runtime was not ready when the image was loaded",
+      ],
+      actions: [
+        "Click Retry Setup once if your network connection is stable.",
+        "If it fails again, click Retry with Cleanup to clear the runtime image cache and reset the isolated runtime.",
+        "If you are on VPN, proxy, or corporate Wi-Fi, allow GitHub release downloads or try another network.",
+      ],
+      technical,
+    };
+  }
+
   return {
     title: "Secure Sandbox Setup Failed",
     summary:
@@ -701,7 +744,7 @@ export function SetupScreen({ onComplete, preview }: Props) {
 
                   <div className="text-center mb-4">
                     <p className="text-xs text-[var(--text-secondary)] mb-3">
-                      Automatic cleanup resets Entropic&apos;s isolated runtime state. On Windows it removes Entropic&apos;s managed WSL distros and runtime cache; on macOS it resets Entropic&apos;s isolated Colima runtime, including the sandbox workspace stored there. It does not touch your normal WSL distros, macOS home files, or Docker Desktop data.
+                      Automatic cleanup resets Entropic&apos;s isolated runtime state and clears the cached OpenClaw runtime image. On Windows it removes Entropic&apos;s managed WSL distros and runtime cache; on macOS it resets Entropic&apos;s isolated Colima runtime, including the sandbox workspace stored there. It does not touch your normal WSL distros, macOS home files, or Docker Desktop data.
                     </p>
                     <button
                       onClick={() => startSetup(false)}
