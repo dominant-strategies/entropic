@@ -53,29 +53,6 @@ jobs:
       - name: Bundle runtime (Colima + Lima + Docker CLI)
         run: ./scripts/bundle-runtime.sh
 
-      - name: Download runtime image from release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RUNTIME_RELEASE_TAG: runtime-latest
-          RUNTIME_RELEASE_REPO: dominant-strategies/entropic-releases
-        run: |
-          set -euo pipefail
-          RESOURCES_DIR="src-tauri/resources"
-          mkdir -p "$RESOURCES_DIR"
-
-          echo "Downloading runtime image from $RUNTIME_RELEASE_REPO release $RUNTIME_RELEASE_TAG..."
-
-          # Download openclaw-runtime.tar.gz
-          gh release download "$RUNTIME_RELEASE_TAG" \
-            --repo "$RUNTIME_RELEASE_REPO" \
-            --pattern "openclaw-runtime.tar.gz" \
-            --dir "$RESOURCES_DIR"
-
-          # Scanner will be downloaded on-demand from runtime release (not bundled in app)
-
-          echo "Runtime image downloaded:"
-          ls -lh "$RESOURCES_DIR"/*.tar.gz
-
       - name: Import Apple signing certificate
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -131,14 +108,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY_SHA1 }}
         run: pnpm tauri build
-
-      - name: Copy runtime image into app bundle
-        run: |
-          set -euo pipefail
-          APP_RESOURCES="src-tauri/target/release/bundle/macos/Entropic.app/Contents/Resources"
-          mkdir -p "$APP_RESOURCES"
-          cp "src-tauri/resources/openclaw-runtime.tar.gz" "$APP_RESOURCES/openclaw-runtime.tar.gz"
-          ls -lh "$APP_RESOURCES/openclaw-runtime.tar.gz"
 
       - name: Sign bundled binaries
         env:
